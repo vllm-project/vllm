@@ -129,8 +129,8 @@ class MiniCPM3Attention(nn.Module):
     ) -> torch.Tensor:
         q, _ = self.q_a_proj(hidden_states)
         q = self.q_a_layernorm(q)
-        q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
-                                     self.qk_head_dim)
+        q, _ = self.q_b_proj(q)
+        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
         _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                           dim=-1)
         latent_cache, _ = self.kv_a_proj_with_mqa(hidden_states)
