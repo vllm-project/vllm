@@ -109,7 +109,7 @@ Decoder-only Language Models
     -
   * - :code:`MiniCPM3ForCausalLM`
     - MiniCPM3
-    - :code:`openbmb/MiniCPM3-4B`
+    - :code:`openbmb/MiniCPM3-4B`, etc.
     -
   * - :code:`MistralForCausalLM`
     - Mistral, Mistral-Instruct

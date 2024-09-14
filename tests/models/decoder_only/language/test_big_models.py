@@ -5,7 +5,8 @@ This tests bigger models and use half precision.
 Run `pytest tests/models/test_big_models.py`.
 """
 import pytest
-import torch
+
+from vllm.platforms import current_platform
 
 from ...utils import check_outputs_equal
 
@@ -21,9 +22,7 @@ MODELS = [
 ]
 
 #TODO: remove this after CPU float16 support ready
-target_dtype = "float"
-if torch.cuda.is_available():
-    target_dtype = "half"
+target_dtype = "float" if current_platform.is_cpu() else "half"
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -37,6 +36,9 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
+    if model.startswith("openbmb/MiniCPM3") and current_platform.is_cpu():
+        pytest.skip("MiniCPM requires fused_moe which is not supported by CPU")
+
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
