@@ -1,54 +1,140 @@
-"""
+"""Tests which cover integration of the speculative decoding framework with
+tensor parallelism.
 """
 
+import os
 import pytest
 import torch
-import os
 
 from vllm.utils import is_hip
 
-from .conftest import run_greedy_equality_correctness_test
+from .conftest import run_equality_correctness_test_tp
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
-    [{
+    [[
         # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
+        "--enforce-eager",
+
         # Required for spec decode.
-        "use_v2_block_manager": True,
-        "tensor_parallel_size": 2,
-
-        # Use a small model for a fast test.
-        "model": "JackFram/llama-68m",
-
-        # Currently required for SPMD.
-        "distributed_executor_backend": "ray",
-    }])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+        "--use-v2-block-manager",
+        "--tensor-parallel-size",
+        "2",
+        "--distributed-executor-backend",
+        "ray",
+    ]])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
+@pytest.mark.parametrize("baseline_llm_kwargs", [[]])
 @pytest.mark.parametrize("test_llm_kwargs", [
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-        "speculative_draft_tensor_parallel_size": 1,
-    },
+    [
+        "--speculative-model",
+        "JackFram/llama-68m",
+        "--num-speculative-tokens",
+        "3",
+    ],
+    [
+        "--speculative-model",
+        "[ngram]",
+        "--num-speculative-tokens",
+        "5",
+        "--ngram-prompt-lookup-max",
+        "3",
+    ],
 ])
 @pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
 @pytest.mark.parametrize("seed", [1])
-def test_spmd_tp2(test_llm_generator, baseline_llm_generator, batch_size: int):
-    """Verify ray accelerated dag + spec decode works
+def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
+                              baseline_llm_kwargs, test_llm_kwargs,
+                              batch_size: int, output_len: int, seed: int):
+    """Verify greedy equality when tensor parallelism is used.
     """
+    os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
+    os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
+    # assert os.getenv("VLLM_USE_RAY_SPMD_WORKER",
+    #                  "0") == "1", "test requires SPMD worker"
+    # assert os.getenv("VLLM_USE_RAY_COMPILED_DAG",
+    #                  "0") == "1", "test currently requires Ray compiled dags"
+    if is_hip():
+        pytest.skip("hip is not well-supported yet")
+    run_equality_correctness_test_tp("JackFram/llama-68m",
+                                     common_llm_kwargs,
+                                     per_test_common_llm_kwargs,
+                                     baseline_llm_kwargs,
+                                     test_llm_kwargs,
+                                     batch_size,
+                                     output_len,
+                                     seed,
+                                     temperature=0.0)
 
-    assert os.getenv("VLLM_USE_RAY_SPMD_WORKER",
-                     "0") == "1", "test requires SPMD worker"
-    assert os.getenv("VLLM_USE_RAY_COMPILED_DAG",
-                     "0") == "1", "test currently requires Ray compiled dags"
 
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=32,
-                                         force_output_len=True)
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [[
+        # Skip cuda graph recording for fast test.
+        "--enforce-eager",
+
+        # Required for spec decode.
+        "--use_v2_block_manager",
+        "--tensor_parallel_size",
+        "2",
+
+        # precision
+        "--dtype",
+        "bfloat16",
+        "--distributed-executor-backend",
+        "ray",
+    ]])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
+@pytest.mark.parametrize("baseline_llm_kwargs", [[]])
+@pytest.mark.parametrize("model, test_llm_kwargs",
+                         [("JackFram/llama-68m", [
+                             "--speculative-model",
+                             "JackFram/llama-68m",
+                             "--num_speculative-tokens",
+                             "5",
+                             "--speculative-draft-tensor-parallel-size",
+                             "1",
+                         ]),
+                          ("ibm-granite/granite-3b-code-instruct", [
+                              "--speculative-model",
+                              "ibm-granite/granite-3b-code-instruct",
+                              "--num_speculative-tokens",
+                              "5",
+                              "--speculative-draft-tensor-parallel-size",
+                              "1",
+                          ])])
+@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("seed", [1])
+def test_draft_model_tp_lt_target_model_tp2(model, common_llm_kwargs,
+                                            per_test_common_llm_kwargs,
+                                            baseline_llm_kwargs,
+                                            test_llm_kwargs, batch_size: int,
+                                            seed: int):
+    """Verify spec decode works well with smaller tp for draft models.
+    """
+    os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
+    os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
+    # assert os.getenv("VLLM_USE_RAY_SPMD_WORKER",
+    #                  "0") == "1", "test requires SPMD worker"
+    # assert os.getenv("VLLM_USE_RAY_COMPILED_DAG",
+    #                  "0") == "1", "test currently requires Ray compiled dags"
+    run_equality_correctness_test_tp(model,
+                                     common_llm_kwargs,
+                                     per_test_common_llm_kwargs,
+                                     baseline_llm_kwargs,
+                                     test_llm_kwargs,
+                                     batch_size,
+                                     max_output_len=32,
+                                     seed=seed,
+                                     temperature=0.0)

@@ -525,8 +525,10 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
 
         serialized_data = self.input_encoder.encode(execute_model_req)
         dag_future = await self.forward_dag.execute_async(serialized_data)
-        outputs = await dag_future
-        return self.output_decoder.decode(outputs[0])
+        # TODO(sang): Should check if there were exceptions from all workers.
+        # There's no cheap way to achieve this in Ray. It will be fixed soon.
+        output = await dag_future[0]
+        return self.output_decoder.decode(output)
 
     async def _driver_execute_model_async(
         self,
