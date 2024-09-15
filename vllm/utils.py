@@ -529,7 +529,7 @@ def get_open_zmq_ipc_path() -> str:
     return f"ipc://{base_rpc_path}/{uuid4()}"
 
 
-def get_open_port(, force: bool = False) -> int:
+def get_open_port(force: bool = False) -> int:
     port = envs.VLLM_PORT
     if port is not None:
         if force and port is not None:
