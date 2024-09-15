@@ -27,10 +27,7 @@ def test_run(my_rank, buffer, device):
         placeholder = torch.tensor([1]).to(device)
 
         buffer.insert(tokens, roi, key, value, placeholder)
-
-        #for i in range(2000):
-        #    print("Here:", i)
-        #    time.sleep(0.01)
+        
     torch.distributed.barrier()
         
     # drop_select
