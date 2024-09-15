@@ -191,10 +191,10 @@ def init_distributed_environment(
         # this backend is used for WORLD
         maybe_disagg_world_size = world_size
         maybe_disagg_rank = rank
-        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
+        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
             maybe_disagg_world_size = world_size * 2
             logger.debug("Disaggregated prefill enabled.")
-            if dist_kv.IS_KV_PREFILL_INSTANCE:
+            if dist_kv.IS_KV_PREFILL_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
                 # for prefill, the ranks are [0, world_size)
                 maybe_disagg_rank = rank
             else:
@@ -227,7 +227,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = [[i for i in range(world_size)]]
         # offset the distributed group
-        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
+        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
             ranks = include_decoding_groups_if_disagg_enabled(
                 ranks, world_size)
 
@@ -289,7 +289,7 @@ def initialize_model_parallel(
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
-    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
+    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
         # Disaggregated prefill enabled
         # The world_size for this vLLM instance is tp * pp, but torch.distributed contains 2 vLLM instances, its world size is 2 * tp * pp
         # Adjust the world_size to match.
@@ -341,7 +341,8 @@ def initialize_model_parallel(
                                     use_custom_allreduce=False)
     logger.debug("_PP initialized for rank %d", torch.distributed.get_rank())
 
-    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
+    # TODO(Jiayi): perhaps we need to separate lmcache and disagg
+    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
         global _DISAGG
         logger.debug("Disaggregated prefill enabled, create _DISAGG group")
         group_ranks = []
