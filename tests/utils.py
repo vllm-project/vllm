@@ -179,6 +179,7 @@ def compare_two_settings(model: str,
         env1: The first set of environment variables to pass to the API server.
         env2: The second set of environment variables to pass to the API server.
     """
+    os.environ["VLLM_PORT"] = "8001"
 
     trust_remote_code = "--trust-remote-code"
     if trust_remote_code in arg1 or trust_remote_code in arg2:
@@ -297,6 +298,8 @@ def compare_two_settings(model: str,
                 "test": "streaming",
                 "texts": texts,
             })
+
+    os.environ.pop("VLLM_PORT")
 
     n = len(results) // 2
     arg1_results = results[:n]
@@ -491,6 +494,7 @@ async def completions_with_server_args(
     Returns:
       OpenAI Completion instance
     '''
+    os.environ["VLLM_PORT"] = "8001"
 
     outputs = None
     with RemoteOpenAIServer(model_name,
@@ -503,6 +507,8 @@ async def completions_with_server_args(
                                                   stream=False,
                                                   max_tokens=5,
                                                   logprobs=num_logprobs)
+    os.environ.pop("VLLM_PORT")
+    
     assert outputs is not None
 
     return outputs
