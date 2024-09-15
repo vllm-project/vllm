@@ -25,15 +25,15 @@ On the client side, run:
 import argparse
 import asyncio
 import base64
+import io
 import json
 import os
-import io
 import random
 import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Collection
+from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
@@ -206,9 +206,14 @@ def sample_hf_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
 ):
-    dataset = load_dataset(dataset_path, name=dataset_subset, split=dataset_split, streaming=True)
-    filtered_dataset = dataset.shuffle().filter(lambda x: len(x["conversations"]) >= 2)
-    sampled_requests: List[Tuple[str, int, int, Dict[str, Collection[str]]]] = []
+    dataset = load_dataset(dataset_path,
+                           name=dataset_subset,
+                           split=dataset_split,
+                           streaming=True)
+    filtered_dataset = dataset.shuffle().filter(
+        lambda x: len(x["conversations"]) >= 2)
+    sampled_requests: List[Tuple[str, int, int, Dict[str,
+                                                     Collection[str]]]] = []
     for data in filtered_dataset:
         if len(sampled_requests) == num_requests:
             break
@@ -233,7 +238,8 @@ def sample_hf_requests(
             image = image.convert("RGB")
             image_data = io.BytesIO()
             image.save(image_data, format='JPEG')
-            image_base64 = base64.b64encode(image_data.getvalue()).decode("utf-8")
+            image_base64 = base64.b64encode(
+                image_data.getvalue()).decode("utf-8")
             mm_content = {
                 "type": "image_url",
                 "image_url": {
@@ -277,8 +283,8 @@ def sample_random_requests(
                                   [(offsets[i] + i + j) % tokenizer.vocab_size
                                    for j in range(input_lens[i])])
 
-        input_requests.append(
-            (prompt, int(prefix_len + input_lens[i]), int(output_lens[i]), None))
+        input_requests.append((prompt, int(prefix_len + input_lens[i]),
+                               int(output_lens[i]), None))
 
     return input_requests
 
@@ -397,7 +403,8 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len, test_mm_content = input_requests[0]
+    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
+        input_requests[0])
     test_input = RequestFuncInput(
         model=model_id,
         prompt=test_prompt,
@@ -631,7 +638,7 @@ def main(args: argparse.Namespace):
             input_requests = [(prompt_formatted, prompt_len, output_len)
                               for prompt, prompt_formatted, prompt_len,
                               output_len in input_requests]
-    
+
     elif args.dataset_name == "hf":
         input_requests = sample_hf_requests(
             dataset_path=args.dataset_path,
@@ -857,18 +864,14 @@ if __name__ == "__main__":
         default=128,
         help="Number of input tokens per request, used only for HF dataset.",
     )
-    parser.add_argument(
-        "--hf-subset",
-        type=str,
-        default=None,
-        help="Subset of the HF dataset."
-    )
-    parser.add_argument(
-        "--hf-split",
-        type=str,
-        default=None,
-        help="Split of the HF dataset."
-    )
+    parser.add_argument("--hf-subset",
+                        type=str,
+                        default=None,
+                        help="Subset of the HF dataset.")
+    parser.add_argument("--hf-split",
+                        type=str,
+                        default=None,
+                        help="Split of the HF dataset.")
     parser.add_argument(
         "--request-rate",
         type=float,
