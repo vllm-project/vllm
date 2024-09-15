@@ -24,7 +24,7 @@ filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
 partial-json-parser # used for parsing partial JSON outputs
 pyzmq
 msgspec
-gguf == 0.9.1
+gguf == 0.10.0
 importlib_metadata
 mistral_common >= 1.4.0
 pyyaml
