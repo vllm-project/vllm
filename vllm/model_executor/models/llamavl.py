@@ -1066,6 +1066,7 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
         kv_cache: torch.LongTensor,
         attn_metadata: AttentionMetadata,
         vision_hidden_states: Optional[torch.Tensor],
+        run_xattn_mask: torch.Tensor,
     ) -> torch.Tensor:
         _attn_out = self.attention(
             decoder_hidden_states=self.attention_norm(x),
@@ -1076,10 +1077,11 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
             attn_metadata=attn_metadata,
             encoder_hidden_states=vision_hidden_states,
         )
-        h = x + self.gate_attn.tanh() * _attn_out
+        # import pdb; pdb.set_trace()
+        h = x + self.gate_attn.tanh() * _attn_out * run_xattn_mask
         _ffn = self.feed_forward(self.ffn_norm(h))
         # _ffn = full_text_row_masked_out_mask * _ffn  # type: ignore
-        h = h + self.gate_ffwd.tanh() * _ffn * float(not self.no_ffn)
+        h = h + self.gate_ffwd.tanh() * _ffn * float(not self.no_ffn) * run_xattn_mask
         return h
 
 
@@ -1279,6 +1281,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         vision_hidden_states: Optional[torch.Tensor],
+        run_xattn_mask: torch.Tensor,
     ):
         # assert self.cache_is_setup, "Please set up cache before calling forward"
         # mask = self.mask_cache.index_select(2, positions)
@@ -1297,6 +1300,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
                 kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata,
                 vision_hidden_states=vision_hidden_states,
+                run_xattn_mask=run_xattn_mask,
             )
             # check(h, f"layer_{idx}_xh_{step_name}.pt")
             h = layer(
@@ -2021,10 +2025,12 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
+        if attn_metadata.num_prefill_tokens > 0 and attn_metadata.num_decode_tokens > 0:
+            raise ValueError("Chunk prefill not supported")
         image_inputs = self._parse_and_validate_image_input(**kwargs)
         if image_inputs is None:
             cross_attention_masks = None
-            full_text_row_masked_out_mask = None
+            run_xattn_mask = (attn_metadata.encoder_seq_lens_tensor != 0).reshape(-1, 1).cuda()
             xattn_caches = None
             vision_tokens = None
         else:
@@ -2043,6 +2049,13 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
                 vision_tokens_flat[start_pos:end_pos] = vision_token_in_batch[:seq_len]
                 start_pos = end_pos
             vision_tokens = vision_tokens_flat
+
+            run_xattn_mask = torch.ones((attn_metadata.num_prefill_tokens, 1), dtype=torch.bool, device=vision_tokens.device) 
+            start_pos = 0
+            for seq_len, encoder_seq_len in zip(attn_metadata.seq_lens_tensor, attn_metadata.encoder_seq_lens):
+                if encoder_seq_len == 0:
+                    run_xattn_mask[start_pos:start_pos+seq_len] = False
+                start_pos += seq_len
 
             # batch_masks = []
             # # TODO: get the sequence of each query without hack? 1) better attn metadata 2) better input processor to create vision mask during preprocess
@@ -2099,6 +2112,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             vision_hidden_states=vision_tokens,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            run_xattn_mask=run_xattn_mask,
         )
         # if positions.numel() == 1 and positions.item() == 20:
         #     exit(0)
