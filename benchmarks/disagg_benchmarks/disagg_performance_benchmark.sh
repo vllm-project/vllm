@@ -147,7 +147,7 @@ main() {
   rm -rf results
   mkdir results
 
-  default_output_len=10
+  default_output_len=6
 
   export VLLM_LOGGING_LEVEL=DEBUG
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
