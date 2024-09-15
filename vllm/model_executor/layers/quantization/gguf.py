@@ -55,7 +55,10 @@ class GGUFConfig(QuantizationConfig):
 def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
                   qweight_type: int) -> torch.Tensor:
     # use dequantize mulmat for IQmatrix, mmq for k-quants
-    if qweight_type >= 16:
+    if x.shape[0] == 1:
+        # enable mmvq in contiguous batching
+        y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+    elif qweight_type >= 16:
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
         weight = ops.ggml_dequantize(qweight, qweight_type, *shape)
