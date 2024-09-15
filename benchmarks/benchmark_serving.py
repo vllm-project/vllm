@@ -27,6 +27,7 @@ import asyncio
 import base64
 import json
 import os
+import io
 import random
 import time
 import warnings
@@ -229,7 +230,10 @@ def sample_hf_requests(
 
         if "image" in data and isinstance(data["image"], Image):
             image: Image = data["image"]
-            image_base64 = base64.b64encode(image.tobytes()).decode("utf-8")
+            image = image.convert("RGB")
+            image_data = io.BytesIO()
+            image.save(image_data, format='JPEG')
+            image_base64 = base64.b64encode(image_data.getvalue()).decode("utf-8")
             mm_content = {
                 "type": "image_url",
                 "image_url": {

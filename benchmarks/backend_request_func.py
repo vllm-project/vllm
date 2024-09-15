@@ -318,7 +318,13 @@ async def async_request_openai_chat_completions(
             "messages": [
                 {
                     "role": "user",
-                    "content": request_func_input.prompt,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": request_func_input.prompt
+                        },
+                        request_func_input.multi_modal_content or {},
+                    ],
                 },
             ],
             "temperature": 0.0,
