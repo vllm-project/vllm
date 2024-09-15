@@ -224,7 +224,7 @@ class KV_transfer_agent:
                 torch.ones_like(current_tokens, dtype=bool))
             if ret[0] is None:
                 # didn't find any match.
-                self.bypass_model_exec = False
+                bypass_model_exec = False
                 num_computed_tokens_list.append(0)
                 continue
             
