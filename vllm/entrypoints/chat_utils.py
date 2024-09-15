@@ -135,6 +135,8 @@ class MultiModalItemTracker:
                     self._model_config.hf_config.image_token_index)
             if model_type in ("chameleon", "internvl_chat"):
                 return "<image>"
+            if model_type == "llamavl":
+                return "<|image|>"
 
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "audio":

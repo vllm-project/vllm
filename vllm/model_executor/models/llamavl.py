@@ -4,7 +4,7 @@ import itertools
 import collections
 import math
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union, Callable, Dict, Any)
+                    TypedDict, Union, Callable, Dict, Any, Set)
 
 import torch
 import torch.nn as nn
@@ -42,7 +42,7 @@ from vllm.transformers_utils.multimodal_processors.llamavl import LlamaVLImagePr
 import vllm.distributed.parallel_state as ps
 
 step_name = "prefill"
-pt_dir = ""
+pt_dir = "/home/eecs/zhang-chen/MultiModal/scripts/"
 
 def check(tensor, file_name): pass
     # with open(f"{pt_dir}{file_name}", "rb") as f:
@@ -666,6 +666,7 @@ class VisionEncoder(nn.Module):
         return x
 
     def forward(self, images: torch.Tensor, ar: torch.Tensor) -> torch.Tensor:
+        # TODO: run tp in this function
         if images.ndim == 5:
             num_concurrent_media = 1
             bsz, num_chunks, nch, w, h = images.shape
@@ -857,8 +858,8 @@ class TilePositionEmbedding(nn.Module):
             x.shape[0], num_tiles, 1, self.width, device=x.device, dtype=x.dtype
         )
         for idx, arx in enumerate(ar):
-            w, h = arx
-            out_pos_embed[idx, : w * h] = embed[:w, :h].reshape(w * h, 1, self.width)
+            h, w = arx
+            out_pos_embed[idx, : w * h] = embed[:h, :w].reshape(w * h, 1, self.width)
         if self.gated:
             out_pos_embed = out_pos_embed * self.gate.tanh()
         x = x + out_pos_embed
@@ -1149,7 +1150,7 @@ class CrossAttentionTransformerVision(torch.nn.Module):
         vision_tokens = self.vision_encoder(
             images.to(dtype=torch.bfloat16), aspect_ratios
         )
-        vision_tokens = F.linear(vision_tokens, self.vision_projection.weight)
+        vision_tokens = self.vision_projection(vision_tokens)
         # vision_tokens = gather_from_tensor_model_parallel_region(vision_tokens)
         return vision_tokens
 
@@ -1334,7 +1335,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
         _, _, _, num_image_tokens, image_token_dim = tuple(vision_tokens.shape)
         bsz, ntext, nimg, nchunks = cross_attention_masks.shape
         cross_attention_masks = (
-            cross_attention_masks.repeat_interleave(vision_seqlen, dim=2)
+            cross_attention_masks.repeat_interleave(vision_seqlen, dim=3)
             .view(bsz, ntext, -1)
             .unsqueeze(1)
         )
@@ -1352,26 +1353,42 @@ class CrossAttentionTransformerText(torch.nn.Module):
 
 class VariableSizeImageTransform(object):
     """
-    The variable size image transform will resize the image dynamically
+    This class accepts images of any size and dynamically resize, pads and chunks it
     based on the image aspect ratio and the number of image chunks we allow.
-    The algorithm will not upsample low-res images to fit a certain aspect
-    ratio, because that leads to a significant degradation in image quality.
-    For example, if an input image is of size 300x800, and we want to allow
-    a maximum of 16 image chunks, it will find the closest aspect ratio that
-    is allowed within 16 image chunks, i.e., 2:5 = 2 horizontal patches and
-    5 vertical patches, giving a total of 10 chunks.
-    The image will then be resized to products of the base size (default is
-    224px because MetaCLIP takes that), so in this case it will  be resized to
-    2*224:5*224 = 448:1120, where we maintain the original aspect ratio and
-    pad with the mean value for the rest. This approach minimizes the amount
-    of padding required for any arbitrary resolution.
-    The final output will therefore be of shape (11, 3, 224, 224), where 10
-    patches are coming from the resizing and chunking, and the first patch
-    is a downsampled version of the image that preserves aspect ratios.
+
+    The algorithm will NOT distort the image fit a certain aspect ratio, because
+    that leads to a significant degradation in image quality.
+
+    It can be summarized in 6 steps:
+    1. Find all possible canvas combinations of max_num_chunks;
+    2. Find the best canvas to fit the image;
+    3. Resize without distortion
+    4. Pad
+    5. Normalize
+    6. Chunk
+
+    For example, if an input image is of size 300x800, patch_size of 224,
+    and max_num_chunks = 8, it will find the closest aspect ratio that
+    is allowed within 8 image chunks, with some restrictions.
+    In this case, 2:4 = 2 horizontal patches and 4 vertical patches,
+    giving a total of 8 chunks.
+
+    If resize_to_max_canvas, the image will be resized (without distortion),
+    to the largest possible resolution. In this case, 388:896, and padded to 448:896,
+    where we maintain the original aspect ratio and pad with zeros value for the rest.
+    This approach minimizes the amount of padding required for any arbitrary resolution.
+
+    However, if limit_upscaling_to_patch_size is set to True,
+    the upscaling will be limited to the patch size. In the example above,
+    the image would remain 300x800 (no upscaling), and then padded to 448:896.
+
+    The final output will therefore be of shape (8, 3, 224, 224), where 2x4
+    patches are coming from the resizing and chunking.
     """
 
     def __init__(self, size: int = IMAGE_RES) -> None:
         self.size = size
+        logger.info(f"VariableSizeImageTransform size: {self.size}")
         self.to_tensor = tv.ToTensor()
         self._mean = (0.48145466, 0.4578275, 0.40821073)
         self._std = (0.26862954, 0.26130258, 0.27577711)
@@ -1380,121 +1397,118 @@ class VariableSizeImageTransform(object):
             std=self._std,
             inplace=True,
         )
+        self.resample = tv.InterpolationMode.BILINEAR
 
     @staticmethod
-    def _factors(n: int):
-        """Return all factors of a number."""
-        return set(
-            reduce(
-                list.__add__,
-                ([i, n // i] for i in range(1, int(n**0.5) + 1) if n % i == 0),
-            )
-        )
-
-    def _find_supported_aspect_ratios(self, num_chunks: int):
+    def get_factors(n: int) -> Set[int]:
         """
-        This function computes all the allowed aspect ratios for a fixed
-        number of input chunks.
-        For example, with `num_chunks=5`, it will return:
-        {
-            0.2: [(1, 5)],
-            5.0: [(5, 1)],
+        Calculate all factors of a given number, i.e. a dividor that leaves
+        no remainder. For example, if n=12, it will return {1, 2, 3, 4, 6, 12}.
+
+        Args:
+            n (int): The number to find factors for.
+
+        Returns:
+            set: A set containing all factors of the number.
+        """
+        factors_set = set()
+
+        for i in range(1, int(n**0.5) + 1):
+            if n % i == 0:
+                factors_set.add(i)
+                factors_set.add(n // i)
+        return factors_set
+
+    def find_supported_resolutions(
+        self, max_num_chunks: int, patch_size: int
+    ) -> torch.Tensor:
+        """
+        Computes all of the allowed resoltuions for a fixed number of chunks
+        and patch_size. Useful for when dividing an image into chunks.
+
+        Args:
+            max_num_chunks (int): Maximum number of chunks for processing.
+            patch_size (int): Size of the side of the patch.
+
+        Returns:
+            torch.Tensor: List of possible resolutions as tuples (height, width).
+
+        Example:
+            >>> max_num_chunks = 5
+            >>> patch_size = 224
+            >>> find_supported_resolutions(max_num_chunks, patch_size)
+            tensor([(224, 896), (448, 448), (224, 224), (896, 224), (224, 672),
+            (672, 224), (224, 448), (448, 224)])
+
+            Given max_num_chunks=4, patch_size=224, it will create a dictionary:
+            {
             0.25: [(1, 4)],
             1.0: [(2, 2), (1, 1)],
             4.0: [(4, 1)],
-            0.3333333333333333: [(1, 3)],
+            0.33: [(1, 3)],
             3.0: [(3, 1)],
             0.5: [(1, 2)],
             2.0: [(2, 1)]
-        }
+            }
+
+            and return the resolutions multiplied by the patch_size:
+            [(1*224, 4*224), (2*224, 2*224), ..., (2*224, 1*224)]
         """
-        asp_dict = {}
-        for chunk_size in range(num_chunks, 0, -1):
-            _factors = sorted(VariableSizeImageTransform._factors(chunk_size))
-            _asp_ratios = [(x, chunk_size // x) for x in _factors]
-            for ratio in _asp_ratios:
-                k = ratio[0] / ratio[1]
-                if k not in asp_dict:
-                    asp_dict[k] = [ratio]
-                else:
-                    asp_dict[k].append(ratio)
-        return asp_dict
+        asp_dict = collections.defaultdict(list)
+        for chunk_size in range(max_num_chunks, 0, -1):
+            _factors = sorted(self.get_factors(chunk_size))
+            _asp_ratios = [(factor, chunk_size // factor) for factor in _factors]
+            for height, width in _asp_ratios:
+                ratio_float = height / width
+                asp_dict[ratio_float].append((height, width))
 
-    def _find_closest_aspect_ratio(
-        self, num_chunks: int, img_width: int, img_height: int
-    ) -> Tuple:
+        # get the resolutions multiplied by the patch_size
+        possible_resolutions = []
+        for key, value in asp_dict.items():
+            for height, depth in value:
+                possible_resolutions.append((height * patch_size, depth * patch_size))
+
+        return possible_resolutions
+
+    @staticmethod
+    def get_max_res_without_distortion(
+        image_size: Tuple[int, int],
+        target_size: Tuple[int, int],
+    ) -> Tuple[int, int]:
         """
-        Given an image width, height and target number of chunks
-        this function will find the closest supported aspect ratio.
+        Determines the maximum resolution to which an image can be resized to without distorting its
+        aspect ratio, based on the target resolution.
+
+        Args:
+            image_size (Tuple[int, int]): The original resolution of the image (height, width).
+            target_resolution (Tuple[int, int]): The desired resolution to fit the image into (height, width).
+        Returns:
+            Tuple[int, int]: The optimal dimensions (height, width) to which the image should be resized.
+        Example:
+            >>> _get_max_res_without_distortion([200, 300], target_size = [450, 200])
+            (134, 200)
+            >>> _get_max_res_without_distortion([800, 600], target_size = [450, 1300])
+            (450, 338)
         """
-        tgt_ar = img_width / img_height
-        asp_dict = self._find_supported_aspect_ratios(num_chunks)
-        cl_d, cl_p = 1e23, None
-        if tgt_ar >= 1:
-            cl_p = min(
-                [k for k in asp_dict.keys() if k <= tgt_ar],
-                key=lambda x: abs(x - tgt_ar),
-            )
-            v = asp_dict[cl_p]
-            # select width
-            widths = [(idx, self.size * vv[0]) for idx, vv in enumerate(v)]
-            tgt_idx = max(widths, key=lambda x: x[1])[0]
+
+        original_width, original_height = image_size
+        target_width, target_height = target_size
+
+        scale_w = target_width / original_width
+        scale_h = target_height / original_height
+
+        if scale_w < scale_h:
+            new_width = target_width
+            new_height = min(math.floor(original_height * scale_w), target_height)
         else:
-            cl_p = min(
-                [k for k in asp_dict.keys() if k > tgt_ar],
-                key=lambda x: abs(1 / x - 1 / tgt_ar),
-            )
-            v = asp_dict[cl_p]
-            # select height
-            heights = [(idx, self.size * vv[1]) for idx, vv in enumerate(v)]
-            tgt_idx = max(heights, key=lambda x: x[1])[0]
-        out = v[tgt_idx]
-        return out
+            new_height = target_height
+            new_width = min(math.floor(original_width * scale_h), target_width)
 
-    def _resize(
-        self, image: Image.Image, target_width: int, target_height: int
-    ) -> Image.Image:
-        # Resize longer edge to given size.
-        w, h = image.size
-        scale = w / h
+        return new_width, new_height
 
-        if scale > 1.0:
-            # width > height
-            new_w = target_width
-            new_h = math.floor(new_w / scale)
-        else:
-            # height >= width
-            new_h = target_height
-            new_w = math.floor(new_h * scale)
-
-        image = F.resize(image, (new_h, new_w))
-        return image
-
-    def _resize_max_side_to_size(
-        self,
-        image: Image.Image,
-    ) -> Image.Image:
-        # Resize longer edge to given size.
-        w, h = image.size
-        scale = w / h
-
-        if scale > 1.0:
-            # width > height
-            new_w = max(self.size, w)
-            new_h = math.floor(new_w / scale)
-        else:
-            # height >= width
-            new_h = max(self.size, h)
-            new_w = math.floor(new_h * scale)
-
-        image = F.resize(image, (new_h, new_w))
-        return image
-
-    def _pad(self, image: Image.Image, new_width: int, new_height: int) -> Image.Image:
-        mean_per_channel = tuple(
-            np.clip(np.array(image).mean(axis=(0, 1)), 0, 255).astype(np.uint8)
-        )
-        new_im = Image.new(mode="RGB", size=(new_height, new_width), color=(0, 0, 0))  # type: ignore
+    def _pad(self, image: Image.Image, target_size) -> Image.Image:
+        new_width, new_height = target_size
+        new_im = Image.new(mode="RGB", size=(new_width, new_height), color=(0, 0, 0))  # type: ignore
         new_im.paste(image)
         return new_im
 
@@ -1508,72 +1522,224 @@ class VariableSizeImageTransform(object):
         image = image.view(ncw * nch, num_channels, height // nch, width // ncw)
         return image
 
-    def _fit_image_to_canvas(
-        self, num_chunks: int, img_width: int, img_height: int
-    ) -> Any:
+    def resize_without_distortion(
+        self,
+        image: torch.Tensor,
+        target_size: Tuple[int, int],
+        max_upscaling_size: Optional[int],
+    ) -> torch.Tensor:
         """
-        Given an image width, height and target number of chunks this function will see if the image
-        can be fit into any of the canvases that can be build from arranging the tiles in a grid.
-        If the image can be fit onto several canvases, it will return the canvas where the shorter edge
-        of the image will be largest.
+        Used to resize an image to target_resolution, without distortion.
+
+        If target_size requires upscaling the image, the user can set max_upscaling_size to
+        limit the upscaling to a maximum size. In this case, since we rescale without distortion,
+        modifying target_size works as a boundary for the image's largest side.
+
+        Args:
+            resample (str): Resampling method used when resizing images.
+                Supports "nearest", "nearest_exact", "bilinear", "bicubic".
+            max_upscaling_size (int): The maximum size to upscale the image to.
+                If None, there is no limit.
+        Examples:
+        >>> target_size = (1000, 1200)
+        >>> max_upscaling_size = 600
+        >>> image_size = (400, 200)
+        >>> resize_without_distortion(image_size, target_size, max_upscaling_size)
+        (600, 300)  # new_size_without_distortion
+
+        >>> target_size = (1000, 1200)
+        >>> max_upscaling_size = 600
+        >>> image_size = (2000, 200)
+        >>> resize_without_distortion(image_size, target_size, max_upscaling_size)
+        (1000, 100)  # new_size_without_distortion
+
+        >>> target_size = (1000, 1200)
+        >>> max_upscaling_size = 2000
+        >>> image_size = (400, 200)
+        >>> resize_without_distortion(image_size, target_size, max_upscaling_size)
+        (1000, 500)  # new_size_without_distortion
+
+        >>> target_size = (1000, 1200)
+        >>> max_upscaling_size = None
+        >>> image_size = (400, 200)
+        >>> resize_without_distortion(image_size, target_size, max_upscaling_size)
+        (1000, 500)  # new_size_without_distortion
         """
-        # Initialize the optimal canvas to None. If no canvas is found where image fits, function returns None.
-        optimal_canvas = None
-        optimal_image_width_height = None
 
-        scale = img_width / img_height
+        image_width, image_height = image.size
+        image_size = (image_width, image_height)
 
-        # Gather all potential supported image resolutions and iterate through them to find best match
-        potential_arrangements = [
-            item
-            for sublist in self._find_supported_aspect_ratios(num_chunks).values()
-            for item in sublist
-        ]
-        current_gap = 1e23
-        for n_w, n_h in potential_arrangements:
-            # Compute the canvas size
-            canvas_width, canvas_height = n_w * self.size, n_h * self.size
+        # If target_size requires upscaling, we might want to limit the upscaling to max_upscaling_size
+        if max_upscaling_size is not None:
+            new_target_width = min(max(image_width, max_upscaling_size), target_size[0])
+            new_target_height = min(
+                max(image_height, max_upscaling_size), target_size[1]
+            )
+            target_size = (new_target_width, new_target_height)
 
-            # Check if image can fit into the canvas without downsampling
-            if canvas_width >= img_width and canvas_height >= img_height:
-                # If we did not find a good canvas yet, we will use the current one
-                if optimal_canvas is None:
-                    # Set optimal canvas and determine the actual image height and width in the canvas with aspect ratio preserving resampling
-                    optimal_canvas = (n_w, n_h)
-                    optimal_image_width_height = (n_w * self.size, n_h * self.size)
-                else:
-                    # Find closest fit based on gap
-                    image_width_height = (n_w * self.size, n_h * self.size)
-                    gap = abs(img_width - image_width_height[0]) + abs(
-                        img_height - image_width_height[1]
-                    )
-                    if gap < current_gap:
-                        # If the gap is smaller than the previous one, we will update our optimal canvas and image width height
-                        optimal_canvas = (n_w, n_h)
-                        optimal_image_width_height = image_width_height
-                        current_gap = gap
-        return optimal_canvas
+        # resize to target_size while preserving aspect ratio
+        new_size_without_distortion = self.get_max_res_without_distortion(
+            image_size, target_size
+        )
 
-    def __call__(self, image: Image.Image, max_num_chunks: int) -> Tuple[Any, Any]:
+        image = F.resize(
+            image,
+            (new_size_without_distortion[1], new_size_without_distortion[0]),
+            interpolation=self.resample,
+        )
+
+        return image
+
+    def get_best_fit(
+        self,
+        image_size: Tuple[int, int],
+        possible_resolutions: torch.Tensor,
+        resize_to_max_canvas: bool = False,
+    ) -> Tuple[int, int]:
+        """
+        Determines the best canvas possible from a list of possible resolutions to, without distortion,
+        resize an image to.
+
+        For each possible resolution, calculates the scaling factors for
+        width and height, and selects the smallest one, which is the limiting side.
+        E.g. to match the canvas you can upscale height by 2x, and width by 1.5x,
+        therefore, the maximum upscaling you can do is min(2, 1.5) = 1.5.
+
+        If upscaling is possible (any of the scaling factors is greater than 1),
+        then picks the smallest upscaling factor > 1, unless resize_to_max_canvas is True.
+
+        If upscaling is not possible, then picks the largest scaling factor <= 1, i.e.
+        reduce downscaling as much as possible.
+
+        If there are multiple resolutions with the same max scale, we pick the one with the lowest area,
+        to minimize padding. E.g., the same image can be upscaled to 224x224 and 224x448, but the latter
+        has more padding.
+
+        Args:
+            image_size (Tuple[int, int]): A tuple containing the height and width of the image.
+            possible_resolutions (torch.Tensor): A tensor of shape (N, 2) where each
+                row represents a possible resolution (height, width).
+            use_max_upscaling (bool): If True, will return the largest upscaling resolution.
+
+        Returns:
+            List[int]: The best resolution [height, width] for the given image.
+
+        Example:
+            >>> image_size = (200, 300)
+            >>> possible_resolutions = torch.tensor([[224, 672],
+            ...                                     [672, 224],
+            ...                                     [224, 448],
+            ...                                     [448, 224],
+            ...                                     [224, 224]])
+            >>> _get_smallest_upscaling_possibility(image_size, possible_resolutions)
+            [224, 448]
+
+            We have:
+                scale_w = tensor([2.2400, 0.7467, 1.4933, 0.7467, 0.7467])
+                scale_h = tensor([1.1200, 3.3600, 1.1200, 2.2400, 1.1200])
+                scales = tensor([1.1200, 0.7467, 1.1200, 0.7467, 0.7467])
+            Only one of the scales > 1:
+                upscaling_possible = tensor([1.1200, 1.1200])
+                smallest_rescale = tensor(1.1200)
+            So we pick the resolution with the smallest smallest area:
+                areas = tensor([150528, 100352]) # [672, 224], [224, 448]
+                optimal_canvas = tensor([224, 448])
+        """
+
+        original_width, original_height = image_size
+
+        # get all possible resolutions heights/widths
+        target_widths, target_heights = (
+            possible_resolutions[:, 0],
+            possible_resolutions[:, 1],
+        )
+
+        # get scaling factors to resize the image without distortion
+        scale_w = target_widths / original_width
+        scale_h = target_heights / original_height
+
+        # get the min scale between width and height (limiting side -> no distortion)
+        scales = torch.where(scale_w > scale_h, scale_h, scale_w)
+
+        # filter only scales that allow upscaling
+        upscaling_options = scales[scales >= 1]
+        if len(upscaling_options) > 0:
+            if resize_to_max_canvas:
+                selected_scale = torch.max(upscaling_options)
+            else:
+                selected_scale = torch.min(upscaling_options)
+        else:
+            # no upscaling possible,
+            # get the minimum downscaling (max scale for scales<1)
+            downscaling_options = scales[scales < 1]
+            selected_scale = torch.max(downscaling_options)
+
+        # get all resolutions that support this scaling factor,
+        # e.g. you can upscale to 224x224, 224x448, 224x672 without distortion
+        chosen_canvas = possible_resolutions[scales == selected_scale]
+
+        # if there are multiple resolutions,
+        # get the one with minimum area to reduce padding
+        if len(chosen_canvas) > 1:
+            areas = chosen_canvas[:, 0] * chosen_canvas[:, 1]
+            optimal_idx = torch.argmin(areas)
+            optimal_canvas = chosen_canvas[optimal_idx]
+        else:
+            optimal_canvas = chosen_canvas[0]
+
+        return tuple(optimal_canvas.tolist())
+
+    def __call__(
+        self,
+        image: Image.Image,
+        max_num_chunks: int,
+        normalize_img: bool = True,
+        resize_to_max_canvas: bool = False,
+    ) -> Tuple[Any, Any]:
+        """
+        Args:
+            image (PIL.Image): Image to be resized.
+            max_num_chunks (int): Maximum number of chunks to split the image into.
+            normalize_img (bool): Whether to normalize the image.
+            resize_to_max_canvas (bool): Whether to resize the image to the maximum canvas size.
+            If True, picks the canvas the allows the largest resizing without distortion.
+            If False, downsample as little as possible, including no resizing at all,
+            but never upsample, unless the image is smaller than the patch size.
+        """
         assert max_num_chunks > 0
         assert isinstance(image, Image.Image), type(image)
         w, h = image.size
-        # Check if the image can be fit to the canvas without downsampling
-        ar = self._fit_image_to_canvas(
-            num_chunks=max_num_chunks, img_width=w, img_height=h
+
+        possible_resolutions = self.find_supported_resolutions(
+            max_num_chunks=max_num_chunks, patch_size=self.size
         )
-        if ar is None:
-            # If we did not find a canvas, we have to find the closest aspect ratio and downsample the image
-            ar = self._find_closest_aspect_ratio(
-                num_chunks=max_num_chunks, img_width=w, img_height=h
-            )
-            image = self._resize(image, ar[0] * self.size, ar[1] * self.size)
-        else:
-            image = self._resize_max_side_to_size(image)
-        image = self._pad(image, ar[1] * self.size, ar[0] * self.size)
+        possible_resolutions = torch.tensor(possible_resolutions)
+
+        best_resolution = self.get_best_fit(
+            image_size=(w, h),
+            possible_resolutions=possible_resolutions,
+            resize_to_max_canvas=resize_to_max_canvas,
+        )
+
+        max_upscaling_size = None if resize_to_max_canvas else self.size
+        image = self.resize_without_distortion(
+            image, best_resolution, max_upscaling_size
+        )
+        image = self._pad(image, best_resolution)
+
         image = self.to_tensor(image)
-        image = self.normalize(image)
-        image = self._split(image, ar[0], ar[1])  # type: ignore
+
+        if normalize_img:
+            image = self.normalize(image)
+
+        ratio_w, ratio_h = (
+            best_resolution[0] // self.size,
+            best_resolution[1] // self.size,
+        )
+
+        image = self._split(image, ratio_w, ratio_h)  # type: ignore
+
+        ar = (ratio_h, ratio_w)
         return image, ar
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()

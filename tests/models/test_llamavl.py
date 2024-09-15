@@ -30,7 +30,7 @@ if __name__ == "__main__":
     llm = LLM(model=f"{checkpoint_dir}/Meta-Llama-3.2-{size}-Vision-Early/",
               enforce_eager=True,
               limit_mm_per_prompt={"image": 2},
-              tensor_parallel_size=1
+              tensor_parallel_size=1,
             #   load_format="dummy"
               )
 
@@ -40,34 +40,8 @@ if __name__ == "__main__":
         image = PIL_Image.open(f).convert("RGB")
     with open(f"{resource_dir}/pasta.jpeg", "rb") as f:
         image2 = PIL_Image.open(f).convert("RGB")
-    
-    # inputs = [
-    #     {
-    #         "prompt": "<|image|><|image|><|begin_of_text|>In a sentence, these two images paint",
-    #         "multi_modal_data": {
-    #             "image": [image, image2],
-    #         }
-    #     },
-    #     {
-    #         "prompt": "<|image|><|begin_of_text|>If I had to write a haiku for this one",
-    #         "multi_modal_data": {
-    #             "image": [image]
-    #         }
-    #     },
-    #     # {
-    #     #     "prompt": "he color of the sky is blue but sometimes it can also be",
-    #     # },
-    # ]
+
     inputs = [
-        {
-            "encoder_prompt": {
-                "prompt": "",
-                "multi_modal_data": {
-                    "image": [image, image2],
-                }
-            },
-            "decoder_prompt": "<|image|><|image|><|begin_of_text|>In a sentence, these two images paint",
-        },
         {
             "encoder_prompt":{
                 "prompt": "",
