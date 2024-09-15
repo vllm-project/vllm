@@ -18,7 +18,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
-from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -332,6 +331,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         # receive KV cache from prefill instance, or from LMCache
         if self.need_recv_kv(model_input, worker_input):
+            from vllm.worker.model_runner import GPUModelRunnerBase
             assert isinstance(self.model_runner, GPUModelRunnerBase), \
                 "Distributed KV transfer only support GPU modelrunner"
             hidden_or_intermediate_states, bypass_model_exec, model_input = \
@@ -358,6 +358,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         # sending out KV cache
         if self.need_send_kv(model_input, worker_input):
+            from vllm.worker.model_runner import GPUModelRunnerBase
             assert isinstance(self.model_runner, GPUModelRunnerBase), \
                 "Distributed KV transfer only support GPU modelrunner"
             ps.get_disagg_group().send_kv_caches_and_hidden_states(
@@ -373,6 +374,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         # separating postprocessing steps out from execute_model
         # so that disaggregated prefill can completely bypass model forwarding
+        from vllm.worker.model_runner import ModelRunner
         if isinstance(self.model_runner, ModelRunner):
             output = self.model_runner.postprocess_model(
                 model_input,
@@ -427,6 +429,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         kv_caches = self.kv_cache[worker_input.virtual_engine]
         prefill_meta = model_input.attn_metadata.prefill_metadata
+        from vllm.worker.model_runner import GPUModelRunnerBase
         if not isinstance(self.model_runner, GPUModelRunnerBase):
             return False
 
