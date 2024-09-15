@@ -65,6 +65,8 @@ class KV_transfer_agent:
         group_ranks: List[List[int]],
         local_rank: int,
         torch_distributed_backend: Union[str, Backend],
+        # FIXME(Kuntai): remove this hardcoding
+        lookup_buffer_size: int = 1e10
     ):
         
         if IS_LMCACHE_INSTANCE:
@@ -90,8 +92,14 @@ class KV_transfer_agent:
                 local_rank,
                 "gloo",
             )
-            self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe, self.send_pipe, 1e9 * 10)
-            self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe, self.recv_pipe, 1e9 * 10)
+            self.send_buffer = SimpleKVLookupBuffer(
+                self.send_signal_pipe,
+                self.send_pipe,
+                self.lookup_buffer_size)
+            self.recv_buffer = SimpleKVLookupBuffer(
+                self.recv_signal_pipe, 
+                self.recv_pipe, 
+                self.lookup_buffer_size)
         else:
             # when performing disaggregated prefill, only 1 pipe is needed
             # at prefill instance this pipe is used for send KV cache
@@ -106,19 +114,11 @@ class KV_transfer_agent:
                 local_rank,
                 "gloo",
             )
-            self.send_buffer = SimpleKVLookupBuffer(self.signal_pipe, self.pipe, 1e9 * 10)
-            self.recv_buffer = self.send_buffer
-
-        
-            
-        
-        # FIXME(Jiayi): buffer initializtion should be adapted accordingly
-        # Signal pipe needs to be initialized on both vllm and lmc side
-
-        # init lookup buffer
-        # TODO: replace this 1e9 with a configurable parameter or a constant
-        #self.buffer = SimpleKVLookupBuffer(self.cpu_pipe, self.device_pipe, 1e9 * 10)
-        
+            self.send_buffer = SimpleKVLookupBuffer(
+                self.signal_pipe, 
+                self.pipe, 
+                self.lookup_buffer_size)
+            self.recv_buffer = self.send_buffer 
         
     def send_kv_caches_and_hidden_states(
         self,
