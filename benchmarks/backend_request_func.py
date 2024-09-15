@@ -25,6 +25,7 @@ class RequestFuncInput:
     best_of: int = 1
     use_beam_search: bool = False
     logprobs: Optional[int] = None
+    multi_modal_content: Optional[dict] = None
 
 
 @dataclass

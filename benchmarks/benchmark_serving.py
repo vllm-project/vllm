@@ -24,6 +24,7 @@ On the client side, run:
 """
 import argparse
 import asyncio
+import base64
 import json
 import os
 import random
@@ -31,11 +32,13 @@ import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Collection
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
                                   RequestFuncOutput)
+from datasets import load_dataset
+from PIL.Image import Image
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -119,7 +122,7 @@ def sample_sharegpt_requests(
         if prompt_len > 1024 or prompt_len + output_len > 2048:
             # Prune too long sequences.
             continue
-        filtered_dataset.append((prompt, prompt_len, output_len))
+        filtered_dataset.append((prompt, prompt_len, output_len, None))
 
     return filtered_dataset
 
@@ -189,7 +192,54 @@ def sample_sonnet_requests(
             message, add_generation_prompt=True, tokenize=False)
         prompt_len = len(tokenizer(prompt_formatted).input_ids)
         sampled_requests.append(
-            (prompt, prompt_formatted, prompt_len, output_len))
+            (prompt, prompt_formatted, prompt_len, output_len, None))
+
+    return sampled_requests
+
+
+def sample_hf_requests(
+    dataset_path: str,
+    dataset_subset: str,
+    dataset_split: str,
+    num_requests: int,
+    tokenizer: PreTrainedTokenizerBase,
+    fixed_output_len: Optional[int] = None,
+):
+    dataset = load_dataset(dataset_path, name=dataset_subset, split=dataset_split, streaming=True)
+    filtered_dataset = dataset.shuffle().filter(lambda x: len(x["conversations"]) >= 2)
+    sampled_requests: List[Tuple[str, int, int, Dict[str, Collection[str]]]] = []
+    for data in filtered_dataset:
+        if len(sampled_requests) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        prompt = data["conversations"][0]["value"]
+        prompt_token_ids = tokenizer(prompt).input_ids
+        completion = data["conversations"][1]["value"]
+        completion_token_ids = tokenizer(completion).input_ids
+        prompt_len = len(prompt_token_ids)
+        output_len = len(completion_token_ids
+                         ) if fixed_output_len is None else fixed_output_len
+        if prompt_len < 4 or output_len < 4:
+            # Prune too short sequences.
+            continue
+        if prompt_len > 1024 or prompt_len + output_len > 2048:
+            # Prune too long sequences.
+            continue
+
+        if "image" in data and isinstance(data["image"], Image):
+            image: Image = data["image"]
+            image_base64 = base64.b64encode(image.tobytes()).decode("utf-8")
+            mm_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{image_base64}"
+                },
+            }
+        else:
+            mm_content = None
+
+        sampled_requests.append((prompt, prompt_len, output_len, mm_content))
 
     return sampled_requests
 
@@ -224,7 +274,7 @@ def sample_random_requests(
                                    for j in range(input_lens[i])])
 
         input_requests.append(
-            (prompt, int(prefix_len + input_lens[i]), int(output_lens[i])))
+            (prompt, int(prefix_len + input_lens[i]), int(output_lens[i]), None))
 
     return input_requests
 
@@ -343,7 +393,7 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len = input_requests[0]
+    test_prompt, test_prompt_len, test_output_len, test_mm_content = input_requests[0]
     test_input = RequestFuncInput(
         model=model_id,
         prompt=test_prompt,
@@ -353,6 +403,7 @@ async def benchmark(
         logprobs=logprobs,
         best_of=best_of,
         use_beam_search=use_beam_search,
+        multi_modal_content=test_mm_content,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -373,6 +424,7 @@ async def benchmark(
             logprobs=logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
+            multi_modal_content=test_mm_content,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -385,7 +437,7 @@ async def benchmark(
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
-        prompt, prompt_len, output_len = request
+        prompt, prompt_len, output_len, mm_content = request
         request_func_input = RequestFuncInput(
             model=model_id,
             prompt=prompt,
@@ -395,6 +447,7 @@ async def benchmark(
             logprobs=logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
+            multi_modal_content=mm_content,
         )
         tasks.append(
             asyncio.create_task(
@@ -574,6 +627,16 @@ def main(args: argparse.Namespace):
             input_requests = [(prompt_formatted, prompt_len, output_len)
                               for prompt, prompt_formatted, prompt_len,
                               output_len in input_requests]
+    
+    elif args.dataset_name == "hf":
+        input_requests = sample_hf_requests(
+            dataset_path=args.dataset_path,
+            dataset_subset=args.hf_subset,
+            dataset_split=args.hf_split,
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            fixed_output_len=args.hf_output_len,
+        )
 
     elif args.dataset_name == "random":
         input_requests = sample_random_requests(
@@ -685,7 +748,7 @@ if __name__ == "__main__":
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "sonnet", "random"],
+        choices=["sharegpt", "sonnet", "random", "hf"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument("--dataset-path",
@@ -784,6 +847,24 @@ if __name__ == "__main__":
         " context. The length range of context in a random "
         " request is [random-prefix-len, "
         " random-prefix-len + random-prefix-len * random-range-ratio).")
+    parser.add_argument(
+        "--hf-output-len",
+        type=int,
+        default=128,
+        help="Number of input tokens per request, used only for HF dataset.",
+    )
+    parser.add_argument(
+        "--hf-subset",
+        type=str,
+        default=None,
+        help="Subset of the HF dataset."
+    )
+    parser.add_argument(
+        "--hf-split",
+        type=str,
+        default=None,
+        help="Split of the HF dataset."
+    )
     parser.add_argument(
         "--request-rate",
         type=float,
