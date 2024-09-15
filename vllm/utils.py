@@ -535,7 +535,7 @@ def get_open_port(force: bool = False) -> int:
         if force and port is not None:
             # force vLLM to use envs.VLLM_PORT for torch.distributed init
             # This is because this port will binded by prefill instance
-            # But both prefill and decode instance need to use this port to 
+            # But both prefill and decode instance need to use this port to
             # initialize torch.distributed
             return port
         while True:
