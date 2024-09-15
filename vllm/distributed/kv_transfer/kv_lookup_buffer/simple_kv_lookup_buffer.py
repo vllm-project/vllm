@@ -2,7 +2,7 @@
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import \
     KVLookupBufferBase
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Union
 import threading
 import torch
 from collections import deque
@@ -14,10 +14,19 @@ logger = init_logger(__name__)
 
 class SimpleKVLookupBuffer(KVLookupBufferBase):
     
-    def __init__(self, signal_pipe, data_pipe, buffer_size_thresh):
+    def __init__(self, 
+                 signal_pipe: KVPipeBase, 
+                 data_pipe: KVPipeBase, 
+                 buffer_size_thresh: int):
         """
-        signal_pipe: on CPU -- avoid recv() stops the python intepreter
-        data_pipe: on GPU
+        signal_pipe: on CPU 
+        
+        NOTE: on-device recv will block all threads in the process, making the 
+        KV cache producer unable to listen to new request while transmitting 
+        KV cache. Luckily CPU recv only blocks the current thread so we use 
+        CPU recv to listen to new request.
+        
+        data_pipe: on device (e.g. GPU)
         """
         
         self.buffer = deque()
@@ -33,7 +42,9 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         self.end_signal = None
 
         
-    def _matches(self, tokens_roi_sender, tokens_roi_recver):
+    def _matches(self,
+                 tokens_roi_sender: List[torch.Tensor], 
+                 tokens_roi_recver: List[torch.Tensor]):
 
         # tokens_roi_sender: tokens and roi of the producer (in the buffer)
         # tokens_roi_recver: tokens and roi of the consumer (query)
@@ -69,7 +80,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         self.buffer_size -= tensor.element_size() * tensor.numel()
         self.data_pipe.send_tensor(tensor)
 
-    def _get_element_size(self, data):
+    def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
         
         if data == [] or data is None:
             return 0
@@ -78,7 +89,12 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
 
         assert False, "Unknown data type %s" % type(data)
         
-    def _add_to_buffer(self, input_tokens, roi, key, value, hidden):
+    def _add_to_buffer(self,
+                       input_tokens: torch.Tensor, 
+                       roi: torch.Tensor, 
+                       key: torch.Tensor, 
+                       value: torch.Tensor, 
+                       hidden: torch.Tensor):
 
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
@@ -150,7 +166,9 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         logger.debug("Closing drop_select_handler")
                         
         
-    def drop_select(self, input_tokens, roi):
+    def drop_select(self, 
+                    input_tokens: torch.Tensor, 
+                    roi: torch.Tensor):
         
         assert self.request_handling_thread is None, \
             "drop_select should be called by the receiver"
@@ -183,6 +201,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         while self.buffer_size > self.buffer_size_threshold:
             # logger.debug("KV transfer buffer is full. Handling...")
             self.full_handler()
+
         
         self._add_to_buffer(input_tokens, roi, key, value, hidden)
         
