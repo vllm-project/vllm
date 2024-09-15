@@ -6,18 +6,19 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Generator, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
 
 import filelock
+import gguf
 import huggingface_hub.constants
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import LoadConfig, ModelConfig
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
@@ -121,9 +122,18 @@ def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
 
     quant_cls = get_quantization_config(model_config.quantization)
+
+    # GGUF doesn't have config file
+    if model_config.quantization == "gguf":
+        return quant_cls.from_config({})
+
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
+    # some vision model may keep quantization_config in their text_config
+    hf_text_config = getattr(model_config.hf_config, "text_config", None)
+    if hf_quant_config is None and hf_text_config is not None:
+        hf_quant_config = getattr(hf_text_config, "quantization_config", None)
     if hf_quant_config is None:
         # compressed-tensors uses a compressions_config
         hf_quant_config = getattr(model_config.hf_config, "compression_config",
@@ -182,6 +192,13 @@ def get_quant_config(model_config: ModelConfig,
 
         if model_config.quantization == "bitsandbytes":
             config["adapter_name_or_path"] = model_name_or_path
+        elif model_config.quantization == "modelopt":
+            if config["producer"]["name"] == "modelopt":
+                return quant_cls.from_config(config)
+            else:
+                raise ValueError(
+                    f"Unsupported quantization config"
+                    f" found for {model_config.quantization} in {f}.")
 
     return quant_cls.from_config(config)
 
@@ -240,6 +257,7 @@ def download_weights_from_hf(
 
 def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
+    index_file: str,
     cache_dir: Optional[str],
     revision: Optional[str] = None,
 ) -> None:
@@ -258,36 +276,37 @@ def download_safetensors_index_file_from_hf(
             # Download the safetensors index file.
             hf_hub_download(
                 repo_id=model_name_or_path,
-                filename=SAFE_WEIGHTS_INDEX_NAME,
+                filename=index_file,
                 cache_dir=cache_dir,
                 revision=revision,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
             )
         # If file not found on remote or locally, we should not fail since
-        # only some models will have SAFE_WEIGHTS_INDEX_NAME.
+        # only some models will have index_file.
         except huggingface_hub.utils.EntryNotFoundError:
-            logger.info("No %s found in remote.", SAFE_WEIGHTS_INDEX_NAME)
+            logger.info("No %s found in remote.", index_file)
         except huggingface_hub.utils.LocalEntryNotFoundError:
-            logger.info("No %s found in local cache.", SAFE_WEIGHTS_INDEX_NAME)
+            logger.info("No %s found in local cache.", index_file)
 
 
 # For models like Mistral-7B-v0.3, there are both sharded
 # safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
-# So, we use the SAFE_WEIGHTS_INDEX_NAME to
+# So, we use the index_file to
 # look up which safetensors files should be used.
 def filter_duplicate_safetensors_files(hf_weights_files: List[str],
-                                       hf_folder: str) -> List[str]:
+                                       hf_folder: str,
+                                       index_file: str) -> List[str]:
     # model.safetensors.index.json is a mapping from keys in the
     # torch state_dict to safetensors file holding that weight.
-    index_file_name = os.path.join(hf_folder, SAFE_WEIGHTS_INDEX_NAME)
+    index_file_name = os.path.join(hf_folder, index_file)
     if not os.path.isfile(index_file_name):
         return hf_weights_files
 
     # Iterate through the weight_map (weight_name: safetensors files)
     # to identify weights that we should use.
-    with open(index_file_name) as index_file:
-        weight_map = json.load(index_file)["weight_map"]
+    with open(index_file_name, "r") as f:
+        weight_map = json.load(f)["weight_map"]
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(
@@ -409,6 +428,47 @@ def pt_weights_iterator(
         torch.cuda.empty_cache()
 
 
+def get_gguf_extra_tensor_names(
+        gguf_file: str, gguf_to_hf_name_map: Dict[str, str]) -> List[str]:
+    reader = gguf.GGUFReader(gguf_file)
+    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
+    exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
+    extra_keys = expected_gguf_keys - exact_gguf_keys
+    return [gguf_to_hf_name_map[key] for key in extra_keys]
+
+
+def gguf_quant_weights_iterator(
+    gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """
+    Iterate over the quant weights in the model gguf files and convert
+    them to torch tensors
+    """
+
+    reader = gguf.GGUFReader(gguf_file)
+
+    for tensor in reader.tensors:
+        if tensor.name in gguf_to_hf_name_map:
+            weight_type = tensor.tensor_type
+            name = gguf_to_hf_name_map[tensor.name]
+
+            if weight_type.name != "F32":
+                weight_type_name = name.replace("weight", "qweight_type")
+                weight_type = torch.tensor(weight_type)
+                yield weight_type_name, weight_type
+
+    for tensor in reader.tensors:
+        if tensor.name in gguf_to_hf_name_map:
+            weight = tensor.data
+            weight_type = tensor.tensor_type
+            name = gguf_to_hf_name_map[tensor.name]
+
+            if weight_type.name != "F32":
+                name = name.replace("weight", "qweight")
+            param = torch.tensor(weight)
+            yield name, param
+
+
 def kv_cache_scales_loader(
         filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
         model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
@@ -467,8 +527,36 @@ def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
 def default_weight_loader(param: torch.Tensor,
                           loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
-    assert param.size() == loaded_weight.size()
-    param.data.copy_(loaded_weight)
+    try:
+        if param.numel() == 1 and loaded_weight.numel() == 1:
+            # Sometimes scalar values aren't considered tensors with shapes
+            # so if both param and loaded_weight are a scalar,
+            # "broadcast" instead of copy
+            param.data.fill_(loaded_weight.item())
+        else:
+            assert param.size() == loaded_weight.size(), (
+                f"Attempted to load weight ({loaded_weight.size()}) "
+                f"into parameter ({param.size()})")
+
+            param.data.copy_(loaded_weight)
+    except Exception:
+        # NOTE: This exception is added for the purpose of setting breakpoint to
+        # debug weight loading issues.
+        raise
+
+
+def row_parallel_weight_loader(param: torch.Tensor,
+                               loaded_weight: torch.Tensor) -> None:
+    """Load weights that are row-parallelized."""
+    tp_rank = get_tensor_model_parallel_rank()
+    shard_dim = 0 if param.dim() != 1 else None
+
+    if shard_dim is not None:
+        shard_size = param.data.shape[shard_dim]
+        start_idx = tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(shard_dim, start_idx, shard_size)
+
+    return default_weight_loader(param, loaded_weight)
 
 
 def initialize_dummy_weights(

@@ -39,13 +39,13 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA
 from .utils import is_pp_missing_parameter, make_layers
@@ -73,6 +73,7 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
+
         self.gate = ReplicatedLinear(hidden_size,
                                      num_experts,
                                      bias=False,
@@ -359,6 +360,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
         )
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
@@ -375,8 +378,11 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                                    attn_metadata, intermediate_tensors)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
@@ -429,7 +435,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if ((name.endswith(".bias") or name.endswith("_bias"))
+                        and name not in params_dict):
                     continue
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
@@ -448,17 +455,21 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
+                    if ((name.endswith(".bias") or name.endswith("_bias"))
+                            and name not in params_dict):
+                        continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
-                                  weight_name,
+                                  name,
                                   shard_id=shard_id,
                                   expert_id=expert_id)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
+                    if ((name.endswith(".bias") or name.endswith("_bias"))
+                            and name not in params_dict):
                         continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):

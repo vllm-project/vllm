@@ -20,6 +20,7 @@ vLLM is a community project. Our compute resources for development and testing a
 - Roblox
 - RunPod
 - Sequoia Capital
+- Skywork AI
 - Trainy
 - UC Berkeley
 - UC San Diego

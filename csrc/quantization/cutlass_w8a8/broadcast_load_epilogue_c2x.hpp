@@ -209,6 +209,156 @@ struct VisitorRowOrScalarBroadcast {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// This is a modified RowBroadcast that will broadcast 0 if ptr_row is null
+template<
+  class ThreadMap,
+  class Element,
+  class StrideMNL
+>
+struct VisitorRowOrZeroBroadcast {
+
+  // This struct has been modified to remove null_default (because it's always 0)
+  struct Arguments {
+    Element const* ptr_row = nullptr;
+    StrideMNL dRow = {};
+  };
+
+  using Params = Arguments;
+
+  template <class ProblemShape>
+  static constexpr Params
+  to_underlying_arguments(ProblemShape const& problem_shape, Arguments const& args, void* workspace) {
+    return args;
+  }
+
+  template <class ProblemShape>
+  static size_t
+  get_workspace_size(ProblemShape const& problem_shape, Arguments const& args) {
+    return 0;
+  }
+
+  struct SharedStorage {};
+
+  // Global load type
+  static int constexpr vec_bits = ThreadMap::kElementsPerAccess * sizeof_bits<Element>::value;
+  using VecType = uint_bit_t<cute::min(128, vec_bits)>;
+  static int constexpr VecLength = sizeof(VecType) / sizeof(Element);
+
+  CUTLASS_HOST_DEVICE
+  VisitorRowOrZeroBroadcast() { }
+
+  CUTLASS_HOST_DEVICE
+  VisitorRowOrZeroBroadcast(Params const& params, SharedStorage const& shared_storage)
+    : params_ptr(&params) { }
+
+  Params const* params_ptr;
+
+  template <class GTensor, class RTensor, class CTensor, class ProblemShape>
+  struct Callbacks : EmptyCallbacks {
+    CUTLASS_DEVICE
+    Callbacks(
+      GTensor&& tC_gRow,
+      RTensor&& tC_rRow,
+      CTensor&& tC_cRow,
+      ProblemShape problem_shape,
+      Params const* params_ptr
+    ):
+      tC_gRow(cute::forward<GTensor>(tC_gRow)),
+      tC_rRow(cute::forward<RTensor>(tC_rRow)),
+      tC_cRow(cute::forward<CTensor>(tC_cRow)),
+      n(get<1>(problem_shape)),
+      params_ptr(params_ptr) { }
+
+    GTensor tC_gRow;
+    RTensor tC_rRow;
+    CTensor tC_cRow;
+    Params const* params_ptr;
+    int n;
+
+    // This function is modified from VisitorRowBroadcast
+    CUTLASS_DEVICE void
+    begin_epilogue() {
+      clear(tC_rRow);
+      auto src_v = filter(tC_gRow);
+      auto coord_v = filter(tC_cRow);
+      auto dst_v = filter(tC_rRow);
+
+      if (params_ptr->ptr_row != nullptr) {
+        // In this case we are loading from a row vector and broadcasting
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < size(src_v); ++i) {
+          bool guard = get<1>(coord_v(i)) < n;
+          cutlass::arch::global_load<VecType, sizeof(VecType)>(
+              dst_v(i), (void const*)&src_v(i), guard);
+        }
+      } else {
+        // In this case we are broadcasting 0
+        VecType filled_vec;
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < VecLength; i++) {
+          reinterpret_cast<Element*>(&filled_vec)[i] = Element{0};
+        }
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < size(src_v); ++i) {
+          if (get<1>(coord_v(i)) < n) {
+            dst_v(i) = filled_vec;
+          }
+        }
+      }
+    }
+
+    template <class ElementAccumulator, int FragmentSize>
+    CUTLASS_DEVICE auto // returns an Array
+    visit(int iter_idx, int row_idx, int column_idx, int frg_idx,
+          Array<ElementAccumulator, FragmentSize> const& frg_acc) {
+      Tensor rRow_frg = recast<Array<Element, FragmentSize>>(coalesce(tC_rRow));
+      return rRow_frg(column_idx);
+    }
+  };
+
+  template <class ProblemShape>
+  CUTLASS_DEVICE auto
+  get_callbacks(
+    gemm::GemmCoord threadblock_tile_offset,
+    int thread_idx,
+    ProblemShape problem_shape
+  ) {
+    Tensor mRow = make_tensor(
+      make_gmem_ptr(params_ptr->ptr_row),
+      problem_shape,
+      params_ptr->dRow);
+
+    // VECTOR, FRAGMENT_COLUMN
+    Tensor tC_gRow = recast<VecType>(
+      ThreadMap::partition(mRow, thread_idx, threadblock_tile_offset)
+    )(_,_,_0{},_0{},_0{},_0{});
+    Tensor tC_rRow = make_tensor_like(tC_gRow);
+
+    // Generate the pred tensor
+    Tensor cRow = make_identity_tensor(mRow.shape());
+    Tensor tC_cRow = outer_partition(
+      ThreadMap::partition(cRow, thread_idx, threadblock_tile_offset)(_,_,_0{},_0{},_0{},_0{}),
+      Shape<Int<VecLength>>{},
+      (_0{})
+    );
+
+    return Callbacks<
+      decltype(tC_gRow), decltype(tC_rRow),
+      decltype(tC_cRow), ProblemShape>(
+      cute::move(tC_gRow),
+      cute::move(tC_rRow),
+      cute::move(tC_cRow),
+      problem_shape,
+      params_ptr
+    );
+  }
+
+};
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 // Column vector broadcast
 template<
   class ThreadMap,
@@ -217,7 +367,7 @@ template<
 >
 struct VisitorColOrScalarBroadcast {
 
-  // This struct has been modified to have a bool indicating that ptr_col is a 
+  // This struct has been modified to have a bool indicating that ptr_col is a
   // scalar that must be broadcast.
   struct Arguments {
     Element const* ptr_col = nullptr;

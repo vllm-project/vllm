@@ -2,9 +2,9 @@ from functools import lru_cache, partial
 from typing import Dict, FrozenSet, Iterable, List, Optional, Union
 
 import torch
-from transformers import PreTrainedTokenizer
 
 from vllm.sampling_params import LogitsProcessor
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 class AllowedTokenIdsLogitsProcessor:
@@ -40,19 +40,22 @@ def _get_allowed_token_ids_logits_processor(
     return AllowedTokenIdsLogitsProcessor(allowed_token_ids)
 
 
-def logit_bias_logits_processor(logit_bias: Dict[str,
-                                                 float], token_ids: List[int],
-                                logits: torch.Tensor) -> torch.Tensor:
+def logit_bias_logits_processor(
+    logit_bias: Dict[int, float],
+    token_ids: List[int],
+    logits: torch.Tensor,
+) -> torch.Tensor:
     for token_id, bias in logit_bias.items():
         logits[token_id] += bias
     return logits
 
 
 def get_logits_processors(
-        logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]],
-        allowed_token_ids: Optional[List[int]],
-        tokenizer: PreTrainedTokenizer) -> List[LogitsProcessor]:
-    logits_processors = []
+    logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]],
+    allowed_token_ids: Optional[List[int]],
+    tokenizer: AnyTokenizer,
+) -> List[LogitsProcessor]:
+    logits_processors: List[LogitsProcessor] = []
     if logit_bias:
         try:
             # Convert token_id to integer
@@ -69,7 +72,7 @@ def get_logits_processors(
         # Check if token_id is within the vocab size
         for token_id, bias in clamped_logit_bias.items():
             if token_id < 0 or token_id >= tokenizer.vocab_size:
-                raise ValueError("token_id in logit_bias contains "
+                raise ValueError(f"token_id {token_id} in logit_bias contains "
                                  "out-of-vocab token id")
 
         logits_processors.append(

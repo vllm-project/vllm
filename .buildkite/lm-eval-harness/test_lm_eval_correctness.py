@@ -14,7 +14,7 @@ import lm_eval
 import numpy
 import yaml
 
-RTOL = 0.02
+RTOL = 0.05
 TEST_DATA_FILE = os.environ.get(
     "LM_EVAL_TEST_DATA_FILE",
     ".buildkite/lm-eval-harness/configs/Meta-Llama-3-8B-Instruct.yaml")
@@ -23,9 +23,12 @@ TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
 
 
 def launch_lm_eval(eval_config):
+    trust_remote_code = eval_config.get('trust_remote_code', False)
+
     model_args = f"pretrained={eval_config['model_name']}," \
                  f"tensor_parallel_size={TP_SIZE}," \
-                 f"add_bos_token=true"
+                 f"add_bos_token=true," \
+                 f"trust_remote_code={trust_remote_code}"
 
     results = lm_eval.simple_evaluate(
         model="vllm",

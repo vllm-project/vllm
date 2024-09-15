@@ -114,3 +114,71 @@ def test_traces(trace_service):
         SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN) == ttft
     e2e_time = metrics.finished_time - metrics.arrival_time
     assert attributes.get(SpanAttributes.LLM_LATENCY_E2E) == e2e_time
+    assert metrics.scheduler_time > 0
+    assert attributes.get(
+        SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER) == metrics.scheduler_time
+    # Model forward and model execute should be none, since detailed traces is
+    # not enabled.
+    assert metrics.model_forward_time is None
+    assert metrics.model_execute_time is None
+
+
+def test_traces_with_detailed_steps(trace_service):
+    os.environ[OTEL_EXPORTER_OTLP_TRACES_INSECURE] = "true"
+
+    sampling_params = SamplingParams(temperature=0.01,
+                                     top_p=0.1,
+                                     max_tokens=256)
+    model = "facebook/opt-125m"
+    llm = LLM(
+        model=model,
+        otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
+        collect_detailed_traces="all",
+    )
+    prompts = ["This is a short prompt"]
+    outputs = llm.generate(prompts, sampling_params=sampling_params)
+
+    timeout = 5
+    if not trace_service.evt.wait(timeout):
+        raise TimeoutError(
+            f"The fake trace service didn't receive a trace within "
+            f"the {timeout} seconds timeout")
+
+    attributes = decode_attributes(trace_service.request.resource_spans[0].
+                                   scope_spans[0].spans[0].attributes)
+    assert attributes.get(SpanAttributes.LLM_RESPONSE_MODEL) == model
+    assert attributes.get(
+        SpanAttributes.LLM_REQUEST_ID) == outputs[0].request_id
+    assert attributes.get(
+        SpanAttributes.LLM_REQUEST_TEMPERATURE) == sampling_params.temperature
+    assert attributes.get(
+        SpanAttributes.LLM_REQUEST_TOP_P) == sampling_params.top_p
+    assert attributes.get(
+        SpanAttributes.LLM_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
+    assert attributes.get(
+        SpanAttributes.LLM_REQUEST_BEST_OF) == sampling_params.best_of
+    assert attributes.get(SpanAttributes.LLM_REQUEST_N) == sampling_params.n
+    assert attributes.get(SpanAttributes.LLM_USAGE_PROMPT_TOKENS) == len(
+        outputs[0].prompt_token_ids)
+    completion_tokens = sum(len(o.token_ids) for o in outputs[0].outputs)
+    assert attributes.get(
+        SpanAttributes.LLM_USAGE_COMPLETION_TOKENS) == completion_tokens
+    metrics = outputs[0].metrics
+    assert attributes.get(
+        SpanAttributes.LLM_LATENCY_TIME_IN_QUEUE) == metrics.time_in_queue
+    ttft = metrics.first_token_time - metrics.arrival_time
+    assert attributes.get(
+        SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN) == ttft
+    e2e_time = metrics.finished_time - metrics.arrival_time
+    assert attributes.get(SpanAttributes.LLM_LATENCY_E2E) == e2e_time
+    assert metrics.scheduler_time > 0
+    assert attributes.get(
+        SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER) == metrics.scheduler_time
+    assert metrics.model_forward_time > 0
+    assert attributes.get(
+        SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_FORWARD) == pytest.approx(
+            metrics.model_forward_time / 1000)
+    assert metrics.model_execute_time > 0
+    assert attributes.get(SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE
+                          ) == metrics.model_execute_time
+    assert metrics.model_forward_time < 1000 * metrics.model_execute_time

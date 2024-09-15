@@ -1,12 +1,10 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               set_weight_attrs)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -14,6 +12,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
     replace_tensor, verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.parameter import (GroupQuantScaleParameter,
+                                           PackedvLLMParameter)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -126,8 +126,7 @@ class AWQMarlinConfig(QuantizationConfig):
 
         return check_marlin_supported(quant_type=cls.TYPE_MAP[num_bits],
                                       group_size=group_size,
-                                      has_zp=has_zp,
-                                      min_capability=cls.get_min_capability())
+                                      has_zp=has_zp)
 
 
 class AWQMarlinLinearMethod(LinearMethodBase):
@@ -152,6 +151,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
     ) -> None:
         del output_size
         output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
 
         # Normalize group_size
         if self.quant_config.group_size != -1:
@@ -165,59 +165,44 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             input_size=input_size,
             group_size=group_size)
 
-        qweight = Parameter(
-            torch.empty(
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
                 input_size_per_partition,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qweight, {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
-            })
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader)
 
         num_groups = input_size_per_partition // group_size
 
-        qzeros = Parameter(
-            torch.empty(
+        qzeros = PackedvLLMParameter(
+            data=torch.empty(
                 num_groups,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qzeros, {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
-            })
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader)
 
-        scales = Parameter(
-            torch.empty(
-                num_groups,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(scales, {
-            "input_dim": 0,
-            "output_dim": 1,
-        })
+        scales = GroupQuantScaleParameter(data=torch.empty(
+            num_groups,
+            output_size_per_partition,
+            dtype=params_dtype,
+        ),
+                                          input_dim=0,
+                                          output_dim=1,
+                                          weight_loader=weight_loader)
 
         layer.register_parameter("qweight", qweight)
-        set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qzeros", qzeros)
-        set_weight_attrs(qzeros, extra_weight_attrs)
         layer.register_parameter("scales", scales)
-        set_weight_attrs(scales, extra_weight_attrs)
 
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
@@ -229,6 +214,12 @@ class AWQMarlinLinearMethod(LinearMethodBase):
     # Here, we handle the repacking
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
+        layer.qweight = torch.nn.Parameter(layer.qweight.data,
+                                           requires_grad=False)
+        layer.qzeros = torch.nn.Parameter(layer.qzeros.data,
+                                          requires_grad=False)
+        layer.scales = torch.nn.Parameter(layer.scales.data,
+                                          requires_grad=False)
 
         # Allocate marlin workspace
         layer.workspace = marlin_make_workspace(

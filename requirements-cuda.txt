@@ -7,5 +7,5 @@ nvidia-ml-py # for pynvml package
 torch == 2.4.0
 # These must be updated alongside torch
 torchvision == 0.19   # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
-xformers == 0.0.27.post2  # Requires PyTorch 2.4.0
-vllm-flash-attn == 2.6.1  # Requires PyTorch 2.4.0
+xformers == 0.0.27.post2; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch 2.4.0
+vllm-flash-attn == 2.6.1; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch 2.4.0
