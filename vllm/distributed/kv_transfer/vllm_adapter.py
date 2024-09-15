@@ -30,7 +30,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe import TorchDistributedPipe
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_kv_lookup_buffer import SimpleKVLookupBuffer
 
-from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 from copy import deepcopy
 
 assert envs.VLLM_DISAGG_PREFILL_ROLE in [None, "prefill", "decode", "lmcache"], \
@@ -139,7 +138,7 @@ class KV_transfer_agent:
     def send_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
-        model_input: ModelInputForGPUWithSamplingMetadata,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
@@ -190,9 +189,9 @@ class KV_transfer_agent:
     def recv_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
-        model_input: ModelInputForGPUWithSamplingMetadata,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor]
-    ) -> List[Union[torch.Tensor, IntermediateTensors], bool, ModelInputForGPUWithSamplingMetadata]:
+    ) -> List[Union[torch.Tensor, IntermediateTensors], bool, "ModelInputForGPUWithSamplingMetadata"]:
 
         bypass_model_exec = True
 
@@ -291,13 +290,13 @@ class KV_transfer_agent:
     
     def adpat_model_input(
         self,
-        model_input: ModelInputForGPUWithSamplingMetadata,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
         input_tokens_list: List[torch.Tensor],
         num_computed_tokens_list: List[int],
         start_pos_list: List[int],
         slot_mapping_flat: torch.Tensor,
         device: torch.device,
-    ) -> ModelInputForGPUWithSamplingMetadata:
+    ) -> "ModelInputForGPUWithSamplingMetadata":
         rebuilt_input_tokens = []
         rebuilt_input_positions= []
         rebuilt_query_lens = []
@@ -373,6 +372,7 @@ class KV_transfer_agent:
             dtype=model_input.sampling_metadata.selected_token_indices.dtype,
             ).to(device)
         
+        from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
         rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
             input_tokens = torch.cat(rebuilt_input_tokens).to(device),
             input_positions = torch.cat(rebuilt_input_positions).to(device),
