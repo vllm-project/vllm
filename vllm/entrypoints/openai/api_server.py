@@ -264,7 +264,7 @@ def tokenization(request: Request) -> OpenAIServingTokenization:
 
 
 def embedding(request: Request) -> OpenAIServingEmbedding:
-    return request.app.state.openai_serving_tokenization
+    return request.app.state.openai_serving_embedding
 
 
 def engine_client(request: Request) -> AsyncEngineClient:
