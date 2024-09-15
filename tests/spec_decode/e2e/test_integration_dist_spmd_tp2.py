@@ -22,9 +22,11 @@ from .conftest import run_equality_correctness_test_tp
         # Required for spec decode.
         "--use-v2-block-manager",
         "--tensor-parallel-size",
-        "2",
+        "1",
         "--distributed-executor-backend",
         "ray",
+        "--worker-use-ray",
+        "--disable-frontend-multiprocessing",
     ]])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])

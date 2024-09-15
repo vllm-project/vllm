@@ -14,7 +14,7 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
-                           HiddenStates, SamplerOutput, SequenceGroupMetadata,
+                           HiddenStates, SequenceGroupMetadata,
                            IntermediateTensors, SequenceGroupMetadataDelta,
                            get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
@@ -401,28 +401,31 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         assert intermediate_tensors is None, (
             "Pipeline parallelism is not supported with spec decoding.")
         self._track_finished_requests(execute_model_req)
-
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
 
+        # Speculative decoding is disabled in the following cases:
+        # 1. Prefill phase: Speculative decoding is not
+        #    used during the prefill phase.
+        # 2. Auto-disable enabled: The running queue size exceeds
+        #    the specified threshold.
+        # 3. No request: There are no requests in the batch, or
+        #    none of the requests in the batch have spec decoding enabled.
+        # In any of these cases, the proposer and scorer workers
+        # are called normally.
+        no_spec = num_lookahead_slots == 0 or disable_all_speculation or all(
+            sgm.num_speculative_tokens == 0
+            for sgm in execute_model_req.seq_group_metadata_list)
+
         self._maybe_disable_speculative_tokens(
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
         # print(f"SANG-TODO {execute_model_req.seq_group_metadata_list=}")
-        if num_lookahead_slots == 0 or len(
-                execute_model_req.seq_group_metadata_list
-        ) == 0 or disable_all_speculation:
-            print(f"SANG-TODO _run_no_spec {num_lookahead_slots=}")
-            print(
-                f"SANG-TODO Scheduled! {execute_model_req.seq_group_metadata_list=}"
-            )
+        if no_spec:
             return self._run_no_spec(execute_model_req,
-                                     skip_proposer=disable_all_speculation)
-
-        print(
-            f"SANG-TODO _run_speculative_decoding_step {num_lookahead_slots=}")
+                                    skip_proposer=disable_all_speculation)
         return self._run_speculative_decoding_step(execute_model_req,
-                                                   num_lookahead_slots)
+                                                num_lookahead_slots)
 
     @torch.inference_mode()
     def execute_model(
@@ -572,7 +575,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         print(f"SANG-TODO {self.scorer_worker=} {skip_proposer=}")
         print(f"SANG-TODO draft model execute before")
         if not skip_proposer:
-            self.proposer_worker.execute_model(execute_model_req)
+            self.proposer_worker._execute_model_spmd(execute_model_req)
         print(f"SANG-TODO draft model execute done")
 
         print(f"SANG-TODO  target model _execute_model_spmd")
@@ -691,6 +694,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # if proposal_scores is None:
         #     return []
         print(f"SANG-TODO {proposal_scores=}")
+        print(f"SANG-TODO draft {proposals.proposal_lens=}")
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
@@ -736,6 +740,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposal_verifier_probs = proposal_scores.probs[spec_indices]
 
         # Get non-speculative sampled tokens from target model.
+        print(f"SANG-TODO {proposal_scores.token_ids.shape=}")
+        print(f"SANG-TODO {non_spec_indices=}")
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
 
         # Get bonus tokens from target model.
@@ -766,7 +772,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         )
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
-        print(f"SANG-TODO {non_spec_token_ids=} {non_spec_token_ids.shape=}")
+        print(f"SANG-TODO {non_spec_token_ids=} {non_spec_token_ids.shape=} {max_proposal_len=}")
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
                                                        1).clone()
         non_spec_token_ids[:, 1:] = -1
