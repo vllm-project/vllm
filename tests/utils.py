@@ -508,7 +508,7 @@ async def completions_with_server_args(
                                                   max_tokens=5,
                                                   logprobs=num_logprobs)
     os.environ.pop("VLLM_PORT")
-    
+
     assert outputs is not None
 
     return outputs
