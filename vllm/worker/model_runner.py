@@ -14,7 +14,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
@@ -1545,30 +1544,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-
         hidden_or_intermediate_states = model_executable(
-        input_ids=model_input.input_tokens,
-        positions=model_input.input_positions,
-        kv_caches=kv_caches,
-        attn_metadata=model_input.attn_metadata,
-        intermediate_tensors=intermediate_tensors,
-        **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                        device=self.device),
-        **seqlen_agnostic_kwargs)
-        
+            input_ids=model_input.input_tokens,
+            positions=model_input.input_positions,
+            kv_caches=kv_caches,
+            attn_metadata=model_input.attn_metadata,
+            intermediate_tensors=intermediate_tensors,
+            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                         device=self.device),
+            **seqlen_agnostic_kwargs)
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end.record()
 
-        return hidden_or_intermediate_states
-
-    @torch.inference_mode()
-    def postprocess_model(
-        self,
-        model_input,
-        hidden_or_intermediate_states,
-        
-    ):
+        # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             if (self.is_driver_worker
                     and hidden_or_intermediate_states is not None
@@ -1586,7 +1576,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_or_intermediate_states.tensors["model_forward_time"] = (
                     torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
-        
+
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
 
@@ -1618,7 +1608,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.model_forward_time = (orig_model_forward_time +
                                          model_forward_time)
 
-        decode_meta = model_input.attn_metadata.decode_metadata
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
             assert model_input.sampling_metadata is not None
@@ -1635,9 +1624,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.hidden_states = hidden_states
 
         return [output]
-    
-    
-    
+
 
 class CUDAGraphRunner:
 
