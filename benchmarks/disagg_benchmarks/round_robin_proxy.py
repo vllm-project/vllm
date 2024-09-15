@@ -3,92 +3,55 @@ import aiohttp
 from aiohttp import web
 import itertools
 
-class AsyncRoundRobinProxy:
-    def __init__(self, backend_ports):
-        self.backend_ports = itertools.cycle(backend_ports)
-        self.session = None
-
-    async def start(self):
-        self.session = aiohttp.ClientSession()
-
-    async def stop(self):
-        if self.session:
-            await self.session.close()
+class RoundRobinProxy:
+    def __init__(self, target_ports):
+        self.target_ports = target_ports
+        self.port_cycle = itertools.cycle(self.target_ports)
 
     async def handle_request(self, request):
-        backend_port = next(self.backend_ports)
-        print("forwarding to port", backend_port)
-        backend_url = f"http://localhost:{backend_port}{request.path_qs}"
+        target_port = next(self.port_cycle)
+        target_url = f"http://localhost:{target_port}{request.path_qs}"
 
-        try:
-            async with self.session.request(
-                method=request.method,
-                url=backend_url,
-                headers=request.headers,
-                data=await request.read()
-            ) as backend_response:
-                response = web.StreamResponse(
-                    status=backend_response.status,
-                    headers=backend_response.headers
-                )
-                await response.prepare(request)
+        async with aiohttp.ClientSession() as session:
+            try:
+                # Forward the request
+                async with session.request(
+                    method=request.method,
+                    url=target_url,
+                    headers=request.headers,
+                    data=request.content,
+                ) as response:
+                    # Start sending the response
+                    resp = web.StreamResponse(
+                        status=response.status,
+                        headers=response.headers
+                    )
+                    await resp.prepare(request)
 
-                async for chunk in backend_response.content.iter_any():
-                    await response.write(chunk)
+                    # Stream the response content
+                    async for chunk in response.content.iter_any():
+                        await resp.write(chunk)
 
-                await response.write_eof()
-                return response
+                    await resp.write_eof()
+                    return resp
 
-        except aiohttp.ClientError as e:
-            return web.Response(text=f"Backend error: {str(e)}", status=502)
-
-async def run_backend(port):
-    async def handle(request):
-        if request.path == '/stream':
-            response = web.StreamResponse(
-                status=200,
-                headers={'Content-Type': 'text/plain'}
-            )
-            await response.prepare(request)
-            for i in range(10):
-                await response.write(f"Chunk {i}\n".encode())
-                await asyncio.sleep(0.5)  # Simulate delay between chunks
-            return response
-        else:
-            return web.Response(text=f"Response from backend on port {port}")
-
-    app = web.Application()
-    app.router.add_route('*', '/{tail:.*}', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, 'localhost', port)
-    await site.start()
-    print(f"Backend running on http://localhost:{port}")
+            except Exception as e:
+                return web.Response(text=f"Error: {str(e)}", status=500)
 
 async def main():
-    proxy = AsyncRoundRobinProxy([8100, 8200])
-    await proxy.start()
-
+    proxy = RoundRobinProxy([8100, 8200])
     app = web.Application()
-    app.router.add_route('*', '/{tail:.*}', proxy.handle_request)
+    app.router.add_route('*', '/{path:.*}', proxy.handle_request)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, 'localhost', 8000)
+    await site.start()
 
-    await asyncio.gather(
-        site.start(),
-        run_backend(8100),
-        run_backend(8200)
-    )
+    print("Proxy server started on http://localhost:8000")
+    
+    # Keep the server running
+    await asyncio.Event().wait()
 
-    print("Proxy running on http://localhost:8000")
-
-    try:
-        await asyncio.Future()  # Run forever
-    finally:
-        await proxy.stop()
-        await runner.cleanup()
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
