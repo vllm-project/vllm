@@ -15,9 +15,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            is_block_tables_empty)
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
-from vllm.distributed import get_disagg_group
-import vllm.envs as envs
-
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
