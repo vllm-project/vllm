@@ -167,13 +167,14 @@ def get_llava_onevision_video_frame_feature_size(
         width / spatial_pool_stride)
 
 
-def get_llava_onevision_video_tokens(ctx: InputContext, frames: int) -> int:
+def get_llava_onevision_video_tokens(ctx: InputContext,
+                                     num_frames: int) -> int:
     hf_config = ctx.get_hf_config(LlavaOnevisionConfig)
 
     # TODO: support configuring (not supported by HF right now)
     num_token_image_newline = 1
     tokens_per_frame = get_llava_onevision_video_frame_feature_size(hf_config)
-    video_feature_size = frames * tokens_per_frame + num_token_image_newline
+    video_feature_size = num_frames * tokens_per_frame + num_token_image_newline
 
     return video_feature_size
 
@@ -194,9 +195,8 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             f"Only {_MAX_NUM_VIDEOS} videos are supported")
 
     # TODO: support configuring the number of frames
-    frames_per_video = _MAX_FRAMES_PER_VIDEO
-    video_feature_size = get_llava_onevision_video_tokens(
-        ctx, frames_per_video)
+    num_frames = _MAX_FRAMES_PER_VIDEO
+    video_feature_size = get_llava_onevision_video_tokens(ctx, num_frames)
 
     if isinstance(vision_config, CLIPVisionConfig):
         seq_data = dummy_seq_data_for_clip(
@@ -207,7 +207,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             image_feature_size_override=video_feature_size,
         )
 
-        mm_data = dummy_video_for_clip(vision_config, frames=frames_per_video)
+        mm_data = dummy_video_for_clip(vision_config, num_frames=num_frames)
         return seq_data, mm_data
     elif isinstance(vision_config, SiglipVisionConfig):
         seq_data = dummy_seq_data_for_siglip(
@@ -218,16 +218,15 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             image_feature_size_override=video_feature_size,
         )
 
-        mm_data = dummy_video_for_siglip(vision_config,
-                                         frames=frames_per_video)
+        mm_data = dummy_video_for_siglip(vision_config, num_frames=num_frames)
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
 
 
-def image_processor_for_llava_onevision(ctx: InputContext,
-                                        llm_inputs: LLMInputs):
+def input_processor_when_multimodal_input_image(ctx: InputContext,
+                                                llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -282,8 +281,8 @@ def image_processor_for_llava_onevision(ctx: InputContext,
     raise NotImplementedError(msg)
 
 
-def video_processor_for_llava_onevision(ctx: InputContext,
-                                        llm_inputs: LLMInputs):
+def input_processor_when_multimodal_input_video(ctx: InputContext,
+                                                llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "video" not in multi_modal_data:
         return llm_inputs
@@ -326,9 +325,9 @@ def input_processor_for_llava_onevision(ctx: InputContext,
                                     and "image" not in multi_modal_data):
         return llm_inputs
     if "image" in multi_modal_data:
-        return image_processor_for_llava_onevision(ctx, llm_inputs)
+        return input_processor_when_multimodal_input_image(ctx, llm_inputs)
     if "video" in multi_modal_data:
-        return video_processor_for_llava_onevision(ctx, llm_inputs)
+        return input_processor_when_multimodal_input_video(ctx, llm_inputs)
 
     msg = "Unsupported multi data type"
     raise NotImplementedError(msg)
@@ -562,19 +561,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        import pdb
-        pdb.set_trace()
-        import numpy
-        float32_tensor = pixel_values.to(torch.float32).cpu().reshape(-1)
-        numpy.savetxt('vllm_bfvisiontower.txt',
-                      float32_tensor.numpy(),
-                      fmt='%.6f')
         image_features = vision_tower(pixel_values)
-        import numpy
-        float32_tensor = image_features.to(torch.float32).cpu().reshape(-1)
-        numpy.savetxt('vllm_visiontower.txt',
-                      float32_tensor.numpy(),
-                      fmt='%.6f')
         return self._select_image_features(
             image_features,
             strategy=self.config.vision_feature_select_strategy,
@@ -626,7 +613,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
                     other_patch_embeds = unpad_image(other_patch_embeds,
                                                      (orig_height, orig_width))
                     max_num_patches = int(
-                        vision_aspect_ratio.removesuffix("anyres_max_"))
+                        vision_aspect_ratio.removeprefix("anyres_max_"))
                     channels, curr_height, curr_width = other_patch_embeds.shape
                     ratio = math.sqrt(curr_height * curr_width /
                                       (max_num_patches * height**2))
@@ -734,7 +721,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         b, num_videos, frames, c, h, w = pixel_values.shape
-        assert (num_videos == 1)
+        assert (num_videos == _MAX_NUM_VIDEOS)
         pixel_values = pixel_values.reshape(b * num_videos * frames, c, h, w)
         video_features = vision_tower(pixel_values)
         video_features = self._select_image_features(
@@ -757,19 +744,11 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         video_pixels = inputs["data"]
 
+        # TODO: support multiple videos per input
         if isinstance(video_pixels, torch.Tensor):
-            # TODO: support multiple videos per input
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, video_pixels)
             return stacked_embeddings
-
-        elif is_list_of(video_pixels, torch.Tensor):
-            frames_per_videos = [v.shape[0] for v in video_pixels]
-            stacked_pixels = torch.cat(video_pixels, dim=0)
-            stacked_embeddings = self._video_pixels_to_features(
-                self.vision_tower, stacked_pixels)
-            return torch.split(stacked_embeddings, frames_per_videos, dim=0)
-
         else:
             raise ValueError(
                 f"Unsupported type of video input {type(video_pixels)}")
@@ -806,27 +785,17 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
                 batch.
             pixel_values_videos: Pixels in each frames for each input videos.
         """
-        # import pdb; pdb.set_trace()
-
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         # merge video embeddings into input embeddings
         if modalities:
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
             if "images" in modalities:
-                import pdb
-                pdb.set_trace()
                 image_input = modalities["images"]
                 vision_embeddings = self._process_image_input(image_input)
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, vision_embeddings,
                     self.config.image_token_index)
-                float32_tensor = inputs_embeds.to(torch.float32).cpu()
-                import numpy
-                numpy.savetxt('vllm.txt', float32_tensor, fmt='%.6f')
-                import numpy
-                ids = input_ids.cpu().numpy()
-                numpy.savetxt('vllm_ids.txt', ids, fmt='%d')
             if "videos" in modalities:
                 video_input = modalities["videos"]
                 video_embeddings = self._process_video_pixels(video_input)

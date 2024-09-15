@@ -94,7 +94,7 @@ def dummy_image_for_siglip(
 
 def dummy_video_for_siglip(
     hf_config: SiglipVisionConfig,
-    frames: int,
+    num_frames: int,
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -105,7 +105,7 @@ def dummy_video_for_siglip(
         image_width_override=image_width_override,
         image_height_override=image_height_override)
     np_frame = np.array(pil_frame["image"])
-    mm_data_per_video = np.repeat([np_frame], frames, axis=0)
+    mm_data_per_video = np.repeat([np_frame], num_frames, axis=0)
     mm_data = {"video": mm_data_per_video}
     return mm_data
 
