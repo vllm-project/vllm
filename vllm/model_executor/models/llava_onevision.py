@@ -29,13 +29,13 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
-from .clip import (CLIPVisionModel, dummy_image_for_clip,
-                   dummy_seq_data_for_clip, get_clip_image_feature_size,
+from .clip import (CLIPVisionModel, dummy_seq_data_for_clip,
+                   dummy_video_for_clip, get_clip_image_feature_size,
                    get_clip_patch_grid_length, input_processor_for_clip)
-
 from .interfaces import SupportsMultiModal
-from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
-                     dummy_seq_data_for_siglip, get_siglip_image_feature_size,
+from .llava_next import _get_llava_next_num_unpadded_features
+from .siglip import (SiglipVisionModel, dummy_seq_data_for_siglip,
+                     dummy_video_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
 from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
@@ -96,33 +96,6 @@ LlavaOnevisionImageInputs = Union[LlavaOnevisionImagePixelInputs,
 
 LlavaOnevisionMultiInputs = Union[LlavaOnevisionImageInputs,
                                   LlavaOnevisionVideoPixelInputs]
-
-
-def _get_llava_next_num_unpadded_features(
-    original_height: int,
-    original_width: int,
-    npatches: int,
-    num_patch_height: int,
-    num_patch_width: int,
-) -> Tuple[int, int]:
-    current_height = npatches * num_patch_height
-    current_width = npatches * num_patch_width
-
-    aspect_ratio = original_width / original_height
-    current_aspect_ratio = current_width / current_height
-
-    if aspect_ratio > current_aspect_ratio:
-        new_height = (original_height * current_width) // original_width
-        padding = (current_height - new_height) // 2
-        current_height -= padding * 2
-    else:
-        new_width = (original_width * current_height) // original_height
-        padding = (current_width - new_width) // 2
-        current_width -= padding * 2
-
-    unpadded_features = current_height * current_width
-    newline_features = current_height
-    return (unpadded_features, newline_features)
 
 
 def get_llava_onevision_image_feature_size(
@@ -194,26 +167,6 @@ def get_llava_onevision_video_frame_feature_size(
         width / spatial_pool_stride)
 
 
-def _get_max_llm_tokens(ctx: InputContext) -> int:
-    """
-    Calculated from the maximum video frames under the context length
-    constraints of the language model.
-    """
-    hf_text_config = ctx.model_config.hf_text_config
-    model_config = ctx.model_config
-    max_tokens = model_config.max_model_len
-    rope_scaling = model_config.rope_scaling
-
-    if rope_scaling:
-        rope_scaling_factor = hf_text_config.rope_scaling["factor"]
-    else:
-        rope_scaling_factor = 1
-
-    max_tokens *= rope_scaling_factor
-
-    return max_tokens
-
-
 def get_llava_onevision_video_tokens(ctx: InputContext, frames: int) -> int:
     hf_config = ctx.get_hf_config(LlavaOnevisionConfig)
 
@@ -236,7 +189,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
 
     # TODO: support multiple videos
     num_videos = mm_counts["video"]
-    if num_videos != _MAX_NUM_VIDEOS:
+    if num_videos > _MAX_NUM_VIDEOS:
         raise NotImplementedError(
             f"Only {_MAX_NUM_VIDEOS} videos are supported")
 
@@ -254,10 +207,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             image_feature_size_override=video_feature_size,
         )
 
-        pil_frame = dummy_image_for_clip(vision_config, num_images=1)
-        np_frame = np.array(pil_frame["image"])
-        mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
-        mm_data = {"video": mm_data_per_video}
+        mm_data = dummy_video_for_clip(vision_config, frames=frames_per_video)
         return seq_data, mm_data
     elif isinstance(vision_config, SiglipVisionConfig):
         seq_data = dummy_seq_data_for_siglip(
@@ -268,10 +218,8 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             image_feature_size_override=video_feature_size,
         )
 
-        pil_frame = dummy_image_for_siglip(vision_config, num_images=1)
-        np_frame = np.array(pil_frame["image"])
-        mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
-        mm_data = {"video": mm_data_per_video}
+        mm_data = dummy_video_for_siglip(vision_config,
+                                         frames=frames_per_video)
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -787,8 +735,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         # this is already done inside the vision tower
         b, num_videos, frames, c, h, w = pixel_values.shape
         assert (num_videos == 1)
-        pixel_values = pixel_values.reshape(b * num_videos * frames,
-                                            c, h, w)
+        pixel_values = pixel_values.reshape(b * num_videos * frames, c, h, w)
         video_features = vision_tower(pixel_values)
         video_features = self._select_image_features(
             video_features,
@@ -798,8 +745,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         video_features = self.apply_pooling(video_features)
         video_features = video_features.reshape(
             b, frames * video_features.shape[1], -1)
-        image_newline = self.image_newline[None, None, :].repeat(
-            b, 1, 1).to(video_features.device)
+        image_newline = self.image_newline[None, None, :].repeat(b, 1, 1).to(
+            video_features.device)
         video_features = torch.cat((video_features, image_newline), dim=1)
         video_features = video_features.flatten(0, 1)
 
@@ -916,9 +863,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators
-        vit_weights, mlp_weights, newline_weights, llm_weights = itertools.tee(
-            weights, 4)
-
+        (
+            vit_weights,
+            mlp_weights,
+            newline_weights,
+            llm_weights
+        ) = itertools.tee(weights, 4)
         # load vision encoder
         vit_weights = filter_weights(vit_weights, "vision_tower")
         self.vision_tower.load_weights(vit_weights)
