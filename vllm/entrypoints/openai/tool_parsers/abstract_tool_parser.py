@@ -20,7 +20,6 @@ class ToolParser:
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = []
 
         self.model_tokenizer = tokenizer

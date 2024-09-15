@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import (get_config,
+from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
@@ -121,35 +121,37 @@ class ModelConfig:
             override default neuron config that are specific to Neuron devices, 
             this argument will be used to configure the neuron config that 
             can not be gathered from the vllm arguments. 
+        config_format: The config format which shall be loaded.
+            Defaults to 'auto' which defaults to 'hf'.
     """
 
-    def __init__(
-            self,
-            model: str,
-            tokenizer: str,
-            tokenizer_mode: str,
-            trust_remote_code: bool,
-            dtype: Union[str, torch.dtype],
-            seed: int,
-            revision: Optional[str] = None,
-            code_revision: Optional[str] = None,
-            rope_scaling: Optional[dict] = None,
-            rope_theta: Optional[float] = None,
-            tokenizer_revision: Optional[str] = None,
-            max_model_len: Optional[int] = None,
-            spec_target_max_model_len: Optional[int] = None,
-            quantization: Optional[str] = None,
-            quantization_param_path: Optional[str] = None,
-            enforce_eager: Optional[bool] = None,
-            max_context_len_to_capture: Optional[int] = None,
-            max_seq_len_to_capture: Optional[int] = None,
-            max_logprobs: int = 20,
-            disable_sliding_window: bool = False,
-            skip_tokenizer_init: bool = False,
-            served_model_name: Optional[Union[str, List[str]]] = None,
-            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-            use_async_output_proc: bool = True,
-            override_neuron_config: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self,
+                 model: str,
+                 tokenizer: str,
+                 tokenizer_mode: str,
+                 trust_remote_code: bool,
+                 dtype: Union[str, torch.dtype],
+                 seed: int,
+                 revision: Optional[str] = None,
+                 code_revision: Optional[str] = None,
+                 rope_scaling: Optional[dict] = None,
+                 rope_theta: Optional[float] = None,
+                 tokenizer_revision: Optional[str] = None,
+                 max_model_len: Optional[int] = None,
+                 spec_target_max_model_len: Optional[int] = None,
+                 quantization: Optional[str] = None,
+                 quantization_param_path: Optional[str] = None,
+                 enforce_eager: Optional[bool] = None,
+                 max_context_len_to_capture: Optional[int] = None,
+                 max_seq_len_to_capture: Optional[int] = None,
+                 max_logprobs: int = 20,
+                 disable_sliding_window: bool = False,
+                 skip_tokenizer_init: bool = False,
+                 served_model_name: Optional[Union[str, List[str]]] = None,
+                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+                 use_async_output_proc: bool = True,
+                 override_neuron_config: Optional[Dict[str, Any]] = None,
+                 config_format: ConfigFormat = ConfigFormat.AUTO) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -176,7 +178,8 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling, rope_theta)
+                                    code_revision, rope_scaling, rope_theta,
+                                    config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
@@ -277,11 +280,11 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
-        rocm_supported_quantization = ["awq", "gptq", "squeezellm", "fp8"]
+        rocm_supported_quantization = ["awq", "gptq", "fp8"]
         optimized_quantization_methods = [
-            "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
-            "fbgemm_fp8", "compressed_tensors", "compressed-tensors",
-            "experts_int8"
+            "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
+            "awq_marlin", "fbgemm_fp8", "compressed_tensors",
+            "compressed-tensors", "experts_int8"
         ]
         tpu_supported_quantization = ["tpu_int8"]
         neuron_supported_quantization = ["neuron_quant"]
@@ -376,7 +379,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        if self.enforce_eager:
+        if device_config.device_type == "cuda" and self.enforce_eager:
             logger.warning(
                 "To see benefits of async output processing, enable CUDA "
                 "graph. Since, enforce-eager is enabled, async output "
@@ -747,6 +750,7 @@ class LoadFormat(str, enum.Enum):
     SHARDED_STATE = "sharded_state"
     GGUF = "gguf"
     BITSANDBYTES = "bitsandbytes"
+    MISTRAL = "mistral"
 
 
 @dataclass
@@ -770,7 +774,7 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's 
             checkpoints.
-            
+
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -866,6 +870,13 @@ class ParallelConfig:
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
 
+        if current_platform.is_tpu() and self.world_size > 1:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            if self.distributed_executor_backend != "ray":
+                raise ValueError(
+                    "TPU backend only supports Ray for distributed inference.")
+
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -873,7 +884,8 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             backend = "mp"
             ray_found = ray_utils.ray_is_available()
-            if cuda_device_count_stateless() < self.world_size:
+            if (current_platform.is_cuda()
+                    and cuda_device_count_stateless() < self.world_size):
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
                                      "required for multi-node inference, "
@@ -1538,7 +1550,7 @@ class LoRAConfig:
         if model_config.quantization and model_config.quantization not in [
                 "awq", "gptq"
         ]:
-            # TODO support marlin and squeezellm
+            # TODO support marlin
             logger.warning("%s quantization is not tested with LoRA yet.",
                            model_config.quantization)
 
@@ -1555,14 +1567,6 @@ class PromptAdapterConfig:
     prompt_adapter_dtype: Optional[torch.dtype] = None
 
     def __post_init__(self):
-        library_name = 'peft'
-        try:
-            __import__(library_name)
-        except ImportError as e:
-            raise ImportError(
-                f"'{library_name}' is not installed for prompt adapter support."
-                f"Please install it using 'pip install {library_name}'."
-            ) from e
 
         if self.max_prompt_adapters < 1:
             raise ValueError(f"max_prompt_adapters "
@@ -1738,8 +1742,11 @@ def _get_and_verify_max_len(
                     "with rope_scaling. Please raise an issue so we can "
                     "investigate.")
 
-            assert "factor" in rope_scaling
-            scaling_factor = rope_scaling["factor"]
+            if rope_type == "mrope":
+                scaling_factor = 1
+            else:
+                assert "factor" in rope_scaling
+                scaling_factor = rope_scaling["factor"]
             if rope_type == "yarn":
                 derived_max_model_len = rope_scaling[
                     "original_max_position_embeddings"]
