@@ -28,12 +28,11 @@ from copy import deepcopy
 import torch
 from torch.distributed import Backend
 
+import vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer as sklb
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
     KVLookupBufferBase)
-from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_kv_lookup_buffer import (
-    SimpleKVLookupBuffer)
 from vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe import (
     TorchDistributedPipe)
 from vllm.logger import init_logger
@@ -76,6 +75,8 @@ class KV_transfer_agent:
 
         self.send_buffer: Optional[KVLookupBufferBase] = None
         self.recv_buffer: Optional[KVLookupBufferBase] = None
+
+        SimpleKVLookupBuffer = sklb.SimpleKVLookupBuffer
 
         if IS_LMCACHE_INSTANCE:
             # when vLLM is connected with LMCache
