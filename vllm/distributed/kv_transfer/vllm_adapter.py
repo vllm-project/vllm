@@ -1,14 +1,19 @@
 """vLLM distributed KV cache transfer API.
-These APIs are used in `vllm/worker/model_runner.py`.
+These APIs are used in `vllm/worker/worker_base.py`.
 
-Currently supporting TP and PP, but TP and PP must be the same.
+Currently supporting TP. The TP between prefill and decode instance needs to be the same.
 
-Workflow:
-- In prefill instance, vLLM `insert` that buffers the KV cache into lookup buffer.
+Workflow (disaggregated prefill)
+- In prefill instance
+    - After prefill, vLLM `insert` its KV caches into a lookup buffer.
+    - The prefill instance will also open up a thread that listens to `drop_select` request.
 - In decode instance
-    - vLLM first runs `drop_select` to send input tokens and a mask on input tokens to sender
-    - The prefill instance send back the matching KV caches
-    - vLLM then store the KV cache into paged memory.
+    - vLLM first runs `drop_select` to send input tokens and a mask on input tokens (we call it roi, region of interest) to prefill instance
+    - The prefill instance then respond to `drop_select` request by
+        - Finding a match in current lookup buffer.
+        - Clone and send the matched item out
+        - Delete the matched item in the lookup buffer to free up GPU memory.
+    - The decode vLLM then store the KV cache into paged memory.
 """
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 from collections import defaultdict, deque
@@ -30,7 +35,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe import TorchDistributedPipe
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_kv_lookup_buffer import SimpleKVLookupBuffer
 
-from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 from copy import deepcopy
 
 assert envs.VLLM_DISAGG_PREFILL_ROLE in [None, "prefill", "decode", "lmcache"], \
@@ -66,57 +70,68 @@ class KV_transfer_agent:
         group_ranks: List[List[int]],
         local_rank: int,
         torch_distributed_backend: Union[str, Backend],
+        # FIXME(Kuntai): remove this hardcoding
+        lookup_buffer_size: int = 1e10
     ):
         
-
-        # init pipe
-        self.device_pipe = TorchDistributedPipe(
-            group_ranks,
-            local_rank,
-            torch_distributed_backend,
-        )
-        self.cpu_pipe = TorchDistributedPipe(
-            group_ranks,
-            local_rank,
-            "gloo"
-        )
-
-        # init two pipes: one or send and one for recv
-        if IS_KV_PREFILL_INSTANCE or IS_LMCACHE_INSTANCE:
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                torch_distributed_backend,
-            )
-            self.recv_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                torch_distributed_backend,
-            )
-        elif IS_KV_DECODE_INSTANCE:
-            self.recv_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                torch_distributed_backend,
-            )
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                torch_distributed_backend,
-            )
-            
+        self.lookup_buffer_size = lookup_buffer_size
         
-        # FIXME(Jiayi): buffer initializtion should be adapted accordingly
-        # Signal pipe needs to be initialized on both vllm and lmc side
-
-        # init lookup buffer
-        # TODO: replace this 1e9 with a configurable parameter or a constant
-        self.buffer = SimpleKVLookupBuffer(self.cpu_pipe, self.device_pipe, 1e9 * 10)
-
+        if IS_LMCACHE_INSTANCE:
+            # when vLLM is connected with LMCache
+            # it needs to both send and recv KV cache
+            self.send_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                torch_distributed_backend,
+            )
+            self.send_signal_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                "gloo",
+            )
+            self.recv_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                torch_distributed_backend,
+            )
+            self.recv_signal_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                "gloo",
+            )
+            self.send_buffer = SimpleKVLookupBuffer(
+                self.send_signal_pipe,
+                self.send_pipe,
+                self.lookup_buffer_size)
+            self.recv_buffer = SimpleKVLookupBuffer(
+                self.recv_signal_pipe, 
+                self.recv_pipe, 
+                self.lookup_buffer_size)
+        else:
+            # when performing disaggregated prefill, only 1 pipe is needed
+            # at prefill instance this pipe is used for send KV cache
+            # at decode instance this pipe is used for recv KV cache
+            self.pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                torch_distributed_backend,
+            )
+            self.signal_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                "gloo",
+            )
+            buffer = SimpleKVLookupBuffer(
+                self.signal_pipe, 
+                self.pipe, 
+                self.lookup_buffer_size)
+            self.send_buffer = buffer
+            self.recv_buffer = buffer
+        
     def send_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
-        model_input: ModelInputForGPUWithSamplingMetadata,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
@@ -152,7 +167,7 @@ class KV_transfer_agent:
                 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
-            self.buffer.insert(
+            self.send_buffer.insert(
                 current_tokens, 
                 torch.ones_like(current_tokens, dtype=bool),
                 keys, 
@@ -167,10 +182,11 @@ class KV_transfer_agent:
     def recv_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
-        model_input: ModelInputForGPUWithSamplingMetadata,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor]
-    ) -> List[Union[torch.Tensor, IntermediateTensors], bool, ModelInputForGPUWithSamplingMetadata]:
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool, "ModelInputForGPUWithSamplingMetadata"]:
 
+        # When this flag is set to False, it means that 
         bypass_model_exec = True
 
         # This is disagg decode instance, during prefill state
@@ -197,12 +213,12 @@ class KV_transfer_agent:
             input_tokens_list.append(current_tokens)
             start_pos_list.append(start_pos)
             
-            ret = self.buffer.drop_select(
+            ret = self.recv_buffer.drop_select(
                 current_tokens, 
                 torch.ones_like(current_tokens, dtype=bool))
             if ret[0] is None:
                 # didn't find any match.
-                self.bypass_model_exec = False
+                bypass_model_exec = False
                 num_computed_tokens_list.append(0)
                 continue
             
@@ -219,9 +235,7 @@ class KV_transfer_agent:
             for i in range(model_executable.model.start_layer,
                         model_executable.model.end_layer):
 
-                # get kv cache
                 kv_cache = kv_caches[i - model_executable.model.start_layer]
-                # get corresponding layer
                 layer = model_executable.model.layers[i]
 
                 key_cache, value_cache = kv_cache[0], kv_cache[1]
@@ -247,7 +261,7 @@ class KV_transfer_agent:
             return None, bypass_model_exec, None
 
         if not is_complete:
-            rebuilt_model_input = self.adpat_model_input(
+            rebuilt_model_input = self.build_partial_prefill_input(
                 model_input,
                 input_tokens_list,
                 num_computed_tokens_list,
@@ -266,15 +280,15 @@ class KV_transfer_agent:
         return hidden_or_intermediate_states, bypass_model_exec, model_input
     
     
-    def adpat_model_input(
+    def build_partial_prefill_input(
         self,
-        model_input: ModelInputForGPUWithSamplingMetadata,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
         input_tokens_list: List[torch.Tensor],
         num_computed_tokens_list: List[int],
         start_pos_list: List[int],
         slot_mapping_flat: torch.Tensor,
         device: torch.device,
-    ) -> ModelInputForGPUWithSamplingMetadata:
+    ) -> "ModelInputForGPUWithSamplingMetadata":
         rebuilt_input_tokens = []
         rebuilt_input_positions= []
         rebuilt_query_lens = []
@@ -290,6 +304,7 @@ class KV_transfer_agent:
         rebuilt_context_lens_tensor = []
         rebuilt_selected_token_indices = []
         
+        # recounting query and context lengths
         for idx in range(len(input_tokens_list)):
             token_tensor = input_tokens_list[idx]
             num_token = len(token_tensor)
@@ -350,6 +365,8 @@ class KV_transfer_agent:
             dtype=model_input.sampling_metadata.selected_token_indices.dtype,
             ).to(device)
         
+        # import here to avoid circular import.
+        from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
         rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
             input_tokens = torch.cat(rebuilt_input_tokens).to(device),
             input_positions = torch.cat(rebuilt_input_positions).to(device),

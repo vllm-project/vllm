@@ -226,8 +226,14 @@ class TorchDistributedPipe:
             with self.buffer_size_lock:
                 self.buffer_size = self.buffer_size - tensor_size
         except Exception as e:
-            logger.error("Encountering exception in KV sending thread")
-            logger.error("%s", e)
+            logger.error("[rank%d]: Exception when trying to send %s, msg: %s",
+                         torch.distributed.get_rank(),
+                         str(tensor),
+                         str(e))
+            import traceback
+            traceback.print_exc()
+            
+
 
     def block_if_full(self):
         """
@@ -279,10 +285,11 @@ class TorchDistributedPipe:
         try:
             tensor = future.result()
         except Exception as e:
+            # the underlying pipe is likely broken
             logger.error("Encountering exception in KV receiving thread")
             logger.error("%s", e)
-
-        #tensor = self._recv_impl()
+            # fault tolerance: if the pipe is broken, return None
+            return None
 
         if tensor.numel() == 1 and tensor.item() == NONE_INT:
             return None
