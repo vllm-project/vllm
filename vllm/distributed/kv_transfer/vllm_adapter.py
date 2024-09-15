@@ -191,7 +191,7 @@ class KV_transfer_agent:
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor]
-    ) -> List[Union[torch.Tensor, IntermediateTensors], bool, "ModelInputForGPUWithSamplingMetadata"]:
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool, "ModelInputForGPUWithSamplingMetadata"]:
 
         bypass_model_exec = True
 
