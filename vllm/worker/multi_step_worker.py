@@ -67,9 +67,7 @@ class MultiStepWorker(Worker):
             if execute_model_req.async_callback:
                 model_input.frozen_model_input = dataclasses.replace(  # type: ignore
                     model_input.frozen_model_input,
-                    async_callback=execute_model_req.async_callback,
-                    use_async_and_multi_step=execute_model_req.
-                    use_async_and_multi_step)
+                    async_callback=execute_model_req.async_callback)
         else:
             # on subsequent steps we reuse the worker input and model input
             multi_step_state = self.multi_step_states[virtual_engine]

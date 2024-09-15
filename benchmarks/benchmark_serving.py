@@ -56,8 +56,8 @@ class BenchmarkMetrics:
     total_input: int
     total_output: int
     request_throughput: float
-    input_throughput: float
     output_throughput: float
+    total_token_throughput: float
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
@@ -195,8 +195,16 @@ def sample_sonnet_requests(
 
 
 def sample_random_requests(
-        input_len: int, output_len: int, num_prompts: int, range_ratio: float,
-        tokenizer: PreTrainedTokenizerBase) -> List[Tuple[str, int, int]]:
+    prefix_len: int,
+    input_len: int,
+    output_len: int,
+    num_prompts: int,
+    range_ratio: float,
+    tokenizer: PreTrainedTokenizerBase,
+) -> List[Tuple[str, int, int]]:
+    prefix_token_ids = np.random.randint(0,
+                                         tokenizer.vocab_size,
+                                         size=prefix_len).tolist()
 
     input_lens = np.random.randint(
         int(input_len * range_ratio),
@@ -211,10 +219,12 @@ def sample_random_requests(
     offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
     input_requests = []
     for i in range(num_prompts):
-        prompt = tokenizer.decode([(offsets[i] + i + j) % tokenizer.vocab_size
+        prompt = tokenizer.decode(prefix_token_ids +
+                                  [(offsets[i] + i + j) % tokenizer.vocab_size
                                    for j in range(input_lens[i])])
+
         input_requests.append(
-            (prompt, int(input_lens[i]), int(output_lens[i])))
+            (prompt, int(prefix_len + input_lens[i]), int(output_lens[i])))
 
     return input_requests
 
@@ -283,8 +293,8 @@ def calculate_metrics(
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
-        input_throughput=total_input / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
+        total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0) *
         1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
@@ -318,6 +328,7 @@ async def benchmark(
     model_id: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: List[Tuple[str, int, int]],
+    logprobs: Optional[int],
     best_of: int,
     use_beam_search: bool,
     request_rate: float,
@@ -339,6 +350,7 @@ async def benchmark(
         api_url=api_url,
         prompt_len=test_prompt_len,
         output_len=test_output_len,
+        logprobs=logprobs,
         best_of=best_of,
         use_beam_search=use_beam_search,
     )
@@ -358,6 +370,7 @@ async def benchmark(
             api_url=base_url + "/start_profile",
             prompt_len=test_prompt_len,
             output_len=test_output_len,
+            logprobs=logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -379,6 +392,7 @@ async def benchmark(
             api_url=api_url,
             prompt_len=prompt_len,
             output_len=output_len,
+            logprobs=logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -396,6 +410,7 @@ async def benchmark(
             api_url=base_url + "/stop_profile",
             prompt_len=test_prompt_len,
             output_len=test_output_len,
+            logprobs=logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -426,10 +441,10 @@ async def benchmark(
                                  metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
-    print("{:<40} {:<10.2f}".format("Input token throughput (tok/s):",
-                                    metrics.input_throughput))
     print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
                                     metrics.output_throughput))
+    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
+                                    metrics.total_token_throughput))
 
     result = {
         "duration": benchmark_duration,
@@ -437,8 +452,8 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "input_throughput": metrics.input_throughput,
         "output_throughput": metrics.output_throughput,
+        "total_token_throughput": metrics.total_token_throughput,
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
@@ -562,6 +577,7 @@ def main(args: argparse.Namespace):
 
     elif args.dataset_name == "random":
         input_requests = sample_random_requests(
+            prefix_len=args.random_prefix_len,
             input_len=args.random_input_len,
             output_len=args.random_output_len,
             num_prompts=args.num_prompts,
@@ -580,6 +596,7 @@ def main(args: argparse.Namespace):
             model_id=model_id,
             tokenizer=tokenizer,
             input_requests=input_requests,
+            logprobs=args.logprobs,
             best_of=args.best_of,
             use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
@@ -722,6 +739,16 @@ if __name__ == "__main__":
         "Number of output tokens per request, used only for sonnet dataset.",
     )
     parser.add_argument(
+        "--logprobs",
+        type=int,
+        default=None,
+        help=("Number of logprobs-per-token to compute & return as part of "
+              "the request. If unspecified, then either (1) if beam search "
+              "is disabled, no logprobs are computed & a single dummy "
+              "logprob is returned for each token; or (2) if beam search "
+              "is enabled 1 logprob per token is computed"),
+    )
+    parser.add_argument(
         "--sonnet-prefix-len",
         type=int,
         default=200,
@@ -749,6 +776,14 @@ if __name__ == "__main__":
         help="Range of sampled ratio of input/output length, "
         "used only for random sampling.",
     )
+    parser.add_argument(
+        "--random-prefix-len",
+        type=int,
+        default=0,
+        help="Number of fixed prefix tokens before random "
+        " context. The length range of context in a random "
+        " request is [random-prefix-len, "
+        " random-prefix-len + random-prefix-len * random-range-ratio).")
     parser.add_argument(
         "--request-rate",
         type=float,
