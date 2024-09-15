@@ -27,7 +27,6 @@ import torch
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
-from vllm.distributed.group_coordinator import GroupCoordinator
 from vllm.logger import init_logger
 import vllm.distributed.parallel_state as ps
 from vllm import _custom_ops as ops
