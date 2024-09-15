@@ -19,7 +19,6 @@ kill_gpu_processes() {
   # kill all processes on GPU.
   pkill -f pt_main_thread
   pkill -f python3
-  pkill -f round_robin_proxy.sh
   ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
@@ -61,7 +60,7 @@ launch_chunked_prefill() {
     --gpu-memory-utilization 0.8 &
   wait_for_server 8100
   wait_for_server 8200
-  bash round_robin_proxy.sh &
+  python3 round_robin_proxy.py &
   sleep 1
 }
 
@@ -149,7 +148,7 @@ main() {
   mkdir results
 
   default_qps=10
-  default_output_len=150
+  default_output_len=10
 
   export VLLM_LOGGING_LEVEL=DEBUG
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
