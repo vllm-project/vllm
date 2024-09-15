@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import msgspec
 
-import vllm.envs as envs
 import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
+import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.msgspec_utils import encode_hook

@@ -1,9 +1,12 @@
 import asyncio
-import aiohttp
-from aiohttp import web
 import itertools
 
+import aiohttp
+from aiohttp import web
+
+
 class RoundRobinProxy:
+
     def __init__(self, target_ports):
         self.target_ports = target_ports
         self.port_cycle = itertools.cycle(self.target_ports)
@@ -16,16 +19,14 @@ class RoundRobinProxy:
             try:
                 # Forward the request
                 async with session.request(
-                    method=request.method,
-                    url=target_url,
-                    headers=request.headers,
-                    data=request.content,
+                        method=request.method,
+                        url=target_url,
+                        headers=request.headers,
+                        data=request.content,
                 ) as response:
                     # Start sending the response
-                    resp = web.StreamResponse(
-                        status=response.status,
-                        headers=response.headers
-                    )
+                    resp = web.StreamResponse(status=response.status,
+                                              headers=response.headers)
                     await resp.prepare(request)
 
                     # Stream the response content
@@ -38,6 +39,7 @@ class RoundRobinProxy:
             except Exception as e:
                 return web.Response(text=f"Error: {str(e)}", status=500)
 
+
 async def main():
     proxy = RoundRobinProxy([8100, 8200])
     app = web.Application()
@@ -49,9 +51,10 @@ async def main():
     await site.start()
 
     print("Proxy server started on http://localhost:8000")
-    
+
     # Keep the server running
     await asyncio.Event().wait()
+
 
 if __name__ == '__main__':
     asyncio.run(main())

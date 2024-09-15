@@ -20,29 +20,25 @@ If you only need to use the distributed environment without model/pipeline
  parallelism, you can skip the model parallel initialization and destruction
  steps.
 """
-import time
 import contextlib
 import pickle
-import logging
+import time
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
 from typing import Any, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
-import queue
 
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
-import vllm.envs as envs
-from vllm.logger import init_logger
-
-
 # Use this import to check if disagg prefill is enabled.
 # if enabled, need to adjust distributed group correspondingly.
 import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
+import vllm.envs as envs
+from vllm.logger import init_logger
 
 
 @dataclass
@@ -865,7 +861,8 @@ def include_decoding_groups_if_disagg_enabled(
             Extended: [ [0,1], [2,3], [4,5], [6,7] ]
         Arguments:
             groups: original distributed group
-            world_size: the vLLM world size, which is half of torch.distributed.get_world_size()
+            world_size: the vLLM world size, which is half of 
+            torch.distributed.get_world_size()
     """
 
     if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
@@ -908,9 +905,8 @@ def init_distributed_environment(
                 # offset global rank by tp * pp (which is world_size)
                 maybe_disagg_rank = rank + world_size
 
-        logger.debug(
-            f"Before: world size {maybe_disagg_world_size}, rank {maybe_disagg_rank}"
-        )
+        logger.debug("Before: world size %d, rank %d", maybe_disagg_world_size,
+                     maybe_disagg_rank)
 
         torch.distributed.init_process_group(
             backend=backend,
@@ -974,17 +970,18 @@ def initialize_model_parallel(
     ranks 8 to 15 belong to the second box.
 
 
-    Disaggregated prefill will also initialize its process group using this function.
+    Disaggregated prefill will also init its process group using this function.
     Changes:
         - vLLM world size: unchanged (tp * pp)
         - torch.distributed.get_world_size():
             - 2 * tp * pp
-            - Why: torch.distributed package sees 2 vLLM instances (prefill and decode)
+            - Why: both prefill vLLM and decode vLLM is in the world
         - Global rank:
             - [0, tp * pp) for prefill
             - [tp * pp, 2 * tp * pp) for decode
         - Parallel groups
-            - Extend _WORLD, _TP and _PP using `include_decoding_groups_if_disagg_enabled`
+            - Extend _WORLD, _TP and _PP using 
+              `include_decoding_groups_if_disagg_enabled`
             - Add a new parallel group `_DISAGG` for disaggregated prefill
                 - [ [0, tp * pp], [1, tp * pp + 1], .. ]
         - Local rank: unchanged
@@ -997,12 +994,14 @@ def initialize_model_parallel(
         get_world_group().device_group)
     if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
         # Disaggregated prefill enabled
-        # The world_size for this vLLM instance is tp * pp, but torch.distributed contains 2 vLLM instances, its world size is 2 * tp * pp
+        # The world_size for this vLLM instance is tp * pp, but
+        # torch.distributed contains 2 vLLM instances,
+        # its world size is 2 * tp * pp
         # Adjust the world_size to match.
         world_size = world_size // 2
 
-    if (world_size
-            != tensor_model_parallel_size * pipeline_model_parallel_size):
+    if (world_size !=
+            tensor_model_parallel_size * pipeline_model_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
