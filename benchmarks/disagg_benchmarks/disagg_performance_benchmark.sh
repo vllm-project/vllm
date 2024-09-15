@@ -43,7 +43,7 @@ launch_chunked_prefill() {
       --model $model \
       --port 8100 \
       -tp 4 \
-      --max-model-len 30000 \
+      --max-model-len 10000 \
       --disable-log-stats \
       --disable-log-requests \
       --enable-chunked-prefill \
@@ -53,7 +53,7 @@ launch_chunked_prefill() {
     --model $model \
     --port 8200 \
     -tp 4 \
-    --max-model-len 30000 \
+    --max-model-len 10000 \
     --disable-log-stats \
     --disable-log-requests \
     --enable-chunked-prefill \
@@ -73,7 +73,7 @@ launch_disagg_prefill() {
       --model $model \
       --port 8100 \
       -tp 4 \
-      --max-model-len 30000 \
+      --max-model-len 10000 \
       --disable-log-stats \
       --disable-log-requests \
       --gpu-memory-utilization 0.8 &
@@ -82,7 +82,7 @@ launch_disagg_prefill() {
     --model $model \
     --port 8200 \
     -tp 4 \
-    --max-model-len 30000 \
+    --max-model-len 10000 \
     --disable-log-stats \
     --disable-log-requests \
     --gpu-memory-utilization 0.8 &
@@ -98,10 +98,10 @@ benchmark() {
   model="meta-llama/Meta-Llama-3.1-70B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
-  num_prompts=400
+  num_prompts=200
   qps=$1
   prefix_len=50
-  input_len=2048
+  input_len=1024
   output_len=$2
   tag=$3
 
@@ -131,7 +131,7 @@ main() {
   (which jq) || (apt-get -y install jq)
   (which socat) || (apt-get -y install socat)
 
-  pip install quart httpx
+  pip install quart httpx matplotlib aiohttp
 
   cd "$(dirname "$0")"
 
@@ -147,7 +147,6 @@ main() {
   rm -rf results
   mkdir results
 
-  default_qps=10
   default_output_len=10
 
   export VLLM_LOGGING_LEVEL=DEBUG
@@ -164,6 +163,8 @@ main() {
   benchmark $qps $default_output_len disagg_prefill
   done
   kill_gpu_processes
+
+  python3 visualize_benchmark_results.py
 
 }
 
