@@ -823,4 +823,3 @@ class FlashInferImpl(AttentionImpl):
                 k_scale=k_scale,
                 v_scale=v_scale)
         return output.view(num_tokens, hidden_size)
-        
