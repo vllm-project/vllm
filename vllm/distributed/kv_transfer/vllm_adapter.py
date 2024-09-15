@@ -67,21 +67,9 @@ class KV_transfer_agent:
         torch_distributed_backend: Union[str, Backend],
     ):
         
-        '''
-        # init pipe
-        self.device_pipe = TorchDistributedPipe(
-            group_ranks,
-            local_rank,
-            torch_distributed_backend,
-        )
-        self.cpu_pipe = TorchDistributedPipe(
-            group_ranks,
-            local_rank,
-            "gloo"
-        )
-        '''
-        # init 4 pipes: 2 * (one for send and one for recv)
-        if IS_KV_PREFILL_INSTANCE or IS_LMCACHE_INSTANCE:
+        if IS_LMCACHE_INSTANCE:
+            # when vLLM is connected with LMCache
+            # it needs to both send and recv KV cache
             self.send_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
@@ -102,27 +90,26 @@ class KV_transfer_agent:
                 local_rank,
                 "gloo",
             )
-        elif IS_KV_DECODE_INSTANCE:
-            self.recv_pipe = TorchDistributedPipe(
+            self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe, self.send_pipe, 1e9 * 10)
+            self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe, self.recv_pipe, 1e9 * 10)
+        else:
+            # when performing disaggregated prefill, only 1 pipe is needed
+            # at prefill instance this pipe is used for send KV cache
+            # at decode instance this pipe is used for recv KV cache
+            self.pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 torch_distributed_backend,
             )
-            self.recv_signal_pipe = TorchDistributedPipe(
+            self.signal_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 "gloo",
             )
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                torch_distributed_backend,
-            )
-            self.send_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
+            self.send_buffer = SimpleKVLookupBuffer(self.signal_pipe, self.pipe, 1e9 * 10)
+            self.recv_buffer = self.send_buffer
+
+        
             
         
         # FIXME(Jiayi): buffer initializtion should be adapted accordingly
@@ -132,9 +119,7 @@ class KV_transfer_agent:
         # TODO: replace this 1e9 with a configurable parameter or a constant
         #self.buffer = SimpleKVLookupBuffer(self.cpu_pipe, self.device_pipe, 1e9 * 10)
         
-        self.send_buffer = SimpleKVLookupBuffer(self.send_pipe, self.send_signal_pipe, 1e9 * 10)
-        self.recv_buffer = SimpleKVLookupBuffer(self.recv_pipe, self.recv_signal_pipe, 1e9 * 10)
-
+        
     def send_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
@@ -269,7 +254,7 @@ class KV_transfer_agent:
             return None, bypass_model_exec, None
 
         if not is_complete:
-            rebuilt_model_input = self.adpat_model_input(
+            rebuilt_model_input = self.build_partial_prefill_input(
                 model_input,
                 input_tokens_list,
                 num_computed_tokens_list,
@@ -288,7 +273,7 @@ class KV_transfer_agent:
         return hidden_or_intermediate_states, bypass_model_exec, model_input
     
     
-    def adpat_model_input(
+    def build_partial_prefill_input(
         self,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         input_tokens_list: List[torch.Tensor],
