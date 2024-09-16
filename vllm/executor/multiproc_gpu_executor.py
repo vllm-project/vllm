@@ -1,8 +1,5 @@
 import asyncio
 import os
-import signal
-import threading
-import weakref
 from functools import partial
 from typing import Any, List, Optional
 
@@ -107,17 +104,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         # Set up signal handlers to shutdown the executor cleanly
         # sometimes gc does not work well
-
-        # Use weakref to avoid holding a reference to self
-        ref = weakref.ref(self)
-
-        def shutdown(signum, frame):
-            if executor := ref():
-                executor.shutdown()
-
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGINT, shutdown)
-            signal.signal(signal.SIGTERM, shutdown)
 
         self.driver_worker = self._create_worker(
             distributed_init_method=distributed_init_method)

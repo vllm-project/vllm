@@ -1,11 +1,11 @@
 # The CLI entrypoint to vLLM.
 import argparse
-import asyncio
 import os
 import signal
 import sys
 from typing import List, Optional
 
+import uvloop
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -34,7 +34,7 @@ def serve(args: argparse.Namespace) -> None:
     # EngineArgs expects the model name to be passed as --model.
     args.model = args.model_tag
 
-    asyncio.run(run_server(args))
+    uvloop.run(run_server(args))
 
 
 def interactive_cli(args: argparse.Namespace) -> None:
