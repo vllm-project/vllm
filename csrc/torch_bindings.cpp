@@ -275,7 +275,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cu_seq_len,"
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
-      "Tensor(a! -> *)? x) -> Tensor[]");
+      "Tensor(a! -> *)? ssm_states) -> Tensor[]");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
   ops.def(
