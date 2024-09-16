@@ -77,7 +77,8 @@ class FastSyncLLM:
             RayGPUExecutor), "Ray is not supported in sync openai mode"
 
         self.result_queue.put(("Ready", None, None))
-        request_stats = {}
+        prompt_lens = {}
+        tokens = {}
         log_interval = 100
         poll_interval = envs.VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS
         try:
@@ -103,25 +104,22 @@ class FastSyncLLM:
                 for output in step_outputs:
                     assert len(output.outputs) == 1  # type: ignore
                     first_out = output.outputs[0]  # type: ignore
-                    output_len = len(first_out.text)
                     stats = None
-                    if output_len >= 0 and (output.request_id
-                                            not in request_stats):
-                        request_stats[output.request_id] = output_len
-                        result = first_out.text
-                    else:
-                        result = first_out.text[
-                            request_stats[output.request_id]:output_len]
+                    result = first_out.text
+                    tokens[output.request_id] = tokens.get(
+                        output.request_id, 0) + len(first_out.token_ids)
+                    if output.prompt_token_ids is not None:
+                        prompt_lens[output.request_id] = len(
+                            output.prompt_token_ids)
                     if output.finished:
+                        assert output.request_id in prompt_lens
                         stats = {
-                            "prompt": len(output.prompt_token_ids),
-                            "tokens": len(first_out.token_ids),
+                            "prompt": prompt_lens[output.request_id],
+                            "tokens": tokens[output.request_id],
                             "finish_reason": first_out.finish_reason,
                             "stop_reason": first_out.stop_reason,
                         }
-                        del request_stats[output.request_id]
-                    else:
-                        request_stats[output.request_id] = output_len
+                        del prompt_lens[output.request_id]
                     self.result_queue.put_nowait(
                         (output.request_id, result, stats))
         except Exception as e:
