@@ -111,16 +111,20 @@ class MQLLMEngineClient:
 
     @staticmethod
     def is_unsupported_config(engine_args: AsyncEngineArgs):
+        if engine_args.pipeline_parallel_size > 1:
+            return True
+
         is_embedding = ModelConfig(
             model=engine_args.model,
+            revision=engine_args.revision,
             tokenizer=engine_args.model,
             tokenizer_mode="auto",
             trust_remote_code=engine_args.trust_remote_code,
             quantization=engine_args.quantization,
             seed=0,
             dtype="auto").embedding_mode
-        is_pp = engine_args.pipeline_parallel_size > 1
-        return is_embedding or is_pp
+
+        return is_embedding
 
     @contextmanager
     def get_data_socket(self) -> Iterator[Socket]:

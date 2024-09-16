@@ -1,4 +1,5 @@
 import pickle
+import signal
 from contextlib import contextmanager
 from typing import Any, Iterator, List, Optional, Union
 
@@ -313,6 +314,13 @@ class MQLLMEngine:
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str):
+
+    def signal_handler(*_) -> None:
+        # Interrupt server on sigterm
+        raise KeyboardInterrupt("MQLLMEngine terminated")
+
+    signal.signal(signal.SIGTERM, signal_handler)
+
     engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
                                           usage_context=usage_context,
                                           ipc_path=ipc_path)

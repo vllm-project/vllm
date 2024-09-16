@@ -107,6 +107,10 @@ Decoder-only Language Models
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
     -
+  * - :code:`MiniCPM3ForCausalLM`
+    - MiniCPM3
+    - :code:`openbmb/MiniCPM3-4B`, etc.
+    -
   * - :code:`MistralForCausalLM`
     - Mistral, Mistral-Instruct
     - :code:`mistralai/Mistral-7B-v0.1`, :code:`mistralai/Mistral-7B-Instruct-v0.1`, etc.

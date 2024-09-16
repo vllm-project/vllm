@@ -559,7 +559,7 @@ def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                            num_bits: int) -> torch.Tensor:
     num_experts = b_q_weight.shape[0]
     assert size_k % 16 == 0
-    output = torch.empty((num_experts, size_k // 16, size_n * 2),
+    output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
                          device=b_q_weight.device,
                          dtype=b_q_weight.dtype)
     for e in range(num_experts):
