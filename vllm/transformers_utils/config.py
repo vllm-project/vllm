@@ -138,6 +138,10 @@ def get_config(
                     raise RuntimeError(err_msg) from e
                 else:
                     raise e
+            if config.model_type in _CONFIG_REGISTRY:
+                config_class = _CONFIG_REGISTRY[config.model_type]
+                config = config_class.from_pretrained(
+                    model, revision=revision, code_revision=code_revision)
 
     elif config_format == ConfigFormat.MISTRAL:
         config = load_params_config(model, revision)
