@@ -6,6 +6,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest)
 from vllm.sampling_params import LogitsProcessor
+from vllm.transformers_utils.tokenizer import MistralTokenizer
 
 
 async def get_guided_decoding_logits_processor(
@@ -13,6 +14,11 @@ async def get_guided_decoding_logits_processor(
                                                      ChatCompletionRequest],
         tokenizer) -> Optional[LogitsProcessor]:
     request = _adapt_request_for_tool_use(request)
+
+    if isinstance(tokenizer, MistralTokenizer):
+        raise NotImplementedError(
+            "Guided decoding is currently not supported for Mistral tokenizer."
+        )
 
     if guided_decoding_backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
@@ -35,6 +41,11 @@ def get_local_guided_decoding_logits_processor(
         guided_decoding_backend: str, guided_options: GuidedDecodingRequest,
         tokenizer) -> Optional[LogitsProcessor]:
     # request = _adapt_request_for_tool_use(request)
+
+    if isinstance(tokenizer, MistralTokenizer):
+        raise NotImplementedError(
+            "Guided decoding is currently not supported for Mistral tokenizer."
+        )
 
     if guided_decoding_backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
