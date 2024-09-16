@@ -78,16 +78,21 @@ def single_marlin_moe(
     max_workspace_size = (N // 64) * 16
     workspace = torch.zeros(max_workspace_size,
                             dtype=torch.int,
-                            device="cuda",
+                            device=hidden_states.device,
                             requires_grad=False)
+
+    w_zeros = torch.empty((0),
+                          dtype=hidden_states.dtype,
+                          device=hidden_states.device,
+                          requires_grad=False)
 
     scalar_type = (scalar_types.uint4b8
                    if num_bits == 4 else scalar_types.uint8b128)
 
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        g_idx, perm, workspace, scalar_type, M, N, K, True, E, topk,
-        block_size_m, True, False)
+        w_zeros, g_idx, perm, workspace, scalar_type, M, N, K, True, False, E,
+        topk, block_size_m, True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -106,6 +111,8 @@ def fused_marlin_moe(
     override_config: Optional[Dict[str, Any]] = None,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
+    w1_zeros: Optional[torch.Tensor] = None,
+    w2_zeros: Optional[torch.Tensor] = None,
     num_bits: int = 8,
 ) -> torch.Tensor:
     """
@@ -176,6 +183,19 @@ def fused_marlin_moe(
                             device="cuda",
                             requires_grad=False)
 
+    has_zp1 = w1_zeros is not None
+    has_zp2 = w2_zeros is not None
+    if w1_zeros is None:
+        w1_zeros = torch.empty((0),
+                               dtype=hidden_states.dtype,
+                               device=hidden_states.device,
+                               requires_grad=False)
+    if w2_zeros is None:
+        w2_zeros = torch.empty((0),
+                               dtype=hidden_states.dtype,
+                               device=hidden_states.device,
+                               requires_grad=False)
+
     scalar_type = (scalar_types.uint4b8
                    if num_bits == 4 else scalar_types.uint8b128)
 
@@ -192,6 +212,7 @@ def fused_marlin_moe(
         topk_weights,
         topk_ids,
         w1_scale,
+        w1_zeros,
         g_idx1,
         perm1,
         workspace,
@@ -200,6 +221,7 @@ def fused_marlin_moe(
         2 * N,
         K,
         True,
+        has_zp1,
         E,
         topk,
         block_size_m,
@@ -216,6 +238,7 @@ def fused_marlin_moe(
         topk_weights,
         topk_ids,
         w2_scale,
+        w2_zeros,
         g_idx2,
         perm2,
         workspace,
@@ -224,6 +247,7 @@ def fused_marlin_moe(
         K,
         N,
         True,
+        has_zp2,
         E,
         topk,
         block_size_m,
