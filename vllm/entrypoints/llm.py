@@ -347,6 +347,27 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
+    
+   def generate_beam_search(
+        self,
+        prompts: List[str],
+        beam_width: int,
+        max_tokens: int,
+    ) -> List[Tuple[List[List[int]], List[str]]]:
+        outputs = self.generate(prompts,
+                                do_sample=False,
+                                max_new_tokens=max_tokens,
+                                num_beams=beam_width,
+                                num_return_sequences=beam_width)
+        for i in range(len(outputs)):
+            output_ids, output_str = outputs[i]
+            for j in range(len(output_ids)):
+                output_ids[j] = [
+                    x for x in output_ids[j]
+                    if x != self.tokenizer.pad_token_id
+                ]
+            outputs[i] = (output_ids, output_str)
+        return outputs
 
     def chat(
         self,
