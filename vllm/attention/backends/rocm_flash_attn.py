@@ -545,8 +545,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             block_size = value_cache.shape[3]
             gqa_ratio = num_heads // self.num_kv_heads
             use_custom = use_rocm_custom_paged_attention(
-                decode_query.dtype, head_size, block_size, self.kv_cache_dtype,
-                gqa_ratio, decode_meta.max_decode_seq_len)
+                decode_query.dtype, head_size, block_size, gqa_ratio,
+                decode_meta.max_decode_seq_len)
             if use_custom:
                 max_seq_len = decode_meta.max_decode_seq_len
                 max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
@@ -625,8 +625,8 @@ def _sdpa_attention(
 
 
 def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
-                                    block_size: int, kv_cache_dtype: str,
-                                    gqa_ratio: int, max_seq_len: int) -> bool:
+                                    block_size: int, gqa_ratio: int,
+                                    max_seq_len: int) -> bool:
     # rocm custom page attention not support on navi (gfx1*)
     return (envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN and not ON_NAVI
             and (qtype == torch.half or qtype == torch.bfloat16)

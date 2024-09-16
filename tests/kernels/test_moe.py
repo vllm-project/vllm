@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.scalar_type import scalar_types
+from vllm.utils import is_hip
 
 
 def torch_moe(a, w1, w2, score, topk):
@@ -154,6 +155,8 @@ def compute_max_diff(output, output_ref):
         torch.abs(output_ref))
 
 
+@pytest.mark.skipif(is_hip(),
+                    reason="Make this test work with MoE padding on HIP")
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])

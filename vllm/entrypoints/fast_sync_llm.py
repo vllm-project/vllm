@@ -78,7 +78,7 @@ class FastSyncLLM:
 
         self.result_queue.put(("Ready", None, None))
         prompt_lens = {}
-        tokens = {}
+        tokens = {}  # type: ignore
         log_interval = 100
         poll_interval = envs.VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS
         try:

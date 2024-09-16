@@ -281,7 +281,8 @@ class ModelConfig:
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
         rocm_supported_quantization = [
-            "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8"
+            "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
+            "fbgemm_fp8"
         ]
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
