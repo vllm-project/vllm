@@ -25,7 +25,7 @@ def test_full_graph(model, tp_size):
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0)
-    llm = LLM(model=model, enforce_eager=True)
+    llm = LLM(model=model, enforce_eager=True, tensor_parallel_size=tp_size)
 
     outputs = llm.generate(prompts, sampling_params)
 
