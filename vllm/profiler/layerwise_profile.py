@@ -161,6 +161,11 @@ class LayerwiseProfileResults(profile):
 
         def _df_traversal(event: _ProfilerEvent,
                           curr_node: Optional[_ModuleTreeNode] = None):
+
+            # For the tensor parallel case for now only look at task 1
+            if event.start_tid != 1:
+                return
+
             if event_has_module(event):
                 node = _ModuleTreeNode(event=event, parent=curr_node)
                 if curr_node:
