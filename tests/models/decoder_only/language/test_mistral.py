@@ -3,6 +3,7 @@
 Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
+
 from vllm import SamplingParams
 
 from ...utils import check_logprobs_close

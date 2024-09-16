@@ -1,5 +1,6 @@
 from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload, Any, Dict
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Union, cast,
+                    overload)
 
 from tqdm import tqdm
 

@@ -41,13 +41,17 @@ from vllm.sampling_params import SamplingParams
 #     python demo.py simple
 #     python demo.py advanced
 
-model_name = "mistralai/Mistral-7B-Instruct-v0.3"  
+model_name = "mistralai/Mistral-7B-Instruct-v0.3"
 # or switch to "mistralai/Mistral-Nemo-Instruct-2407"
 # or "mistralai/Mistral-Large-Instruct-2407"
 # or any other mistral model with function calling ability
 
 sampling_params = SamplingParams(max_tokens=8192, temperature=0.0)
-llm = LLM(model=model_name, tokenizer_mode="mistral", config_format="mistral", load_format="mistral")
+llm = LLM(model=model_name,
+          tokenizer_mode="mistral",
+          config_format="mistral",
+          load_format="mistral")
+
 
 def generate_random_id(length=9):
     characters = string.ascii_letters + string.digits
@@ -61,10 +65,7 @@ def get_current_weather(city: str, state: str, unit: 'str'):
             "partly cloudly, with highs in the 90's.")
 
 
-tool_funtions = {
-    "get_current_weather": get_current_weather
-
-}
+tool_funtions = {"get_current_weather": get_current_weather}
 
 tools = [{
     "type": "function",
@@ -99,8 +100,10 @@ tools = [{
 }]
 
 messages = [{
-    "role": "user",
-    "content": "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
+    "role":
+    "user",
+    "content":
+    "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
 }]
 
 outputs = llm.chat(messages, sampling_params=sampling_params, tools=tools)
@@ -112,10 +115,12 @@ messages.append({
     "content": output,
 })
 
-# let's now actually parse and execute the model's output simulating an API call by using the 
+# let's now actually parse and execute the model's output simulating an API call by using the
 # above defined function
 tool_calls = json.loads(output)
-tool_answers = [tool_funtions[call['name']](**call['arguments']) for call in tool_calls]
+tool_answers = [
+    tool_funtions[call['name']](**call['arguments']) for call in tool_calls
+]
 
 # append the answer as a tool message and let the LLM give you an answer
 messages.append({
@@ -127,6 +132,6 @@ messages.append({
 outputs = llm.chat(messages, sampling_params, tools=tools)
 
 print(outputs[0].outputs[0].text.strip())
-# yields 
+# yields
 #   'The weather in Dallas, TX is 85 degrees fahrenheit. '
 #   'It is partly cloudly, with highs in the 90's.'

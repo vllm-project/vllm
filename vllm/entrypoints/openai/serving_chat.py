@@ -162,7 +162,7 @@ class OpenAIServingChat(OpenAIServing):
 
         if not is_mistral_tokenizer and request.tool_choice == "auto" and not (
                 self.enable_auto_tools and self.tool_parser is not None):
-            # for hf tokenizers, "auto" tools requires 
+            # for hf tokenizers, "auto" tools requires
             # --enable-auto-tool-choice and --tool-call-parser
             return self.create_error_response(
                 "\"auto\" tool choice requires "
