@@ -5,8 +5,9 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
-                    Optional, Set, Tuple, Union, cast)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
+from typing import Sequence as GenericSequence
+from typing import Set, Tuple, Union, cast
 
 import msgspec
 import torch
@@ -165,6 +166,9 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
+    # It is used to compute mrope_position_ids.
+    _mrope_position_delta: Optional[int] = None
+
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
         assert self._output_token_ids.typecode == "l"
@@ -218,6 +222,14 @@ class SequenceData(msgspec.Struct,
         """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
+
+    @property
+    def mrope_position_delta(self) -> Optional[int]:
+        return self._mrope_position_delta
+
+    @mrope_position_delta.setter
+    def mrope_position_delta(self, new_mrope_position_delta):
+        self._mrope_position_delta = new_mrope_position_delta
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
@@ -396,6 +408,10 @@ class Sequence:
         self.status = SequenceStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
 
+        # These are used to keep track of delta outputs
+        self._last_token_ids_offset: int = 0
+        self._last_output_text_offset: int = 0
+
         # Used for incremental detokenization
         self.prefix_offset = 0
         self.read_offset = 0
@@ -451,11 +467,37 @@ class Sequence:
         return self.prompt_adapter_request.prompt_adapter_id \
                         if self.prompt_adapter_request else 0
 
-    def get_output_text_to_return(self, buffer_length: int):
+    def get_output_text_to_return(self, buffer_length: int,
+                                  delta: bool) -> str:
+        """If delta is True, only new text since the last call to
+        this method is returned"""
+
         # We return the full output text if the sequence is finished.
         truncate = buffer_length and not self.is_finished()
-        return self.output_text[:-buffer_length] if truncate else (
-            self.output_text)
+        if not delta:
+            return self.output_text[:-buffer_length] if truncate else (
+                self.output_text)
+        length = len(self.output_text)
+        if truncate:
+            length -= buffer_length
+        last_offset = self._last_output_text_offset
+        if last_offset < length:
+            self._last_output_text_offset = length
+            return self.output_text[last_offset:length]
+        return ""
+
+    def get_output_token_ids_to_return(self,
+                                       delta: bool) -> GenericSequence[int]:
+        """If delta is True, only new tokens since the last call to
+        this method are returned"""
+        if not delta:
+            return self.get_output_token_ids()
+        length = self.get_output_len()
+        last_offset = self._last_token_ids_offset
+        if last_offset < length:
+            self._last_token_ids_offset = length
+            return self.data._output_token_ids[last_offset:]
+        return ()
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size

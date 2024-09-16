@@ -87,7 +87,7 @@ def apply_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    out_dtype: torch.dtype,
+    out_dtype: Optional[torch.dtype] = None,
     input_scale: Optional[torch.Tensor] = None,
     input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
@@ -97,6 +97,9 @@ def apply_fp8_linear(
     # ops.scaled_fp8_quant supports both dynamic and static quant.
     #   If dynamic, layer.input_scale is None and x_scale computed from x.
     #   If static, layer.input_scale is scalar and x_scale is input_scale.
+
+    if out_dtype is None:
+        out_dtype = input.dtype
 
     # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
     if cutlass_fp8_supported:
@@ -168,11 +171,13 @@ def apply_fp8_linear(
             # GEMM
             # This computes C = (X * W).
             # Output in fp32 to allow subsequent ops to happen in-place
-            output, _ = torch._scaled_mm(qinput,
-                                         weight,
-                                         scale_a=TORCH_DEVICE_IDENTITY,
-                                         scale_b=TORCH_DEVICE_IDENTITY,
-                                         out_dtype=torch.float32)
+            output = torch._scaled_mm(qinput,
+                                      weight,
+                                      scale_a=TORCH_DEVICE_IDENTITY,
+                                      scale_b=TORCH_DEVICE_IDENTITY,
+                                      out_dtype=torch.float32)
+            if type(output) is tuple and len(output) == 2:
+                output = output[0]
             # Unpad (undo num_token_padding)
             output = torch.narrow(output, 0, 0, input.shape[0])
             x_scale = torch.narrow(x_scale, 0, 0, input.shape[0])

@@ -208,9 +208,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        # CUTLASS 3.5.1
-        GIT_TAG 06b21349bcf6ddf6a1686a47a137ad1446579db9 
+        GIT_TAG v3.5.1
         GIT_PROGRESS TRUE
+
+        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+        GIT_SHALLOW TRUE
   )
   FetchContent_MakeAvailable(cutlass)
 
@@ -243,6 +247,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           COMPILE_FLAGS
           "-gencode arch=compute_90a,code=sm_90a")
   endif()
+
 
   #
   # Machete kernels
@@ -307,28 +312,11 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-if(VLLM_GPU_LANG STREQUAL "HIP")
-  #
-  # custom extension
-  #
-  set(CUSTOM_SRC
-  "csrc/custom/torch_bindings.cpp"
-  "csrc/custom/custom_kernels.cu"
-  "csrc/custom/fused_kernels.cu"
-  "csrc/custom/custom.cu"
-  "csrc/custom/paged_attention/attention_ll4mi.cu"
-  )
-
-  define_gpu_extension_target(
-    _custom_C
-    DESTINATION vllm
-    LANGUAGE ${VLLM_GPU_LANG}
-    SOURCES ${CUSTOM_SRC}
-    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-    ARCHITECTURES ${VLLM_GPU_ARCHES}
-    USE_SABI 3
-    WITH_SOABI)
-endif()
+# If CUTLASS is compiled on NVCC >= 12.5, it by default uses 
+# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the 
+# driver API. This causes problems when linking with earlier versions of CUDA.
+# Setting this variable sidesteps the issue by calling the driver directly.
+target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
 #
 # _moe_C extension
@@ -354,6 +342,28 @@ define_gpu_extension_target(
   WITH_SOABI)
 
 
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  #
+  # _rocm_C extension
+  #
+  set(VLLM_ROCM_EXT_SRC
+    "csrc/rocm/torch_bindings.cpp"
+    "csrc/rocm/attention.cu"
+    "csrc/rocm/custom_kernels.cu"
+    "csrc/rocm/fused_kernels.cu"
+    "csrc/rocm/custom.cu")
+
+  define_gpu_extension_target(
+    _rocm_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_ROCM_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
+endif()
+
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
@@ -364,6 +374,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
-  message(STATUS "Enabling custom extension.")
-  add_dependencies(default _custom_C)
+  message(STATUS "Enabling rocm extension.")
+  add_dependencies(default _rocm_C)
 endif()

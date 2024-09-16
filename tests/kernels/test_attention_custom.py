@@ -164,79 +164,27 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
-    kv_scale = 1.0
+    k_scale = v_scale = 1.0
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
-    if version == "v1":
-        ops.paged_attention_v1(
-            output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            block_tables,
-            context_lens,
-            block_size,
-            max_context_len,
-            alibi_slopes,
-            kv_cache_dtype,
-            kv_scale,
-        )
-    elif version == "v2" or version == "custom":
-        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
-                          PARTITION_SIZE)
-        assert PARTITION_SIZE % block_size == 0
-        num_seqs, num_heads, head_size = output.shape
-        tmp_output = torch.empty(
-            size=(num_seqs, num_heads, num_partitions, head_size),
-            dtype=output.dtype,
-        )
-        exp_sums = torch.empty(
-            size=(num_seqs, num_heads, num_partitions),
-            dtype=torch.float32,
-        )
-        max_logits = torch.empty_like(exp_sums)
-        if version == "v2":
-            ops.paged_attention_v2(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                context_lens,
-                block_size,
-                max_context_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                kv_scale,
-            )
-        elif version == "custom":
-            ops.paged_attention_custom(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                context_lens,
-                block_size,
-                max_context_len,
-                alibi_slopes,
-                kv_cache_dtype,
-            )
-    else:
-        raise AssertionError(f"Unknown version: {version}")
+    num_partitions = ((max_context_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
+    assert PARTITION_SIZE % block_size == 0
+    num_seqs, num_heads, head_size = output.shape
+    tmp_output = torch.empty(
+        size=(num_seqs, num_heads, num_partitions, head_size),
+        dtype=output.dtype,
+    )
+    exp_sums = torch.empty(
+        size=(num_seqs, num_heads, num_partitions),
+        dtype=torch.float32,
+    )
+    max_logits = torch.empty_like(exp_sums)
+    ops.paged_attention_rocm(output, exp_sums, max_logits, tmp_output, query,
+                             key_cache, value_cache, num_kv_heads, scale,
+                             block_tables, context_lens, block_size,
+                             max_context_len, alibi_slopes, kv_cache_dtype,
+                             k_scale, v_scale)
 
     # Run the reference implementation.
     if kv_cache_dtype == "fp8":

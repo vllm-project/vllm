@@ -33,7 +33,6 @@ class Hermes2ProToolParser(ToolParser):
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
-        self.current_tool_name_sent = False
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
 

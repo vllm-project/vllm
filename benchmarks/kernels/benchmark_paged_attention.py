@@ -145,7 +145,7 @@ def main(
                         v_scale,
                     )
                 else:
-                    ops.paged_attention_custom(
+                    ops.paged_attention_rocm(
                         output,
                         exp_sums,
                         max_logits,
@@ -161,6 +161,8 @@ def main(
                         max_seq_len,
                         alibi_slopes,
                         kv_cache_dtype,
+                        k_scale,
+                        v_scale,
                     )
             else:
                 raise ValueError(f"Invalid version: {version}")

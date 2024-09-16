@@ -107,6 +107,10 @@ Decoder-only Language Models
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
     -
+  * - :code:`MiniCPM3ForCausalLM`
+    - MiniCPM3
+    - :code:`openbmb/MiniCPM3-4B`, etc.
+    -
   * - :code:`MistralForCausalLM`
     - Mistral, Mistral-Instruct
     - :code:`mistralai/Mistral-7B-v0.1`, :code:`mistralai/Mistral-7B-Instruct-v0.1`, etc.
@@ -227,6 +231,11 @@ Multimodal Language Models
     - Image\ :sup:`E+`
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
+  * - :code:`LlavaNextVideoForConditionalGeneration`
+    - LLaVA-NeXT-Video
+    - Video
+    - :code:`llava-hf/LLaVA-NeXT-Video-7B-hf`, etc. (see note)
+    -
   * - :code:`MiniCPMV`
     - MiniCPM-V
     - Image\ :sup:`+`
@@ -242,10 +251,20 @@ Multimodal Language Models
     - Image\ :sup:`E+`
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
+  * - :code:`PixtralForConditionalGeneration`
+    - Pixtral
+    - Image\ :sup:`+`
+    - :code:`mistralai/Pixtral-12B-2409`
+    -
   * - :code:`QWenLMHeadModel`
     - Qwen-VL
-    - Image\ :sup:`E`
+    - Image\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
+    -
+  * - :code:`Qwen2VLForConditionalGeneration`
+    - Qwen2-VL (see note)
+    - Image\ :sup:`+` / Video\ :sup:`+`
+    - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
   * - :code:`UltravoxModel`
     - Ultravox
@@ -259,6 +278,14 @@ Multimodal Language Models
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+
+.. note::
+  For :code:`LLaVA-NeXT-Video` and :code:`Qwen2-VL`, the latest release of :code:`huggingface/transformers` doesn't work yet, so we need to use a developer version (:code:`21fac7abba2a37fae86106f87fcf9974fd1e3830`) for now.
+  This can be installed by running the following command: 
+
+  .. code-block:: bash
+    
+    pip install git+https://github.com/huggingface/transformers.git@21fac7abba2a37fae86106f87fcf9974fd1e3830
 
 ----
 
@@ -319,7 +346,7 @@ Note that, as an inference engine, vLLM does not introduce new models. Therefore
 
 We have the following levels of testing for models:
 
-1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. Please refer to `test_models.py <https://github.com/vllm-project/vllm/blob/main/tests/models/test_models.py>`_ and `test_big_models.py <https://github.com/vllm-project/vllm/blob/main/tests/models/test_big_models.py>`_ for the models that have passed this test.
+1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. Please refer to `models tests <https://github.com/vllm-project/vllm/blob/main/tests/models>`_ for the models that have passed this test.
 2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
 3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to `functionality tests <https://github.com/vllm-project/vllm/tree/main/tests>`_ and `examples <https://github.com/vllm-project/vllm/tree/main/examples>`_ for the models that have passed this test.
 4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.
