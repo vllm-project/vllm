@@ -83,7 +83,7 @@ class LogitsProcessor(nn.Module):
         logits = lm_head.linear_method.apply(lm_head,
                                              hidden_states,
                                              bias=embedding_bias)
-        print("SANG-TODO before logits gather")
+        # print("SANG-TODO before logits gather")
         if self.use_gather and False:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
@@ -94,7 +94,7 @@ class LogitsProcessor(nn.Module):
             # because XLA requires strict SPMD among all devices. Every device
             # should execute the same operations after gathering the logits.
             logits = tensor_model_parallel_all_gather(logits)
-        print("SANG-TODO after logits gather")
+        # print("SANG-TODO after logits gather")
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[..., :self.org_vocab_size]

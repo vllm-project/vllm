@@ -82,11 +82,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_lens_list=proposal_lens_list,
          )
 
-        print(f"SANG-TODO before execute target model")
+        # print(f"SANG-TODO before execute target model")
         target_sampler_output = self._scorer_worker._execute_model_spmd(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
-        print(f"SANG-TODO after execute target model")
+        # print(f"SANG-TODO after execute target model")
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
 

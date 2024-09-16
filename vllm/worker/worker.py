@@ -393,7 +393,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
             execute_model_req.seq_group_metadata_list = (
                 new_seq_group_metadata_list)
-        print("SANG-TODO worker _execute_model_spmd")
+        # print("SANG-TODO worker _execute_model_spmd")
         output = super()._execute_model_spmd(execute_model_req,
                                              intermediate_tensors)
         return output

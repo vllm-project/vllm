@@ -145,7 +145,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     "model_config"].hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
-                print(f"SANG-TODO {draft_tp=}")
+                # print(f"SANG-TODO {draft_tp=}")
                 if draft_tp == 1:
                     draft_worker_kwargs[
                         "model_runner_cls"] = TP1DraftModelRunner
@@ -228,7 +228,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
-        print(f"SANG-TODO {proposer_worker=} {scorer_worker=}")
+        # print(f"SANG-TODO {proposer_worker=} {scorer_worker=}")
         scorer_runner = getattr(self.scorer_worker, "model_runner", None)
         self.generators = scorer_runner.get_generators(
         ) if scorer_runner else None
@@ -423,9 +423,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # print(f"SANG-TODO {execute_model_req.seq_group_metadata_list=}")
         if no_spec:
             return self._run_no_spec(execute_model_req,
-                                    skip_proposer=disable_all_speculation)
+                                     skip_proposer=disable_all_speculation)
         return self._run_speculative_decoding_step(execute_model_req,
-                                                num_lookahead_slots)
+                                                   num_lookahead_slots)
 
     @torch.inference_mode()
     def execute_model(
@@ -519,7 +519,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             return
 
         for seq_group_metadata in seq_group_metadata_list:
-            print(f"SANG-TODO {type(seq_group_metadata)=}")
+            # print(f"SANG-TODO {type(seq_group_metadata)=}")
             # Once num_speculative_tokens is set to 0, the spec decode
             # of this request will be disabled forever.
             # TODO(comaniac): We currently store spec decoding specific
@@ -572,22 +572,23 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
-        print(f"SANG-TODO {self.scorer_worker=} {skip_proposer=}")
-        print(f"SANG-TODO draft model execute before")
+        # print(f"SANG-TODO this iteration won't run spec decoding {execute_model_req=}")
+        # print(f"SANG-TODO {self.scorer_worker=} {skip_proposer=}")
+        # print(f"SANG-TODO draft model execute before {skip_proposer=}")
         if not skip_proposer:
             self.proposer_worker._execute_model_spmd(execute_model_req)
-        print(f"SANG-TODO draft model execute done")
+        # print(f"SANG-TODO draft model execute done")
 
-        print(f"SANG-TODO  target model _execute_model_spmd")
+        # print(f"SANG-TODO  target model _execute_model_spmd")
         sampler_output = self.scorer_worker._execute_model_spmd(
             execute_model_req)
-        print(
-            f"SANG-TODO  target model _execute_model_spmd {len(sampler_output)=}"
-        )
+        # print(
+        # f"SANG-TODO  target model _execute_model_spmd {len(sampler_output)=}"
+        # )
         if len(sampler_output) == 0:
             return []
 
-        print(f"SANG-TODO {sampler_output=} {len(sampler_output)=}")
+        # print(f"SANG-TODO {sampler_output=} {len(sampler_output)=}")
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
 
@@ -609,7 +610,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 prepare_prefill_hidden_states(
                     sampler_output.prefill_hidden_states)
 
-            self.proposer_worker.execute_model(execute_model_req)
+            self.proposer_worker._execute_model_spmd(execute_model_req)
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
@@ -668,6 +669,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
+        # print(f"SANG-TODO run speculative steps {execute_model_req=}")
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
         # Pass last hidden states from target model to proposer
@@ -678,7 +680,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # Generate proposals using draft worker.
             proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step)
-        print(f"SANG-TODO draft {proposals=}")
+        # print(f"SANG-TODO draft {proposals=}")
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
@@ -693,14 +695,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             )
         # if proposal_scores is None:
         #     return []
-        print(f"SANG-TODO {proposal_scores=}")
-        print(f"SANG-TODO draft {proposals.proposal_lens=}")
+        # print(f"SANG-TODO {proposal_scores=}")
+        # print(f"SANG-TODO draft {proposals.proposal_lens=}")
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
 
-        print(f"SANG-TODO {accepted_token_ids=}")
+        # print(f"SANG-TODO {accepted_token_ids=}")
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
                        scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
@@ -740,8 +742,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposal_verifier_probs = proposal_scores.probs[spec_indices]
 
         # Get non-speculative sampled tokens from target model.
-        print(f"SANG-TODO {proposal_scores.token_ids.shape=}")
-        print(f"SANG-TODO {non_spec_indices=}")
+        # print(f"SANG-TODO {proposal_scores.token_ids.shape=}")
+        # print(f"SANG-TODO {non_spec_indices=}")
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
 
         # Get bonus tokens from target model.
@@ -772,7 +774,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         )
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
-        print(f"SANG-TODO {non_spec_token_ids=} {non_spec_token_ids.shape=} {max_proposal_len=}")
+        # print(f"SANG-TODO {non_spec_token_ids=} {non_spec_token_ids.shape=} {max_proposal_len=}")
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
                                                        1).clone()
         non_spec_token_ids[:, 1:] = -1

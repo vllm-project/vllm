@@ -1052,7 +1052,7 @@ def get_logprobs(
         # Update indices and tokens for prompt logprobs.
         if (seq_group.is_prompt
                 and sampling_params.prompt_logprobs is not None):
-            print(f"SANG-TODO {sampling_params.prompt_logprobs=}")
+            # print(f"SANG-TODO {sampling_params.prompt_logprobs=}")
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
@@ -1072,7 +1072,7 @@ def get_logprobs(
             next_token_ids.extend(token_ids)
 
             if sampling_params.logprobs is not None:
-                print(f"SANG-TODO {sampling_params.logprobs=}")
+                # print(f"SANG-TODO {sampling_params.logprobs=}")
                 largest_num_logprobs = max(largest_num_logprobs,
                                            sampling_params.logprobs)
 
@@ -1111,7 +1111,7 @@ def get_logprobs(
         if largest_num_logprobs > 0:
             # Logprobs of topk tokens for a batch of sequence groups.
             # (num_query_tokens_across_batch).
-            print(f"SANG-TODO {largest_num_logprobs=}")
+            # print(f"SANG-TODO {largest_num_logprobs=}")
             top_logprobs, top_token_ids = torch.topk(logprobs,
                                                      largest_num_logprobs,
                                                      dim=-1)

@@ -66,7 +66,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         local_rank = get_tp_group().local_rank
         self._draft_ranks = list(
             range(local_rank, local_rank + self.draft_tensor_parallel_size))
-        print(f"SANG-TODO {self._draft_ranks=}")
+        # print(f"SANG-TODO {self._draft_ranks=}")
         # self._is_dummy = get_tp_group().rank not in self._draft_ranks
 
         # dummy workers do nothing
@@ -150,7 +150,17 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
     ) -> List[SamplerOutput]:
         if self._is_dummy:
             return []
-        print("SANG-TODO execute model tp 1 draft model!")
+        # print("SANG-TODO execute model tp 1 draft model!")
+        with self._patch_tensor_parallel_group():
+            return self._worker.execute_model(execute_model_req)
+
+    def _execute_model_spmd(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        if self._is_dummy:
+            return []
+        # print("SANG-TODO execute model tp 1 draft model!")
         with self._patch_tensor_parallel_group():
             return self._worker._execute_model_spmd(execute_model_req)
 
