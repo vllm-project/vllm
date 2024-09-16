@@ -112,10 +112,10 @@ def load_outputs_w_logprobs(filename: str) -> OutputsLogprobs:
             for tokens, text, logprobs in json_data]
 
 
-@pytest.mark.skip(
-    reason=
-    "Model is too big, test passed on A100 locally but will OOM on CI machine."
-)
+    # @pytest.mark.skip(
+    #     reason=
+    #     "Model is too big, test passed on A100 locally but will OOM on CI machine."
+    # )
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_model_len", MAX_MODEL_LEN)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -148,10 +148,10 @@ def test_chat(
                          name_1="output")
 
 
-@pytest.mark.skip(
-    reason=
-    "Model is too big, test passed on A100 locally but will OOM on CI machine."
-)
+    # @pytest.mark.skip(
+    #     reason=
+    #     "Model is too big, test passed on A100 locally but will OOM on CI machine."
+    # )
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
