@@ -276,6 +276,13 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
 def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
                 size_n: int, size_k: int) -> torch.Tensor:
+    print(f"a {a.shape} {a.dtype}")
+    print(f"w {b_q_weight.shape} {b_q_weight.dtype}")
+    print(f"s {b_scales.shape} {b_scales.dtype}")
+    print(f"wk {workspace.shape} {workspace.dtype}")
+    print(f"size_m {size_m}")
+    print(f"size_n {size_n}")
+    print(f"size_k {size_k}")
     return torch.ops._C.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
                                     size_n, size_k)
 
@@ -520,24 +527,12 @@ def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
               codebook_partition_sizes: List[int],
               bias: Optional[torch.Tensor]) -> torch.Tensor:
-    print("GEMM")
-    print(f"input={input.shape}, {input.dtype}")
-    print(f"codes={codes.shape}, {codes.dtype}")
-    print(f"codebooks={codebooks.shape}, {codebooks.dtype}")
-    print(f"scales={scales.shape}, {scales.dtype}")
-    if bias:
-        print(f"bias={bias.shape}, {bias.dtype}")
-    print(f"codebook_partition_sizes={codebook_partition_sizes}")
     return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
                                   codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
                  codebook_partition_sizes: List[int]) -> torch.Tensor:
-    print("DEQUANT")
-    print(f"codes={codes.shape}, {codes.dtype}")
-    print(f"codebooks={codebooks.shape}, {codebooks.dtype}")
-    print(f"codebook_partition_sizes={codebook_partition_sizes}")
     return torch.ops._C.aqlm_dequant(codes, codebooks,
                                      codebook_partition_sizes)
 
