@@ -734,17 +734,18 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
+            print(f"cache_service_metrics {self.llm_engine.cache_service_metrics}")
+            if self.llm_engine.cache_service_metrics is not None:
+                logger.info(
+                    "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%, total tokens hit %d, number of measurement collected %d",
+                    0 if self.llm_engine.cache_service_metrics.total_tokens == 0 else self.llm_engine.cache_service_metrics.hit_tokens/self.llm_engine.cache_service_metrics.total_tokens * 100,
+                    0 if self.llm_engine.cache_service_metrics.total_blocks == 0 else self.llm_engine.cache_service_metrics.hit_blocks/self.llm_engine.cache_service_metrics.total_blocks * 100, self.llm_engine.cache_service_metrics.total_tokens, self.llm_engine.cache_service_metrics.counter
+                )
+
 
         # Restore original behavior
         self.llm_engine.step_return_finished_only = False
-
-        if self.llm_engine.cache_service_metrics is not None:
-            logger.info(
-                "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%, total tokens hit %d, number of measurement collected %d",
-                0 if self.llm_engine.cache_service_metrics.total_tokens == 0 else self.llm_engine.cache_service_metrics.hit_tokens/self.llm_engine.cache_service_metrics.total_tokens * 100,
-                0 if self.llm_engine.cache_service_metrics.total_blocks == 0 else self.llm_engine.cache_service_metrics.hit_blocks/self.llm_engine.cache_service_metrics.total_blocks * 100, self.llm_engine.cache_service_metrics.total_tokens, self.llm_engine.cache_service_metrics.counter
-            )
-
+        
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.
