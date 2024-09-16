@@ -86,7 +86,7 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: Dict[str, weakref.ref["GroupCoordinator"]] = {}
+_groups: Dict[str, weakref.ReferenceType["GroupCoordinator"]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
