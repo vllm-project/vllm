@@ -69,8 +69,10 @@ _running_tasks: Set[asyncio.Task] = set()
 
 
 def model_is_embedding(model_name: str, trust_remote_code: bool,
-                       quantization: Optional[str]) -> bool:
+                       quantization: Optional[str],
+                       revision: Optional[str]) -> bool:
     return ModelConfig(model=model_name,
+                       revision=revision,
                        tokenizer=model_name,
                        tokenizer_mode="auto",
                        trust_remote_code=trust_remote_code,
@@ -130,7 +132,7 @@ async def build_async_engine_client_from_engine_args(
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
     if (model_is_embedding(engine_args.model, engine_args.trust_remote_code,
-                           engine_args.quantization)
+                           engine_args.quantization, engine_args.revision)
             or disable_frontend_multiprocessing):
         engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
