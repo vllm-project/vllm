@@ -199,15 +199,6 @@ def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
                            seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
                            block_tables: torch.Tensor) -> None:
     """Advance a step on GPU for existing inputs for a multi-step runner"""
-    print(f"num_seqs={num_seqs}")
-    print(f"num_queries={num_queries}")
-    print(f"block_size={block_size}")
-    print(f"input_tokens={input_tokens}")
-    print(f"sampled_token_ids={sampled_token_ids}")
-    print(f"input_positions={input_positions}")
-    print(f"seq_lens={seq_lens}")
-    print(f"slot_mapping={slot_mapping}")
-    print(f"block_tables={block_tables}")
     return torch.ops._C.advance_step_flashattn(num_seqs, num_queries,
                                                block_size, input_tokens,
                                                sampled_token_ids,
@@ -225,19 +216,7 @@ def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
                             paged_kv_indptr: torch.Tensor,
                             paged_kv_last_page_len: torch.Tensor,
                             block_table_bound: torch.Tensor) -> None:
-    print(f"num_seqs={num_seqs}")
-    print(f"num_queries={num_queries}")
-    print(f"block_size={block_size}")
-    print(f"input_tokens={input_tokens}")
-    print(f"sampled_token_ids={sampled_token_ids}")
-    print(f"input_positions={input_positions}")
-    print(f"seq_lens={seq_lens}")
-    print(f"slot_mapping={slot_mapping}")
-    print(f"block_tables={block_tables}")
-    print(f"paged_kv_indices={paged_kv_indices}")
-    print(f"paged_kv_indptr={paged_kv_indptr}")
-    print(f"paged_kv_last_page_len={paged_kv_last_page_len}")
-    print(f"block_table_bound={block_table_bound}")
+
     return torch.ops._C.advance_step_flashinfer(
         num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
         input_positions, seq_lens, slot_mapping, block_tables,
@@ -297,13 +276,6 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
 def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
                 size_n: int, size_k: int) -> torch.Tensor:
-    print(f"a {a.shape} {a.dtype}")
-    print(f"w {b_q_weight.shape} {b_q_weight.dtype}")
-    print(f"s {b_scales.shape} {b_scales.dtype}")
-    print(f"wk {workspace.shape} {workspace.dtype}")
-    print(f"size_m {size_m}")
-    print(f"size_n {size_n}")
-    print(f"size_k {size_k}")
     return torch.ops._C.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
                                     size_n, size_k)
 
