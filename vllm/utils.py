@@ -12,6 +12,7 @@ import tempfile
 import threading
 import uuid
 import warnings
+import weakref
 from asyncio import FIRST_COMPLETED, ensure_future
 from functools import lru_cache, partial, wraps
 from platform import uname
@@ -1077,6 +1078,20 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
+    """Make an instance method that weakly references
+    its associated instance and no-ops once that
+    instance is collected."""
+    ref = weakref.ref(bound_method.__self__)  # type: ignore[attr-defined]
+    unbound = bound_method.__func__  # type: ignore[attr-defined]
+
+    def weak_bound(*args, **kwargs) -> None:
+        if inst := ref():
+            unbound(inst, *args, **kwargs)
+
+    return weak_bound
 
 
 #From: https://stackoverflow.com/a/4104188/2749989

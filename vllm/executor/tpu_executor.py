@@ -62,11 +62,17 @@ class TPUExecutor(ExecutorBase):
         rank: int = 0,
         distributed_init_method: Optional[str] = None,
     ):
-        from vllm.worker.tpu_worker import TPUWorker
+        if self.scheduler_config.is_multi_step:
+            from vllm.worker.multi_step_tpu_worker import MultiStepTPUWorker
+            worker = MultiStepTPUWorker(**self._get_worker_kwargs(
+                local_rank, rank, distributed_init_method))
+            return worker
+        else:
+            from vllm.worker.tpu_worker import TPUWorker
 
-        worker = TPUWorker(**self._get_worker_kwargs(local_rank, rank,
-                                                     distributed_init_method))
-        return worker
+            worker = TPUWorker(**self._get_worker_kwargs(
+                local_rank, rank, distributed_init_method))
+            return worker
 
     def initialize_cache(
         self,
