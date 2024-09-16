@@ -23,7 +23,7 @@ def get_model_architecture(
     architectures = getattr(model_config.hf_config, "architectures", [])
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
-    mixtral_supported = ["fp8", "compressed-tensors"]
+    mixtral_supported = ["fp8", "compressed-tensors", "awq"]
     # for gptq_marlin, only run fused MoE for int4
     if model_config.quantization == "gptq_marlin":
         hf_quant_config = getattr(model_config.hf_config,
