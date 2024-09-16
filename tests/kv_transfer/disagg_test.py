@@ -1,11 +1,11 @@
 import os
-import sys
 import subprocess
+import sys
 import time
+from subprocess import Popen
+
 import pytest
 import requests
-import signal
-from subprocess import Popen
 import torch
 
 
@@ -16,16 +16,15 @@ def setup_servers():
         pytest.skip("Skipping test: fewer than 4 GPUs available")
 
     # Set up environment variables
-    VLLM_HOST_IP = subprocess.check_output("hostname -I | awk '{print $1}'", shell=True).decode().strip()
+    VLLM_HOST_IP = subprocess.check_output("hostname -I | awk '{print $1}'",
+                                           shell=True).decode().strip()
     os.environ["VLLM_HOST_IP"] = VLLM_HOST_IP
     os.environ["VLLM_PORT"] = "12345"
 
     # Start prefill instance
     prefill_cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-        "-tp", "2",
-        "--model", "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        "--port", "8100",
+        sys.executable, "-m", "vllm.entrypoints.openai.api_server", "-tp", "2",
+        "--model", "meta-llama/Meta-Llama-3.1-8B-Instruct", "--port", "8100",
         "--gpu-memory-utilization", "0.8"
     ]
     prefill_env = os.environ.copy()
@@ -35,10 +34,8 @@ def setup_servers():
 
     # Start decode instance
     decode_cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-        "-tp", "2",
-        "--model", "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        "--port", "8200",
+        sys.executable, "-m", "vllm.entrypoints.openai.api_server", "-tp", "2",
+        "--model", "meta-llama/Meta-Llama-3.1-8B-Instruct", "--port", "8200",
         "--gpu-memory-utilization", "0.8"
     ]
     decode_env = os.environ.copy()
@@ -61,6 +58,7 @@ def setup_servers():
     prefill_proc.wait()
     decode_proc.wait()
 
+
 # Helper function to wait for server
 def wait_for_server(port, timeout=120):
     start_time = time.time()
@@ -73,35 +71,30 @@ def wait_for_server(port, timeout=120):
             time.sleep(1)
     return False
 
+
 # Test function to send curl requests and validate responses
-@pytest.mark.parametrize("prompt", [
-    "San Francisco is a",
-    "Santa Clara is a"
-])
+@pytest.mark.parametrize("prompt", ["San Francisco is a", "Santa Clara is a"])
 def test_disaggregated_prefilling(prompt):
     # Send to prefill
-    response = requests.post(
-        "http://localhost:8100/v1/completions",
-        headers={"Content-Type": "application/json"},
-        json={
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "prompt": prompt,
-            "max_tokens": 1,
-            "temperature": 0
-        }
-    )
+    response = requests.post("http://localhost:8100/v1/completions",
+                             headers={"Content-Type": "application/json"},
+                             json={
+                                 "model":
+                                 "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                                 "prompt": prompt,
+                                 "max_tokens": 1,
+                                 "temperature": 0
+                             })
     assert response.status_code == 200
 
     # Send to decode
-    response = requests.post(
-        "http://localhost:8200/v1/completions",
-        headers={"Content-Type": "application/json"},
-        json={
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "prompt": prompt,
-            "max_tokens": 10,
-            "temperature": 0
-        }
-    )
+    response = requests.post("http://localhost:8200/v1/completions",
+                             headers={"Content-Type": "application/json"},
+                             json={
+                                 "model":
+                                 "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                                 "prompt": prompt,
+                                 "max_tokens": 10,
+                                 "temperature": 0
+                             })
     assert response.status_code == 200
-    
