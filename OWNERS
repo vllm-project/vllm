@@ -1,28 +1,21 @@
 approvers:
+  - danielezonca
+  - terrytangyuan
   - dtrifiro
-  - fialhocoelho
+  - NickLucche
   - heyselbi
-  - joerunde
-  - maxdebayser
-  - njhill
-  - prashantgupta24
   - RH-steve-grubb
   - rpancham
-  - terrytangyuan
   - vaibhavjainwiz
-  - z103cb
   - Xaenalt
+  - tarukumar
+  - Raghul-M
 reviewers:
   - dtrifiro
-  - fialhocoelho
+  - NickLucche
   - heyselbi
-  - joerunde
-  - maxdebayser
-  - njhill
-  - prashantgupta24
   - RH-steve-grubb
   - rpancham
-  - terrytangyuan
   - vaibhavjainwiz
   - Xaenalt
-  - z103cb
+  - tarukumar
