@@ -882,14 +882,8 @@ if __name__ == "__main__":
         "Use \"--percentile-metrics\" to select metrics.",
     )
 
+    # group for dataset specific arguments
     sonnet_group = parser.add_argument_group("sonnet dataset options")
-    sonnet_group.add_argument(
-        "--sonnet-prefix-len",
-        type=int,
-        default=200,
-        help=
-        "Number of prefix tokens per request, used only for sonnet dataset.",
-    )
     sonnet_group.add_argument(
         "--sonnet-input-len",
         type=int,
@@ -903,6 +897,13 @@ if __name__ == "__main__":
         default=150,
         help=
         "Number of output tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-prefix-len",
+        type=int,
+        default=200,
+        help=
+        "Number of prefix tokens per request, used only for sonnet dataset.",
     )
 
     sharegpt_group = parser.add_argument_group("sharegpt dataset options")
@@ -945,13 +946,6 @@ if __name__ == "__main__":
         " random-prefix-len + random-prefix-len * random-range-ratio).")
 
     hf_group = parser.add_argument_group("hf dataset options")
-    hf_group.add_argument(
-        "--hf-output-len",
-        type=int,
-        default=None,
-        help="Output length for each request. Overrides the output lengths "
-        "from the sampled HF dataset.",
-    )
     hf_group.add_argument("--hf-subset",
                           type=str,
                           default=None,
@@ -960,6 +954,13 @@ if __name__ == "__main__":
                           type=str,
                           default=None,
                           help="Split of the HF dataset.")
+    hf_group.add_argument(
+        "--hf-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output lengths "
+        "from the sampled HF dataset.",
+    )
 
     args = parser.parse_args()
     main(args)
