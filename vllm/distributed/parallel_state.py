@@ -26,7 +26,7 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
@@ -86,11 +86,12 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: Dict[str, weakref.ReferenceType["GroupCoordinator"]] = {}
+_groups: Dict[str, Callable[[], "GroupCoordinator"]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
-    _groups[group.unique_name] = weakref.ref(group)
+    # looks like Python 3.8 does not understand `ReferenceType`
+    _groups[group.unique_name] = weakref.ref(group)  # type: ignore
 
 
 @torch.library.custom_op("vllm::inplace_all_reduce", mutates_args=["tensor"])
