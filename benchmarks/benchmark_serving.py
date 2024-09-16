@@ -410,7 +410,7 @@ async def benchmark(
     if backend != "openai-chat" and test_mm_content is not None:
         # multi-modal benchmark is only available on OpenAI Chat backend.
         raise ValueError(
-            "Multi-modal content is only supported for OpenAI Chat backend.")
+            "Multi-modal content is only supported on 'openai-chat' backend.")
     test_input = RequestFuncInput(
         model=model_id,
         prompt=test_prompt,
