@@ -13,9 +13,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.def(
       "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
       "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
-      "g_idx, Tensor! perm, Tensor! workspace, int size_m, int size_n, int "
-      "size_k, bool is_k_full, int num_experts, int topk, int moe_block_size, "
-      "bool replicate_input, bool apply_weights) -> Tensor");
+      "g_idx, Tensor! perm, Tensor! workspace, "
+      "__torch__.torch.classes._core_C.ScalarType b_q_type, int size_m, "
+      "int size_n, int size_k, bool is_k_full, int num_experts, int topk, "
+      "int moe_block_size, bool replicate_input, bool apply_weights)"
+      " -> Tensor");
   m.impl("marlin_gemm_moe", torch::kCUDA, &marlin_gemm_moe);
 #endif
 }

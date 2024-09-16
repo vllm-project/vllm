@@ -611,4 +611,5 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             topk_ids,
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
+            num_bits=self.quant_config.quant_type.size_bits,
         ).to(orig_dtype)
