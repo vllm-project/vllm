@@ -56,6 +56,7 @@ def choose_mp_linear_kernel(
                 f"{kernel.__name__} requires capability "
                 f"{kernel.get_min_capability()}, current compute capability "
                 f"is {compute_capability}")
+            continue
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
