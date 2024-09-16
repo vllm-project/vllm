@@ -204,7 +204,9 @@ class MQLLMEngine:
 
         try:
             return self.engine.step()
-        except Exception as e:
+        except SystemExit:
+            raise
+        except BaseException as e:
             self._set_errored(e)
             rpc_err = RPCError(request_id=None,
                                is_engine_errored=True,

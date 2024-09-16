@@ -201,7 +201,10 @@ async def build_async_engine_client_from_engine_args(
             mp_engine_client.close()
 
             # Wait for engine process to join
-            engine_process.join()
+            engine_process.join(4)
+            if engine_process.exitcode is None:
+                # Kill if taking longer than 5 seconds to stop
+                engine_process.kill()
 
             # Lazy import for prometheus multiprocessing.
             # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
