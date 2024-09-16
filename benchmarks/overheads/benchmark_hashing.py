@@ -5,8 +5,7 @@ from vllm import LLM, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
 # A very long prompt, total number of tokens is about 15k.
-LONG_PROMPT = ["You are an expert in large language models, aren't you?"
-               ] * 100
+LONG_PROMPT = ["You are an expert in large language models, aren't you?"] * 100
 LONG_PROMPT = ' '.join(LONG_PROMPT)
 
 
@@ -26,10 +25,8 @@ def main(args):
     for i in range(3):
         output = llm.generate(LONG_PROMPT, sampling_params)
 
-    batched_prompts = [
-        ('' if args.share_prefix else ('%d' % i)) + LONG_PROMPT 
-        for i in range(1000)
-    ]
+    batched_prompts = [('' if args.share_prefix else ('%d' % i)) + LONG_PROMPT
+                       for i in range(1000)]
     print("------start generating------")
     profiler.runctx('llm.generate(batched_prompts, sampling_params)',
                     globals(), locals())
