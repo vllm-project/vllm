@@ -8,7 +8,8 @@ TRACE_HEADERS = ["traceparent", "tracestate"]
 
 logger = init_logger(__name__)
 
-_is_otel_installed = False
+_is_otel_imported = False
+otel_import_error_traceback: Optional[str] = None
 try:
     from opentelemetry.context.context import Context
     from opentelemetry.sdk.environment_variables import (
@@ -19,8 +20,14 @@ try:
     from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
-    _is_otel_installed = True
+    _is_otel_imported = True
 except ImportError:
+    # Capture and format traceback to provide detailed context for the import
+    # error. Only the string representation of the error is retained to avoid
+    # memory leaks.
+    # See https://github.com/vllm-project/vllm/pull/7266#discussion_r1707395458
+    import traceback
+    otel_import_error_traceback = traceback.format_exc()
 
     class Context:  # type: ignore
         pass
@@ -35,14 +42,17 @@ except ImportError:
         pass
 
 
-def is_otel_installed() -> bool:
-    return _is_otel_installed
+def is_otel_available() -> bool:
+    return _is_otel_imported
 
 
 def init_tracer(instrumenting_module_name: str,
                 otlp_traces_endpoint: str) -> Optional[Tracer]:
-    assert is_otel_installed(), ("OpenTelemetry packages must be installed "
-                                 "prior to initializing a tracer")
+    if not is_otel_available():
+        raise ValueError(
+            "OpenTelemetry is not available. Unable to initialize "
+            "a tracer. Ensure OpenTelemetry packages are installed. "
+            f"Original error:\n{otel_import_error_traceback}")
     trace_provider = TracerProvider()
 
     span_exporter = get_span_exporter(otlp_traces_endpoint)
@@ -70,7 +80,7 @@ def get_span_exporter(endpoint):
 
 def extract_trace_context(
         headers: Optional[Mapping[str, str]]) -> Optional[Context]:
-    if is_otel_installed():
+    if is_otel_available():
         headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)
     else:
@@ -92,6 +102,12 @@ class SpanAttributes(BaseSpanAttributes):
     LLM_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
     LLM_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
     LLM_LATENCY_E2E = "gen_ai.latency.e2e"
+    LLM_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
+    # Time taken in the forward pass for this across all workers
+    LLM_LATENCY_TIME_IN_MODEL_FORWARD = "gen_ai.latency.time_in_model_forward"
+    # Time taken in the model execute function. This will include model
+    # forward, block/sync across workers, cpu-gpu sync time and sampling time.
+    LLM_LATENCY_TIME_IN_MODEL_EXECUTE = "gen_ai.latency.time_in_model_execute"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:

@@ -1,17 +1,10 @@
 #!/bin/bash
 
-# Requirement: 8x H100 GPUs.
-
-
-# Model: neuralmagic/Meta-Llama-3-70B-Instruct-FP8-KV 
-# Query: 2048 input tokens, 11 output tokens, QPS 4, 500 requests
-# Resource: 8x H100
-# Approaches:
-# 1. Chunked prefill: 1 vllm instance with tp=8
-# 2. Chunked prefill: 2 vllm instance with tp=4, equivalent to 1 tp=4 instance with QPS 4
-# 3. Disaggregated prefill: 1 prefilling instance and 1 decoding instance
-# Prefilling instance: max_output_token=1
-# Decoding instance: force the input tokens be the same across requests to bypass prefilling
+# benchmark the overhead of disaggregated prefill.
+# methodology:
+# - send all request to prefill vLLM instance. It will buffer KV cache.
+# - then send all request to decode instance. 
+# - The TTFT of decode instance is the overhead.
 
 set -ex
 

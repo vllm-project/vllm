@@ -1,10 +1,16 @@
 """Attention backend utils"""
-from typing import TYPE_CHECKING, Dict, List, Type, TypeVar, Union
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar, Union
 
+import numpy as np
 import torch
 
-from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
-from vllm.utils import make_tensor_with_pad
+from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
+                            AttentionState)
+from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+
+if TYPE_CHECKING:
+    from vllm.worker.model_runner_base import ModelRunnerBase
 
 # Error string(s) for encoder/decoder
 # unsupported attention scenarios
@@ -12,6 +18,10 @@ STR_NOT_IMPL_ENC_DEC_ROCM_HIP = ("ROCm/HIP is not currently supported "
                                  "with encoder/decoder models.")
 
 PAD_SLOT_ID = -1
+
+# Switch to numpy implementation of compute_slot_mapping
+# if we have at least this many elements. Could be tuned further.
+_COMPUTE_SLOT_MAPPING_NUMPY_NUMEL = 256
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
@@ -46,6 +56,29 @@ def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
     return start_idx
 
 
+def _compute_slot_mapping_python(slot_mapping: List[int],
+                                 block_table: List[int], range_start: int,
+                                 range_end: int, block_size: int):
+    for i in range(range_start, range_end):
+        block_number = block_table[i // block_size]
+        block_offset = i % block_size
+        slot = block_number * block_size + block_offset
+        slot_mapping.append(slot)
+
+
+def _compute_slot_mapping_numpy(slot_mapping: List[int],
+                                block_table: List[int], range_start: int,
+                                range_end: int, block_size: int):
+    block_table_array = np.array(block_table)
+    idx = np.arange(range_start, range_end)
+    block_offset = idx % block_size
+    idx //= block_size
+    seq_slot_mapping_array = block_table_array[idx]
+    seq_slot_mapping_array *= block_size
+    seq_slot_mapping_array += block_offset
+    slot_mapping.extend(seq_slot_mapping_array)
+
+
 def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
                          seq_id: int, seq_len: int, context_len: int,
                          start_idx: int, block_size: int,
@@ -67,13 +100,22 @@ def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
     # sliding window is 8, and block size is 4, the first two
     # tokens are masked and the slot mapping will be
     # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
+    padding_mask_len = max(0, start_idx - context_len)
+    slot_mapping.extend([PAD_SLOT_ID] * padding_mask_len)
+
+    range_start = max(start_idx, context_len)
+    range_end = seq_len
+    numel = range_end - range_start
     block_table = block_tables[seq_id]
-    slot_mapping.extend([PAD_SLOT_ID] * max(0, start_idx - context_len))
-    for i in range(max(start_idx, context_len), seq_len):
-        block_number = block_table[i // block_size]
-        block_offset = i % block_size
-        slot = block_number * block_size + block_offset
-        slot_mapping.append(slot)
+
+    # numpy implementation will be faster than python if we have
+    # many elements, otherwise it will be slower.
+    if numel < _COMPUTE_SLOT_MAPPING_NUMPY_NUMEL:
+        _compute_slot_mapping_python(slot_mapping, block_table, range_start,
+                                     range_end, block_size)
+    else:
+        _compute_slot_mapping_numpy(slot_mapping, block_table, range_start,
+                                    range_end, block_size)
 
 
 TAttentionMetadata = TypeVar("TAttentionMetadata", bound='AttentionMetadata')
@@ -181,7 +223,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables, device=device)
+            block_tables = torch.from_numpy(input_block_tables).to(
+                device, non_blocking=True)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -191,15 +234,15 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             )
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
-        context_lens_tensor = torch.tensor(self.context_lens,
-                                           dtype=torch.int,
-                                           device=device)
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
+        assert device is not None
+        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
+                                               device, self.runner.pin_memory)
+        seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
+                                           self.runner.pin_memory)
+        query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
+                                             self.runner.pin_memory)
+        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -214,10 +257,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                      dim=0,
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
-
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
@@ -235,3 +274,69 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
+
+
+class CommonAttentionState(AttentionState):
+
+    def __init__(self, runner: "ModelRunnerBase"):
+        self.runner = runner
+        self._is_graph_capturing = False
+
+    @contextmanager
+    def graph_capture(self, max_batch_size: int):
+        self._is_graph_capturing = True
+        self._graph_slot_mapping = torch.full((max_batch_size, ),
+                                              PAD_SLOT_ID,
+                                              dtype=torch.long,
+                                              device=self.runner.device)
+        self._graph_seq_lens = torch.ones(max_batch_size,
+                                          dtype=torch.int32,
+                                          device=self.runner.device)
+        self._graph_block_tables = torch.from_numpy(
+            self.runner.graph_block_tables).to(device=self.runner.device)
+        yield
+        self._is_graph_capturing = False
+        del self._graph_slot_mapping
+        del self._graph_seq_lens
+        del self._graph_block_tables
+
+    def graph_clone(self, batch_size: int) -> "CommonAttentionState":
+        assert self._is_graph_capturing
+        return self.__class__(self.runner)
+
+    def graph_capture_get_metadata_for_batch(self, batch_size: int):
+        assert self._is_graph_capturing
+        attn_metadata = self.runner.attn_backend.make_metadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=batch_size,
+            slot_mapping=self._graph_slot_mapping[:batch_size],
+            seq_lens=None,
+            seq_lens_tensor=self._graph_seq_lens[:batch_size],
+            max_query_len=None,
+            max_prefill_seq_len=0,
+            max_decode_seq_len=self.runner.max_seq_len_to_capture,
+            query_start_loc=None,
+            seq_start_loc=None,
+            context_lens_tensor=None,
+            block_tables=self._graph_block_tables[:batch_size],
+            use_cuda_graph=True,
+        )
+        return attn_metadata
+
+    def get_graph_input_buffers(self, attn_metadata) -> Dict[str, Any]:
+        return {
+            "slot_mapping": attn_metadata.slot_mapping,
+            "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
+            "block_tables": attn_metadata.decode_metadata.block_tables,
+        }
+
+    def prepare_graph_input_buffers(self, input_buffers,
+                                    attn_metadata) -> None:
+        input_buffers["seq_lens_tensor"].copy_(
+            attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
+        input_buffers["block_tables"].copy_(
+            attn_metadata.decode_metadata.block_tables, non_blocking=True)
+
+    def begin_forward(self, model_input) -> None:
+        return

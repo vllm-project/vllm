@@ -174,8 +174,8 @@ if __name__ == "__main__":
     # document the result
     with open(results_folder / "benchmark_results.md", "w") as f:
 
-        results = read_markdown(
-            "../.buildkite/nightly-benchmarks/tests/descriptions.md")
+        results = read_markdown("../.buildkite/nightly-benchmarks/" +
+                                "performance-benchmarks-descriptions.md")
         results = results.format(
             latency_tests_markdown_table=latency_md_table,
             throughput_tests_markdown_table=throughput_md_table,

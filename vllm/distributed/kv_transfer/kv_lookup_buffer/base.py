@@ -1,21 +1,22 @@
-
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
+
 import torch
 
 
 class KVLookupBufferBase(ABC):
-    
+
     @abstractmethod
-    def insert(self,
-               input_tokens: torch.Tensor,
-               kv: torch.Tensor, roi) -> None:
+    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
+               key: torch.Tensor, value: torch.Tensor,
+               hidden: torch.Tensor) -> None:
         raise NotImplementedError
-    
+
     @abstractmethod
-    def drop_select(self, input_tokens, roi) -> Optional[torch.Tensor]:
+    def drop_select(self, input_tokens: torch.Tensor,
+                    roi: torch.Tensor) -> List[Optional[torch.Tensor]]:
         raise NotImplementedError
-    
+
     @abstractmethod
     def close(self):
         """

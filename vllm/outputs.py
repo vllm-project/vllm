@@ -1,8 +1,11 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional
+from typing import Sequence as GenericSequence
+from typing import Union
 
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
 
@@ -28,7 +31,7 @@ class CompletionOutput:
 
     index: int
     text: str
-    token_ids: Tuple[int, ...]
+    token_ids: GenericSequence[int]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
     finish_reason: Optional[str] = None
@@ -70,24 +73,34 @@ class RequestOutput:
     Args:
         request_id: The unique ID of the request.
         prompt: The prompt string of the request.
+                For encoder/decoder models, this is the
+                decoder input prompt.
         prompt_token_ids: The token IDs of the prompt.
+                          For encoder/decoder models, this is the
+                          decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
+        encoder_prompt: The encoder prompt string of the request; 
+                        None if decoder-only
+        encoder_prompt_token_ids: The token IDs of the encoder prompt;
+                                  None if decoder-only
     """
 
     def __init__(
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: List[int],
+        prompt_token_ids: Optional[List[int]],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
+        encoder_prompt: Optional[str] = None,
+        encoder_prompt_token_ids: Optional[List[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -97,21 +110,30 @@ class RequestOutput:
         self.finished = finished
         self.metrics = metrics
         self.lora_request = lora_request
+        self.encoder_prompt = encoder_prompt
+        self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
-    def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
-        if seq_group.sampling_params is None:
+    def from_seq_group(cls,
+                       seq_group: SequenceGroup) -> Optional["RequestOutput"]:
+        sampling_params = seq_group.sampling_params
+        if sampling_params is None:
             raise ValueError(
                 "Sampling parameters are missing for a CompletionRequest.")
+        finished = seq_group.is_finished()
+        if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY and (
+                not finished):
+            return None
+
         seqs = seq_group.get_seqs()
         if len(seqs) == 1:
             top_n_seqs = seqs
         else:
             # Get the top-n sequences.
-            n = seq_group.sampling_params.n
-            if seq_group.sampling_params.use_beam_search:
+            n = sampling_params.n
+            if sampling_params.use_beam_search:
                 sorting_key = lambda seq: seq.get_beam_search_score(
-                    seq_group.sampling_params.length_penalty)
+                    sampling_params.length_penalty)
             else:
                 sorting_key = lambda seq: seq.get_cumulative_logprob()
             sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
@@ -121,24 +143,49 @@ class RequestOutput:
         # NOTE: We need omit logprobs here explicitly because the sequence
         # always has the logprobs of the sampled tokens even if the
         # logprobs are not requested.
-        include_logprobs = seq_group.sampling_params.logprobs is not None
-        text_buffer_length = seq_group.sampling_params.output_text_buffer_length
-        outputs = [
-            CompletionOutput(
-                seqs.index(seq),
-                seq.get_output_text_to_return(text_buffer_length),
-                seq.get_output_token_ids(),
-                seq.get_cumulative_logprob() if include_logprobs else None,
-                seq.output_logprobs if include_logprobs else None,
-                SequenceStatus.get_finished_reason(seq.status),
-                seq.stop_reason) for seq in top_n_seqs
-        ]
+        include_logprobs = sampling_params.logprobs is not None
+        text_buffer_length = sampling_params.output_text_buffer_length
+        delta = sampling_params.output_kind == RequestOutputKind.DELTA
+
+        outputs = []
+        include_prompt = True
+        for seq in top_n_seqs:
+            output_text = seq.get_output_text_to_return(
+                text_buffer_length, delta)
+            output_token_ids = seq.get_output_token_ids_to_return(delta)
+            output_logprobs = seq.output_logprobs if include_logprobs else None
+
+            if delta:
+                # Slice logprobs delta if applicable
+                if output_logprobs:
+                    output_logprobs = output_logprobs[-len(output_token_ids):]
+                # Don't include prompt if this is after the first output
+                # containing decode token ids
+                if include_prompt and seq.get_output_len() > len(
+                        output_token_ids):
+                    include_prompt = False
+
+            outputs.append(
+                CompletionOutput(
+                    seqs.index(seq), output_text, output_token_ids,
+                    seq.get_cumulative_logprob() if include_logprobs else None,
+                    output_logprobs,
+                    SequenceStatus.get_finished_reason(seq.status),
+                    seq.stop_reason))
 
         # Every sequence in the sequence group should have the same prompt.
-        prompt = seq_group.prompt
-        prompt_token_ids = seq_group.prompt_token_ids
-        prompt_logprobs = seq_group.prompt_logprobs
-        finished = seq_group.is_finished()
+        if include_prompt:
+            prompt = seq_group.prompt
+            prompt_token_ids = seq_group.prompt_token_ids
+            encoder_prompt = seq_group.encoder_prompt
+            encoder_prompt_token_ids = seq_group.encoder_prompt_token_ids
+            prompt_logprobs = seq_group.prompt_logprobs
+        else:
+            prompt = None
+            prompt_token_ids = None
+            encoder_prompt = None
+            encoder_prompt_token_ids = None
+            prompt_logprobs = None
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
         return cls(seq_group.request_id,
@@ -148,12 +195,16 @@ class RequestOutput:
                    outputs,
                    finished,
                    seq_group.metrics,
-                   lora_request=seq_group.lora_request)
+                   lora_request=seq_group.lora_request,
+                   encoder_prompt=encoder_prompt,
+                   encoder_prompt_token_ids=encoder_prompt_token_ids)
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
+                f"encoder_prompt={self.encoder_prompt!r}, "
+                f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "

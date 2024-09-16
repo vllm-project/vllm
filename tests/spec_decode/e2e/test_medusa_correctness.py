@@ -21,7 +21,7 @@ correctess for the target model outputs.
 
 import pytest
 
-from .conftest import run_greedy_equality_correctness_test
+from .conftest import run_equality_correctness_test
 
 # main model
 # lmsys/vicuna-7b-v1.3 was to be used but it's causing
@@ -55,7 +55,7 @@ PRECISION = "float32"
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -70,14 +70,68 @@ PRECISION = "float32"
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
-                                    batch_size: int, output_len: int):
+def test_medusa_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
+                                       per_test_common_llm_kwargs,
+                                       baseline_llm_kwargs, test_llm_kwargs,
+                                       batch_size: int, output_len: int,
+                                       seed: int):
     """Verify greedy equality with different batch size."""
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "enforce_eager": False,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model_name": MAIN_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": SPEC_MODEL,
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+    },
+])
+@pytest.mark.parametrize("output_len", [
+    128,
+])
+@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("seed", [1])
+def test_medusa_e2e_greedy_correctness_cuda_graph(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int):
+    """Verify greedy equality with cuda graph enabled and different 
+    batch sizes."""
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
 
 @pytest.mark.parametrize(
@@ -98,7 +152,7 @@ def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -116,18 +170,22 @@ def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_mlp_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
-                                                    test_llm_generator,
-                                                    batch_size: int,
-                                                    output_len: int):
+def test_medusa_e2e_greedy_correctness_with_preemption(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
 
 @pytest.mark.parametrize(
@@ -143,7 +201,7 @@ def test_mlp_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -165,16 +223,22 @@ def test_mlp_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_mlp_different_k(baseline_llm_generator, test_llm_generator,
-                         batch_size: int, output_len: int):
-    """Verify that mlp speculative decoding produces exact equality
+def test_medusa_different_k(vllm_runner, common_llm_kwargs,
+                            per_test_common_llm_kwargs, baseline_llm_kwargs,
+                            test_llm_kwargs, batch_size: int, output_len: int,
+                            seed: int):
+    """Verify that medusa speculative decoding produces exact equality
     to without spec decode with different values of num_speculative_tokens.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
 
 @pytest.mark.parametrize(
@@ -190,7 +254,7 @@ def test_mlp_different_k(baseline_llm_generator, test_llm_generator,
         "dtype": PRECISION,
 
         # Main model
-        "model": MAIN_MODEL,
+        "model_name": MAIN_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -208,17 +272,23 @@ def test_mlp_different_k(baseline_llm_generator, test_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_mlp_disable_queue(baseline_llm_generator, test_llm_generator,
-                           batch_size: int, output_len: int):
-    """Verify that mlp speculative decoding produces exact equality
+def test_medusa_disable_queue(vllm_runner, common_llm_kwargs,
+                              per_test_common_llm_kwargs, baseline_llm_kwargs,
+                              test_llm_kwargs, batch_size: int,
+                              output_len: int, seed: int):
+    """Verify that medusa speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
 
 if __name__ == "__main__":

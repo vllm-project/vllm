@@ -25,7 +25,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install mypy==1.9.0
+        pip install mypy==1.11.1
         pip install types-setuptools
         pip install types-PyYAML
         pip install types-requests
@@ -35,10 +35,8 @@ jobs:
         mypy
         mypy tests --follow-imports skip
         mypy vllm/attention --follow-imports skip
-        mypy vllm/core --follow-imports skip
         mypy vllm/distributed --follow-imports skip
         mypy vllm/engine  --follow-imports skip
-        mypy vllm/entrypoints --follow-imports skip
         mypy vllm/executor --follow-imports skip
         mypy vllm/lora --follow-imports skip
         mypy vllm/model_executor  --follow-imports skip

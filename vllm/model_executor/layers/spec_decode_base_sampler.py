@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import torch
 import torch.jit
@@ -36,9 +36,12 @@ class SpecDecodeBaseSampler(nn.Module):
         self.num_emitted_tokens: Optional[torch.Tensor] = None
         self.num_draft_tokens: int = 0
 
-    def init_gpu_tensors(self, rank: int) -> None:
+    def init_gpu_tensors(self, device: Union[int, str]) -> None:
         assert self.num_accepted_tokens is None
-        device = f"cuda:{rank}"
+        if isinstance(device, int):
+            device = f"cuda:{device}"
+        elif not isinstance(device, str):
+            raise ValueError(f"Device must be int or str, get {type(device)}")
         self.num_accepted_tokens = torch.tensor(0,
                                                 dtype=torch.long,
                                                 device=device)
@@ -127,29 +130,35 @@ class SpecDecodeBaseSampler(nn.Module):
 
     def _raise_if_incorrect_input(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: Optional[torch.Tensor] = None,
     ) -> None:
-        self._raise_if_incorrect_shape(target_probs, draft_token_ids,
-                                       bonus_token_ids, draft_probs)
-        self._raise_if_incorrect_dtype(target_probs, draft_token_ids,
-                                       bonus_token_ids, draft_probs)
-        self._raise_if_inconsistent_device(target_probs, draft_token_ids,
-                                           bonus_token_ids, draft_probs)
-        self._raise_if_out_of_bounds_vocab(target_probs.shape[-1],
+        self._raise_if_incorrect_shape(target_with_bonus_probs,
+                                       draft_token_ids, bonus_token_ids,
+                                       draft_probs)
+        self._raise_if_incorrect_dtype(target_with_bonus_probs,
+                                       draft_token_ids, bonus_token_ids,
+                                       draft_probs)
+        self._raise_if_inconsistent_device(target_with_bonus_probs,
+                                           draft_token_ids, bonus_token_ids,
+                                           draft_probs)
+        self._raise_if_out_of_bounds_vocab(target_with_bonus_probs.shape[-1],
                                            draft_token_ids, bonus_token_ids)
 
     def _raise_if_incorrect_shape(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: Optional[torch.Tensor] = None,
     ) -> None:
         (target_batch_size, num_target_probs,
-         target_vocab_size) = target_probs.shape
+         target_vocab_size) = target_with_bonus_probs.shape
+
+        # Does not count the extra token
+        num_target_probs -= 1
 
         # validate the shape of draft token ids.
         draft_token_ids_batch_size, num_draft_token_ids = draft_token_ids.shape
@@ -172,12 +181,12 @@ class SpecDecodeBaseSampler(nn.Module):
 
     def _raise_if_incorrect_dtype(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: Optional[torch.Tensor] = None,
     ) -> None:
-        assert target_probs.dtype == self.probs_dtype
+        assert target_with_bonus_probs.dtype == self.probs_dtype
         assert draft_token_ids.dtype == self.token_id_dtype
         assert bonus_token_ids.dtype == self.token_id_dtype
         if draft_probs is not None:
@@ -185,15 +194,16 @@ class SpecDecodeBaseSampler(nn.Module):
 
     def _raise_if_inconsistent_device(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: Optional[torch.Tensor] = None,
     ) -> None:
         devices = [
-            t.device for t in
-            [target_probs, bonus_token_ids, draft_probs, draft_token_ids]
-            if t is not None
+            t.device for t in [
+                target_with_bonus_probs, bonus_token_ids, draft_probs,
+                draft_token_ids
+            ] if t is not None
         ]
         assert all([devices[0] == device for device in devices])
 
@@ -217,7 +227,7 @@ class SpecDecodeDeterministicBaseSampler(SpecDecodeBaseSampler):
     @abstractmethod
     def forward(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
@@ -233,7 +243,7 @@ class SpecDecodeStochasticBaseSampler(SpecDecodeBaseSampler):
     @abstractmethod
     def forward(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,

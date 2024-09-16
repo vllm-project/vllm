@@ -475,6 +475,7 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, __nv_bfloat16>(
                                                  __NV_SATFINITE, fp8_type);
   return (uint8_t)res;
     #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 // float -> fp8
@@ -508,7 +509,7 @@ __inline__ __device__ Tout convert(const Tin& x) {
   }
   #endif
   assert(false);
-  return {};  // Squash missing return statement warning
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
@@ -521,7 +522,7 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   }
   #endif
   assert(false);
-  return {};  // Squash missing return statement warning
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
   // The following macro is used to dispatch the conversion function based on

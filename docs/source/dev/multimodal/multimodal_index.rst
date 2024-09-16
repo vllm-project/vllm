@@ -15,6 +15,9 @@ by following :ref:`this guide <adding_multimodal_plugin>`.
 
 Looking to add your own multi-modal model? Please follow the instructions listed :ref:`here <enabling_multimodal_inputs>`.
 
+..
+  TODO: Add usage of --limit-mm-per-prompt when multi-image input is officially supported
+
 Guides
 ++++++
 
@@ -41,8 +44,6 @@ Base Classes
 ------------
 
 .. autodata:: vllm.multimodal.NestedTensors
-
-.. autodata:: vllm.multimodal.BatchedTensors
 
 .. autodata:: vllm.multimodal.BatchedTensorInputs
 

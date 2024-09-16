@@ -19,7 +19,6 @@ kill_gpu_processes() {
   # kill all processes on GPU.
   pkill -f pt_main_thread
   pkill -f python3
-  pkill -f round_robin_proxy.sh
   ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
@@ -44,7 +43,7 @@ launch_chunked_prefill() {
       --model $model \
       --port 8100 \
       -tp 4 \
-      --max-model-len 30000 \
+      --max-model-len 10000 \
       --disable-log-stats \
       --disable-log-requests \
       --enable-chunked-prefill \
@@ -54,14 +53,14 @@ launch_chunked_prefill() {
     --model $model \
     --port 8200 \
     -tp 4 \
-    --max-model-len 30000 \
+    --max-model-len 10000 \
     --disable-log-stats \
     --disable-log-requests \
     --enable-chunked-prefill \
     --gpu-memory-utilization 0.8 &
   wait_for_server 8100
   wait_for_server 8200
-  bash round_robin_proxy.sh &
+  python3 round_robin_proxy.py &
   sleep 1
 }
 
@@ -74,7 +73,7 @@ launch_disagg_prefill() {
       --model $model \
       --port 8100 \
       -tp 4 \
-      --max-model-len 30000 \
+      --max-model-len 10000 \
       --disable-log-stats \
       --disable-log-requests \
       --gpu-memory-utilization 0.8 &
@@ -83,7 +82,7 @@ launch_disagg_prefill() {
     --model $model \
     --port 8200 \
     -tp 4 \
-    --max-model-len 30000 \
+    --max-model-len 10000 \
     --disable-log-stats \
     --disable-log-requests \
     --gpu-memory-utilization 0.8 &
@@ -99,10 +98,10 @@ benchmark() {
   model="meta-llama/Meta-Llama-3.1-70B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
-  num_prompts=400
+  num_prompts=200
   qps=$1
   prefix_len=50
-  input_len=2048
+  input_len=1024
   output_len=$2
   tag=$3
 
@@ -132,7 +131,7 @@ main() {
   (which jq) || (apt-get -y install jq)
   (which socat) || (apt-get -y install socat)
 
-  pip install quart httpx
+  pip install quart httpx matplotlib aiohttp
 
   cd "$(dirname "$0")"
 
@@ -148,8 +147,7 @@ main() {
   rm -rf results
   mkdir results
 
-  default_qps=10
-  default_output_len=150
+  default_output_len=6
 
   export VLLM_LOGGING_LEVEL=DEBUG
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
@@ -165,6 +163,8 @@ main() {
   benchmark $qps $default_output_len disagg_prefill
   done
   kill_gpu_processes
+
+  python3 visualize_benchmark_results.py
 
 }
 

@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Type, Union)
 from unittest.mock import patch
 
 import numpy as np
@@ -10,14 +11,15 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         MultiModalConfig, ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput)
+                           Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -49,7 +51,10 @@ class ModelInputForTPU(ModelRunnerInputBase):
     num_samples: int
     best_of: List[int]
     seq_groups: List[List[int]]
+    is_first_multi_step: bool = True
+    is_last_step: bool = True
     virtual_engine: int = 0
+    async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -62,6 +67,8 @@ class ModelInputForTPU(ModelRunnerInputBase):
             "num_samples": self.num_samples,
             "best_of": self.best_of,
             "seq_groups": self.seq_groups,
+            "is_first_multi_step": self.is_first_multi_step,
+            "is_last_step": self.is_last_step,
             "virtual_engine": self.virtual_engine,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
@@ -89,7 +96,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        multimodal_config: Optional[MultiModalConfig] = None,
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
@@ -98,7 +104,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
@@ -117,6 +122,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             self.block_size,
             False,
         )
+        self.cached_step_outputs: List[torch.Tensor] = []
 
     def load_model(self) -> None:
         self.device = self.device_config.device
@@ -142,24 +148,11 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 parallel_config=self.parallel_config,
                 cache_config=self.cache_config,
                 scheduler_config=self.scheduler_config,
-                multimodal_config=self.multimodal_config,
                 lora_config=None,
             )
         model = model.eval()
         xm.wait_device_ops()
-
-        model = ModelWrapper(model)
-        # NOTE(woosuk): There are two stages of compilation: torch.compile and
-        # XLA compilation. Setting dynamic=True can reduce the torch.compile
-        # overhead by reusing the FX graph for different shapes.
-        # However, the XLA graph will still require static shapes and needs to
-        # be re-compiled for every different shapes. This overhead is inevitable
-        # in the first run, but can be skipped afterwards as we cache the XLA
-        # graphs in the disk (VLLM_XLA_CACHE_PATH).
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=True)
+        self.model = ModelWrapper(model)
 
     def _dummy_run(
         self,
@@ -221,11 +214,40 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             )
         t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
-
-        # Dummy run.
         num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
-        self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
-                   num_samples, kv_caches)
+
+        # NOTE(woosuk): There are two stages of compilation: torch.compile and
+        # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
+        # overhead by reusing the FX graph for different shapes.
+        # However, the XLA graph will still require static shapes and needs to
+        # be re-compiled for every different shapes. This overhead is inevitable
+        # in the first run, but can be skipped afterwards as we cache the XLA
+        # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        if is_prompt:
+            # Prefll
+            torch._dynamo.mark_dynamic(token_ids, 1)
+            torch._dynamo.mark_dynamic(position_ids, 1)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
+        else:
+            # Decode
+            torch._dynamo.mark_dynamic(token_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(input_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
+            torch._dynamo.mark_dynamic(t, 0)
+            torch._dynamo.mark_dynamic(p, 0)
+        # Dummy run.
+        self.model(token_ids,
+                   position_ids,
+                   attn_metadata,
+                   input_lens,
+                   t,
+                   p,
+                   num_samples,
+                   kv_caches,
+                   is_prompt=is_prompt)
 
     def warmup_model(
         self,
@@ -501,112 +523,187 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         num_steps: int = 1,
     ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
-        if num_steps > 1:
-            raise ValueError(
-                "TPUModelRunner does not support multi-step execution.")
+        if not model_input.is_first_multi_step:
+            if not model_input.is_last_step:
+                return []
 
-        def _execute_model(*args, clone: bool = False) -> torch.Tensor:
-            """Move input args from CPU to device and execute the model."""
+            use_async_out_proc = model_input.async_callback is not None
+            sampler_outputs = []
+            num_outputs = len(self.cached_step_outputs)
+            for i in range(num_outputs):
+                next_token_ids = self.cached_step_outputs.pop(0)
+                next_token_ids = next_token_ids.cpu().tolist()
+                sampler_output = _make_decode_output(next_token_ids,
+                                                     model_input.seq_groups)
+                sampler_outputs.append(sampler_output)
 
-            def _copy_to_device(x: torch.Tensor) -> torch.Tensor:
-                if clone:
-                    # When x is a slice of a CPU tensor, XLA may copy the whole
-                    # original tensor to TPU instead of only copying x.
-                    # To avoid this, we copy x after cloning.
-                    x = x.clone()
-                return x.to(self.device)
+                if i < num_outputs - 1 and use_async_out_proc:
+                    assert model_input.async_callback is not None
+                    ctx = model_input.async_callback.keywords[  # type: ignore
+                        "ctx"]
+                    ctx.append_output(
+                        outputs=[sampler_output],
+                        seq_group_metadata_list=ctx.seq_group_metadata_list,
+                        scheduler_outputs=ctx.scheduler_outputs,
+                        is_async=False,
+                        is_last_step=False)
+                    model_input.async_callback()
+            if use_async_out_proc:
+                return [sampler_outputs[-1]]
+            else:
+                return sampler_outputs
 
-            new_args = []
-            for arg in args:
-                if isinstance(arg, torch.Tensor):
-                    arg = _copy_to_device(arg)
-                elif isinstance(arg, AttentionMetadata):
-                    arg.slot_mapping = _copy_to_device(arg.slot_mapping)
-                    if getattr(arg, "block_tables", None) is not None:
-                        arg.block_tables = _copy_to_device(arg.block_tables)
-                    if getattr(arg, "context_lens", None) is not None:
-                        arg.context_lens = _copy_to_device(arg.context_lens)
-                new_args.append(arg)
-            return self.model(*new_args)
-
-        num_prefills = model_input.attn_metadata.num_prefills
-        is_prompt = num_prefills > 0
+        is_prompt = model_input.attn_metadata.num_prefills > 0
         if is_prompt:
+            assert num_steps == 1
             # NOTE(woosuk): Since the FlashAttention kernel does not support
             # ragged inputs, we split the prompts into different batches and
             # process them separately. This is a temporary hack that should be
             # optimized by using SplashAttention.
-            next_token_ids = []
             orig_slot_mapping = model_input.attn_metadata.slot_mapping
             batch_size = model_input.input_lens.shape[0]
             start_idx = 0
+            next_token_ids = []
             for i in range(batch_size):
                 # Get the actual prefill_len.
                 prefill_len = model_input.input_lens[i:i + 1].item()
                 prefill_len = _get_padded_prefill_len(prefill_len)
                 end_idx = start_idx + prefill_len
 
-                model_input.attn_metadata.slot_mapping = orig_slot_mapping[
-                    None, start_idx:end_idx]
-                model_input.attn_metadata.num_prefills = 1
-                output_token_ids = _execute_model(
-                    model_input.token_ids[None, start_idx:end_idx],
-                    model_input.position_ids[None, start_idx:end_idx],
-                    model_input.attn_metadata,
-                    model_input.input_lens[i:i + 1],
-                    model_input.t[i:i + 1],
-                    model_input.p[i:i + 1],
-                    model_input.num_samples,
-                    kv_caches,
-                    clone=True)
-                # Retrieve the outputs to CPU.
-                next_token_ids += output_token_ids.cpu().tolist()
+                token_ids = model_input.token_ids[None, start_idx:end_idx].to(
+                    self.device)
+                position_ids = model_input.position_ids[None,
+                                                        start_idx:end_idx].to(
+                                                            self.device)
+                attn_metadata = model_input.attn_metadata
+                attn_metadata.num_prefills = 1
+                attn_metadata.slot_mapping = orig_slot_mapping[
+                    None, start_idx:end_idx].to(self.device)
+                input_lens = model_input.input_lens[i:i + 1].to(self.device)
+                t = model_input.t[i:i + 1].to(self.device)
+                p = model_input.p[i:i + 1].to(self.device)
+                output_token_ids = self.model(token_ids,
+                                              position_ids,
+                                              attn_metadata,
+                                              input_lens,
+                                              t,
+                                              p,
+                                              model_input.num_samples,
+                                              kv_caches,
+                                              is_prompt=True)
+                next_token_ids.append(output_token_ids[0])
                 start_idx = end_idx
-        else:
-            # Execute the model.
-            output_token_ids = _execute_model(
-                model_input.token_ids, model_input.position_ids,
-                model_input.attn_metadata, model_input.input_lens,
-                model_input.t, model_input.p, model_input.num_samples,
-                kv_caches)
-            # Retrieve the outputs to CPU.
-            next_token_ids = output_token_ids.cpu().tolist()
 
-        # NOTE(woosuk): Minimal code to construct the sampler outputs.
-        # The TPU backend does not reuse the sampler, since the TPU backend
-        # does not support the advanced sampling parameters such as logprobs.
-        zero_logprob = Logprob(0.0)
-        batch_idx = 0
-        sampler_outputs = []
-        for seq_group in model_input.seq_groups:
-            seq_ids = seq_group
-            seq_outputs = []
-            if is_prompt:
+            if model_input.async_callback is not None:
+                model_input.async_callback()
+            # Retrieve the outputs to CPU.
+            next_token_ids = [
+                output_token_ids.cpu().tolist()
+                for output_token_ids in next_token_ids
+            ]
+
+            # NOTE(woosuk): Minimal code to construct the sampler outputs.
+            # The TPU backend does not reuse the sampler, since the TPU backend
+            # does not support advanced sampling parameters such as logprobs.
+            zero_logprob = Logprob(0.0)
+            sampler_outputs = []
+            for i, seq_group in enumerate(model_input.seq_groups):
+                seq_ids = seq_group
                 assert len(seq_ids) == 1
                 seq_id = seq_ids[0]
-                for i in range(model_input.best_of[batch_idx]):
-                    next_token_id = next_token_ids[batch_idx][i]
+                seq_outputs = []
+                for j in range(model_input.best_of[i]):
+                    next_token_id = next_token_ids[i][j]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,
                                        {next_token_id: zero_logprob}))
-                batch_idx += 1
-            else:
-                for seq_id in seq_ids:
-                    next_token_id = next_token_ids[batch_idx][0]
-                    seq_outputs.append(
-                        SequenceOutput(seq_id, next_token_id,
-                                       {next_token_id: zero_logprob}))
-                    batch_idx += 1
-            sampler_outputs.append(
-                CompletionSequenceGroupOutput(seq_outputs, None))
-        return [SamplerOutput(sampler_outputs)]
+                sampler_outputs.append(
+                    CompletionSequenceGroupOutput(seq_outputs, None))
+            return [SamplerOutput(sampler_outputs)]
+        else:
+            token_ids = model_input.token_ids.to(self.device)
+            position_ids = model_input.position_ids.to(self.device)
+            attn_metadata = model_input.attn_metadata
+            attn_metadata.slot_mapping = attn_metadata.slot_mapping.to(
+                self.device)
+            attn_metadata.block_tables = attn_metadata.block_tables.to(
+                self.device)
+            attn_metadata.context_lens = attn_metadata.context_lens.to(
+                self.device)
+            t = model_input.t.to(self.device)
+            p = model_input.p.to(self.device)
+            input_lens = model_input.input_lens.to(self.device)
+            for i in range(num_steps):
+                slot_mapping = attn_metadata.slot_mapping
+                output_token_ids = self.model(token_ids,
+                                              position_ids,
+                                              attn_metadata,
+                                              input_lens,
+                                              t,
+                                              p,
+                                              model_input.num_samples,
+                                              kv_caches,
+                                              is_prompt=False)
+                self.cached_step_outputs.append(output_token_ids)
+
+                if i < num_steps - 1:
+                    # Prepare the inputs for the next step.
+                    token_ids = output_token_ids.unsqueeze(dim=1).int()
+                    position_ids = position_ids + 1
+                    attn_metadata.context_lens = attn_metadata.context_lens + 1
+
+                    block_tables = attn_metadata.block_tables
+                    block_number = block_tables.gather(
+                        1,
+                        position_ids.long() // self.block_size)
+                    block_offset = position_ids % self.block_size
+
+                    is_padding = slot_mapping == _PAD_SLOT_ID
+                    slot_mapping = block_number * self.block_size + block_offset
+                    slot_mapping = slot_mapping.long()
+                    slot_mapping = torch.where(is_padding, _PAD_SLOT_ID,
+                                               slot_mapping)
+                    attn_metadata.slot_mapping = slot_mapping
+
+            if model_input.async_callback is not None:
+                model_input.async_callback()
+
+            if num_steps > 1:
+                return []
+            # Retrieve the outputs to CPU.
+            next_token_ids = self.cached_step_outputs.pop(0)
+            next_token_ids = next_token_ids.cpu().tolist()
+            sampler_output = _make_decode_output(next_token_ids,
+                                                 model_input.seq_groups)
+            return [sampler_output]
 
 
-class ModelWrapper(nn.Module):
+class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model: nn.Module):
-        super().__init__()
         self.model = model
+        compiled_callable = torch.compile(self.forward,
+                                          backend="openxla",
+                                          fullgraph=True,
+                                          dynamic=False)
+        super().__init__(compiled_callable)
+
+    def __call__(self, *args, is_prompt: bool, **kwargs):
+        if len(self.compiled_codes) < 3 or not self.use_custom_dispatcher:
+            # not fully compiled yet, or not using the custom dispatcher,
+            # let PyTorch handle it
+            return self.compiled_callable(*args, **kwargs)
+        # the 3 compiled codes are:
+        # 0: for profiling
+        # 1: for prompt
+        # 2: for decode
+        # dispatch to the compiled code directly, skip PyTorch
+        if is_prompt:
+            with self.dispatch_to_code(1):
+                return self.forward(*args, **kwargs)
+        else:
+            with self.dispatch_to_code(2):
+                return self.forward(*args, **kwargs)
 
     def forward(
         self,
@@ -692,6 +789,9 @@ class ModelWrapper(nn.Module):
         sampled_token_ids = torch.multinomial(probs,
                                               num_samples,
                                               replacement=True)
+        if num_samples == 1:
+            argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+            sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
         next_token_ids = torch.where(t != 0, sampled_token_ids,
                                      argmax_token_ids)
         return next_token_ids
@@ -723,3 +823,24 @@ def _apply_top_p(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
     cutoff_logit = torch.gather(logits_sorted, -1, cutoff_index)
     logits = logits.masked_fill_(logits < cutoff_logit, -float("inf"))
     return logits
+
+
+def _make_decode_output(
+    next_token_ids: List[int],
+    seq_groups: List[List[int]],
+) -> SamplerOutput:
+    zero_logprob = Logprob(0.0)
+    sampler_outputs = []
+    batch_idx = 0
+    for seq_group in seq_groups:
+        seq_ids = seq_group
+        seq_outputs = []
+        for seq_id in seq_ids:
+            next_token_id = next_token_ids[batch_idx]
+            seq_outputs.append(
+                SequenceOutput(seq_id, next_token_id,
+                               {next_token_id: zero_logprob}))
+            batch_idx += 1
+        sampler_outputs.append(CompletionSequenceGroupOutput(
+            seq_outputs, None))
+    return SamplerOutput(sampler_outputs)
