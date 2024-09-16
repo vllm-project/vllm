@@ -1,3 +1,4 @@
+# ruff: noqa
 import json
 import random
 import string

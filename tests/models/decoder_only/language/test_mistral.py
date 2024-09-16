@@ -50,9 +50,13 @@ TOOLS = [{
 }]
 MSGS = [{
     "role": "user",
-    "content": "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
+    "content": ("Can you tell me what the temperate"
+        " will be in Dallas, in fahrenheit?")
 }]
-EXPECTED_FUNC_CALL = '[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]'
+EXPECTED_FUNC_CALL = (
+    '[{"name": "get_current_weather", "arguments": '
+    '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]'
+)
 
 
 @pytest.mark.parametrize("model", MODELS)
