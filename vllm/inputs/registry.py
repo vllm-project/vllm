@@ -1,4 +1,5 @@
 import functools
+import inspect
 from array import array
 from collections import UserDict
 from dataclasses import dataclass
@@ -245,14 +246,7 @@ class InputRegistry:
         See also:
             :ref:`input_processing_pipeline`
         """
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
-
-        model_cls, _ = get_model_architecture(model_config)
-
-        processor = self._input_processors_by_model_type \
-            .get(model_cls, self._default_input_processor)
-
+        processor = self._get_model_input_processor(model_config)
         return processor(InputContext(model_config), inputs)
 
     def create_input_processor(self, model_config: "ModelConfig"):
@@ -260,4 +254,67 @@ class InputRegistry:
         Create an input processor (see :meth:`process_input`) for a
         specific model.
         """
-        return functools.partial(self.process_input, model_config)
+        # Determine which kwargs can be leveraged for the input processor
+        # and drop + warn for kwargs that are unimplemented.
+        processor_kwargs = self._get_allowed_kwarg_overrides(
+            callable=self._get_model_input_processor(model_config),
+            overrides=model_config.processor_kwargs,
+        )
+        return functools.partial(self.process_input, model_config,
+                                 **processor_kwargs)
+
+    def _get_model_input_processor(self,
+                                   model_config: "ModelConfig") -> Callable:
+        """Grabs the input processor for the provided model.
+        
+        Args:
+            model_config: Config whose model architecture we can leverage to
+            grab the callable input processor.
+        
+        Returns:
+            Callable input processor for this model.
+        """
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_architecture
+
+        model_cls, _ = get_model_architecture(model_config)
+
+        processor = self._input_processors_by_model_type \
+            .get(model_cls, self._default_input_processor)
+        return processor
+
+    def _get_allowed_kwarg_overrides(
+        self,
+        callable: Callable,
+        overrides: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Given a callable processor, determine which kwarg overrides provided
+        via the model config are valid keyword arguments, and drop any that
+        are not.
+
+        Args:
+            processor: Callable processor which takes 0 or more kwargs.
+            model_config: Config which may contain init time processor kwargs.
+
+        Returns:
+            Dictionary containing the processor kwargs to be wrapped when
+            creating the callable processor partial.
+        """
+        if not isinstance(overrides, dict):
+            return {}
+        allowed_kwargs = list(inspect.signature(callable).parameters.keys())
+        # Drop any processor_kwargs provided by the user that are
+        # not kwarg names accepted by the provided input processor.
+        filtered_overrides = {
+            kwarg_name: val
+            for kwarg_name, val in overrides.items()
+            if kwarg_name in allowed_kwargs
+        }
+
+        # If anything is dropped, log a warning
+        dropped_keys = set(overrides) - set(filtered_overrides)
+        if dropped_keys:
+            logger.warning(
+                "The following kwarg overrides are not implemented "
+                "by the input processor and will be dropped: %s", dropped_keys)
+        return filtered_overrides
