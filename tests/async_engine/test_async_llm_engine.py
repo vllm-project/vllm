@@ -26,6 +26,11 @@ class RequestOutput:
     finished: bool = False
 
 
+@dataclass
+class MockModelConfig:
+    use_async_output_proc = True
+
+
 class MockEngine:
 
     def __init__(self):
@@ -35,6 +40,7 @@ class MockEngine:
         self.request_id = None
         # Ugly, remove dependency when possible
         self.parallel_config = ParallelConfig(1, 1, False)
+        self.model_config = MockModelConfig()
 
     async def step_async(self, virtual_engine):
         # PP size is 1, ignore virtual engine
