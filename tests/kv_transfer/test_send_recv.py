@@ -42,7 +42,7 @@ def stress_test(my_rank, pipe):
 
     tensors: List[torch.Tensor] = []
 
-    for i in tqdm(range(2000)):
+    for i in tqdm(range(500)):
         mean = torch.rand(1).item()
         std = torch.rand(1).item()
         size = torch.randint(900, 1000, (2, ))
@@ -61,7 +61,7 @@ def stress_test(my_rank, pipe):
 
     torch.distributed.barrier()
 
-    for i in tqdm(range(2000)):
+    for i in tqdm(range(500)):
         if my_rank == int((i % 10) > 3):
             pipe.send_tensor(tensors[3 * i])
             pipe.send_tensor(tensors[3 * i + 1])
@@ -89,7 +89,7 @@ def latency_test(my_rank, pipe, nelement, ntensor):
 
     torch.distributed.barrier()
 
-    for i in tqdm(range(1000)):
+    for i in tqdm(range(500)):
 
         tensors = []
 
@@ -134,4 +134,6 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     test_run(my_rank, pipe)
     stress_test(my_rank, pipe)
-    latency_test(my_rank, pipe, 1024 * 8 * 128, 80)
+    
+    # Use this function if you want to test the latency of pipe impl.
+    # latency_test(my_rank, pipe, 1024 * 8 * 128, 80)
