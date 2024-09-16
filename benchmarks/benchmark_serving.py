@@ -88,7 +88,7 @@ def sample_sharegpt_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
-) -> List[Tuple[str, int, int]]:
+) -> List[Tuple[str, int, int, None]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
     # Load the dataset.
@@ -135,7 +135,7 @@ def sample_sonnet_requests(
     output_len: int,
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
-) -> List[Tuple[str, str, int, int]]:
+) -> List[Tuple[str, str, int, int, None]]:
     assert (
         input_len > prefix_len
     ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
@@ -205,7 +205,7 @@ def sample_hf_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
-):
+) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
     dataset = load_dataset(dataset_path,
                            name=dataset_subset,
                            split=dataset_split,
@@ -767,7 +767,8 @@ if __name__ == "__main__":
     parser.add_argument("--dataset-path",
                         type=str,
                         default=None,
-                        help="Path to the dataset.")
+                        help="Path to the sharegpt/sonnet dataset. "
+                        "Or the huggingface dataset ID if using HF dataset.")
     parser.add_argument(
         "--model",
         type=str,
@@ -863,8 +864,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--hf-output-len",
         type=int,
-        default=128,
-        help="Number of input tokens per request, used only for HF dataset.",
+        default=None,
+        help="Output length for each request. Overrides the output lengths "
+        "from the sampled HF dataset.",
     )
     parser.add_argument("--hf-subset",
                         type=str,
