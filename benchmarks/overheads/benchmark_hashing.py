@@ -38,7 +38,7 @@ def main(args):
     total_time = 0
     total_calls = 0
     for func in stats.stats:
-        if 'hash_of_block' in func[2]:
+        if 'hash_of_block' in func[2] or 'hash_block_tokens' in func[2]:
             total_time = stats.stats[func][3]
             total_calls = stats.stats[func][0]
     percentage = (total_time / stats.total_tt) * 100
@@ -52,7 +52,7 @@ if __name__ == "__main__":
         'automatic prefix caching.')
     parser.add_argument('--model', type=str, default='lmsys/longchat-7b-16k')
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
-    parser.add_argument('--output-len', type=int, default=10)
+    parser.add_argument('--output-len', type=int, default=1)
     parser.add_argument('--enable-prefix-caching',
                         action='store_true',
                         help='enable prefix caching')
