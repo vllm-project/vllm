@@ -134,6 +134,6 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     test_run(my_rank, pipe)
     stress_test(my_rank, pipe)
-    
+
     # Use this function if you want to test the latency of pipe impl.
     # latency_test(my_rank, pipe, 1024 * 8 * 128, 80)
