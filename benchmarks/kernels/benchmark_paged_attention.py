@@ -145,7 +145,7 @@ def main(
                         v_scale,
                     )
                 else:
-                    ops.paged_attention_custom(
+                    ops.paged_attention(
                         output,
                         exp_sums,
                         max_logits,
