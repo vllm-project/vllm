@@ -6,6 +6,7 @@ import torch
 
 
 def run_python_script(script_name, timeout):
+    script_name = f'kv_transfer/{script_name}'
     try:
         # Start both processes asynchronously using Popen
         process0 = subprocess.Popen(
