@@ -1,5 +1,10 @@
 
-## Environment Creation 
+## vLLM and tt-metal Branches
+Git-checkout the following branches in each repo separately:
+- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev)
+- tt-metal branch: [vllm_dev](https://github.com/tenstorrent/tt-metal/tree/vllm_dev)
+
+## Environment Creation
 
 To setup the tt-metal environment with vLLM, follow the instructions in `setup-metal.sh`
 
