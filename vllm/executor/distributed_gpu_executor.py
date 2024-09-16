@@ -8,6 +8,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
+from vllm.worker.vineyard_llm_cache import CacheServiceMetrics
 
 logger = init_logger(__name__)
 
@@ -47,7 +48,8 @@ class DistributedGPUExecutor(GPUExecutor):
         return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+                         num_cpu_blocks: int, 
+                         cache_service_metrics: Optional[CacheServiceMetrics] = None) -> None:
         """Initialize the KV cache in all workers.
         """
 
@@ -62,7 +64,9 @@ class DistributedGPUExecutor(GPUExecutor):
 
         self._run_workers("initialize_cache",
                           num_gpu_blocks=num_gpu_blocks,
-                          num_cpu_blocks=num_cpu_blocks)
+                          num_cpu_blocks=num_cpu_blocks,
+                          cache_service_metrics = cache_service_metrics
+                          )
 
     def execute_model(
         self,

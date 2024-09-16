@@ -54,6 +54,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.worker.vineyard_llm_cache import CacheServiceMetrics
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -296,6 +297,7 @@ class LLMEngine:
         )
         self.log_stats = log_stats
         self.step_return_finished_only = step_return_finished_only
+        self.cache_service_metrics = CacheServiceMetrics
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -422,7 +424,6 @@ class LLMEngine:
                 # See https://prometheus.github.io/client_python/multiprocess/
                 from vllm.engine.metrics import (LoggingStatLogger,
                                                  PrometheusStatLogger)
-
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(
@@ -477,7 +478,8 @@ class LLMEngine:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        logger.info(f"LLMEngine _initialize_kv_caches cache_service_metrics {self.cache_service_metrics}")
+        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks, cache_service_metrics = self.cache_service_metrics)
 
     @classmethod
     def _get_executor_cls(cls,

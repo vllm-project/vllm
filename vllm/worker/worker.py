@@ -28,6 +28,7 @@ from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
+from vllm.worker.vineyard_llm_cache import CacheServiceMetrics
 
 logger = init_logger(__name__)
 
@@ -250,7 +251,8 @@ class Worker(LocalOrDistributedWorkerBase):
         return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+                         num_cpu_blocks: int,
+                         cache_service_metrics: Optional[CacheServiceMetrics] = None) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
 
         This also warms up the model, which may record CUDA graphs.
@@ -261,7 +263,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-
+        logger.info(f"worker initialize_cache initialize cache_service_metrics {cache_service_metrics} ")
+        self.model_runner.set_cache_service_metrics(cache_service_metrics)
         self._init_cache_engine()
         self._warm_up_model()
 

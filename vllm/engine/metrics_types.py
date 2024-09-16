@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Protocol
 
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
-
+from vllm.worker.vineyard_llm_cache import CacheServiceMetrics
 
 @dataclass
 class Stats:
@@ -71,8 +71,8 @@ class StatLoggerBase(ABC):
         self.num_generation_tokens: List[int] = []
         self.last_local_log = time.time()
         self.local_interval = local_interval
+        self.external_cache_service_metrics = CacheServiceMetrics
         self.spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
-
     @abstractmethod
     def log(self, stats: Stats) -> None:
         raise NotImplementedError

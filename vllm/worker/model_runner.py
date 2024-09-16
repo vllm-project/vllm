@@ -55,6 +55,7 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+from vllm.worker.vineyard_llm_cache import CacheServiceMetrics
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -976,6 +977,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Multi-modal data support
         self.input_registry = input_registry
         self.mm_registry = mm_registry
+        self.cache_service_metrics = None
         self.multi_modal_input_mapper = mm_registry \
             .create_input_mapper(model_config)
         self.mm_registry.init_mm_limits_per_prompt(self.model_config)
@@ -997,7 +999,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # to ensure the tensor model parallel group is initialized.
         self.vineyard_llm_cache = None
 
-    def _init_vineyard_cache(self):
+    def _init_vineyard_cache(self, metrics: CacheServiceMetrics = None):
         if envs.VLLM_USE_VINEYARD_CACHE:
             if not self.scheduler_config.chunked_prefill_enabled:
                 raise Exception("Vineyard LLM cache is not enabled, requires chunked prefill")
@@ -1011,6 +1013,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 kv_cache_dtype=self.kv_cache_dtype,
                 torch_dtype=get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                         self.model_config.dtype),
+                metrics = metrics,
             )
             logger.info("Using Vineyard LLM cache")
         else:
@@ -1020,6 +1023,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.inter_data_cache: Dict[int, PyObjectCache] = {}
         self.sampling_metadata_cache: SamplingMetadataCache = \
             SamplingMetadataCache()
+        logger.info(f"Initialize CacheServiceMetric {metrics}")
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1096,7 +1100,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend="eager")
-        self._init_vineyard_cache()
+        self._init_vineyard_cache(self.cache_service_metrics)
 
     def save_sharded_state(
         self,
@@ -1128,6 +1132,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
+    
+    def set_cache_service_metrics(self, metrics: CacheServiceMetrics) -> None:
+        #logger.info(f"model_runner set_cache_service_metrics {metrics} ")
+        if self.vineyard_llm_cache != None:
+            self.vineyard_llm_cache.metrics = metrics
 
     def _prepare_model_input_tensors(
         self,

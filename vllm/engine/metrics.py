@@ -17,6 +17,7 @@ else:
 
 if TYPE_CHECKING:
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+    from vllm.worker.vineyard_llm_cache import CacheServiceMetrics
 
 logger = init_logger(__name__)
 
@@ -374,6 +375,12 @@ class LoggingStatLogger(StatLoggerBase):
                     self._format_spec_decode_metrics_str(
                         self.spec_decode_metrics))
 
+            if self.external_cache_service_metrics is not None:
+                logger.info(
+                    "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%",
+                    0 if self.external_cache_service_metrics.total_tokens == 0 else self.external_cache_service_metrics.hit_tokens/self.external_cache_service_metrics.total_tokens * 100,
+                    0 if self.external_cache_service_metrics.total_blocks == 0 else self.external_cache_service_metrics.hit_blocks/self.external_cache_service_metrics.total_blocks * 100,
+                )
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []

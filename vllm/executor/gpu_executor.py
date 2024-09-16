@@ -9,6 +9,7 @@ from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 from vllm.worker.worker_base import WorkerBase, WorkerWrapperBase
+from vllm.worker.vineyard_llm_cache import CacheServiceMetrics
 
 logger = init_logger(__name__)
 
@@ -113,16 +114,21 @@ class GPUExecutor(ExecutorBase):
         """
         return self.driver_worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+    def initialize_cache(self, 
+                         num_gpu_blocks: int, 
+                         num_cpu_blocks: int, 
+                         cache_service_metrics: Optional[CacheServiceMetrics] = None) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
-        logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
-                    num_cpu_blocks)
+        logger.info("# GPU blocks: %d, # CPU blocks: %d cache_service_metrics %s", num_gpu_blocks, num_cpu_blocks, cache_service_metrics)
 
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        self.driver_worker.initialize_cache(
+            num_gpu_blocks, 
+            num_cpu_blocks, 
+            cache_service_metrics = cache_service_metrics)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
