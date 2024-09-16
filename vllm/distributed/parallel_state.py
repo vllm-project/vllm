@@ -205,28 +205,24 @@ class GroupCoordinator:
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
 
-        self.pynccl_comm: Optional[PyNcclCommunicator]
+        self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
             )
-        else:
-            self.pynccl_comm = None
 
-        self.ca_comm: Optional[CustomAllreduce]
+        self.ca_comm: Optional[CustomAllreduce] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
             )
-        else:
-            self.ca_comm = None
 
         from vllm.distributed.device_communicators.tpu_communicator import (
             TpuCommunicator)
-        self.tpu_communicator: Optional[TpuCommunicator]
+        self.tpu_communicator: Optional[TpuCommunicator] = None
         if use_tpu_communicator and self.world_size > 1:
             self.tpu_communicator = TpuCommunicator(group=self.cpu_group)
 
