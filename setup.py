@@ -57,7 +57,7 @@ embed_commit_hash()
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
-envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
+envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
@@ -65,7 +65,9 @@ if not sys.platform.startswith("linux"):
     logger.warning(
         "vLLM only supports Linux platform (including WSL). "
         "Building on %s, "
-        "so vLLM may not be able to run correctly", sys.platform)
+        "so vLLM may not be able to run correctly",
+        sys.platform,
+    )
     VLLM_TARGET_DEVICE = "empty"
 
 MAIN_CUDA_VERSION = "12.1"
@@ -91,7 +93,7 @@ def remove_prefix(text, prefix):
 
 class CMakeExtension(Extension):
 
-    def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
+    def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
         super().__init__(name, sources=[], py_limited_api=True, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
@@ -158,38 +160,38 @@ class cmake_build_ext(build_ext):
             os.path.dirname(self.get_ext_fullpath(ext.name)))
 
         cmake_args = [
-            '-DCMAKE_BUILD_TYPE={}'.format(cfg),
-            '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
-            '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
-            '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
+            "-DCMAKE_BUILD_TYPE={}".format(cfg),
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}".format(outdir),
+            "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}".format(self.build_temp),
+            "-DVLLM_TARGET_DEVICE={}".format(VLLM_TARGET_DEVICE),
         ]
 
         verbose = envs.VERBOSE
         if verbose:
-            cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
+            cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]
 
         if is_sccache_available():
             cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_HIP_COMPILER_LAUNCHER=sccache',
+                "-DCMAKE_C_COMPILER_LAUNCHER=sccache",
+                "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache",
+                "-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache",
+                "-DCMAKE_HIP_COMPILER_LAUNCHER=sccache",
             ]
         elif is_ccache_available():
             cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_HIP_COMPILER_LAUNCHER=ccache',
+                "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+                "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+                "-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache",
+                "-DCMAKE_HIP_COMPILER_LAUNCHER=ccache",
             ]
 
         # Pass the python executable to cmake so it can find an exact
         # match.
-        cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
+        cmake_args += ["-DVLLM_PYTHON_EXECUTABLE={}".format(sys.executable)]
 
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
-        cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
+        cmake_args += ["-DVLLM_PYTHON_PATH={}".format(":".join(sys.path))]
 
         #
         # Setup parallelism and build tool
@@ -197,27 +199,28 @@ class cmake_build_ext(build_ext):
         num_jobs, nvcc_threads = self.compute_num_jobs()
 
         if nvcc_threads:
-            cmake_args += ['-DNVCC_THREADS={}'.format(nvcc_threads)]
+            cmake_args += ["-DNVCC_THREADS={}".format(nvcc_threads)]
 
         if is_ninja_available():
-            build_tool = ['-G', 'Ninja']
+            build_tool = ["-G", "Ninja"]
             cmake_args += [
-                '-DCMAKE_JOB_POOL_COMPILE:STRING=compile',
-                '-DCMAKE_JOB_POOLS:STRING=compile={}'.format(num_jobs),
+                "-DCMAKE_JOB_POOL_COMPILE:STRING=compile",
+                "-DCMAKE_JOB_POOLS:STRING=compile={}".format(num_jobs),
             ]
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
         subprocess.check_call(
-            ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+            cwd=self.build_temp,
+        )
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
         try:
-            subprocess.check_output(['cmake', '--version'])
+            subprocess.check_output(["cmake", "--version"])
         except OSError as e:
-            raise RuntimeError('Cannot find CMake executable') from e
+            raise RuntimeError("Cannot find CMake executable") from e
 
         # Create build directory if it does not exist.
         if not os.path.exists(self.build_temp):
@@ -247,8 +250,8 @@ def _no_device() -> bool:
 
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
-    return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu()))
+    return VLLM_TARGET_DEVICE == "cuda" and has_cuda and not (_is_neuron()
+                                                              or _is_tpu())
 
 
 def _is_hip() -> bool:
@@ -291,10 +294,12 @@ def _build_core_ext() -> bool:
 
 def get_hipcc_rocm_version():
     # Run the hipcc --version command
-    result = subprocess.run(['hipcc', '--version'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True)
+    result = subprocess.run(
+        ["hipcc", "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
 
     # Check if the command was executed successfully
     if result.returncode != 0:
@@ -302,7 +307,7 @@ def get_hipcc_rocm_version():
         return None
 
     # Extract the version using a regular expression
-    match = re.search(r'HIP version: (\S+)', result.stdout)
+    match = re.search(r"HIP version: (\S+)", result.stdout)
     if match:
         # Return the version string
         return match.group(1)
@@ -313,6 +318,7 @@ def get_hipcc_rocm_version():
 
 def get_neuronxcc_version():
     import sysconfig
+
     site_dir = sysconfig.get_paths()["purelib"]
     version_file = os.path.join(site_dir, "neuronxcc", "version",
                                 "__init__.py")
@@ -371,7 +377,8 @@ def get_vllm_version() -> str:
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
-            if "sdist" not in sys.argv: # skip this for source tarball, required for pypi
+            # skip this for source tarball, required for pypi
+            if "sdist" not in sys.argv:
                 version += f"+cu{cuda_version_str}"
     elif _is_hip():
         # Get the HIP version
@@ -429,8 +436,8 @@ def get_requirements() -> List[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
+            if "vllm-flash-attn" in req and not (cuda_major == "12"
+                                                 and cuda_minor == "1"):
                 # vllm-flash-attn is built only for CUDA 12.1.
                 # Skip for other versions.
                 continue
@@ -507,7 +514,7 @@ setup(
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
         "video": ["opencv-python"],  # Required for video processing
-        "audio": ["librosa", "soundfile"]  # Required for audio processing
+        "audio": ["librosa", "soundfile"],  # Required for audio processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
     package_data=package_data,
