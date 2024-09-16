@@ -407,6 +407,10 @@ async def benchmark(
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
         input_requests[0])
+    if backend != "openai-chat" and test_mm_content is not None:
+        # multi-modal benchmark is only available on OpenAI Chat backend.
+        raise ValueError(
+            "Multi-modal content is only supported for OpenAI Chat backend.")
     test_input = RequestFuncInput(
         model=model_id,
         prompt=test_prompt,
@@ -796,26 +800,6 @@ if __name__ == "__main__":
         help="Number of prompts to process.",
     )
     parser.add_argument(
-        "--sharegpt-output-len",
-        type=int,
-        default=None,
-        help="Output length for each request. Overrides the output length "
-        "from the ShareGPT dataset.")
-    parser.add_argument(
-        "--sonnet-input-len",
-        type=int,
-        default=550,
-        help=
-        "Number of input tokens per request, used only for sonnet dataset.",
-    )
-    parser.add_argument(
-        "--sonnet-output-len",
-        type=int,
-        default=150,
-        help=
-        "Number of output tokens per request, used only for sonnet dataset.",
-    )
-    parser.add_argument(
         "--logprobs",
         type=int,
         default=None,
@@ -825,57 +809,6 @@ if __name__ == "__main__":
               "logprob is returned for each token; or (2) if beam search "
               "is enabled 1 logprob per token is computed"),
     )
-    parser.add_argument(
-        "--sonnet-prefix-len",
-        type=int,
-        default=200,
-        help=
-        "Number of prefix tokens per request, used only for sonnet dataset.",
-    )
-    parser.add_argument(
-        "--random-input-len",
-        type=int,
-        default=1024,
-        help=
-        "Number of input tokens per request, used only for random sampling.",
-    )
-    parser.add_argument(
-        "--random-output-len",
-        type=int,
-        default=128,
-        help=
-        "Number of output tokens per request, used only for random sampling.",
-    )
-    parser.add_argument(
-        "--random-range-ratio",
-        type=float,
-        default=1.0,
-        help="Range of sampled ratio of input/output length, "
-        "used only for random sampling.",
-    )
-    parser.add_argument(
-        "--random-prefix-len",
-        type=int,
-        default=0,
-        help="Number of fixed prefix tokens before random "
-        " context. The length range of context in a random "
-        " request is [random-prefix-len, "
-        " random-prefix-len + random-prefix-len * random-range-ratio).")
-    parser.add_argument(
-        "--hf-output-len",
-        type=int,
-        default=None,
-        help="Output length for each request. Overrides the output lengths "
-        "from the sampled HF dataset.",
-    )
-    parser.add_argument("--hf-subset",
-                        type=str,
-                        default=None,
-                        help="Subset of the HF dataset.")
-    parser.add_argument("--hf-split",
-                        type=str,
-                        default=None,
-                        help="Split of the HF dataset.")
     parser.add_argument(
         "--request-rate",
         type=float,
@@ -948,6 +881,85 @@ if __name__ == "__main__":
         "Default value is \"99\". "
         "Use \"--percentile-metrics\" to select metrics.",
     )
+
+    sonnet_group = parser.add_argument_group("sonnet dataset options")
+    sonnet_group.add_argument(
+        "--sonnet-prefix-len",
+        type=int,
+        default=200,
+        help=
+        "Number of prefix tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-input-len",
+        type=int,
+        default=550,
+        help=
+        "Number of input tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-output-len",
+        type=int,
+        default=150,
+        help=
+        "Number of output tokens per request, used only for sonnet dataset.",
+    )
+
+    sharegpt_group = parser.add_argument_group("sharegpt dataset options")
+    sharegpt_group.add_argument(
+        "--sharegpt-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output length "
+        "from the ShareGPT dataset.")
+
+    random_group = parser.add_argument_group("random dataset options")
+    random_group.add_argument(
+        "--random-input-len",
+        type=int,
+        default=1024,
+        help=
+        "Number of input tokens per request, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-output-len",
+        type=int,
+        default=128,
+        help=
+        "Number of output tokens per request, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=1.0,
+        help="Range of sampled ratio of input/output length, "
+        "used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-prefix-len",
+        type=int,
+        default=0,
+        help="Number of fixed prefix tokens before random "
+        " context. The length range of context in a random "
+        " request is [random-prefix-len, "
+        " random-prefix-len + random-prefix-len * random-range-ratio).")
+
+    hf_group = parser.add_argument_group("hf dataset options")
+    hf_group.add_argument(
+        "--hf-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output lengths "
+        "from the sampled HF dataset.",
+    )
+    hf_group.add_argument("--hf-subset",
+                          type=str,
+                          default=None,
+                          help="Subset of the HF dataset.")
+    hf_group.add_argument("--hf-split",
+                          type=str,
+                          default=None,
+                          help="Split of the HF dataset.")
 
     args = parser.parse_args()
     main(args)
