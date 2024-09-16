@@ -477,7 +477,9 @@ class Sequence:
         if not delta:
             return self.output_text[:-buffer_length] if truncate else (
                 self.output_text)
-        length = len(self.output_text) - buffer_length
+        length = len(self.output_text)
+        if truncate:
+            length -= buffer_length
         last_offset = self._last_output_text_offset
         if last_offset < length:
             self._last_output_text_offset = length

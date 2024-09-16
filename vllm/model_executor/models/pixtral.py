@@ -454,7 +454,7 @@ class Transformer(nn.Module):
         return x
 
 
-def position_meshgrid(patch_embeds_list: list[torch.Tensor], ) -> torch.Tensor:
+def position_meshgrid(patch_embeds_list: List[torch.Tensor], ) -> torch.Tensor:
     positions = torch.cat([
         torch.stack(
             torch.meshgrid(
