@@ -135,7 +135,8 @@ def main(args):
               enforce_eager=True,
               use_v2_block_manager=args.use_v2_block_manager,
               tensor_parallel_size=args.tensor_parallel_size,
-              enable_prefix_caching=args.enable_prefix_caching)
+              enable_prefix_caching=args.enable_prefix_caching,
+              enable_chunked_prefill=args.enable_chunked_prefill)
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
@@ -175,6 +176,9 @@ if __name__ == "__main__":
     parser.add_argument('--enable-prefix-caching',
                         action='store_true',
                         help='enable prefix caching')
+    parser.add_argument('--enable-chunked-prefill',
+                        action='store_true',
+                        help='enable chunked prefill')
     parser.add_argument('--use-v2-block-manager',
                         action='store_true',
                         help='Use BlockSpaceMangerV2')

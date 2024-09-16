@@ -992,9 +992,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
-
-        set_cpu_offload_max_bytes(
-            int(self.cache_config.cpu_offload_gb * 1024**3))
+        
         # Delay the initialization of vineyard cache after model loading
         # to ensure the tensor model parallel group is initialized.
         self.vineyard_llm_cache = None
@@ -1002,22 +1000,19 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def _init_vineyard_cache(self):
         if envs.VLLM_USE_VINEYARD_CACHE:
             if not self.scheduler_config.chunked_prefill_enabled:
-                logger.warn("Vineyard LLM cache is not enabled, requires chunked prefill")
-            elif not envs.VLLM_USE_FLASH_ATTN_DECODING:
-                logger.warn("Vineyard LLM cache is not enabled, requires flash attention decoding")
-            else:
-                from vllm.worker.vineyard_llm_cache import VineyardLLMCache
-                self.vineyard_llm_cache: VineyardLLMCache = VineyardLLMCache.from_envs(
-                    model_config=self.model_config,
-                    parallel_config=self.parallel_config,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                    torch_dtype=get_kv_cache_torch_dtype(self.kv_cache_dtype,
-                                                         self.model_config.dtype),
-                )
-                if self.vineyard_llm_cache:
-                    logger.info("Using Vineyard LLM cache")
-                else:
-                    logger.warn("Vineyard LLM cache is failed to be initialized")
+                raise Exception("Vineyard LLM cache is not enabled, requires chunked prefill")
+            if not envs.VLLM_USE_FLASH_ATTN_DECODING:
+                raise Exception("Vineyard LLM cache is not enabled, requires flash attention decoding")
+            
+            from vllm.worker.vineyard_llm_cache import VineyardLLMCache
+            self.vineyard_llm_cache: VineyardLLMCache = VineyardLLMCache.from_envs(
+                model_config=self.model_config,
+                parallel_config=self.parallel_config,
+                kv_cache_dtype=self.kv_cache_dtype,
+                torch_dtype=get_kv_cache_torch_dtype(self.kv_cache_dtype,
+                                                        self.model_config.dtype),
+            )
+            logger.info("Using Vineyard LLM cache")
         else:
             logger.info("Vineyard LLM cache is not enabled")
 
