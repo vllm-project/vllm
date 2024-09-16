@@ -1,8 +1,8 @@
-import os
 import argparse
 import copy
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -427,7 +427,7 @@ if __name__ == "__main__":
 
     output_directory = args.output_directory if args.output_directory else Path(
         args.json_trace).parent
-    
+
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
 
