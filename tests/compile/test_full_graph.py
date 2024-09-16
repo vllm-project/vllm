@@ -2,9 +2,17 @@ import os
 
 import pytest
 
+from vllm.utils import cuda_device_count_stateless
+
 
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
-def test_full_graph(model):
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_full_graph(model, tp_size):
+
+    # Skip the test if there are not enough CUDA devices.
+    if cuda_device_count_stateless() < tp_size:
+        pytest.skip("Not enough CUDA devices for the test.")
+
     # make sure these models can be captured in full graph mode
     if "VLLM_TEST_DYNAMO_GRAPH_CAPTURE" not in os.environ:
         os.environ["VLLM_TEST_DYNAMO_GRAPH_CAPTURE"] = "1"
