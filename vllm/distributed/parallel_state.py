@@ -1056,13 +1056,23 @@ def initialize_model_parallel(
             # decode global rank: i + world_size
             group_ranks.append([i, i + world_size])
         logger.debug("Distributed group is %s", str(group_ranks))
-        _DISAGG = dist_kv.KV_transfer_agent(
-            group_ranks=group_ranks,
-            local_rank=get_world_group().local_rank,
-            torch_distributed_backend=backend,
-        )
-        logger.debug("_DISAGG initialized for rank %d",
-                     torch.distributed.get_rank())
+        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
+            _DISAGG = dist_kv.KV_transfer_agent(
+                group_ranks=group_ranks,
+                local_rank=get_world_group().local_rank,
+                torch_distributed_backend=backend,
+            )
+            logger.debug("_DISAGG initialized for rank %d",
+                        torch.distributed.get_rank())
+        elif dist_kv.IS_LMCACHE_INSTANCE:
+            _DISAGG = dist_kv.KV_transfer_agent(
+                group_ranks=group_ranks,
+                local_rank=get_world_group().local_rank,
+                torch_distributed_backend="gloo",
+            )
+            logger.debug("_DISAGG (LMC) initialized for rank %d",
+                        torch.distributed.get_rank())
+            
 
 
 def ensure_model_parallel_initialized(

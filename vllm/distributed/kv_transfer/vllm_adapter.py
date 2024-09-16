@@ -107,6 +107,7 @@ class KV_transfer_agent:
             self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe,
                                                     self.recv_pipe,
                                                     self.lookup_buffer_size)
+            self.tensor_device = 'cpu'
         else:
             # when performing disaggregated prefill, only 1 pipe is needed
             # at prefill instance this pipe is used for send KV cache
@@ -125,6 +126,8 @@ class KV_transfer_agent:
                                           self.lookup_buffer_size)
             self.send_buffer = buffer
             self.recv_buffer = buffer
+            
+            self.tensor_device = 'cuda'
 
     def send_kv_caches_and_hidden_states(
         self,

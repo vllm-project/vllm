@@ -189,10 +189,11 @@ class TorchDistributedPipe(KVPipeBase):
 
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
-
-        torch.distributed.send(tensor,
+        logger.debug(f"Sent meta {metadata}")
+        torch.distributed.send(tensor.to(self.device),
                                dst=self.target_rank_for_send,
                                group=self.device_group)
+        logger.debug(f"Sent tensor {tensor}")
 
     def _recv_impl(self) -> torch.Tensor:
         """
