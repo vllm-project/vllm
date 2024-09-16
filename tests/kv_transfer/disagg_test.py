@@ -25,7 +25,7 @@ def setup_servers():
     prefill_cmd = [
         sys.executable, "-m", "vllm.entrypoints.openai.api_server", "-tp", "2",
         "--model", "meta-llama/Meta-Llama-3.1-8B-Instruct", "--port", "8100",
-        "--gpu-memory-utilization", "0.8"
+        "--gpu-memory-utilization", "0.8", "--max-model-len", "1000",
     ]
     prefill_env = os.environ.copy()
     prefill_env["VLLM_DISAGG_PREFILL_ROLE"] = "prefill"
@@ -36,7 +36,7 @@ def setup_servers():
     decode_cmd = [
         sys.executable, "-m", "vllm.entrypoints.openai.api_server", "-tp", "2",
         "--model", "meta-llama/Meta-Llama-3.1-8B-Instruct", "--port", "8200",
-        "--gpu-memory-utilization", "0.8"
+        "--gpu-memory-utilization", "0.8", "--max-model-len", "1000",
     ]
     decode_env = os.environ.copy()
     decode_env["VLLM_DISAGG_PREFILL_ROLE"] = "decode"
