@@ -9,8 +9,7 @@ from vllm import SamplingParams
 from ...utils import check_logprobs_close
 
 MODELS = [
-    "mistralai/Mistral-7B-Instruct-v0.1",
-    "mistralai/Mistral-7B-Instruct-v0.3",
+    "mistralai/Mistral-7B-Instruct-v0.1", "mistralai/Mistral-7B-Instruct-v0.3",
     "mistralai/Mistral-Nemo-Instruct-2407"
 ]
 
@@ -49,14 +48,14 @@ TOOLS = [{
     }
 }]
 MSGS = [{
-    "role": "user",
+    "role":
+    "user",
     "content": ("Can you tell me what the temperate"
-        " will be in Dallas, in fahrenheit?")
+                " will be in Dallas, in fahrenheit?")
 }]
 EXPECTED_FUNC_CALL = (
     '[{"name": "get_current_weather", "arguments": '
-    '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]'
-)
+    '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]')
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -137,14 +136,13 @@ def test_mistral_function_calling(
     model: str,
     dtype: str,
 ) -> None:
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            tokenizer_mode="mistral",
-            config_format="mistral",
-            load_format="mistral"
-    ) as vllm_model:
-        outputs = vllm_model.model.chat(MSGS, tools=TOOLS,
+    with vllm_runner(model,
+                     dtype=dtype,
+                     tokenizer_mode="mistral",
+                     config_format="mistral",
+                     load_format="mistral") as vllm_model:
+        outputs = vllm_model.model.chat(MSGS,
+                                        tools=TOOLS,
                                         sampling_params=SAMPLING_PARAMS)
 
         assert outputs[0].outputs[0].text.strip() == EXPECTED_FUNC_CALL
