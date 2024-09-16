@@ -328,7 +328,7 @@ class GroupCoordinator:
          group name as a string, and then look up the group coordinator from
          the group name, dispatch the all-reduce operation to the group
          coordinator.
-        
+
         In addition, PyTorch custom ops do not support mutation or returning
         a new tensor in the same op. So we need to figure out if the op is
         in-place or out-of-place ahead of time.
