@@ -53,13 +53,13 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
             key, value = item.split("=")
         except TypeError as exc:
             msg = "Each item should be in the form KEY=VALUE"
-            raise ValueError(msg) from exc
+            raise argparse.ArgumentTypeError(msg) from exc
 
         try:
             out_dict[key] = int(value)
         except ValueError as exc:
             msg = f"Failed to parse value of item {key}={value}"
-            raise ValueError(msg) from exc
+            raise argparse.ArgumentTypeError(msg) from exc
 
     return out_dict
 
