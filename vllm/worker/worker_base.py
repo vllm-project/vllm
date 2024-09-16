@@ -334,6 +334,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             from vllm.worker.model_runner import GPUModelRunnerBase
             assert isinstance(self.model_runner, GPUModelRunnerBase), \
                 "Distributed KV transfer only support GPU modelrunner"
+            logger.debug("Receiving KV caches")
             hidden_or_intermediate_states, bypass_model_exec, model_input = \
                 ps.get_disagg_group().recv_kv_caches_and_hidden_states(
                     # model is used to know which layer the current worker
@@ -361,6 +362,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             from vllm.worker.model_runner import GPUModelRunnerBase
             assert isinstance(self.model_runner, GPUModelRunnerBase), \
                 "Distributed KV transfer only support GPU modelrunner"
+            logger.debug("Sending KV caches")
             ps.get_disagg_group().send_kv_caches_and_hidden_states(
                 # model is used to know which layer the current worker
                 # is working on, so that we can send KV for only those

@@ -107,6 +107,7 @@ class KV_transfer_agent:
             self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe,
                                                     self.recv_pipe,
                                                     self.lookup_buffer_size)
+            self.tensor_device = 'cpu'
         else:
             # when performing disaggregated prefill, only 1 pipe is needed
             # at prefill instance this pipe is used for send KV cache
@@ -125,6 +126,8 @@ class KV_transfer_agent:
                                           self.lookup_buffer_size)
             self.send_buffer = buffer
             self.recv_buffer = buffer
+            
+            self.tensor_device = 'cuda'
 
     def send_kv_caches_and_hidden_states(
         self,
@@ -247,8 +250,8 @@ class KV_transfer_agent:
 
                 key_cache, value_cache = kv_cache[0], kv_cache[1]
                 ops.reshape_and_cache_flash(
-                    keys[i],
-                    values[i],
+                    keys[i - model_executable.model.start_layer].to(key_cache.device),
+                    values[i - model_executable.model.start_layer].to(value_cache.device),
                     key_cache,
                     value_cache,
                     slot_mapping[start_pos:end_pos],
@@ -266,7 +269,7 @@ class KV_transfer_agent:
             # so we need to recompute the hidden state
             logger.debug("[rank%d]: KV EMPTY recv DONE.",
                          torch.distributed.get_rank())
-            return None, bypass_model_exec, None
+            return None, bypass_model_exec, model_input
 
         if not is_complete:
             rebuilt_model_input = self.build_partial_prefill_input(
@@ -279,7 +282,7 @@ class KV_transfer_agent:
             )
             logger.debug("[rank%d]: KV PARTIAL recv DONE.",
                          torch.distributed.get_rank())
-            return None, bypass_model_exec, rebuilt_model_input
+            return None, False, rebuilt_model_input
 
         # concatenate hidden states from different requests
         hidden_or_intermediate_states = torch.cat(
