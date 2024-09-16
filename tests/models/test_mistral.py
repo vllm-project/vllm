@@ -14,6 +14,8 @@ MODELS = [
 ]
 
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
+
+# for function calling
 TOOLS = [{
     "type": "function",
     "function": {
@@ -45,11 +47,11 @@ TOOLS = [{
         }
     }
 }]
-
 MSGS = [{
     "role": "user",
     "content": "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
 }]
+EXPECTED_FUNC_CALL = '[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]'
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -140,4 +142,4 @@ def test_mistral_function_calling(
         outputs = vllm_model.model.chat(MSGS, tools=TOOLS,
                                         sampling_params=SAMPLING_PARAMS)
 
-        assert outputs[0].outputs[0].text.strip() == ""
+        assert outputs[0].outputs[0].text.strip() == EXPECTED_FUNC_CALL
