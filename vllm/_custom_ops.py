@@ -774,11 +774,11 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                        cu_seq_len: Optional[torch.Tensor],
                        cache_indices : Optional[torch.Tensor],
                        has_initial_state : Optional[torch.Tensor],
-                       x: Optional[torch.Tensor]) -> List[torch.Tensor]:
+                       ssm_states: Optional[torch.Tensor]) -> List[torch.Tensor]:
     return torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_,
                                            delta_bias_, delta_softplus, cu_seq_len,
                                            cache_indices, has_initial_state,
-                                           x)
+                                           ssm_states)
 
 
 # moe

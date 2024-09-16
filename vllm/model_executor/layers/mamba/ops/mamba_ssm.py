@@ -1,5 +1,6 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 
+from typing import Tuple
 import torch
 import triton
 import triton.language as tl
@@ -300,9 +301,42 @@ def selective_scan_fn(u,
                       D=None,
                       z=None,
                       delta_bias=None,
-                      delta_softplus=False):
-    """if return_last_state is True, returns (out, last_state)
-    last_state has shape (batch, dim, dstate). 
+                      delta_softplus=False,
+                      cu_seq_len=None,
+                      cache_indices=None,
+                      has_initial_state=None,
+                      ssm_states=None) -> Tuple[
+                          torch.Tensor,
+                          torch.Tensor
+                      ]:
+    """
+    u: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
+    delta: (dim, cu_seq_len) for varlen or (batch, dim, seqlen)
+    A: (dim, dstate) 
+    B: (ngroups, dstate, cu_seq_len) for varlen or (batch,ngroups,dstate,seqlen)
+    C: (ngroups, dstate, cu_seq_len) for varlen or (batch,ngroups,dstate,seqlen)
+    D: (dim,) 
+    z: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
+    dt_bias: (dim,) or (dim)
+    cu_seq_len: (batch)
+        Cumulative tokens along the last dimension, 
+        sequence lengths are passed through cu_seq_len therefore are required 
+        for variable lengths kernel activation.
+        for example: cu_seq_len = torch.Tensor([10,15,16]) 
+        then u.shape = (dim,16)
+    cache_indices: (batch)
+        A tensor with each cell is a correspondent 
+        input and output ssm_state index
+    has_initial_state: (batch)
+        A tensor populated with ones and zeros, indicate if the ssm_state at the 
+        corresponding index should be used as initial state.
+        Not providing argument assumes there's no initial state
+
+    returns
+        output: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
+                supports inplace replacement
+        last_state has shape (batch, dim, dstate). 
+                supports inplace replacement if ssm_state was provided
     """
     if u.stride(-1) != 1:
         u = u.contiguous()
@@ -316,25 +350,43 @@ def selective_scan_fn(u,
         C = C.contiguous()
     if z is not None and z.stride(-1) != 1:
         z = z.contiguous()
-    if B.dim() == 3:
+    if B.dim() == 3 and cu_seq_len is None:
         B = B.unsqueeze(1)
-    if C.dim() == 3:
+    if B.dim() == 2 and cu_seq_len is not None:
+        B = B.unsqueeze(0)
+    if C.dim() == 3 and cu_seq_len is None:
         C = C.unsqueeze(1)
+    if C.dim() == 2 and cu_seq_len is not None:
+        C = C.unsqueeze(0)
 
-    # if prev_state is None:
-        # prev_state = torch.zeros((
-            # u.shape[0],
-            # u.shape[1],
-            # int(A.shape[1]),
-        # ),
-                        # device=u.device,
-                        # dtype=torch.float32,
-                        # requires_grad=False)
-    out, last_state, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias,
-                                           delta_softplus, position_indices, prev_state)
+    if ssm_states is None:
+        ssm_states = torch.zeros((
+            u.shape[0],
+            u.shape[1],
+            int(A.shape[1]),
+        ),
+                    device=u.device,
+                    dtype=torch.float32,
+                    requires_grad=False)
+
+    out, last_state, *rest = ops.selective_scan_fwd(
+        u,
+        delta,
+        A,
+        B,
+        C,
+        D,
+        z,
+        delta_bias,
+        delta_softplus,
+        cu_seq_len,
+        cache_indices,
+        has_initial_state,
+        ssm_states
+    )
 
     if z is None:
-        return out if not return_last_state else (out, last_state)
+        return out, last_state
     else:
         out_z = rest[0]
-        return out_z if not return_last_state else (out_z, last_state)
+        return out_z, last_state
