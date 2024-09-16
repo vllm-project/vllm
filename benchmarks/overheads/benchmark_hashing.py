@@ -6,7 +6,7 @@ from vllm.utils import FlexibleArgumentParser
 
 # A very long prompt, total number of tokens is about 15k.
 LONG_PROMPT = ["You are an expert in large language models, aren't you?"
-               ] * 1000
+               ] * 100
 LONG_PROMPT = ' '.join(LONG_PROMPT)
 
 
@@ -25,12 +25,14 @@ def main(args):
     print("------warm up------")
     for i in range(3):
         output = llm.generate(LONG_PROMPT, sampling_params)
-        print(output[0].outputs[0].text)
 
+    batched_prompts = [
+        ('' if args.share_prefix else ('%d' % i)) + LONG_PROMPT 
+        for i in range(1000)
+    ]
     print("------start generating------")
-    for i in range(3):
-        profiler.runctx('llm.generate(LONG_PROMPT, sampling_params)',
-                        globals(), locals())
+    profiler.runctx('llm.generate(batched_prompts, sampling_params)',
+                    globals(), locals())
 
     # analyze the runtime of hashing function
     stats = pstats.Stats(profiler)
@@ -38,12 +40,13 @@ def main(args):
     total_time = 0
     total_calls = 0
     for func in stats.stats:
+        # 'hash_of_block' is the hashing function for v1 block manager
+        # and 'hash_block_tokens' is for v2.
         if 'hash_of_block' in func[2] or 'hash_block_tokens' in func[2]:
             total_time = stats.stats[func][3]
             total_calls = stats.stats[func][0]
-    percentage = (total_time / stats.total_tt) * 100
-    print(f"Hashing took {total_time:.2f} seconds,"
-          f"{percentage:.2f}% of the total runtime.")
+    print(f"Hashing time:\t{total_time:.2f} seconds")
+    print(f"Total time:\t{stats.total_tt:.2f} seconds")
 
 
 if __name__ == "__main__":
@@ -59,5 +62,8 @@ if __name__ == "__main__":
     parser.add_argument('--use-v2-block-manager',
                         action='store_true',
                         help='Use BlockSpaceMangerV2')
+    parser.add_argument('--share-prefix',
+                        action='store_true',
+                        help='Share prefix between different prompts.')
     args = parser.parse_args()
     main(args)
