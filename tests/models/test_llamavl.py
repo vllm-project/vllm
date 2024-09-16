@@ -30,6 +30,7 @@ if __name__ == "__main__":
     llm = LLM(model=f"{checkpoint_dir}/Meta-Llama-3.2-{size}-Vision-Early/",
               enforce_eager=True,
               limit_mm_per_prompt={"image": 2},
+              max_num_seqs=16,
               tensor_parallel_size=1,
             #   load_format="dummy"
               )

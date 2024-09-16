@@ -1,3 +1,4 @@
+from array import array
 from dataclasses import dataclass
 from functools import partial
 import itertools
@@ -40,6 +41,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 
 from vllm.transformers_utils.multimodal_processors.llamavl import LlamaVLImageProcessor
 import vllm.distributed.parallel_state as ps
+from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
 
 step_name = "prefill"
 pt_dir = "/home/eecs/zhang-chen/MultiModal/scripts/"
@@ -57,6 +59,7 @@ def check(tensor, file_name): pass
 logger = init_logger(__name__)
 MP_SCALE = 8
 IMAGE_RES = 224
+LLAMA_IMAGE_TOKEN_ID = 128256
 
 class LlamaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -87,19 +90,35 @@ def input_processor_for_llamavl(ctx: InputContext, llm_inputs: LLMInputs):
     token_per_chunk = (ctx.model_config.hf_config.vision_chunk_size // 14) ** 2 + 1
     num_tokens = num_chunks * token_per_chunk
     llm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
-    llm_inputs["encoder_prompt_token_ids"] = [128256] * num_tokens
+    llm_inputs["encoder_prompt_token_ids"] = [LLAMA_IMAGE_TOKEN_ID] * num_tokens
 
     assert "decoder_multi_modal_data" not in llm_inputs, "multi-modal data should be put in encoder message of LLaMA Vision"
 
     return llm_inputs
 
+
+def dummy_seq_data(
+    seq_len: int,
+    num_images: int
+):
+    assert seq_len >= num_images, "seq_len should be greater than or equal to num_images"
+    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                      [LLAMA_IMAGE_TOKEN_ID]) * num_images
+    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                       [0]) * (seq_len - num_images)
+    return SequenceData(token_ids)
+
+
+def dummy_image(
+    num_images: int,
+):
+    width = height = 512
+    image = Image.new("RGB", (width, height), color=0)
+    return {"image": image if num_images == 1 else [image] * num_images}
+
 def dummy_data_for_llamavl(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
-    # seq_len: 16
-    # mm_counts: {'image': 2, 'audio': 1}
-    hf_config = ctx.model_config.hf_config
-    token_per_chunk = (hf_config.vision_chunk_size // 14) ** 2 + 1
-    num_tokens = hf_config.max_num_image * hf_config.vision_max_num_chunks * token_per_chunk
-    import pdb; pdb.set_trace()
+    num_images = mm_counts["image"]
+    return dummy_seq_data(seq_len, num_images), dummy_image(num_images)
 
 def get_max_llama_image_tokens(ctx: InputContext) -> int:
     hf_config = ctx.model_config.hf_config
