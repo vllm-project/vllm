@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from utils import AgentQueue
 
 class TestStep(BaseModel):
+    """This class represents a test step defined in the test configuration file."""
     label: str
     fast_check: bool = False
     commands: List[str] = Field(default_factory=list)
@@ -18,6 +19,7 @@ class TestStep(BaseModel):
     optional: bool = False
 
 class BuildkiteStep(BaseModel):
+    """This class represents a step in Buildkite format."""
     label: str
     key: str
     agents: Dict[str, Any] = {"queue": AgentQueue.AWS_CPU}
@@ -30,12 +32,22 @@ class BuildkiteStep(BaseModel):
     retry: Optional[Dict[str, Any]] = None
 
 class BuildkiteBlockStep(BaseModel):
+    """This class represents a block step in Buildkite format."""
     block: str
     depends_on: Optional[str] = "build"
     key: str
 
 def get_step_key(step_label: str) -> str:
-    return step_label.replace(" ", "-").lower().replace("(", "").replace(")", "").replace("%", "").replace(",", "-")
+    step_key = ""
+    skip_chars = "()%"
+    for char in step_label.lower():
+        if char in " ,":
+            step_key += "-"
+        elif char not in skip_chars:
+            step_key += char
+
+    return step_key
+
 
 def get_block_step(step_label: str) -> BuildkiteBlockStep:
     return BuildkiteBlockStep(block=f"Run {step_label}", key=f"block-{get_step_key(step_label)}")

@@ -77,8 +77,10 @@ def process_step(step: TestStep, run_all: str, list_file_diff: List[str]) -> Lis
 
     def step_should_run():
         """Determine whether the step should automatically run or not."""
-        if not step.source_file_dependencies or run_all == "1" or step.gpu == "a100":
+        if not step.source_file_dependencies or run_all == "1":
             return True
+        if step.gpu == "a100":
+            return False
         return any(source_file in diff_file 
             for source_file in step.source_file_dependencies 
             for diff_file in list_file_diff)
