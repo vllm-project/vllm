@@ -25,8 +25,8 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.4.0%2Bgitfbaa4bc-cp310-cp310-linux_x86_64.whl
 
 ENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
+COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,src=requirements-build.txt,target=requirements-build.txt \
     pip install --upgrade pip && \
     pip install -r requirements-build.txt
 
@@ -47,9 +47,9 @@ FROM cpu-test-1 AS build
 
 WORKDIR /workspace/vllm
 
+COPY requirements-common.txt requirements-common.txt
+COPY requirements-cpu.txt requirements-cpu.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,src=requirements-common.txt,target=requirements-common.txt \
-    --mount=type=bind,src=requirements-cpu.txt,target=requirements-cpu.txt \
     pip install -v -r requirements-cpu.txt
 
 COPY ./ ./
