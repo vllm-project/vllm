@@ -176,7 +176,7 @@ def selective_scan_opcheck_fn(u,
                               position_indices=None,
                               prev_state=None):
     """if return_last_state is True, returns (out, last_state)
-    last_state has shape (batch, dim, dstate). 
+    last_state has shape (batch, dim, dstate).
     """
     if u.stride(-1) != 1:
         u = u.contiguous()

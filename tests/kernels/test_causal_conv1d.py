@@ -42,11 +42,9 @@ def causal_conv1d_ref(
                        bias,
                        padding=width - 1,
                        groups=dim)
-
     else:
         x = torch.cat([initial_states, x], dim=-1)
         out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
-
     out = out[..., :seqlen]
     if return_final_states:
         final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(
@@ -85,7 +83,6 @@ def causal_conv1d_update_ref(x: torch.Tensor,
     out = torch.sum(conv_state * weight, dim=-1)  # (B D)
     if bias is not None:
         out += bias
-
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
 
 

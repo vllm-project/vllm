@@ -52,5 +52,6 @@ def test_full_graph(model_info, backend):
     llm = LLM(model=model, enforce_eager=True, **model_kwargs)
     llm.generate(prompts, sampling_params)
 
-    # Runs insanely slow w/o this
+    # Cleanup dynamo state so new models don't cause lots of
+    # recompilation.
     torch._dynamo.reset()

@@ -965,7 +965,6 @@ def fp8_allclose(
                                   rtol=rtol,
                                   atol=atol)
 
-    # TODO: only if type is fp8
     return bool(
         torch.all(
             torch.isclose(a.double(),

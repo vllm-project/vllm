@@ -6,7 +6,6 @@ from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
 
 
-# TODO: add more shapes?
 @pytest.mark.parametrize("quant_type", [12])
 def test_ggml_opcheck(quant_type):
     block_size, type_size = gguf.GGML_QUANT_SIZES[quant_type]
