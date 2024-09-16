@@ -120,7 +120,8 @@ class WorkerMonitor(threading.Thread):
                     logger.error("Worker %s pid %s died, exit code: %s",
                                  process.name, process.pid, process.exitcode)
             # Cleanup any remaining workers
-            logger.info("Killing local vLLM worker processes")
+            if logger:
+                logger.info("Killing local vLLM worker processes")
             for worker in self.workers:
                 worker.kill_worker()
             # Must be done after worker task queues are all closed
@@ -221,6 +222,8 @@ def _run_worker_process(
             try:
                 executor = getattr(worker, method)
                 output = executor(*args, **kwargs)
+            except KeyboardInterrupt:
+                break
             except BaseException as e:
                 tb = traceback.format_exc()
                 logger.error(

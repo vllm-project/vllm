@@ -1,8 +1,8 @@
-import functools
 import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
@@ -51,7 +51,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device
+from vllm.utils import Counter, Device, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -382,11 +382,16 @@ class LLMEngine:
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
-        self.async_callbacks = [
-            functools.partial(self._process_model_outputs,
-                              ctx=self.scheduler_contexts[v_id])
-            for v_id in range(self.parallel_config.pipeline_parallel_size)
-        ]
+        if model_config.use_async_output_proc:
+            process_model_outputs = weak_bind(self._process_model_outputs)
+
+            self.async_callbacks = [
+                partial(process_model_outputs,
+                        ctx=self.scheduler_contexts[v_id])
+                for v_id in range(self.parallel_config.pipeline_parallel_size)
+            ]
+        else:
+            self.async_callbacks = []
 
         # Currently used by AsyncLLMEngine to ensure quick append
         # of request outputs to asyncio queues
@@ -869,8 +874,8 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
+    @staticmethod
     def _process_sequence_group_outputs(
-        self,
         seq_group: SequenceGroup,
         outputs: List[EmbeddingSequenceGroupOutput],
     ) -> None:
