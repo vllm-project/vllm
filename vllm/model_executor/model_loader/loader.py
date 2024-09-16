@@ -691,6 +691,8 @@ class ShardedStateLoader(BaseModelLoader):
 class BitsAndBytesModelLoader(BaseModelLoader):
     """Model loader to load model weights with BitAndBytes quantization."""
 
+    # TODO: these module names are for Llama only,
+    # change so that it works with other models as well
     default_target_modules = [
         "gate_proj", "down_proj", "up_proj", "q_proj", "k_proj", "v_proj",
         "o_proj"
@@ -924,6 +926,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
                 # weight partitions of different modules occur at
                 # different dimensions
+                # TODO: these module names are for Llama only,
+                # change so that it works with other models as well
                 if 'down_proj' in weight_name or 'o_proj' in weight_name:
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
@@ -993,7 +997,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # weight tensor. So TP does not work with pre_quantized bnb models.
         if pre_quant and get_tensor_model_parallel_world_size() > 1:
             raise ValueError(
-                "Prequant BitsAndBytes models with TP is not supported.")
+                "Prequant BitsAndBytes models with TP is not supported."
+                "Please try with PP.")
 
         load_8bit = False
         if pre_quant:
