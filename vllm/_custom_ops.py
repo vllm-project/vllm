@@ -389,7 +389,8 @@ try:
     @torch.library.register_fake("_C::machete_prepack_B")
     def machete_prepack_B_fake(b_q_weight: torch.Tensor,
                                b_type: ScalarType) -> torch.Tensor:
-        return torch.empty_like(b_q_weight)
+        return torch.empty_like(b_q_weight,
+                                memory_format=torch.contiguous_format)
 
     @torch.library.register_fake("_C::causal_conv1d_fwd")
     def causal_conv1d_fwd_fake(x: torch.Tensor, weight: torch.Tensor,
