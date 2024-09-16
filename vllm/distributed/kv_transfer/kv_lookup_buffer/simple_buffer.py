@@ -169,11 +169,8 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         if isinstance(roi, torch.Tensor):
             roi = roi.clone()
 
-        logger.debug(f"Sending signal {self.normal_signal}")
         self.signal_pipe.send_tensor(self.normal_signal)
-        logger.debug(f"Sending input tokens")
         self.data_pipe.send_tensor(input_tokens)
-        logger.debug(f"Sending roi")
         self.data_pipe.send_tensor(roi)
 
         input_tokens = self.data_pipe.recv_tensor()
