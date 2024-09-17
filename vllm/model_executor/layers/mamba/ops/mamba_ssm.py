@@ -366,7 +366,7 @@ def selective_scan_fn(u,
             int(A.shape[1]),
         ),
                     device=u.device,
-                    dtype=torch.float32,
+                    dtype=u.dtype,
                     requires_grad=False)
 
     out, last_state, *rest = ops.selective_scan_fwd(

@@ -127,7 +127,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + bos * params.B_batch_stride + group_id * params.B_group_stride;
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + bos * params.C_batch_stride + group_id * params.C_group_stride;
-    float *x = reinterpret_cast<float *>(params.x_ptr) + (cache_index * params.dim + dim_id * kNRows) * params.dstate;
+    input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + (cache_index * params.dim + dim_id * kNRows) * params.dstate;
 
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
@@ -242,7 +242,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     }
                 }
                 // Initialize running total
-                scan_t running_prefix = make_float2(1.0, !has_initial_state_bo && chunk == 0 ? 0.0 : x[state_idx]);
+
+                scan_t running_prefix = chunk > 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.0, has_initial_state_bo ? float(x[state_idx]): 0.0);
 
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
@@ -251,7 +252,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // There's a syncthreads in the scan op, so we don't need to sync here.
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
                 if (threadIdx.x == 0) {
-                    x[state_idx] = prefix_op.running_prefix.y;
+                    smem_running_prefix[state_idx] = prefix_op.running_prefix;
+                    if (chunk == n_chunks - 1) {
+                        x[state_idx] = input_t(prefix_op.running_prefix.y);
+                    }
                 }
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
@@ -603,7 +607,7 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     at::Tensor out = delta;
     TORCH_CHECK(ssm_states.has_value(), "ssm_states must be provided, shape required is B dim dstate");
     auto _ssm_states = ssm_states.value();
-    TORCH_CHECK(_ssm_states.scalar_type() == weight_type);
+    TORCH_CHECK(_ssm_states.scalar_type() == input_type);
     TORCH_CHECK(_ssm_states.is_cuda());
     TORCH_CHECK(_ssm_states.stride(-1) == 1);
     CHECK_SHAPE(_ssm_states, batch_size, dim, dstate);
