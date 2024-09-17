@@ -163,13 +163,6 @@ steps:
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
 
-- label: torch compile integration test
-  source_file_dependencies:
-  - vllm/
-  commands:
-    - pytest -v -s ./compile/test_full_graph.py
-    - pytest -v -s ./compile/test_wrapper.py
-
 - label: Prefix Caching Test # 7min
   #mirror_hardwares: [amd]
   source_file_dependencies:
@@ -348,7 +341,10 @@ steps:
   - vllm/executor/
   - vllm/model_executor/models/
   - tests/distributed/
+  - vllm/compilation
   commands:
+  - pytest -v -s ./compile/test_full_graph.py
+  - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
   # Avoid importing model tests that cause CUDA reinitialization error
