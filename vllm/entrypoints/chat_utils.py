@@ -159,7 +159,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.image_token_index)
             if model_type in ("chameleon", "internvl_chat"):
                 return "<image>"
-            if model_type == "llamavl":
+            if model_type == "llamavl" or model_type == "mllama":
                 return "<|image|>"
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|image_pad|><|vision_end|>"
