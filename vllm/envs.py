@@ -69,8 +69,8 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SYNC_SERVER_ACCUM_REQUESTS: int = 1
     VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
-    VLLM_MOE_PADDING: bool = True
-    VLLM_FP8_PADDING: bool = False
+    VLLM_MOE_PADDING: bool = False
+    VLLM_FP8_PADDING: bool = True
 
 
 def get_default_cache_root():
@@ -468,11 +468,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # Pad the weight for moe kernel or not
     "VLLM_MOE_PADDING":
-    lambda: bool(int(os.getenv("VLLM_MOE_PADDING", "1"))),
+    lambda: bool(int(os.getenv("VLLM_MOE_PADDING", "0"))),
 
     # Pad the weight for moe kernel or not
     "VLLM_FP8_PADDING":
-    lambda: bool(int(os.getenv("VLLM_FP8_PADDING", "0"))),
+    lambda: bool(int(os.getenv("VLLM_FP8_PADDING", "1"))),
 }
 
 # end-env-vars-definition
