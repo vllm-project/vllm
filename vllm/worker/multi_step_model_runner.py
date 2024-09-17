@@ -644,9 +644,9 @@ def _pythonize_sampler_output(
         ((sg.sampling_params.prompt_logprobs is not None) and sg.is_prompt)
         for sg in seq_groups
     ])
-    any_logprobs_are_requested = any(
+    any_logprobs_are_requested = prompt_logprobs_are_requested_for_prefill or any(
         [sg.sampling_params.logprobs is not None
-         for sg in seq_groups]) or prompt_logprobs_are_requested_for_prefill
+         for sg in seq_groups])
 
     if prompt_logprobs_are_requested_for_prefill:
         # CPU GPU sync, after gathering *only* sampled tokens (since
