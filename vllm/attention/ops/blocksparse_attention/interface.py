@@ -35,7 +35,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
             use_spda = is_hip() or is_cpu() or not \
                        IS_COMPUTE_8_OR_ABOVE
         device = device or (torch.cuda.current_device()
-                            if torch.cuda.is_available() else "cpu")
+                            if current_platform.is_cuda_available() else "cpu")
         device = torch.device(device)
         # NOTE: vllm CPU backend support BF16 instead of FP16.
         dtype = dtype or (torch.bfloat16 if IS_COMPUTE_8_OR_ABOVE
