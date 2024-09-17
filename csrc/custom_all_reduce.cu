@@ -55,18 +55,6 @@ bool _is_weak_contiguous(torch::Tensor& t) {
           t.numel() * t.element_size());
 }
 
-bool should_custom_ar(torch::Tensor& inp, int64_t max_size, int64_t world_size,
-                      bool full_nvlink) {
-  auto inp_size = inp.numel() * inp.element_size();
-  // custom allreduce requires input byte size to be multiples of 16
-  if (inp_size % 16 != 0) return false;
-  if (!_is_weak_contiguous(inp)) return false;
-  if (world_size == 2 || full_nvlink) return inp_size <= max_size;
-  // for 4 or more non NVLink-capable GPUs, custom allreduce provides little
-  // performance improvement over NCCL.
-  return false;
-}
-
 void _all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                  cudaStream_t stream) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
