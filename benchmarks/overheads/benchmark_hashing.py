@@ -45,6 +45,9 @@ def main(args):
     print(f"Hashing time:\t{total_time:.2f} seconds")
     print(f"Total time:\t{stats.total_tt:.2f} seconds")
 
+    if args.dump_stats is not None:
+        profiler.dump_stats(args.dump_stats)
+
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
@@ -62,5 +65,10 @@ if __name__ == "__main__":
     parser.add_argument('--share-prefix',
                         action='store_true',
                         help='Share prefix between different prompts.')
+    parser.add_argument('--dump-stats',
+                        type=str,
+                        default=None,
+                        required=False,
+                        help='The path to dump the cProfile results.')
     args = parser.parse_args()
     main(args)
