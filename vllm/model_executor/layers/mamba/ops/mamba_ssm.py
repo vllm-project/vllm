@@ -1,6 +1,7 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 
 from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
@@ -305,10 +306,7 @@ def selective_scan_fn(u,
                       cu_seq_len=None,
                       cache_indices=None,
                       has_initial_state=None,
-                      ssm_states=None) -> Tuple[
-                          torch.Tensor,
-                          torch.Tensor
-                      ]:
+                      ssm_states=None) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     u: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
     delta: (dim, cu_seq_len) for varlen or (batch, dim, seqlen)
@@ -328,9 +326,10 @@ def selective_scan_fn(u,
         A tensor with each cell is a correspondent 
         input and output ssm_state index
     has_initial_state: (batch)
-        A tensor populated with ones and zeros, indicate if the ssm_state at the 
-        corresponding index should be used as initial state.
-        Not providing argument assumes there's no initial state
+        A tensor populated with ones and zeros, 
+        indicate if the ssm_state at the corresponding index should be 
+        used as initial state. Not providing argument assumes 
+        there's no initial state
 
     returns
         output: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
@@ -365,25 +364,15 @@ def selective_scan_fn(u,
             u.shape[1],
             int(A.shape[1]),
         ),
-                    device=u.device,
-                    dtype=u.dtype,
-                    requires_grad=False)
+                                 device=u.device,
+                                 dtype=u.dtype,
+                                 requires_grad=False)
 
-    out, last_state, *rest = ops.selective_scan_fwd(
-        u,
-        delta,
-        A,
-        B,
-        C,
-        D,
-        z,
-        delta_bias,
-        delta_softplus,
-        cu_seq_len,
-        cache_indices,
-        has_initial_state,
-        ssm_states
-    )
+    out, last_state, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z,
+                                                    delta_bias, delta_softplus,
+                                                    cu_seq_len, cache_indices,
+                                                    has_initial_state,
+                                                    ssm_states)
 
     if z is None:
         return out, last_state

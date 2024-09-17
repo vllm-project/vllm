@@ -24,7 +24,7 @@ def causal_conv1d_fn(
     bias: (dim,)
     cu_seq_len: (batch)
         tensor contains cumulative input ids sequence lengths
-        for exmaple: cu_seq_len = torch.Tensor([10,16,17]), x.shape=(dim,17)
+        for example: cu_seq_len = torch.Tensor([10,16,17]), x.shape=(dim,17)
     cache_indices: (batch) 
         indicates the corresponding state index, 
         like so: conv_state = conv_states[cache_indices[batch_id]]
@@ -44,13 +44,11 @@ def causal_conv1d_fn(
     bias = bias.contiguous() if bias is not None else None
 
     if conv_states is None:
-        conv_states = torch.empty(
-            x.shape[0],
-            x.shape[1],
-            weight.shape[1] - 1,
-            device=x.device,
-            dtype=x.dtype
-        )
+        conv_states = torch.empty(x.shape[0],
+                                  x.shape[1],
+                                  weight.shape[1] - 1,
+                                  device=x.device,
+                                  dtype=x.dtype)
 
     out = ops.causal_conv1d_fwd(x, weight, bias, conv_states, cu_seq_len,
                                 cache_indices, has_initial_state, activation

@@ -165,13 +165,10 @@ class JambaMambaMixer(nn.Module):
                 self.conv1d.bias,
                 activation=self.activation,
                 conv_states=cache_params.conv_state,
-                has_initial_state=torch.ones(
-                    hidden_states.shape[0],
-                    dtype=torch.int32,
-                    device=hidden_states.device
-                )
-                    if prev_cache_params is not None else None
-            )
+                has_initial_state=torch.ones(hidden_states.shape[0],
+                                             dtype=torch.int32,
+                                             device=hidden_states.device)
+                if prev_cache_params is not None else None)
             # cache_params.conv_state = conv_state
 
         # 3. State Space Model sequence transformation
@@ -217,11 +214,9 @@ class JambaMambaMixer(nn.Module):
                 delta_softplus=True,
                 ssm_states=cache_params.ssm_state,
                 has_initial_state=torch.ones(hidden_states.shape[0],
-                    dtype=torch.int32,
-                    device=hidden_states.device)
-                    if prev_cache_params is not None else None
-
-            )
+                                             dtype=torch.int32,
+                                             device=hidden_states.device)
+                if prev_cache_params is not None else None)
 
         # 4. Final linear projection
         contextualized_states = self.out_proj(scan_outputs.transpose(1, 2))[0]
