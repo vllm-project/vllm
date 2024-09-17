@@ -442,11 +442,12 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # during vLLM memory profiling.
             cross_block_tables = []
             for seq_group_metadata in seq_group_metadata_list:
-                encoder_seq_lens.append(
-                    seq_group_metadata.encoder_seq_data.get_len())
-                cross_block_table = seq_group_metadata.cross_block_table
-                cross_block_tables.append([] if (
-                    cross_block_table is None) else cross_block_table)
+                for _ in enumerate(seq_group_metadata.seq_data.items()):
+                    encoder_seq_lens.append(
+                        seq_group_metadata.encoder_seq_data.get_len())
+                    cross_block_table = seq_group_metadata.cross_block_table
+                    cross_block_tables.append([] if (
+                        cross_block_table is None) else cross_block_table)
 
             if (model_input.attn_metadata is not None
                     and model_input.attn_metadata.use_cuda_graph):
