@@ -6,7 +6,7 @@ import string
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
 
-# This script is an offline demo for running Pixtral.
+# This script is an offline demo for function calling
 #
 # If you want to run a server/client setup, please follow this code:
 #
@@ -23,7 +23,7 @@ from vllm.sampling_params import SamplingParams
 # --header 'Content-Type: application/json' \
 # --header 'Authorization: Bearer token' \
 # --data '{
-#     "model": "mistralai/Pixtral-12B-2409",
+#     "model": "mistralai/Mistral-7B-Instruct-v0.3"
 #     "messages": [
 #       {
 #         "role": "user",
