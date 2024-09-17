@@ -16,6 +16,9 @@ class DeviceCapability(NamedTuple):
     major: int
     minor: int
 
+    def as_version_str(self) -> str:
+        return f"{self.major}.{self.minor}"
+
     def __int__(self) -> int:
         return self.major * 10 + self.minor
 
