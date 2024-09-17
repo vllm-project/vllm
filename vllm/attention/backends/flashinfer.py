@@ -175,7 +175,8 @@ class FlashInferState(AttentionState):
         state._prefill_wrapper = self._get_prefill_wrapper()
         return state
 
-    def graph_capture_get_metadata_for_batch(self, batch_size: int):
+    def graph_capture_get_metadata_for_batch(
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
         assert self._is_graph_capturing
         _indptr_buffer = self._graph_indptr_buffer[:batch_size + 1]
         _last_page_len_buffer = self._graph_last_page_len_buffer[:batch_size]
@@ -237,7 +238,9 @@ class FlashInferState(AttentionState):
         attn_metadata.begin_forward()
         return attn_metadata
 
-    def get_graph_input_buffers(self, attn_metadata):
+    def get_graph_input_buffers(self,
+                                attn_metadata,
+                                is_encoder_decoder_model: bool = False):
         return {
             "slot_mapping":
             attn_metadata.slot_mapping,
@@ -245,7 +248,10 @@ class FlashInferState(AttentionState):
             attn_metadata.num_orig_input_tokens_tensor,
         }
 
-    def prepare_graph_input_buffers(self, input_buffers, attn_metadata):
+    def prepare_graph_input_buffers(self,
+                                    input_buffers,
+                                    attn_metadata,
+                                    is_encoder_decoder_model: bool = False):
         input_buffers["num_orig_input_tokens_tensor"].copy_(
             attn_metadata.num_orig_input_tokens_tensor, non_blocking=True)
         return

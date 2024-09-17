@@ -1,8 +1,8 @@
-import functools
 import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
@@ -26,6 +26,7 @@ from vllm.engine.output_processor.interfaces import (
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
+from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
                          InputRegistry, LLMInputs, PromptInputs)
@@ -50,7 +51,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device
+from vllm.utils import Counter, Device, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -381,11 +382,16 @@ class LLMEngine:
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
-        self.async_callbacks = [
-            functools.partial(self._process_model_outputs,
-                              ctx=self.scheduler_contexts[v_id])
-            for v_id in range(self.parallel_config.pipeline_parallel_size)
-        ]
+        if model_config.use_async_output_proc:
+            process_model_outputs = weak_bind(self._process_model_outputs)
+
+            self.async_callbacks = [
+                partial(process_model_outputs,
+                        ctx=self.scheduler_contexts[v_id])
+                for v_id in range(self.parallel_config.pipeline_parallel_size)
+            ]
+        else:
+            self.async_callbacks = []
 
         # Currently used by AsyncLLMEngine to ensure quick append
         # of request outputs to asyncio queues
@@ -868,8 +874,8 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
+    @staticmethod
     def _process_sequence_group_outputs(
-        self,
         seq_group: SequenceGroup,
         outputs: List[EmbeddingSequenceGroupOutput],
     ) -> None:
@@ -1597,10 +1603,20 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def start_profile(self) -> None:
-        self.model_executor.start_profile()
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes (MultiprocessingGPUExecutor)
+        if type(self.model_executor) == GPUExecutor:
+            self.model_executor.start_profile()
+        else:
+            self.model_executor._run_workers("start_profile")
 
     def stop_profile(self) -> None:
-        self.model_executor.stop_profile()
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes (MultiprocessingGPUExecutor)
+        if type(self.model_executor) == GPUExecutor:
+            self.model_executor.stop_profile()
+        else:
+            self.model_executor._run_workers("stop_profile")
 
     def is_tracing_enabled(self) -> bool:
         return self.tracer is not None
