@@ -11,6 +11,7 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.rpc.client import (AsyncEngineRPCClient,
                                                 RPCClientClosedError)
 from vllm.entrypoints.openai.rpc.server import AsyncEngineRPCServer
+from vllm.sampling_params import SamplingParams
 
 
 @pytest.fixture(scope="function")
@@ -112,7 +113,8 @@ async def test_client_errors_after_closing(monkeypatch, dummy_server,
     with pytest.raises(RPCClientClosedError):
         await client.check_health()
     with pytest.raises(RPCClientClosedError):
-        async for _ in client.generate(None, None, None):
+        async for _ in client.generate("sample prompt", SamplingParams(),
+                                       uuid.uuid4()):
             pass
 
     # But no-ops like aborting will pass
