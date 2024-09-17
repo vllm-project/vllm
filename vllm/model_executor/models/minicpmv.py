@@ -274,6 +274,27 @@ def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
     return seq_data, mm_data
 
 
+def _get_image_bounds(tokenizer, input_ids: torch.Tensor) -> torch.Tensor:
+    start_cond = input_ids == tokenizer.im_start_id
+    end_cond = input_ids == tokenizer.im_end_id
+    if hasattr(tokenizer, "slice_start_id"):
+        start_cond |= (input_ids == tokenizer.slice_start_id)
+        end_cond |= (input_ids == tokenizer.slice_end_id)
+
+    image_start_tokens, = torch.where(start_cond)
+    image_start_tokens += 1
+    image_end_tokens, = torch.where(end_cond)
+    valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
+
+    if valid_image_nums == 0:
+        return torch.zeros((0, 2), device=input_ids.device)
+
+    return torch.hstack([
+        image_start_tokens[:valid_image_nums].unsqueeze(-1),
+        image_end_tokens[:valid_image_nums].unsqueeze(-1),
+    ])
+
+
 def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
@@ -317,6 +338,9 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         new_prompt_chunks.append(text_chunks[-1])
         new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
+
+    multi_modal_data["image_bounds"] = _get_image_bounds(
+        tokenizer, new_token_ids)
 
     llm_inputs = LLMInputs(
         prompt_token_ids=new_token_ids,
@@ -363,10 +387,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
-        # Token ids for image inputs
-        self.im_start_id = self.im_end_id = None
-        self.slice_start_id = self.slice_end_id = None
-
     def get_embedding(
         self,
         input_ids: torch.Tensor,
@@ -398,26 +418,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
 
         return vlm_embedding, vision_hidden_states
 
-    def _get_image_bounds(self, input_ids: torch.Tensor) -> torch.Tensor:
-        start_cond = input_ids == self.im_start_id
-        end_cond = input_ids == self.im_end_id
-        if self.slice_start_id:
-            start_cond |= (input_ids == self.slice_start_id)
-            end_cond |= (input_ids == self.slice_end_id)
-
-        image_start_tokens, = torch.where(start_cond)
-        image_start_tokens += 1
-        image_end_tokens, = torch.where(end_cond)
-        valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
-
-        if valid_image_nums == 0:
-            return torch.zeros((0, 2), device=input_ids.device)
-
-        return torch.hstack([
-            image_start_tokens[:valid_image_nums].unsqueeze(-1),
-            image_end_tokens[:valid_image_nums].unsqueeze(-1),
-        ])
-
     def _parse_and_validate_inputs(
         self,
         input_ids: torch.Tensor,
@@ -425,6 +425,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     ) -> Optional[MiniCPMVImageInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
+        image_bounds = kwargs.pop("image_bounds", [])
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
@@ -460,7 +461,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
             return None
 
         return MiniCPMVImageInputs(
-            image_bounds=self._get_image_bounds(input_ids),
+            image_bounds=image_bounds,
             pixel_values=pixel_values_flat,
             tgt_sizes=torch.stack(tgt_sizes_flat),
         )
@@ -587,9 +588,6 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 0)
 
-        # Reference: https://huggingface.co/openbmb/MiniCPM-V-2/blob/main/modeling_minicpmv.py
-        self.im_start_id, self.im_end_id = 101, 102
-
     def init_llm(
         self,
         config: PretrainedConfig,
@@ -682,9 +680,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 5)
 
-        # Reference: https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/blob/main/tokenization_minicpmv_fast.py
-        self.im_start_id, self.im_end_id = 128010, 128011
-
     def init_llm(
         self,
         config: PretrainedConfig,
@@ -766,10 +761,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
     ):
         super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 6)
-
-        # Reference: https://huggingface.co/openbmb/MiniCPM-V-2_6/blob/main/tokenization_minicpmv_fast.py
-        self.im_start_id, self.im_end_id = 151646, 151647
-        self.slice_start_id, self.slice_end_id = 151656, 151657
 
     def init_llm(
         self,
