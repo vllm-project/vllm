@@ -576,10 +576,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
                 seq_idx][uncomputed_start:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
-                seq_idx][context_len:]
+                seq_idx][uncomputed_start:]
             inter_data.num_orig_input_tokens_list[
                 seq_idx] = inter_data.num_orig_input_tokens_list[seq_idx][
-                    context_len:]
+                    uncomputed_start:]
+            context_len = prefix_cache_len
             inter_data.context_lens[seq_idx] = context_len
             inter_data.query_lens[
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
