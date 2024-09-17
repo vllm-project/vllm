@@ -15,7 +15,7 @@ class PlatformEnum(enum.Enum):
 class DeviceCapability(NamedTuple):
     major: int
     minor: int
-    
+
     def __int__(self) -> int:
         return self.major * 10 + self.minor
 
