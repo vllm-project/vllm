@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
+from typing import ClassVar, List, Optional, Sequence, Tuple, Union, cast, overload
 
 from tqdm import tqdm
 
@@ -348,17 +348,17 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
     
-   def generate_beam_search(
+    def generate_beam_search(
         self,
         prompts: List[str],
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        outputs = self.generate(prompts,
-                                do_sample=False,
-                                max_new_tokens=max_tokens,
-                                num_beams=beam_width,
-                                num_return_sequences=beam_width)
+        beam_search_params = SamplingParams(n=beam_width,
+                                            use_beam_search=True,
+                                            temperature=0.0,
+                                            max_tokens=max_tokens)
+        outputs = self.generate(prompts, beam_search_params)
         for i in range(len(outputs)):
             output_ids, output_str = outputs[i]
             for j in range(len(output_ids)):
