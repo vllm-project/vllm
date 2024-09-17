@@ -8,7 +8,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        return "xla"
+        raise NotImplementedError
 
     @classmethod
     def inference_mode(cls):
