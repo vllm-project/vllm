@@ -258,11 +258,13 @@ class InputRegistry:
         """
         # Determine which kwargs can be leveraged for the input processor
         # and drop + warn for kwargs that are unimplemented.
+        # NOTE: we don't allow override values for ctx/inputs, since doing
+        # so can lead to value collisions etc.
         processor = self._get_model_input_processor(model_config)
         processor_kwargs = self._get_allowed_kwarg_overrides(
             callable=processor,
             overrides=model_config.processor_kwargs,
-        )
+            immutable_kwargs=("ctx", "inputs"))
         return functools.partial(self._process_input,
                                  model_config=model_config,
                                  processor=processor,
@@ -293,6 +295,7 @@ class InputRegistry:
         self,
         callable: Callable,
         overrides: Optional[Dict[str, Any]],
+        immutable_kwargs: Optional[Tuple[str, ...]],
     ) -> Dict[str, Any]:
         """
         Given a callable processor, determine which kwarg overrides provided
@@ -302,6 +305,7 @@ class InputRegistry:
         Args:
             processor: Callable processor which takes 0 or more kwargs.
             model_config: Config which may contain init time processor kwargs.
+            immutable_kwargs: Reserved kwarg keys that can't be overridden.
 
         Returns:
             Dictionary containing the processor kwargs to be wrapped when
@@ -309,6 +313,15 @@ class InputRegistry:
         """
         if not isinstance(overrides, dict):
             return {}
+
+        if immutable_kwargs:
+            for name in immutable_kwargs:
+                if name in overrides:
+                    logger.warning(
+                        "%s is a reserved kwarg and will be dropped "
+                        "from the input processor overrides", name)
+                    del overrides[name]
+
         allowed_kwargs = list(inspect.signature(callable).parameters.keys())
         # Drop any processor_kwargs provided by the user that are
         # not kwarg names accepted by the provided input processor.
@@ -324,4 +337,5 @@ class InputRegistry:
             logger.warning(
                 "The following kwarg overrides are not implemented "
                 "by the input processor and will be dropped: %s", dropped_keys)
+
         return filtered_overrides
