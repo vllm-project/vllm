@@ -22,6 +22,8 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -689,6 +691,8 @@ class ShardedStateLoader(BaseModelLoader):
 class BitsAndBytesModelLoader(BaseModelLoader):
     """Model loader to load model weights with BitAndBytes quantization."""
 
+    # TODO: these module names are for Llama only,
+    # change so that it works with other models as well
     default_target_modules = [
         "gate_proj", "down_proj", "up_proj", "q_proj", "k_proj", "v_proj",
         "o_proj"
@@ -911,13 +915,44 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def _unquantized_generator(self, hf_weights_files, use_safetensors,
                                quant_state_dict) -> Generator:
         from bitsandbytes.functional import quantize_4bit
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
             if any(target_module in weight_name
                    for target_module in self.target_modules):
                 weight_name = weight_name.replace(".weight", ".qweight")
+
+                # weight partitions of different modules occur at
+                # different dimensions
+                # TODO: these module names are for Llama only,
+                # change so that it works with other models as well
+                if 'down_proj' in weight_name or 'o_proj' in weight_name:
+                    total_size = weight_tensor.size(-1)
+                    start_index = total_size // tp_size * tp_rank
+                    end_index = total_size // tp_size * (tp_rank + 1)
+                    weight_sub_tensor = weight_tensor[...,
+                                                      start_index:end_index]
+
+                else:
+                    total_size = weight_tensor.size(0)
+                    start_index = total_size // tp_size * tp_rank
+                    end_index = total_size // tp_size * (tp_rank + 1)
+                    weight_sub_tensor = weight_tensor[start_index:end_index,
+                                                      ...]
+
                 # bitsandbytes requires data in GPU
-                loaded_weight = weight_tensor.cuda().data
+                if weight_sub_tensor.is_cuda:
+                    loaded_weight = weight_sub_tensor
+                else:
+                    loaded_weight = weight_sub_tensor.cuda()
+
+                # remove the following after the issue is fixed:
+                # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1342
+                if loaded_weight.is_contiguous() is False:
+                    loaded_weight = loaded_weight.contiguous()
+
                 with set_default_torch_dtype(torch.float32):
                     processed_weight, quant_state = quantize_4bit(
                         loaded_weight,
@@ -957,6 +992,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 raise ValueError(
                     f"BitsAndBytes loader does not support {quant_method} "
                     "quantization")
+
+        # The quant_states in pre_quantized models cannot work with a split
+        # weight tensor. So TP does not work with pre_quantized bnb models.
+        if pre_quant and get_tensor_model_parallel_world_size() > 1:
+            raise ValueError(
+                "Prequant BitsAndBytes models with TP is not supported."
+                "Please try with PP.")
 
         load_8bit = False
         if pre_quant:
