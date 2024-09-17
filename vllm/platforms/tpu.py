@@ -7,5 +7,9 @@ class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
 
     @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
+        return "xla"
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
