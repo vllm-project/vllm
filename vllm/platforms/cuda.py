@@ -11,7 +11,7 @@ from typing_extensions import ParamSpec
 
 from vllm.logger import init_logger
 
-from .interface import Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
@@ -97,9 +97,10 @@ class CudaPlatform(Platform):
     _enum = PlatformEnum.CUDA
 
     @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> Tuple[int, int]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         physical_device_id = device_id_to_physical_device_id(device_id)
-        return get_physical_device_capability(physical_device_id)
+        major, minor = get_physical_device_capability(physical_device_id)
+        return DeviceCapability(major=major, minor=minor)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

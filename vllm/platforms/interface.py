@@ -1,5 +1,5 @@
 import enum
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple, overload
 
 import torch
 
@@ -10,6 +10,14 @@ class PlatformEnum(enum.Enum):
     TPU = enum.auto()
     CPU = enum.auto()
     UNSPECIFIED = enum.auto()
+
+
+class DeviceCapability(NamedTuple):
+    major: int
+    minor: int
+    
+    def __int__(self) -> int:
+        return self.major * 10 + self.minor
 
 
 class Platform:
@@ -35,8 +43,49 @@ class Platform:
     def get_device_capability(
         cls,
         device_id: int = 0,
-    ) -> Optional[Tuple[int, int]]:
+    ) -> Optional[DeviceCapability]:
         return None
+
+    @classmethod
+    @overload
+    def has_device_capability(
+        cls,
+        capability: Tuple[int, int],
+        *,
+        device_id: int = 0,
+    ) -> bool:
+        ...
+
+    @classmethod
+    @overload
+    def has_device_capability(
+        cls,
+        *,
+        major: int,
+        minor: int = 0,
+        device_id: int = 0,
+    ) -> bool:
+        ...
+
+    @classmethod
+    def has_device_capability(
+        cls,
+        capability: Optional[Tuple[int, int]] = None,
+        *,
+        major: Optional[int] = None,
+        minor: int = 0,
+        device_id: int = 0,
+    ) -> bool:
+        current_capability = cls.get_device_capability(device_id=device_id)
+        if current_capability is None:
+            return False
+
+        if capability is not None:
+            major, minor = capability
+        else:
+            assert major is not None
+
+        return current_capability >= DeviceCapability(major=major, minor=minor)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

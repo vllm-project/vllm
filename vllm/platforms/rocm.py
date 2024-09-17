@@ -1,12 +1,11 @@
 import os
 from functools import lru_cache
-from typing import Tuple
 
 import torch
 
 from vllm.logger import init_logger
 
-from .interface import Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
@@ -22,8 +21,9 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls, device_id: int = 0) -> Tuple[int, int]:
-        return torch.cuda.get_device_capability(device_id)
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+        major, minor = torch.cuda.get_device_capability(device_id)
+        return DeviceCapability(major=major, minor=minor)
 
     @classmethod
     @lru_cache(maxsize=8)

@@ -116,7 +116,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _check_scheme_supported(self,
                                 min_capability: int,
                                 error: bool = True) -> bool:
-        capability = current_platform.get_device_capability()  # type: ignore
+        capability = current_platform.get_device_capability()
 
         if capability is not None:
             capability = capability[0] * 10 + capability[1]
