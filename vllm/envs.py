@@ -393,7 +393,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Time in ms for the zmq client to wait for a response from the backend
     # server for simple data operations
     "VLLM_RPC_TIMEOUT":
-    lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "5000")),
+    lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
