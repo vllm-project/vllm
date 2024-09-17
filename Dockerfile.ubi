@@ -6,8 +6,9 @@ ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
 
 ## Base Layer ##################################################################
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
-ENV PYTHON_VERSION=$PYTHON_VERSION
-ARG PYTHON_VERSION RUN microdnf -y update && \ microdnf install -y \
+ARG PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+RUN microdnf -y update && microdnf install -y \
     python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel \
     && microdnf clean all
 
@@ -28,7 +29,7 @@ ARG PYTHON_VERSION
 
 ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-ENV PYTHON_VERSION=$PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
 RUN microdnf install -y \
     python${PYTHON_VERSION}-devel  && \
     python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && pip install --no-cache -U pip wheel uv && microdnf clean all
@@ -149,6 +150,7 @@ RUN CFLAGS="-O3 -Wall -Werror=format-security -Wno-unused-function -Wp,-D_GLIBCX
 
 ## Release #####################################################################
 FROM python-install AS vllm-openai
+ARG PYTHON_VERSION
 
 WORKDIR /workspace
 
