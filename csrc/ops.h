@@ -223,11 +223,11 @@ std::vector<torch::Tensor> selective_scan_fwd(
                   const c10::optional<torch::Tensor> &has_initial_state,
                   const c10::optional<torch::Tensor> &ssm_states);
 
-at::Tensor causal_conv1d_update(const at::Tensor& x,
-                                const at::Tensor& conv_state,
-                                const at::Tensor& weight,
-                                const c10::optional<at::Tensor>& bias_,
-                                bool silu_activation);
+at::Tensor causal_conv1d_update(
+    const at::Tensor& x, const at::Tensor& conv_state, const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias_, bool silu_activation,
+    const c10::optional<at::Tensor>& cache_seqlens_);
+
 
 at::Tensor causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                   const c10::optional<at::Tensor> &bias_,

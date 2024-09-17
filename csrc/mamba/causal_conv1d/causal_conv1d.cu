@@ -171,7 +171,9 @@ causal_conv1d_update(const at::Tensor &x,
                      const at::Tensor &conv_state,
                      const at::Tensor &weight,
                      const c10::optional<at::Tensor> &bias_,
-                     bool silu_activation) {
+                     bool silu_activation,
+                     const c10::optional<at::Tensor> &cache_seqlens_
+                     ) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -186,10 +188,13 @@ causal_conv1d_update(const at::Tensor &x,
     const auto sizes = x.sizes();
     const int batch_size = sizes[0];
     const int dim = sizes[1];
+    const int seqlen = sizes[2];
     const int width = weight.size(-1);
+    const int conv_state_len = conv_state.size(2);
+    TORCH_CHECK(conv_state_len >= width - 1);
 
-    CHECK_SHAPE(x, batch_size, dim);
-    CHECK_SHAPE(conv_state, batch_size, dim, width);
+    CHECK_SHAPE(x, batch_size, dim, seqlen);
+    CHECK_SHAPE(conv_state, batch_size, dim, conv_state_len);
     CHECK_SHAPE(weight, dim, width);
 
     TORCH_CHECK(width >= 2 && width <= 4, "causal_conv1d only supports width between 2 and 4");
@@ -205,14 +210,26 @@ causal_conv1d_update(const at::Tensor &x,
     at::Tensor out = torch::empty_like(x);
 
     ConvParamsBase params;
-    set_conv_params_fwd(params, batch_size, dim, /*seqlen=*/1, width, x, weight, out,
+    set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
                         bias_.has_value() ? bias_.value().data_ptr() : nullptr,
                         silu_activation,nullptr, nullptr, nullptr);
     params.conv_state_ptr = conv_state.data_ptr();
+    params.conv_state_len = conv_state_len;
     // All stride are in elements, not bytes.
     params.conv_state_batch_stride = conv_state.stride(0);
     params.conv_state_c_stride = conv_state.stride(1);
     params.conv_state_l_stride = conv_state.stride(2);
+
+    if (cache_seqlens_.has_value()) {
+        auto cache_seqlens = cache_seqlens_.value();
+        TORCH_CHECK(cache_seqlens.scalar_type() == torch::kInt32);
+        TORCH_CHECK(cache_seqlens.is_cuda());
+        TORCH_CHECK(cache_seqlens.stride(-1) == 1);
+        CHECK_SHAPE(cache_seqlens, batch_size);
+        params.cache_seqlens = cache_seqlens.data_ptr<int32_t>();
+    } else {
+        params.cache_seqlens = nullptr;
+    }
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -451,7 +468,7 @@ struct Causal_conv1d_update_kernel_traits {
     static_assert(kNBytes == 2 || kNBytes == 4);
 };
 
-template<typename Ktraits>
+template<typename Ktraits, bool kIsCircularBuffer>
 __global__ __launch_bounds__(Ktraits::kNThreads)
 void causal_conv1d_update_kernel(ConvParamsBase params) {
     constexpr int kWidth = Ktraits::kWidth;
@@ -462,6 +479,8 @@ void causal_conv1d_update_kernel(ConvParamsBase params) {
     const int tidx = threadIdx.x;
     const int batch_id = blockIdx.x;
     const int channel_id = blockIdx.y * kNThreads + tidx;
+    if (channel_id >= params.dim) return;
+
     input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + batch_id * params.x_batch_stride
         + channel_id * params.x_c_stride;
     input_t *conv_state = reinterpret_cast<input_t *>(params.conv_state_ptr) + batch_id * params.conv_state_batch_stride
@@ -469,35 +488,70 @@ void causal_conv1d_update_kernel(ConvParamsBase params) {
     weight_t *weight = reinterpret_cast<weight_t *>(params.weight_ptr) + channel_id * params.weight_c_stride;
     input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + batch_id * params.out_batch_stride
         + channel_id * params.out_c_stride;
-    float bias_val = params.bias_ptr == nullptr || channel_id >= params.dim ? 0.f : float(reinterpret_cast<weight_t *>(params.bias_ptr)[channel_id]);
+    float bias_val = params.bias_ptr == nullptr ? 0.f : float(reinterpret_cast<weight_t *>(params.bias_ptr)[channel_id]);
+
+    int state_len = params.conv_state_len;
+    int advance_len = params.seqlen;
+    int cache_seqlen = kIsCircularBuffer ? params.cache_seqlens[batch_id] % state_len : 0;
+    int update_idx = cache_seqlen - (kWidth - 1);
+    update_idx = update_idx < 0 ? update_idx + state_len : update_idx;
 
     float weight_vals[kWidth] = {0};
-    if (channel_id < params.dim) {
-        #pragma unroll
-        for (int i = 0; i < kWidth; ++i) { weight_vals[i] = float(weight[i * params.weight_width_stride]); }
-    }
+    #pragma unroll
+    for (int i = 0; i < kWidth; ++i) { weight_vals[i] = float(weight[i * params.weight_width_stride]); }
 
     float x_vals[kWidth] = {0};
-    if (channel_id < params.dim) {
+    if constexpr (!kIsCircularBuffer) {
+        #pragma unroll 2
+        for (int i = 0; i < state_len - advance_len - (kWidth - 1); ++i) {
+            conv_state[i * params.conv_state_l_stride] = conv_state[(i + advance_len) * params.conv_state_l_stride];
+        }
         #pragma unroll
-        for (int i = 0; i < kWidth - 1; ++i) { x_vals[i] = float(conv_state[(i + 1) * params.conv_state_l_stride]); }
-        x_vals[kWidth - 1] = float(x[0]);
+        for (int i = 0; i < kWidth - 1; ++i) {
+            input_t state_val = conv_state[(state_len - (kWidth - 1) + i) * params.conv_state_l_stride];
+            if (i < advance_len + (kWidth - 1) && state_len - advance_len - (kWidth - 1) + i >= 0) {
+                conv_state[(state_len - advance_len - (kWidth - 1) + i) * params.conv_state_l_stride] = state_val;
+            }
+            x_vals[i] = float(state_val);
+        }
+    } else {
         #pragma unroll
-        for (int i = 0; i < kWidth; ++i) { conv_state[i * params.conv_state_l_stride] = input_t(x_vals[i]); }
+        for (int i = 0; i < kWidth - 1; ++i, update_idx = update_idx + 1 >= state_len ? update_idx + 1 - state_len : update_idx + 1) {
+            input_t state_val = conv_state[update_idx * params.conv_state_l_stride];
+            x_vals[i] = float(state_val);
+        }
     }
-
-    float out_val = bias_val;
-    #pragma unroll
-    for (int i = 0; i < kWidth; ++i) { out_val += weight_vals[i] * x_vals[i]; }
-    if (params.silu_activation) { out_val = out_val / (1 + expf(-out_val)); }
-    if (channel_id < params.dim) { out[0] = input_t(out_val); }
+    #pragma unroll 2
+    for (int i = 0; i < params.seqlen; ++i) {
+        input_t x_val = x[i * params.x_l_stride];
+        if constexpr (!kIsCircularBuffer) {
+            if (i < advance_len && state_len - advance_len + i >= 0) {
+                conv_state[(state_len - advance_len + i) * params.conv_state_l_stride] = x_val;
+            }
+        } else {
+            conv_state[update_idx * params.conv_state_l_stride] = x_val;
+            ++update_idx;
+            update_idx = update_idx >= state_len ? update_idx - state_len : update_idx;
+        }
+        x_vals[kWidth - 1] = float(x_val);
+        float out_val = bias_val;
+        #pragma unroll
+        for (int j = 0; j < kWidth; ++j) { out_val += weight_vals[j] * x_vals[j]; }
+        if (params.silu_activation) { out_val = out_val / (1 + expf(-out_val)); }
+        out[i * params.out_l_stride] = input_t(out_val);
+        // Shift the input buffer by 1
+        #pragma unroll
+        for (int i = 0; i < kWidth - 1; ++i) { x_vals[i] = x_vals[i + 1]; }
+    }
 }
 
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
 void causal_conv1d_update_launch(ConvParamsBase &params, cudaStream_t stream) {
     using Ktraits = Causal_conv1d_update_kernel_traits<kNThreads, kWidth, input_t, weight_t>;
     dim3 grid(params.batch, (params.dim + kNThreads - 1) / kNThreads);
-    auto kernel = &causal_conv1d_update_kernel<Ktraits>;
+    auto kernel = params.cache_seqlens == nullptr
+        ? &causal_conv1d_update_kernel<Ktraits, false>
+        : &causal_conv1d_update_kernel<Ktraits, true>;
     kernel<<<grid, Ktraits::kNThreads, 0, stream>>>(params);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
