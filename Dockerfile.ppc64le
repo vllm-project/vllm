@@ -15,7 +15,7 @@ COPY ./ /workspace/
 WORKDIR /workspace/
 
 # These packages will be in rocketce eventually
-RUN pip install -v cmake xformers torch==2.4.0 uvloop==0.20.0 -r requirements-build.txt -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
+RUN pip install -v cmake xformers torch==2.4.0 uvloop==0.20.0 -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
 
 RUN VLLM_TARGET_DEVICE=cpu pip install -e . --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
 
