@@ -135,7 +135,7 @@ class GroupCoordinator:
         assert self.cpu_group is not None
         assert self.device_group is not None
 
-        if current_platform.is_cuda_available():
+        if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
             self.device = torch.device("cpu")

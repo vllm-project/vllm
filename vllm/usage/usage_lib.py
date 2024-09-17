@@ -152,7 +152,7 @@ class UsageMessage:
                            usage_context: UsageContext,
                            extra_kvs: Dict[str, Any]) -> None:
         # Platform information
-        if current_platform.is_cuda_available():
+        if current_platform.is_cuda_alike():
             device_property = torch.cuda.get_device_properties(0)
             self.gpu_count = torch.cuda.device_count()
             self.gpu_type = device_property.name

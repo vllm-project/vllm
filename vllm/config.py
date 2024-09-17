@@ -1065,7 +1065,7 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if current_platform.is_cuda_available():
+            if current_platform.is_cuda_alike():
                 self.device_type = "cuda"
             elif is_neuron():
                 self.device_type = "neuron"

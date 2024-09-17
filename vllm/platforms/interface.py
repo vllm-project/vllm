@@ -36,7 +36,7 @@ class Platform:
         return self._enum == PlatformEnum.CPU
 
     @classmethod
-    def is_cuda_available(cls) -> bool:
+    def is_cuda_alike(cls) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return False
 

@@ -20,7 +20,7 @@ class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
 
     @classmethod
-    def is_cuda_available(cls) -> bool:
+    def is_cuda_alike(cls) -> bool:
         return True
 
     @classmethod

@@ -97,7 +97,7 @@ class CudaPlatform(Platform):
     _enum = PlatformEnum.CUDA
 
     @classmethod
-    def is_cuda_available(cls) -> bool:
+    def is_cuda_alike(cls) -> bool:
         return True
 
     @classmethod

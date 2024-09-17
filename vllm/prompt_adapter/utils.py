@@ -16,7 +16,7 @@ SAFETENSORS_WEIGHTS_NAME = "adapter_model.safetensors"
 
 # Get current device name based on available devices
 def infer_device() -> str:
-    if current_platform.is_cuda_available():
+    if current_platform.is_cuda_alike():
         return "cuda"
     return "cpu"
 
