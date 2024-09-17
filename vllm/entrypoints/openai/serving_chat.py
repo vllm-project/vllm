@@ -123,7 +123,8 @@ class OpenAIServingChat(OpenAIServing):
             ]
 
             prompt: Union[str, List[int]]
-            if isinstance(tokenizer, MistralTokenizer):
+            is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
+            if is_mistral_tokenizer:
                 prompt = apply_mistral_chat_template(
                     tokenizer,
                     messages=request.messages,
@@ -159,10 +160,10 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(
                 "tool_choice = \"required\" is not supported!")
 
-            # "auto" tools requires --enable-auto-tool-choice
-            # and --tool-call-parser
-        if request.tool_choice == "auto" and not (
+        if not is_mistral_tokenizer and request.tool_choice == "auto" and not (
                 self.enable_auto_tools and self.tool_parser is not None):
+            # for hf tokenizers, "auto" tools requires
+            # --enable-auto-tool-choice and --tool-call-parser
             return self.create_error_response(
                 "\"auto\" tool choice requires "
                 "--enable-auto-tool-choice and --tool-call-parser to be set")
