@@ -6,6 +6,6 @@ from .interface import Platform, PlatformEnum
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
 
-    @staticmethod
-    def inference_mode():
+    @classmethod
+    def inference_mode(cls):
         return torch.no_grad()
