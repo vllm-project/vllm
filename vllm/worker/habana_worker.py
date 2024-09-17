@@ -157,7 +157,7 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
 
         cache_block_size = self.get_cache_block_size_bytes()
         graph_reserved_mem = (float(
-            os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.4'))
+            os.environ.get('VLLM_GRAPH_RESERVED_MEM', '0.1'))
                               if not self.model_config.enforce_eager else 0)
         graph_headroom = 1 - graph_reserved_mem
         available_hpu_memory = free_hpu_memory * \
