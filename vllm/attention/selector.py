@@ -203,8 +203,7 @@ def which_attn_to_use(
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:
-            current_capability = current_platform.get_device_capability()
-            if current_capability is None or current_capability.major != 9:
+            if not current_platform.has_device_capability(major=9):
                 # not Instinct series GPUs.
                 logger.info("flash_attn is not supported on NAVI GPUs.")
         else:
