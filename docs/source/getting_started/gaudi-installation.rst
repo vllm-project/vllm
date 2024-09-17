@@ -76,13 +76,13 @@ Supported Features
 -  Tensor parallelism support for multi-card inference
 -  Inference with `HPU Graphs <https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html>`__
    for accelerating low-batch latency and throughput
+-  Attention with Linear Biases (ALiBi)
 
 Unsupported Features
 ====================
 
 -  Beam search
 -  LoRA adapters
--  Attention with Linear Biases (ALiBi)
 -  Quantization (AWQ, FP8 E5M2, FP8 E4M3)
 -  Prefill chunking (mixed-batch inferencing)
 
