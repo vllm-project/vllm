@@ -122,7 +122,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             if is_prompt:
                 # tokens
                 prompt_tokens = seq_data.get_token_ids()
-                input_tokens.extend(prompt_tokens)
+                input_tokens.append(prompt_tokens)
                 
                 # positions
                 prompt_len = len(prompt_tokens)
@@ -141,14 +141,21 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             block_tables.append(block_table)
                 
         block_tables = make_tensor_with_pad(
-            block_tables, 
-            dtype=torch.int32, 
-            device="cpu", 
+            block_tables,
+            dtype=torch.int32,
+            device="cpu",
             pad=0
         )
-                
-                
-        input_tokens = torch.tensor(input_tokens, dtype=torch.int32, device="cpu")
+        
+        if is_prompt:
+            input_tokens = make_tensor_with_pad(
+                input_tokens, 
+                dtype=torch.int32, 
+                device="cpu", 
+                pad=0
+            )
+        else:
+            input_tokens = torch.tensor(input_tokens, dtype=torch.int32, device="cpu")
         input_positions = torch.tensor(input_positions, dtype=torch.int32, device="cpu")
         if is_prompt:
             prompt_lens = torch.tensor(prompt_lens,
@@ -179,26 +186,19 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         is_prompt = model_input.prompt_lens is not None  # prefill if True, otherwise decode
 
         if is_prompt:
+            input_tokens = model_input.input_tokens
             input_positions = 0
-            # Currently only support same prompt length
-            assert torch.all(model_input.prompt_lens == model_input.prompt_lens[0]), "Currently only supporting same prompt lengths for prefill"
-            batch_size = model_input.prompt_lens.shape[0]
         else:
-            # Currently only support same decode positions
-            input_positions = model_input.input_positions[0].item()
-            assert torch.all(model_input.input_positions == input_positions), "Currently only supporting same input positions for decode"
-            batch_size = model_input.input_tokens.shape[0]
-        
-        # TODO: Need better smarts to deconcat the input tokens
-        input_tokens = model_input.input_tokens.view(batch_size, -1)
+            input_tokens = model_input.input_tokens.view(-1, 1)
+            input_positions = model_input.input_positions
         
         execute_model_kwargs = {
             "tokens": input_tokens,
             "start_pos": input_positions,
             "page_table": model_input.block_tables,
             "kv_cache": kv_caches,
+            "prompt_lens": model_input.prompt_lens,
         }
-        
         
         logits = self.model.forward(**execute_model_kwargs)  # [batch_size, seq_len, vocab_size]
 

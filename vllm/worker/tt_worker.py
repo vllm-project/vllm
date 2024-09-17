@@ -77,7 +77,7 @@ class TTCacheEngine:
         # K and V each have the following shape: (num_blocks, num_kv_heads, block_size, head_size)
         kv_cache_shape = (num_blocks, self.num_kv_heads, self.block_size, self.head_size)
         kv_cache: List[torch.Tensor] = []
-        num_layers = self.num_attention_layers 
+        num_layers = self.num_attention_layers
         if device == "cpu":
             for _ in range(num_layers):
                 # null block in CpuGpuBlockAllocator requires at least that
@@ -91,10 +91,8 @@ class TTCacheEngine:
                                       device=device)
                 kv_cache.append([cache_k, cache_v])
         else:
+            cache_kv = torch.zeros(kv_cache_shape, dtype=self.dtype)
             for _ in range(num_layers):
-                cache_k = torch.zeros(kv_cache_shape, dtype=self.dtype)
-                cache_v = torch.zeros(kv_cache_shape, dtype=self.dtype)
-                
                 kv_tt = [ttnn.as_tensor(
                     lp,
                     device=self.device_config.device,
@@ -104,7 +102,7 @@ class TTCacheEngine:
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     dtype=ttnn.bfloat8_b
                     # TODO: Add caching to speed this up
-                ) for lp in (cache_k, cache_v)]
+                ) for lp in (cache_kv, cache_kv)]
                 
                 kv_cache.append(kv_tt)
         return kv_cache
@@ -233,7 +231,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # TODO: Add proper implementation, ignoring block allocation for now
         # Note: can use --max-num-batched-tokens to set max number of batched tokens per iteration in EngineArgs
         # num_tt_blocks = int(self.scheduler_config.max_model_len / self.cache_config.block_size)
-        num_tt_blocks = 501 # TODO: debugging 
+        num_tt_blocks = 128  # TODO: debugging
         num_cpu_blocks = 0
         return num_tt_blocks, num_cpu_blocks
 
