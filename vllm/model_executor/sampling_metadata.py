@@ -1,4 +1,3 @@
-import random
 from array import array
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -8,15 +7,10 @@ import torch
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData,
                            SequenceGroupMetadata)
-from vllm.triton_utils.sample import get_num_triton_sampler_splits
 from vllm.utils import (PyObjectCache, async_tensor_h2d,
-                        is_pin_memory_available, make_tensor_with_pad,
-                        maybe_expand_dim)
+                        is_pin_memory_available, make_tensor_with_pad)
 
 _SAMPLING_EPS = 1e-5
-_SEED_0_REPLACEMENT = 3403598558
-# Some triton sampler related code is guarded before it is ready.
-_USE_TRITON_SAMPLER = False
 
 
 @dataclass
@@ -74,12 +68,12 @@ def gen_seq_group_to_sample_builder(num_seqs: int):
         generator=None,
         is_prompt=True,
         prompt_logprob_indices=[],
-        sample_indices=[])
+        sample_indices=[],
+    )
 
 
 class SamplingMetadataCache:
-    """Used to cache SamplingMetadata objects between scheduler iterations
-    """
+    """Used to cache SamplingMetadata objects between scheduler iterations"""
 
     def __init__(self):
         self._seq_group_to_sample_cache: Dict[int, PyObjectCache] = {}
@@ -124,12 +118,12 @@ class SamplingMetadata:
             The first tuple is [1, 2] (sampled index within original logit),
             and the second tuple is [0, 1] (sampled index within pruned logit).
         num_prompts: Number of prompt sequence groups in seq_groups.
-        skip_sampler_cpu_output: Indicates if we want to skip the GPU=>CPU 
+        skip_sampler_cpu_output: Indicates if we want to skip the GPU=>CPU
             serialization of token outputs.
-        reuse_sampling_tensors: Indicates if we want to reuse sampling 
+        reuse_sampling_tensors: Indicates if we want to reuse sampling
             tensors that are part of the sampler forward pass. Currently,
             it is mainly used for multi-step decode.
-            
+
     """
 
     def __init__(
@@ -165,16 +159,19 @@ class SamplingMetadata:
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
                                 device, generators, cache)
-        selected_token_indices = async_tensor_h2d(selected_token_indices,
-                                                  dtype=torch.long,
-                                                  target_device=device,
-                                                  pin_memory=pin_memory)
+        selected_token_indices = async_tensor_h2d(
+            selected_token_indices,
+            dtype=torch.long,
+            target_device=device,
+            pin_memory=pin_memory,
+        )
         categorized_sample_indices = {
-            t: maybe_expand_dim(
-                async_tensor_h2d(seq_ids,
-                                 dtype=torch.int,
-                                 target_device=device,
-                                 pin_memory=pin_memory), 2, 2)
+            t: async_tensor_h2d(
+                seq_ids,
+                dtype=torch.int,
+                target_device=device,
+                pin_memory=pin_memory,
+            )
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -201,8 +198,8 @@ def _prepare_seq_groups(
     device: str,
     generators: Optional[Dict[str, torch.Generator]] = None,
     cache: Optional[SamplingMetadataCache] = None,
-) -> Tuple[List[SequenceGroupToSample], List[int], Dict[
-        SamplingType, List[Tuple[int, int]]], int]:
+) -> Tuple[List[SequenceGroupToSample], List[int], Dict[SamplingType,
+                                                        List[int]], int, ]:
     """Prepare sequence groups and indices for sampling.
 
     Args:
@@ -233,16 +230,13 @@ def _prepare_seq_groups(
     # Sampling type -> (
     # indices to sample/prompt logprob within pruned output logits,
     # indices to sample within pruned logits)
-    categorized_sample_indices: Dict[SamplingType, List[Tuple[int, int]]] = {
+    categorized_sample_indices: Dict[SamplingType, List[int]] = {
         t: []
         for t in SamplingType
     }
     # Index of logits to compute logprob. Logits include both prompt logprob
     # and sample logprob indices.
     logit_idx = 0
-    # Index to sample from a sample tensor. It is used by triton sample kernel.
-    # See `_sample_with_triton_kernel` for more details.
-    sample_idx = 0
     # Total number of prompts from given sequence groups.
     num_prompts = 0
 
@@ -264,10 +258,10 @@ def _prepare_seq_groups(
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
         query_len: Optional[int] = None
-        prompt_logprob_indices: List[int] = \
-            sample_obj.prompt_logprob_indices if cache is not None else []
-        sample_indices: List[int] = \
-            sample_obj.sample_indices if cache is not None else []
+        prompt_logprob_indices: List[int] = (sample_obj.prompt_logprob_indices
+                                             if cache is not None else [])
+        sample_indices: List[int] = (sample_obj.sample_indices
+                                     if cache is not None else [])
         do_sample = seq_group_metadata.do_sample
 
         if seq_group_metadata.is_prompt:
@@ -333,11 +327,8 @@ def _prepare_seq_groups(
         if do_sample:
             sample_indices.extend(range(logit_idx, logit_idx + sample_len))
             categorized_sample_indices[sampling_params.sampling_type].extend(
-                list(
-                    zip(range(logit_idx, logit_idx + sample_len),
-                        range(sample_idx, sample_idx + sample_len))))
+                list(range(logit_idx, logit_idx + sample_len)))
             logit_idx += sample_len
-            sample_idx += sample_len
 
         if cache is not None:
             sample_obj.sampling_params = sampling_params
@@ -356,7 +347,8 @@ def _prepare_seq_groups(
                 generator=generator,
                 is_prompt=is_prompt,
                 prompt_logprob_indices=list(prompt_logprob_indices),
-                sample_indices=list(sample_indices))
+                sample_indices=list(sample_indices),
+            )
 
         seq_groups.append(sample_obj)
 
@@ -378,9 +370,6 @@ class SamplingTensors:
     presence_penalties: torch.Tensor
     frequency_penalties: torch.Tensor
     repetition_penalties: torch.Tensor
-    sampling_seeds: torch.Tensor
-    sample_indices: torch.Tensor
-    extra_seeds: Optional[torch.Tensor]
     prompt_tokens: torch.Tensor
     output_tokens: torch.Tensor
 
@@ -391,15 +380,7 @@ class SamplingTensors:
         vocab_size: int,
         device: torch.device,
         dtype: torch.dtype,
-        *,
-        extra_seeds_to_generate: int = 0,
-        extra_entropy: Optional[Tuple[int, ...]] = None
     ) -> Tuple["SamplingTensors", bool, bool, bool]:
-        """
-        extra_seeds_to_generate: extra seeds to generate using the
-            user-defined seed for each sequence.
-        extra_entropy: extra entropy to use when generating seeds.
-        """
         prompt_tokens: List[array] = []
         output_tokens: List[array] = []
         top_ks: List[int] = []
@@ -409,18 +390,9 @@ class SamplingTensors:
         presence_penalties: List[float] = []
         frequency_penalties: List[float] = []
         repetition_penalties: List[float] = []
-        sampling_seeds: List[int] = []
-        sample_indices: List[int] = []
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
-
-        if _USE_TRITON_SAMPLER:
-            prompt_best_of: List[int] = []
-
-            # We need one base seed per Triton slice.
-            seeds_to_generate = (extra_seeds_to_generate +
-                                 get_num_triton_sampler_splits(vocab_size))
 
         assert sampling_metadata.seq_groups is not None
         for seq_group in sampling_metadata.seq_groups:
@@ -452,7 +424,7 @@ class SamplingTensors:
                 do_penalties = True
 
             is_prompt = seq_group.is_prompt
-            if (is_prompt and sampling_params.prompt_logprobs is not None):
+            if is_prompt and sampling_params.prompt_logprobs is not None:
                 # For tokens in the prompt that we only need to get
                 # their logprobs
                 query_len = seq_group.query_len
@@ -477,28 +449,6 @@ class SamplingTensors:
                 frequency_penalties += [f] * len(seq_ids)
                 repetition_penalties += [r] * len(seq_ids)
 
-            if _USE_TRITON_SAMPLER:
-                if is_prompt:
-                    prompt_best_of.append(sampling_params.best_of)
-                    query_len = seq_group.query_len
-                    assert query_len is not None
-
-                seed = sampling_params.seed
-                is_greedy = sampling_params.sampling_type == SamplingType.GREEDY
-
-                for seq_id in seq_ids:
-                    seq_data = seq_group.seq_data[seq_id]
-                    extra_entropy = extra_entropy or ()
-                    seq_seeds = cls._get_sequence_seeds(
-                        seed,
-                        seq_data.get_len(),
-                        *extra_entropy,
-                        seq_id,
-                        seeds_to_generate=seeds_to_generate,
-                        is_greedy=is_greedy)
-                    sampling_seeds.append(seq_seeds)
-                sample_indices.extend(seq_group.sample_indices)
-
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
                 seq_ids = seq_group.seq_ids
@@ -518,23 +468,37 @@ class SamplingTensors:
                         output_tokens.append(seq_data.output_token_ids_array)
 
         sampling_tensors = SamplingTensors.from_lists(
-            temperatures, top_ps, top_ks, min_ps, presence_penalties,
-            frequency_penalties, repetition_penalties, sampling_seeds,
-            sample_indices, prompt_tokens, output_tokens, vocab_size,
-            extra_seeds_to_generate, device, dtype)
+            temperatures,
+            top_ps,
+            top_ks,
+            min_ps,
+            presence_penalties,
+            frequency_penalties,
+            repetition_penalties,
+            prompt_tokens,
+            output_tokens,
+            vocab_size,
+            device,
+            dtype,
+        )
         return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
 
     @classmethod
-    def from_lists(cls, temperatures: List[float], top_ps: List[float],
-                   top_ks: List[int], min_ps: List[float],
-                   presence_penalties: List[float],
-                   frequency_penalties: List[float],
-                   repetition_penalties: List[float],
-                   sampling_seeds: List[int], sample_indices: List[int],
-                   prompt_tokens: List[array], output_tokens: List[array],
-                   vocab_size: int, extra_seeds_to_generate: int,
-                   device: torch.device,
-                   dtype: torch.dtype) -> "SamplingTensors":
+    def from_lists(
+        cls,
+        temperatures: List[float],
+        top_ps: List[float],
+        top_ks: List[int],
+        min_ps: List[float],
+        presence_penalties: List[float],
+        frequency_penalties: List[float],
+        repetition_penalties: List[float],
+        prompt_tokens: List[array],
+        output_tokens: List[array],
+        vocab_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
         pin_memory = is_pin_memory_available()
@@ -603,33 +567,8 @@ class SamplingTensors:
             dtype=torch.int,
             pin_memory=pin_memory,
         )
-        sample_indices_t = torch.tensor(
-            sample_indices,
-            device="cpu",
-            dtype=torch.long,
-            pin_memory=pin_memory,
-        )
-        # need to transpose and make contiguous to
-        # copy the tensor correctly.
-        # [batch_size, n_seeds] -> [n_seeds, batch_size]
-        sampling_seeds_t = torch.tensor(
-            sampling_seeds,
-            device="cpu",
-            dtype=torch.long,
-            pin_memory=pin_memory,
-        ).t().contiguous()
-
         # Because the memory is pinned, we can do non-blocking
         # transfer to device.
-
-        # How many seeds the sample operation itself will need.
-        num_base_seeds = sampling_seeds_t.shape[0] - extra_seeds_to_generate
-        sampling_seeds_gpu = sampling_seeds_t.to(device=device,
-                                                 non_blocking=True)
-        extra_seeds_gpu = sampling_seeds_gpu[num_base_seeds:]
-        if not extra_seeds_gpu.numel():
-            extra_seeds_gpu = None
-        sampling_seeds_gpu = sampling_seeds_gpu[:num_base_seeds]
 
         return cls(
             temperatures=temperatures_t.to(device=device, non_blocking=True),
@@ -644,38 +583,4 @@ class SamplingTensors:
                                                            non_blocking=True),
             prompt_tokens=prompt_t.to(device=device, non_blocking=True),
             output_tokens=output_t.to(device=device, non_blocking=True),
-            sampling_seeds=sampling_seeds_gpu,
-            sample_indices=sample_indices_t.to(device=device,
-                                               non_blocking=True),
-            extra_seeds=extra_seeds_gpu,
         )
-
-    @staticmethod
-    def _get_sequence_seeds(
-        seed: int,
-        *extra_entropy: int,
-        seeds_to_generate: int,
-        is_greedy: bool,
-    ):
-        """Get `seeds_to_generate` child seeds from `seed` and extra entropy."""
-        if not is_greedy:
-            if seed is None:
-                randint_fn = random.randint
-            else:
-                generator = random.Random(str((seed, ) + extra_entropy))
-                randint_fn = generator.randint
-            lo, hi = torch.iinfo(torch.long).min, torch.iinfo(torch.long).max
-            # If the user/random sets seed = 0 but request should
-            # have sampling, we need to change it to something
-            # else. We use a constant in that case.
-            # This way we don't need to create and load a bool
-            # matrix in the sampling kernel, which reduces CPU
-            # overhead and latency.
-            seq_seeds = [
-                randint_fn(lo, hi) or _SEED_0_REPLACEMENT
-                for _ in range(seeds_to_generate)
-            ]
-        else:
-            # For the kernel, seed == 0 means greedy decoding.
-            seq_seeds = [0] * seeds_to_generate
-        return seq_seeds
