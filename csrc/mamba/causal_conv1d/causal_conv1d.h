@@ -36,6 +36,10 @@ struct ConvParamsBase {
 
     void *__restrict__ conv_state_ptr;
 
+    // For the continuous batching case. Makes it so that the mamba state for 
+    // the current batch doesn't need to be a contiguous tensor.
+    int32_t *__restrict__ conv_state_indices_ptr;
+
     void *__restrict__ seq_idx_ptr;
 
     // No __restrict__ since initial_states could be the same as final_states.

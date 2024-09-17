@@ -279,8 +279,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "causal_conv1d_update(Tensor! x,"
       "Tensor! conv_state,"
       "Tensor! weight,"
-      "Tensor? bias_,"
-      "bool silu_activation) -> Tensor");
+      "Tensor? bias,"
+      "bool silu_activation,"
+      "Tensor? conv_state_indices) -> Tensor");
   ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
 
   ops.def(
