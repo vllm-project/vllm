@@ -304,7 +304,8 @@ class CommonAttentionState(AttentionState):
         assert self._is_graph_capturing
         return self.__class__(self.runner)
 
-    def graph_capture_get_metadata_for_batch(self, batch_size: int):
+    def graph_capture_get_metadata_for_batch(
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
         assert self._is_graph_capturing
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
@@ -322,21 +323,121 @@ class CommonAttentionState(AttentionState):
             block_tables=self._graph_block_tables[:batch_size],
             use_cuda_graph=True,
         )
+        if is_encoder_decoder_model:
+            # The encoder decoder model works only with XFormers backend.
+            # Assert the same.
+            assert self.runner.attn_backend.get_name() == "xformers", \
+            f"Expected attn_backend name to be 'xformers', but "\
+            f" got '{self.runner.attn_backend.get_name()}'"
+            self._update_captured_metadata_for_enc_dec_model(
+                batch_size=batch_size, attn_metadata=attn_metadata)
+
         return attn_metadata
 
-    def get_graph_input_buffers(self, attn_metadata) -> Dict[str, Any]:
-        return {
+    def get_graph_input_buffers(
+            self,
+            attn_metadata,
+            is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
+        input_buffers = {
             "slot_mapping": attn_metadata.slot_mapping,
             "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
+        if is_encoder_decoder_model:
+            # The encoder decoder model works only with XFormers backend.
+            # Assert the same.
+            assert self.runner.attn_backend.get_name() == "xformers", \
+            f"Expected attn_backend name to be 'xformers', but "\
+            f" got '{self.runner.attn_backend.get_name()}'"
+            self._add_additonal_input_buffers_for_enc_dec_model(
+                attn_metadata=attn_metadata, input_buffers=input_buffers)
+        return input_buffers
 
-    def prepare_graph_input_buffers(self, input_buffers,
-                                    attn_metadata) -> None:
+    def prepare_graph_input_buffers(
+            self,
+            input_buffers,
+            attn_metadata,
+            is_encoder_decoder_model: bool = False) -> None:
         input_buffers["seq_lens_tensor"].copy_(
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        if is_encoder_decoder_model:
+            # The encoder decoder model works only with XFormers backend.
+            # Assert the same.
+            assert self.runner.attn_backend.get_name() == "xformers", \
+            f"Expected attn_backend name to be 'xformers', but "\
+            f" got '{self.runner.attn_backend.get_name()}'"
+            self._prepare_input_buffers_for_enc_dec_model(
+                attn_metadata, input_buffers)
 
     def begin_forward(self, model_input) -> None:
         return
+
+    def _update_captured_metadata_for_enc_dec_model(self, batch_size: int,
+                                                    attn_metadata):
+        """
+        Updates the attention metadata parameters for CUDA graph capture in an
+        encoder-decoder model.
+
+        This method modifies attention-related tensors and metadata required
+        for CUDA graph capture in encoder-decoder models. Specifically, it
+        updates the cross-attention and encoder sequence tensors in the 
+        AttentionMetadata object.
+        """
+        # During decode phase the cross_slot_mapping will be empty. Hence set
+        # an empty tensor for CUDA Graph capture.
+        attn_metadata.cross_slot_mapping = torch.tensor(
+            [], dtype=torch.int).cuda()
+        attn_metadata.cross_block_tables = torch.full(
+            (batch_size, self.runner.get_max_block_per_batch()),
+            1,
+            dtype=torch.int).cuda()
+        attn_metadata.encoder_seq_lens = torch.full((batch_size, ),
+                                                    1,
+                                                    dtype=torch.int).cuda()
+        attn_metadata.encoder_seq_lens_tensor = torch.full(
+            (batch_size, ), 1, dtype=torch.int).cuda()
+        attn_metadata.max_encoder_seq_len = self.runner.max_seq_len_to_capture
+
+    def _add_additonal_input_buffers_for_enc_dec_model(
+            self, attn_metadata, input_buffers: Dict[str, Any]):
+        """
+        Saves additional input buffers specific to the encoder-decoder model
+        from the attention metadata.
+
+        This method extracts and stores encoder-decoder related input buffers
+        from the `attn_metadata` into the `input_buffers` dictionary. The
+        buffers include encoder sequence lengths, cross-slot mappings, and
+        cross-block tables, which are essential for the encoder-decoder model
+        during CUDA graph replay.
+        """
+        input_buffers["encoder_seq_lens_tensor"] = (
+            attn_metadata.decode_metadata.encoder_seq_lens_tensor)
+        input_buffers["cross_slot_mapping"] = (
+            attn_metadata.decode_metadata.cross_slot_mapping)
+        input_buffers["cross_block_tables"] = (
+            attn_metadata.decode_metadata.cross_block_tables)
+
+    def _prepare_input_buffers_for_enc_dec_model(self, attn_metadata,
+                                                 input_buffers: Dict[str,
+                                                                     Any]):
+        """
+        Populates input buffers with data from the encoder-decoder model's
+        attention metadata.
+
+        This method fills the input buffers with encoder-decoder specific
+        tensors. It copies data from the `attn_metadata` and keyword arguments
+        (`kwargs`) into corresponding buffers in the `input_buffers` dictionary.
+        The copied data includes attention-related metadata as well as input 
+        IDs and positional information for the encoder.
+        """
+        input_buffers["encoder_seq_lens_tensor"].copy_(
+            attn_metadata.decode_metadata.encoder_seq_lens_tensor,
+            non_blocking=True)
+        input_buffers["cross_slot_mapping"].copy_(
+            attn_metadata.decode_metadata.cross_slot_mapping,
+            non_blocking=True)
+        input_buffers["cross_block_tables"].copy_(
+            attn_metadata.decode_metadata.cross_block_tables,
+            non_blocking=True)

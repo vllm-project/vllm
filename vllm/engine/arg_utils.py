@@ -472,7 +472,10 @@ class EngineArgs:
                             default=EngineArgs.max_seq_len_to_capture,
                             help='Maximum sequence length covered by CUDA '
                             'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode.')
+                            'larger than this, we fall back to eager mode. '
+                            'Additionally for encoder-decoder models, if the '
+                            'sequence length of the encoder input is larger '
+                            'than this, we fall back to the eager mode.')
         parser.add_argument('--disable-custom-all-reduce',
                             action='store_true',
                             default=EngineArgs.disable_custom_all_reduce,
