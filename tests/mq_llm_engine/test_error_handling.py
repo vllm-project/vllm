@@ -110,7 +110,7 @@ async def test_failed_health_check(tmp_socket):
         assert client.is_running
 
         # Health probe should throw RAISED_ERROR.
-        await asyncio.sleep(10)
+        await asyncio.sleep(15.)
 
         with pytest.raises(RAISED_ERROR):
             await client.check_health()

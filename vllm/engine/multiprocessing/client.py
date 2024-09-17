@@ -365,6 +365,7 @@ class MQLLMEngineClient:
         Engine's health every N seconds and sets _errored_with 
         if the engine is unhealthy.
         """
+        print(self._errored_with)
         if self._errored_with is not None:
             raise self._errored_with
 
