@@ -277,7 +277,6 @@ class SamplingParams(
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
         assert isinstance(self.best_of, int)
-        
         if self.best_of < self.n:
             raise ValueError(f"best_of must be greater than or equal to n, "
                              f"got n={self.n} and best_of={self.best_of}.")
