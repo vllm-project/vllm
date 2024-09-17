@@ -45,11 +45,10 @@ class TTCacheEngine:
         # Models like Jamba, have mixed typed layers, E.g Mamba
         self.num_attention_layers = model_config.get_num_attention_layers(
             parallel_config)
-        # TODO: should be 1 since TP=8
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        # TODO: get num devices from device_config.device (device_mesh)
-        # TODO: add get_num_devices to worker
-        self.num_kv_heads //= 8 # TP=8, tries to use distributed worker if you give LLM 8 TP
+
+        self.num_kv_heads = TTCacheEngine.get_num_kv_heads(
+            model_config, parallel_config
+        )
 
         self.block_size = cache_config.block_size
         self.num_tt_blocks = cache_config.num_gpu_blocks
@@ -118,6 +117,21 @@ class TTCacheEngine:
 
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         raise NotImplementedError
+    
+    @staticmethod
+    def get_num_kv_heads(
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+    ) -> int:
+        '''
+        Returns the number of KV heads per attention layer. Makes the assumption
+        that we are tensor parallel by a factor of 8.
+        '''
+        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        # TODO: get num devices from device_config.device (device_mesh)
+        # TODO: add get_num_devices to worker
+        num_kv_heads //= 8 # TP=8, tries to use distributed worker if you give LLM 8 TP
+        return num_kv_heads
 
     @staticmethod
     def get_cache_block_size(
@@ -126,8 +140,7 @@ class TTCacheEngine:
         parallel_config: ParallelConfig,
     ) -> int:
         head_size = model_config.get_head_size()
-        num_heads = model_config.get_num_kv_heads(parallel_config)
-        num_heads //= 8 # TODO: Make general without using TP=8?
+        num_heads = TTCacheEngine.get_num_kv_heads(model_config, parallel_config)
         num_attention_layers = model_config.get_num_attention_layers(
             parallel_config)
 
