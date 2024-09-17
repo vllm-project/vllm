@@ -26,6 +26,8 @@ logger = init_logger(__name__)
 
 class RayTPUExecutor(TPUExecutor):
 
+    uses_ray: bool = True
+
     def __init__(self, *args, **kwargs):
         # This is non-None when the execute model loop is running
         # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
@@ -68,8 +70,12 @@ class RayTPUExecutor(TPUExecutor):
             )
 
             assert self.speculative_config is None
-            worker_module_name = "vllm.worker.tpu_worker"
-            worker_class_name = "TPUWorker"
+            if self.scheduler_config.is_multi_step:
+                worker_module_name = "vllm.worker.multi_step_tpu_worker"
+                worker_class_name = "MultiStepTPUWorker"
+            else:
+                worker_module_name = "vllm.worker.tpu_worker"
+                worker_class_name = "TPUWorker"
 
             # GKE does not fetch environment information from metadata server
             # and instead sets these from within the Ray process. Therefore we
