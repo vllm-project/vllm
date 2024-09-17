@@ -66,15 +66,20 @@ async def test_guided_logits_processor_black_box(backend: str, sample_regex,
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
+
 def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
-    with pytest.raises(ValueError, match="You can only use one kind of guided"):
+    with pytest.raises(ValueError,
+                       match="You can only use one kind of guided"):
         GuidedDecodingParams(json=sample_json_schema, regex=sample_regex)
 
-    with pytest.raises(ValueError, match="You can only use one kind of guided"):
+    with pytest.raises(ValueError,
+                       match="You can only use one kind of guided"):
         GuidedDecodingParams(json=sample_json_schema, json_object=True)
 
-    with pytest.raises(ValueError, match="You can only use one kind of guided"):
+    with pytest.raises(ValueError,
+                       match="You can only use one kind of guided"):
         GuidedDecodingParams(json=sample_json_schema, choice=["a", "b"])
 
-    with pytest.raises(ValueError, match="You can only use one kind of guided"):
+    with pytest.raises(ValueError,
+                       match="You can only use one kind of guided"):
         GuidedDecodingParams(json=sample_json_schema, grammar="test grammar")
