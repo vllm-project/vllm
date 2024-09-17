@@ -23,20 +23,12 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn import CrossEntropyLoss
 
-from transformers import PreTrainedModel
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-    logging,
-    replace_return_docstrings,
-)
 from transformers.models.mllama.configuration_mllama import MllamaConfig, MllamaTextConfig, MllamaVisionConfig
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
@@ -68,8 +60,6 @@ from vllm.transformers_utils.multimodal_processors.llamavl import LlamaVLImagePr
 import vllm.distributed.parallel_state as ps
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
 
-
-logger = logging.get_logger(__name__)
 
 logger = init_logger(__name__)
 MP_SCALE = 8
@@ -138,9 +128,6 @@ def get_max_mllama_image_tokens(ctx: InputContext) -> int:
     hf_config = ctx.model_config.hf_config
     token_per_chunk = (hf_config.vision_chunk_size // 14) ** 2 + 1
     return hf_config.max_num_image * hf_config.vision_max_num_chunks *  token_per_chunk 
-
-
-_CONFIG_FOR_DOC = "MllamaConfig"
 
 
 # Copied from transformers.models.llama.modeling_llama._prepare_4d_causal_attention_mask_with_cache_position
@@ -564,14 +551,14 @@ class MllamaVisionEncoder(nn.Module):
         )
 
 
-class MllamaVisionModel(PreTrainedModel):
+class MllamaVisionModel(nn.Module):
     config_class = MllamaVisionConfig
     base_model_prefix = "vision_encoder"
     _no_split_modules = ["MllamaVisionSdpaAttention"]
     _supports_sdpa = True
 
     def __init__(self, config: MllamaVisionConfig):
-        super().__init__(config)
+        super().__init__()
         self.image_size = config.image_size
         self.patch_size = config.patch_size
         self.max_num_tiles = config.max_num_tiles
@@ -1098,55 +1085,16 @@ class MllamaRotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-MLLAMA_START_DOCSTRING = r"""
-    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
-    library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
-    etc.)
-
-    This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
-    Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
-    and behavior.
-
-    Parameters:
-        config ([`MllamaConfig`]):
-            Model configuration class with all the parameters of the model. Initializing with a config file does not
-            load the weights associated with the model, only the configuration. Check out the
-            [`~PreTrainedModel.from_pretrained`] method to load the model weights.
-"""
-
-
-class MllamaPreTrainedModel(PreTrainedModel):
-    config_class = MllamaConfig
-    base_model_prefix = "model"
-    _no_split_modules = ["MllamaSdpaCrossAttention"]
-    _supports_cache_class = True
-    _supports_static_cache = True
-    _supports_sdpa = True
-    _supports_quantized_cache = True
-
-    def _init_weights(self, module):
-        std = self.config.get_text_config().initializer_range
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.Parameter):
-            module.data.normal_(mean=0.0, std=std)
-
-
-class MllamaTextModel(MllamaPreTrainedModel):
+class MllamaTextModel(nn.Module):
     config_class = MllamaTextConfig
     base_model_prefix = "model"
     _no_split_modules = ["MllamaCrossAttentionDecoderLayer", "MllamaSelfAttentionDecoderLayer"]
 
     def __init__(self, config: MllamaTextConfig, cache_config:Optional[CacheConfig]):
-        super().__init__(config)
+        super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        print("vocab_size", self.vocab_size)
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size + 8, config.hidden_size, self.padding_idx)
         self.cross_attention_layers = config.cross_attention_layers
 
@@ -1161,7 +1109,6 @@ class MllamaTextModel(MllamaPreTrainedModel):
         self.norm = MllamaTextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = MllamaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
-        self.post_init()
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -1366,15 +1313,22 @@ class MllamaTextModel(MllamaPreTrainedModel):
         return causal_mask
 
 
-class MllamaForCausalLM(MllamaPreTrainedModel):
+class MllamaForCausalLM(nn.Module):
     config_class = MllamaTextConfig
     base_model_prefix = "language_model"
     _no_split_modules = ["MllamaCrossAttentionDecoderLayer", "MllamaSelfAttentionDecoderLayer"]
 
-    def __init__(self, config: MllamaConfig, cache_config:Optional[CacheConfig]):
-        super().__init__(config)
+    def __init__(self, config: MllamaTextConfig, cache_config:Optional[CacheConfig], quant_config: Optional[QuantizationConfig]):
+        super().__init__()
         self.vocab_size = config.vocab_size
         self.model = MllamaTextModel(config, cache_config)
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+            quant_config=quant_config,
+        )
 
 
     def forward(
@@ -1395,36 +1349,6 @@ class MllamaForCausalLM(MllamaPreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
     ) -> Tuple:
-        r"""
-        Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-
-            num_logits_to_keep (`int`, *optional*):
-                Calculate logits for the last `num_logits_to_keep` tokens. If `0`, calculate logits for all
-                `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
-                token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
-
-        Returns:
-
-        Example:
-
-        ```python
-        >>> from transformers import AutoTokenizer, MllamaForCausalLM
-
-        >>> model = MllamaForCausalLM.from_pretrained("meta-llama/Llama-3.2-11b-hf")
-        >>> tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-11b-hf")
-
-        >>> prompt = "Hey, are you conscious? Can you talk to me?"
-        >>> inputs = tokenizer(prompt, return_tensors="pt")
-
-        >>> # Generate
-        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
-        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
-        ```"""
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1526,108 +1450,21 @@ class MllamaForCausalLM(MllamaPreTrainedModel):
         return model_inputs
 
 
-MLLAMA_INPUTS_DOCSTRING = r"""
-    Args:
-        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
-            it.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are input IDs?](../glossary#input-ids)
-        pixel_values (`torch.FloatTensor` of shape `(batch_size, max_num_images, max_num_tiles, channels, image_size, image_size)):
-            The tensors corresponding to the input images. Pixel values can be obtained using
-            [`AutoImageProcessor`]. See [`MllamaImageProcessor.__call__`] for details ([]`MllamaProcessor`] uses
-            [`MllamaImageProcessor`] for processing images).
-        aspect_ratio_mask: Optional[List[List[int]]] = None, # TODO
-        aspect_ratio_ids: Optional[torch.Tensor] = None, # TODO
-        attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            If `past_key_values` is used, optionally only the last `input_ids` have to be input (see
-            `past_key_values`).
-
-            If you want to change padding behavior, you should read [`modeling_opt._prepare_decoder_attention_mask`]
-            and modify to your needs. See diagram 1 in [the paper](https://arxiv.org/abs/1910.13461) for more
-            information on the default strategy.
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        cross_attention_mask: Optional[torch.Tensor] = None, # TODO
-        cross_attention_states: Optional[torch.Tensor] = None, # TODO
-        position_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Indices of positions of each input sequence tokens in the position embeddings. Selected in the range `[0,
-            config.n_positions - 1]`.
-
-            [What are position IDs?](../glossary#position-ids)
-        past_key_values (`Cache` or `tuple(tuple(torch.FloatTensor))`, *optional*):
-            Pre-computed hidden-states (key and values in the self-attention blocks and in the cross-attention
-            blocks) that can be used to speed up sequential decoding. This typically consists in the `past_key_values`
-            returned by the model at a previous stage of decoding, when `use_cache=True` or `config.use_cache=True`.
-
-            Two formats are allowed:
-            - a [`~cache_utils.Cache`] instance, see our
-            [kv cache guide](https://huggingface.co/docs/transformers/en/kv_cache);
-            - Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
-            shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`). This is also known as the legacy
-            cache format.
-
-            The model will output the same cache format that is fed as input. If no `past_key_values` are passed, the
-            legacy cache format will be returned.
-
-            If `past_key_values` are used, the user can optionally input only the last `input_ids` (those that don't
-            have their past key value states given to this model) of shape `(batch_size, 1)` instead of all `input_ids`
-            of shape `(batch_size, sequence_length)`.
-        inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-            Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation. This
-            is useful if you want more control over how to convert `input_ids` indices into associated vectors than the
-            model's internal embedding lookup matrix.
-        use_cache (`bool`, *optional*):
-            If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
-            `past_key_values`).
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-        cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
-            Indices depicting the position of the input sequence tokens in the sequence. Contrarily to `position_ids`,
-            this tensor is not affected by padding. It is used to update the cache in the correct position and to infer
-            the complete sequence length.
-"""
-
-
-@add_start_docstrings(
-    """The MLLAMA model which consists of a vision backbone and a language model.""",
-    MLLAMA_START_DOCSTRING,
-)
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_mllama_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_mllama)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
-class MllamaForConditionalGeneration(MllamaPreTrainedModel, SupportsMultiModal):
+class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def __init__(self, config: MllamaConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
-        super().__init__(config)
+        super().__init__()
         self.vocab_size = config.text_config.vocab_size
-        self.hidden_size = self.config.text_config.hidden_size
+        self.hidden_size = config.text_config.hidden_size
         self.max_num_tiles = config.vision_config.max_num_tiles
         self.vision_output_dim = config.vision_config.vision_output_dim
-        self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
+        self.pad_token_id = config.pad_token_id if config.pad_token_id is not None else -1
 
         self.vision_model = MllamaVisionModel(
             config.vision_config,
@@ -1635,46 +1472,34 @@ class MllamaForConditionalGeneration(MllamaPreTrainedModel, SupportsMultiModal):
         self.language_model = MllamaForCausalLM(
             config.text_config,
             cache_config=cache_config,
+            quant_config=quant_config,
         )
         self.multi_modal_projector = nn.Linear(
             config.vision_config.vision_output_dim,
             config.text_config.hidden_size,
             bias=True,
         )
-        self.lm_head = ParallelLMHead(
-            config.text_config.vocab_size,
-            config.text_config.hidden_size,
-            org_num_embeddings=config.text_config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-            quant_config=quant_config,
-        )
         self.logits_processor = LogitsProcessor(config.output_hidden_states, config.text_config.vocab_size)
         self.sampler = Sampler()
-        self.post_init()
 
-    def get_input_embeddings(self):
-        return self.language_model.get_input_embeddings()
 
-    def set_input_embeddings(self, value):
-        self.language_model.set_input_embeddings(value)
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.language_model.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+    
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
 
-    def get_output_embeddings(self):
-        return self.language_model.get_output_embeddings()
-
-    def set_output_embeddings(self, new_embeddings):
-        self.language_model.set_output_embeddings(new_embeddings)
-
-    def set_decoder(self, decoder):
-        self.language_model.set_decoder(decoder)
-
-    def get_decoder(self):
-        return self.language_model.get_decoder()
-
-    def tie_weights(self):
-        return self.language_model.tie_weights()
-
-    @add_start_docstrings_to_model_forward(MLLAMA_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1891,3 +1716,33 @@ class MllamaForConditionalGeneration(MllamaPreTrainedModel, SupportsMultiModal):
                 [cross_attention_mask_prev, cross_attention_mask_prev[:, -1:, ...]], dim=1
             )
         return model_kwargs
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        updated_params = set()
+        for name, loaded_weight in weights:
+            if 'patch_embedding.weight' in name:
+                name = name.replace('patch_embedding.weight', 'patch_embedding._linear.weight')
+                loaded_weight = loaded_weight.view(loaded_weight.shape[0], -1)
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                updated_params.add(name)
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict.pop(name)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)

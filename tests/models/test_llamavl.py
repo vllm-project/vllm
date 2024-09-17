@@ -26,8 +26,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     size = model_size_map[args.model_type]
-    checkpoint_dir = "/data/zhang-chen/llama/checkpoints" # update checkpoint path here
-    llm = LLM(model=f"{checkpoint_dir}/Meta-Llama-3.2-{size}-Vision-Early/",
+    # checkpoint_dir = "/data/zhang-chen/llama/checkpoints" # update checkpoint path here
+    model_id = "/data/zhang-chen/Llama-3.2-11B-Vision-Early"
+    llm = LLM(model=model_id,
               enforce_eager=True,
               limit_mm_per_prompt={"image": 2},
               max_num_seqs=16,
@@ -64,4 +65,3 @@ if __name__ == "__main__":
         generated_text = o.outputs[0].text
         print(generated_text)
         print("==================================")
-
