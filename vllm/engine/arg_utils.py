@@ -2,20 +2,21 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
+                    Type, Union)
 
 import torch
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
+                         DeviceConfig, EngineConfig, LoadConfig, LoadFormat,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
@@ -25,6 +26,16 @@ logger = init_logger(__name__)
 
 ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
 
+DEVICE_OPTIONS = [
+    "auto",
+    "cuda",
+    "neuron",
+    "cpu",
+    "openvino",
+    "tpu",
+    "xpu",
+]
+
 
 def nullable_str(val: str):
     if not val or val == "None":
@@ -33,22 +44,36 @@ def nullable_str(val: str):
 
 
 def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
+    """Parses a string containing comma separate key [str] to value [int]
+    pairs into a dictionary.
+
+    Args:
+        val: String value to be parsed.
+
+    Returns:
+        Dictionary with parsed values.
+    """
     if len(val) == 0:
         return None
 
     out_dict: Dict[str, int] = {}
     for item in val.split(","):
-        try:
-            key, value = item.split("=")
-        except TypeError as exc:
-            msg = "Each item should be in the form KEY=VALUE"
-            raise ValueError(msg) from exc
+        kv_parts = [part.lower().strip() for part in item.split("=")]
+        if len(kv_parts) != 2:
+            raise argparse.ArgumentTypeError(
+                "Each item should be in the form KEY=VALUE")
+        key, value = kv_parts
 
         try:
-            out_dict[key] = int(value)
+            parsed_value = int(value)
         except ValueError as exc:
             msg = f"Failed to parse value of item {key}={value}"
-            raise ValueError(msg) from exc
+            raise argparse.ArgumentTypeError(msg) from exc
+
+        if key in out_dict and out_dict[key] != parsed_value:
+            raise argparse.ArgumentTypeError(
+                f"Conflicting values specified for key: {key}")
+        out_dict[key] = parsed_value
 
     return out_dict
 
@@ -64,6 +89,7 @@ class EngineArgs:
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
+    config_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
     quantization_param_path: Optional[str] = None
@@ -148,6 +174,7 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
+    override_neuron_config: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -232,6 +259,13 @@ class EngineArgs:
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
+        parser.add_argument(
+            '--config-format',
+            default=EngineArgs.config_format,
+            choices=[f.value for f in ConfigFormat],
+            help='The format of the model config to load.\n\n'
+            '* "auto" will try to load the config in hf format '
+            'if available else it will try to load in mistral format ')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -438,7 +472,10 @@ class EngineArgs:
                             default=EngineArgs.max_seq_len_to_capture,
                             help='Maximum sequence length covered by CUDA '
                             'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode.')
+                            'larger than this, we fall back to eager mode. '
+                            'Additionally for encoder-decoder models, if the '
+                            'sequence length of the encoder input is larger '
+                            'than this, we fall back to the eager mode.')
         parser.add_argument('--disable-custom-all-reduce',
                             action='store_true',
                             default=EngineArgs.disable_custom_all_reduce,
@@ -543,10 +580,7 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=[
-                                "auto", "cuda", "neuron", "cpu", "openvino",
-                                "tpu", "xpu"
-                            ],
+                            choices=DEVICE_OPTIONS,
                             help='Device type for vLLM execution.')
         parser.add_argument('--num-scheduler-steps',
                             type=int,
@@ -741,6 +775,16 @@ class EngineArgs:
             default=EngineArgs.disable_async_output_proc,
             help="Disable async output processing. This may result in "
             "lower performance.")
+        parser.add_argument(
+            '--override-neuron-config',
+            type=lambda configs: {
+                str(key): value
+                for key, value in
+                (config.split(':') for config in configs.split(','))
+            },
+            default=None,
+            help="override or set neuron device configuration.")
+
         return parser
 
     @classmethod
@@ -751,33 +795,8 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
-    def create_engine_config(self) -> EngineConfig:
-        # gguf file needs a specific model loader and doesn't use hf_repo
-        if self.model.endswith(".gguf"):
-            self.quantization = self.load_format = "gguf"
-
-        # bitsandbytes quantization needs a specific model loader
-        # so we make sure the quant method and the load format are consistent
-        if (self.quantization == "bitsandbytes" or
-           self.qlora_adapter_name_or_path is not None) and \
-           self.load_format != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes quantization and QLoRA adapter only support "
-                f"'bitsandbytes' load format, but got {self.load_format}")
-
-        if (self.load_format == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
-            self.quantization != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes load format and QLoRA adapter only support "
-                f"'bitsandbytes' quantization, but got {self.quantization}")
-
-        assert self.cpu_offload_gb >= 0, (
-            "CPU offload space must be non-negative"
-            f", but got {self.cpu_offload_gb}")
-
-        device_config = DeviceConfig(device=self.device)
-        model_config = ModelConfig(
+    def create_model_config(self) -> ModelConfig:
+        return ModelConfig(
             model=self.model,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -801,7 +820,53 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
+            override_neuron_config=self.override_neuron_config,
+            config_format=self.config_format,
         )
+
+    def create_load_config(self) -> LoadConfig:
+        return LoadConfig(
+            load_format=self.load_format,
+            download_dir=self.download_dir,
+            model_loader_extra_config=self.model_loader_extra_config,
+            ignore_patterns=self.ignore_patterns,
+        )
+
+    def create_engine_config(self) -> EngineConfig:
+        # gguf file needs a specific model loader and doesn't use hf_repo
+        if check_gguf_file(self.model):
+            self.quantization = self.load_format = "gguf"
+
+        # bitsandbytes quantization needs a specific model loader
+        # so we make sure the quant method and the load format are consistent
+        if (self.quantization == "bitsandbytes" or
+           self.qlora_adapter_name_or_path is not None) and \
+           self.load_format != "bitsandbytes":
+            raise ValueError(
+                "BitsAndBytes quantization and QLoRA adapter only support "
+                f"'bitsandbytes' load format, but got {self.load_format}")
+
+        if (self.load_format == "bitsandbytes" or
+            self.qlora_adapter_name_or_path is not None) and \
+            self.quantization != "bitsandbytes":
+            raise ValueError(
+                "BitsAndBytes load format and QLoRA adapter only support "
+                f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        assert self.cpu_offload_gb >= 0, (
+            "CPU offload space must be non-negative"
+            f", but got {self.cpu_offload_gb}")
+
+        device_config = DeviceConfig(device=self.device)
+        model_config = self.create_model_config()
+
+        if model_config.is_multimodal_model:
+            if self.enable_prefix_caching:
+                logger.warning(
+                    "--enable-prefix-caching is currently not "
+                    "supported for multimodal models and has been disabled.")
+            self.enable_prefix_caching = False
+
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
             self.max_model_len,  # neuron needs block_size = max_model_len
@@ -833,7 +898,10 @@ class EngineArgs:
             # If not explicitly set, enable chunked prefill by default for
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
-            if use_long_context:
+
+            # Chunked prefill is currently disabled for multimodal models by
+            # default.
+            if use_long_context and not model_config.is_multimodal_model:
                 is_gpu = device_config.device_type == "cuda"
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
@@ -844,7 +912,6 @@ class EngineArgs:
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and not self.enable_prefix_caching
                         and not has_seqlen_agnostic_layers):
                     self.enable_chunked_prefill = True
                     logger.warning(
@@ -921,6 +988,7 @@ class EngineArgs:
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
+            is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
@@ -943,12 +1011,7 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        load_config = LoadConfig(
-            load_format=self.load_format,
-            download_dir=self.download_dir,
-            model_loader_extra_config=self.model_loader_extra_config,
-            ignore_patterns=self.ignore_patterns,
-        )
+        load_config = self.create_load_config()
 
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,
@@ -999,7 +1062,6 @@ class EngineArgs:
 @dataclass
 class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
-    engine_use_ray: bool = False
     disable_log_requests: bool = False
 
     @staticmethod
@@ -1007,16 +1069,6 @@ class AsyncEngineArgs(EngineArgs):
                      async_args_only: bool = False) -> FlexibleArgumentParser:
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
-        parser.add_argument('--engine-use-ray',
-                            action='store_true',
-                            help='Use Ray to start the LLM engine in a '
-                            'separate process as the server process.'
-                            '(DEPRECATED. This argument is deprecated '
-                            'and will be removed in a future update. '
-                            'Set `VLLM_ALLOW_ENGINE_USE_RAY=1` to force '
-                            'use it. See '
-                            'https://github.com/vllm-project/vllm/issues/7045.'
-                            ')')
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')

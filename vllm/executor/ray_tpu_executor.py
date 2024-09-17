@@ -10,7 +10,8 @@ from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.tpu_executor import TPUExecutor
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
@@ -24,6 +25,8 @@ logger = init_logger(__name__)
 
 
 class RayTPUExecutor(TPUExecutor):
+
+    uses_ray: bool = True
 
     def __init__(self, *args, **kwargs):
         # This is non-None when the execute model loop is running
@@ -67,8 +70,25 @@ class RayTPUExecutor(TPUExecutor):
             )
 
             assert self.speculative_config is None
-            worker_module_name = "vllm.worker.tpu_worker"
-            worker_class_name = "TPUWorker"
+            if self.scheduler_config.is_multi_step:
+                worker_module_name = "vllm.worker.multi_step_tpu_worker"
+                worker_class_name = "MultiStepTPUWorker"
+            else:
+                worker_module_name = "vllm.worker.tpu_worker"
+                worker_class_name = "TPUWorker"
+
+            # GKE does not fetch environment information from metadata server
+            # and instead sets these from within the Ray process. Therefore we
+            # need to override the Ray environment variables manually.
+            override_env = {}
+            if "TPU_CHIPS_PER_HOST_BOUNDS" in os.environ:
+                override_env.update({
+                    "TPU_CHIPS_PER_HOST_BOUNDS":
+                    os.environ["TPU_CHIPS_PER_HOST_BOUNDS"]
+                })
+            if "TPU_HOST_BOUNDS" in os.environ:
+                override_env.update(
+                    {"TPU_HOST_BOUNDS": os.environ["TPU_HOST_BOUNDS"]})
 
             worker = ray.remote(
                 num_cpus=0,
@@ -80,6 +100,8 @@ class RayTPUExecutor(TPUExecutor):
                 worker_class_name=worker_class_name,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
+            if override_env:
+                worker.override_env_vars.remote(override_env)
 
             worker_ip = ray.get(worker.get_node_ip.remote())
             if worker_ip == driver_ip and self.driver_dummy_worker is None:
@@ -95,11 +117,39 @@ class RayTPUExecutor(TPUExecutor):
                 # Else, added to the list of workers.
                 self.workers.append(worker)
 
+        logger.debug("workers: %s", self.workers)
+        logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
         if self.driver_dummy_worker is None:
             raise ValueError(
                 "Ray does not allocate any TPUs on the driver node. Consider "
                 "adjusting the Ray placement group or running the driver on a "
                 "TPU node.")
+
+        worker_ips = [
+            ray.get(worker.get_node_ip.remote())  # type: ignore[attr-defined]
+            for worker in self.workers
+        ]
+        ip_counts: Dict[str, int] = {}
+        for ip in worker_ips:
+            ip_counts[ip] = ip_counts.get(ip, 0) + 1
+
+        def sort_by_driver_then_worker_ip(worker):
+            """
+            Sort the workers based on 3 properties:
+            1. If the worker is on the same node as the driver (vllm engine),
+                it should be placed first.
+            2. Then, if the worker is on a node with fewer workers, it should
+                be placed first.
+            3. Finally, if the work is on a node with smaller IP address, it
+                should be placed first.
+            """
+            ip = ray.get(worker.get_node_ip.remote())
+            return (ip != driver_ip, ip_counts[ip], ip)
+
+        # After sorting, the workers on the same node will be
+        # close to each other, and the workers on the driver
+        # node will be placed first.
+        self.workers = sorted(self.workers, key=sort_by_driver_then_worker_ip)
 
         # Get the set of TPU IDs used on each node.
         worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
