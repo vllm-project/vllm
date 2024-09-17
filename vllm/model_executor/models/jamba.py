@@ -140,7 +140,8 @@ class JambaMambaMixer(nn.Module):
 
     def mamba_forward(self,
                       hidden_states: torch.Tensor,
-                      cache_params: MambaCacheParams = None):
+                      cache_params: MambaCacheParams = None,
+                      prev_cache_params: MambaCacheParams = None):
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(1, 2)
         hidden_states, gate = projected_states.chunk(2, dim=1)
@@ -158,17 +159,20 @@ class JambaMambaMixer(nn.Module):
             )
             hidden_states = hidden_states.unsqueeze(-1)
         else:
-            if cache_params is not None:
-                conv_states = nn.functional.pad(
-                    hidden_states,
-                    (self.conv_kernel_size - hidden_states.shape[-1], 0))
-                cache_params.conv_state.copy_(conv_states)
             hidden_states, _ = causal_conv1d_fn(
                 hidden_states,
                 conv_weights,
                 self.conv1d.bias,
                 activation=self.activation,
+                conv_states=cache_params.conv_state,
+                has_initial_state=torch.ones(
+                    hidden_states.shape[0],
+                    dtype=torch.int32,
+                    device=hidden_states.device
+                )
+                    if prev_cache_params is not None else None
             )
+            # cache_params.conv_state = conv_state
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
@@ -201,7 +205,7 @@ class JambaMambaMixer(nn.Module):
                 dt_softplus=True,
             ).unsqueeze(-1)
         else:
-            scan_outputs, ssm_state = selective_scan_fn(
+            scan_outputs, _ = selective_scan_fn(
                 hidden_states,
                 discrete_time_step,
                 self.A,
@@ -211,10 +215,13 @@ class JambaMambaMixer(nn.Module):
                 gate,
                 time_proj_bias,
                 delta_softplus=True,
-                return_last_state=True,
+                ssm_states=cache_params.ssm_state,
+                has_initial_state=torch.ones(hidden_states.shape[0],
+                    dtype=torch.int32,
+                    device=hidden_states.device)
+                    if prev_cache_params is not None else None
+
             )
-            if ssm_state is not None and cache_params is not None:
-                cache_params.ssm_state.copy_(ssm_state)
 
         # 4. Final linear projection
         contextualized_states = self.out_proj(scan_outputs.transpose(1, 2))[0]
@@ -227,25 +234,39 @@ class JambaMambaMixer(nn.Module):
         conv_state: torch.Tensor,
         ssm_state: torch.Tensor,
     ):
+        offset = 0
         if attn_metadata.prefill_metadata is not None:
-            offset = 0
-            for i, prompt_len in enumerate(
+            # seq_len = computed len + new prompt len;
+            # context_len = computed len
+            # We assume that the hidden state is sorted by
+            # prefills and then decodes
+            for i, seq_len in enumerate(
                     attn_metadata.prefill_metadata.seq_lens):
+                context_len = attn_metadata.prefill_metadata. \
+                              context_lens_tensor[i].item()
+                prompt_len = seq_len - context_len
                 cache = MambaCacheParams(True,
                                          conv_state=conv_state[i].unsqueeze(0),
                                          ssm_state=ssm_state[i].unsqueeze(0))
-                hidden_states[offset:offset + prompt_len].copy_(
-                    self.mamba_forward(hidden_states[offset:offset +
-                                                     prompt_len].unsqueeze(0),
-                                       cache_params=cache)[0])
+
+                hidden_states_out = self.mamba_forward(
+                    hidden_states[offset:offset + prompt_len].unsqueeze(0),
+                    cache_params=cache,
+                    prev_cache_params=None if context_len == 0 else cache)[0]
+
+                hidden_states[offset:offset +
+                              prompt_len].copy_(hidden_states_out)
                 offset += prompt_len
-        else:
-            cache = MambaCacheParams(False,
-                                     conv_state=conv_state,
-                                     ssm_state=ssm_state)
-            hidden_states = self.mamba_forward(hidden_states.unsqueeze(1),
-                                               cache_params=cache)
-            hidden_states = hidden_states.squeeze(1)
+
+        if attn_metadata.decode_metadata is not None:
+            cache = MambaCacheParams(
+                False,
+                conv_state=conv_state[attn_metadata.num_prefills:],
+                ssm_state=ssm_state[attn_metadata.num_prefills:])
+
+            hidden_states[offset:].copy_(
+                self.mamba_forward(hidden_states[offset:].unsqueeze(1),
+                                   cache_params=cache).squeeze(1))
 
         return hidden_states
 
@@ -570,8 +591,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         lora_config: Optional[LoRAConfig] = None,
         scheduler_config: Optional[SchedulerConfig] = None,
     ) -> None:
-        assert not scheduler_config.chunked_prefill_enabled, \
-            "Jamba currently does not support chunked prefill"
         assert not cache_config.enable_prefix_caching, \
             "Jamba currently does not support prefix caching"
 
@@ -615,18 +634,10 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             # We get here only on Prefill/Eager mode runs
-            assert all(
-                key in kwargs
-                for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
-
             request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
             finished_requests_ids = kwargs["finished_requests_ids"]
-            self._release_mamba_cache(finished_requests_ids)
-            batch_size = input_ids.shape[0]
-            if attn_metadata.prefill_metadata:
-                batch_size = len(request_ids_to_seq_ids)
-            mamba_cache = self._prepare_current_run_mamba_cache(
-                request_ids_to_seq_ids, batch_size, finished_requests_ids)
+            mamba_cache = self._release_finished_and_prepare_mamba_cache(
+                finished_requests_ids, request_ids_to_seq_ids)
         else:
             # CUDA graph capturing runs
             mamba_cache = kwargs["seqlen_agnostic_capture_inputs"]
@@ -698,13 +709,15 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
 
     def _prepare_current_run_mamba_cache(
             self, request_ids_to_seq_ids: Dict[str, list[int]],
-            batch_size: int, finished_requests_ids: List[str]):
+            finished_requests_ids: List[str]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         running_indices = []
         request_ids_to_seq_ids_flatten = [
             (req_id, seq_id)
             for req_id, seq_ids in request_ids_to_seq_ids.items()
             for seq_id in seq_ids
         ]
+        batch_size = len(request_ids_to_seq_ids_flatten)
         for dest_index, (request_id,
                          seq_id) in enumerate(request_ids_to_seq_ids_flatten):
             if request_id in finished_requests_ids:
@@ -768,22 +781,21 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                     seq_ids2index.update({seq_id: to_index})
                     return
 
+    def _release_finished_and_prepare_mamba_cache(
+            self, finished_requests_ids,
+            request_ids_to_seq_ids) -> Tuple[torch.Tensor, torch.Tensor]:
+        self._release_mamba_cache(finished_requests_ids)
+        return self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
+                                                     finished_requests_ids)
+
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """
         Copy the relevant Mamba cache into the CUDA graph input buffer 
         that was provided during the capture runs 
         (JambaForCausalLM.mamba_gc_cache_buffer). 
         """
-        assert all(
-            key in kwargs
-            for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
-        finished_requests_ids = kwargs["finished_requests_ids"]
-        self._release_mamba_cache(finished_requests_ids)
-        request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
-        cg_batch_size = input_buffers['input_ids'].shape[0]
-        self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
-                                              cg_batch_size,
-                                              finished_requests_ids)
+        self._release_finished_and_prepare_mamba_cache(
+            kwargs["finished_requests_ids"], kwargs["request_ids_to_seq_ids"])
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """
@@ -818,7 +830,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         hidden_size = self.config.hidden_size
         conv_state_shape = (
             self.config.mamba_expand * hidden_size // world_size,
-            self.config.mamba_d_conv,
+            self.config.mamba_d_conv - 1,
         )
         temporal_state_shape = (
             self.config.mamba_expand * self.config.hidden_size // world_size,
