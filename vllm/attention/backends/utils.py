@@ -352,9 +352,12 @@ class CommonAttentionState(AttentionState):
             attn_metadata,
             is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
         input_buffers = {
-            "slot_mapping": attn_metadata.slot_mapping,
-            "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
-            "block_tables": attn_metadata.decode_metadata.block_tables,
+            "slot_mapping":
+            attn_metadata.slot_mapping,
+            "seq_lens_tensor":
+            attn_metadata.decode_metadata.seq_lens_tensor,
+            "block_tables":
+            attn_metadata.decode_metadata.block_tables,
             "num_orig_input_tokens_tensor":
             attn_metadata.num_orig_input_tokens_tensor,
         }
