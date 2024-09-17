@@ -620,7 +620,7 @@ def _pythonize_sampler_output(
 
     pinned_buffer = pinned_sampled_token_buffer[:model_input.num_queries]
 
-    # We are guaranteed output tensors are ready, so it is safe to
+    # We guarantee output tensors are ready, so it is safe to
     # pythonize the sampler output & obtain CPU-side logprobs.
     #
     # However we should check whether logprobs pythonization may
