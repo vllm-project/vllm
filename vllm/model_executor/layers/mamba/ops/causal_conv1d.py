@@ -1,4 +1,5 @@
 # Copyright (c) 2024, Tri Dao.
+# Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
 from typing import Optional
 
@@ -70,12 +71,17 @@ def causal_conv1d_update(x: torch.Tensor,
                          conv_state: torch.Tensor,
                          weight: torch.Tensor,
                          bias: Optional[torch.Tensor] = None,
-                         activation: Optional[str] = None):
+                         activation: Optional[str] = None,
+                         conv_state_indices: Optional[torch.Tensor] = None):
     """
     x: (batch, dim)
     conv_state: (batch, dim, width)
     weight: (dim, width)
     bias: (dim,)
+    conv_state_indices: (batch,), dtype int32
+        If not None, the conv_state is a larger tensor along the batch dim, 
+        and we are selecting the batch coords specified by conv_state_indices.
+        Useful for a continuous batching scenario.
 
     out: (batch, dim)
     """
@@ -83,4 +89,4 @@ def causal_conv1d_update(x: torch.Tensor,
         raise NotImplementedError("activation must be None, silu, or swish")
     activation_bool = activation in ["silu", "swish"]
     return ops.causal_conv1d_update(x, conv_state, weight, bias,
-                                    activation_bool)
+                                    activation_bool, conv_state_indices)
