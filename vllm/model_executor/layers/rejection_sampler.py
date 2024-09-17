@@ -1,11 +1,27 @@
 from functools import cached_property
+from importlib.util import find_spec
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.jit
 
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeStochasticBaseSampler)
+
+logger = init_logger(__name__)
+
+if find_spec("flashinfer"):
+    """
+    Consider utilizing the FlashInfer rejection sampling kernel initially,
+    as it employs a dedicated kernel rather than relying on 
+    Torch tensor operations. This design choice helps to fuse operations, 
+    reduce memory I/O, and consequently enhances performance.
+    """
+    from flashinfer.sampling import chain_speculative_sampling
+else:
+    chain_speculative_sampling = None
 
 
 class RejectionSampler(SpecDecodeStochasticBaseSampler):
@@ -16,7 +32,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
     def __init__(self,
                  disable_bonus_tokens: bool = True,
-                 strict_mode: bool = False):
+                 strict_mode: bool = False,
+                 use_flashinfer: Optional[bool] = None):
         """Create a rejection sampler.
 
         Args:
@@ -26,13 +43,29 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             strict_mode: Whether or not to perform shape/device/dtype checks
             during sampling. This catches correctness issues but adds
             nontrivial latency.
+            use_falshinfer: We will use this parameter to determine whether
+            to use the FlashInfer rejection sampling kernel or not. If it's
+            None, we will use the default value from the environment variable.
+            This parameter is only used for testing purposes.
         """
         super().__init__(disable_bonus_tokens=disable_bonus_tokens,
                          strict_mode=strict_mode)
+        if use_flashinfer is None:
+            self.use_flashinfer = envs.VLLM_USE_FLASHINFER_SAMPLER and (
+                chain_speculative_sampling is not None)
+        else:
+            self.use_flashinfer = use_flashinfer
+
+        if self.use_flashinfer:
+            assert not disable_bonus_tokens, \
+                "flashinfer will enable bonus token by default"
+            logger.info("Use flashinfer for rejection sampling.")
+        else:
+            logger.info("Use pytorch for rejection sampling.")
 
     def forward(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
@@ -50,9 +83,9 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         sequence.
 
         Args:
-            target_probs: The probability distribution over token ids given
-                context according to the target model.
-            shape = [batch_size, num_speculative_tokens, vocab_size]
+            target_with_bonus_probs: The probability distribution 
+                over token ids given context according to the target model.
+            shape = [batch_size, num_speculative_tokens + 1, vocab_size]
 
             bonus_token_ids: The "bonus" token ids that are accepted iff all
                 speculative tokens in a sequence are accepted.
@@ -78,23 +111,52 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
         if self._strict_mode:
-            self._raise_if_incorrect_input(target_probs, draft_token_ids,
-                                           bonus_token_ids, draft_probs)
+            self._raise_if_incorrect_input(target_with_bonus_probs,
+                                           draft_token_ids, bonus_token_ids,
+                                           draft_probs)
 
-        accepted, recovered_token_ids = (
-            self._batch_modified_rejection_sampling(
-                target_probs,
-                draft_probs,
+        batch_size, k, _ = draft_probs.shape
+
+        # batch_size = 0 when all requests in the batch are
+        # non_spec requests. In this case, output_token_ids is
+        # just an empty tensor.
+        if batch_size == 0:
+            return torch.empty(0, k + 1, device=draft_probs.device, dtype=int)
+
+        # If use Flashinfer chain_speculative_sampling kernel
+        # for rejection sampling
+        if self.use_flashinfer:
+            batch_size, k, _ = draft_probs.shape
+            uniform_samples = self._create_uniform_samples(
+                seeded_seqs, batch_size, k, draft_probs.device)
+            output_token_ids, accepted_token_num, emitted_token_num \
+                = chain_speculative_sampling(
+                draft_probs, draft_token_ids, uniform_samples,
+                target_with_bonus_probs)
+
+            # num_emitted_tokens returned by flashinfer
+            # does not include the bonus token
+            # Flashinfer stops at the first token that violates
+            # the condition p >= q and does not include recovery/bonus token.
+            # Therefore, we need to add batch_size here.
+            self.num_accepted_tokens += accepted_token_num.sum()
+            self.num_emitted_tokens += emitted_token_num.sum() + batch_size
+            self.num_draft_tokens += batch_size * k
+        else:
+            accepted, recovered_token_ids = (
+                self._batch_modified_rejection_sampling(
+                    target_with_bonus_probs[:, :-1],
+                    draft_probs,
+                    draft_token_ids,
+                    seeded_seqs,
+                ))
+
+            output_token_ids = self._create_output(
+                accepted,
+                recovered_token_ids,
                 draft_token_ids,
-                seeded_seqs,
-            ))
-
-        output_token_ids = self._create_output(
-            accepted,
-            recovered_token_ids,
-            draft_token_ids,
-            bonus_token_ids,
-        )
+                bonus_token_ids,
+            )
 
         return output_token_ids
 
@@ -134,6 +196,63 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         ).reshape(batch_size, k)
 
         return accepted, recovered_token_ids
+
+    def _create_uniform_samples(self,
+                                seeded_seqs: Optional[Dict[int,
+                                                           torch.Generator]],
+                                batch_size: int, k: int,
+                                device: torch.device) -> torch.Tensor:
+        """
+        Generates a batch of uniform random samples, with optional seeding 
+        for specific sequences.
+
+        This method creates a tensor of shape `(batch_size, k + 1)` filled 
+        with uniform random values in the range [0, 1). If `seeded_seqs` 
+        is provided, the sequences corresponding to specific indices 
+        will be generated using the provided `torch.Generator` for 
+        reproducibility. The other sequences will be generated without 
+        a seed.
+
+        Args:
+            seeded_seqs : Optional[Dict[int, torch.Generator]]
+                A dictionary mapping indices in the batch to 
+                `torch.Generator` objects. If `None`, all samples are 
+                generated without a seed.
+            batch_size : int
+                The number of sequences to generate.
+            k : int
+                The number of random samples per sequence.
+            device : torch.device
+                The device on which to allocate the tensor.
+
+        Returns:
+            uniform_rand : torch.Tensor
+                A tensor of shape `(batch_size, k + 1)` containing uniform 
+                random values in the range [0, 1).
+        """
+        if not seeded_seqs:
+            return torch.rand(batch_size, k + 1, device=device)
+
+        uniform_rand = torch.empty(batch_size, k + 1, device=device)
+
+        non_seeded_indices = []
+        for idx in range(batch_size):
+            generator = seeded_seqs.get(idx)
+            if generator is None:
+                non_seeded_indices.append(idx)
+            else:
+                uniform_rand[idx, :] = torch.rand(1,
+                                                  k + 1,
+                                                  dtype=self.probs_dtype,
+                                                  device=device,
+                                                  generator=generator)
+        if non_seeded_indices:
+            uniform_rand[non_seeded_indices, :] = torch.rand(
+                len(non_seeded_indices),
+                k + 1,
+                dtype=self.probs_dtype,
+                device=device)
+        return uniform_rand
 
     def _get_accepted(
         self,
@@ -175,29 +294,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         selected_target_probs = target_probs[batch_indices, probs_indicies,
                                              draft_token_ids]
 
-        if not seeded_seqs:
-            uniform_rand = torch.rand_like(selected_target_probs)
-        else:
-            uniform_rand = torch.empty_like(selected_target_probs)
-
-            non_seeded_indices = []
-            for idx in range(batch_size):
-                generator = seeded_seqs.get(idx)
-                if generator is None:
-                    non_seeded_indices.append(idx)
-                else:
-                    uniform_rand[idx, :] = torch.rand(
-                        1,
-                        k,
-                        dtype=self.probs_dtype,
-                        device=target_probs.device,
-                        generator=generator)
-            if non_seeded_indices:
-                uniform_rand[non_seeded_indices, :] = torch.rand(
-                    len(non_seeded_indices),
-                    k,
-                    dtype=self.probs_dtype,
-                    device=target_probs.device)
+        uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,
+                                                    k - 1, target_probs.device)
 
         capped_ratio = torch.minimum(
             selected_target_probs / selected_draft_probs,
