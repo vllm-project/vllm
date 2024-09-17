@@ -1,4 +1,5 @@
 import dataclasses
+import itertools
 from typing import Any, Dict, List, Optional, Tuple, Type, cast
 
 import torch
@@ -24,7 +25,8 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput,
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
-                                      ModelInputForGPUWithSamplingMetadata)
+                                      ModelInputForGPUWithSamplingMetadata,
+                                      _get_graph_batch_size)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
@@ -178,7 +180,15 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
 
-        model_executable = self.model
+        if (model_input.attn_metadata is not None
+                and model_input.attn_metadata.prefill_metadata is None
+                and model_input.attn_metadata.decode_metadata.use_cuda_graph):
+            assert model_input.input_tokens is not None
+            graph_batch_size = model_input.input_tokens.shape[0]
+            model_executable = self.graph_runners[
+                model_input.virtual_engine][graph_batch_size]
+        else:
+            model_executable = self.model
 
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
@@ -199,6 +209,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         if not self.is_driver_worker:
             return []
+
+        if model_input.async_callback is not None:
+            model_input.async_callback()
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
@@ -231,14 +244,12 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
-
         (
             attn_metadata,
             encoder_input_tokens_tensor,
             encoder_input_positions_tensor,
         ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
                                                        model_input))
-
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
         # Frozen dataclass fields cannot be modified, so use
@@ -437,11 +448,29 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 cross_block_tables.append([] if (
                     cross_block_table is None) else cross_block_table)
 
-            # Convert cross-attention block tables to encoder input tensor
+            if (model_input.attn_metadata is not None
+                    and model_input.attn_metadata.use_cuda_graph):
+                # We will be using CUDA graph replay for this decode.
+                max_len_of_block_table = self.get_max_block_per_batch()
+                batch_size = len(encoder_seq_lens)
+                graph_batch_size = _get_graph_batch_size(batch_size)
+                assert graph_batch_size >= batch_size
+                cuda_graph_pad_size = graph_batch_size - batch_size
+                # extend the cross_block_tables and encoder_seq_lens to match
+                # the graph_batch_size.
+                cross_block_tables.extend([[]
+                                           for _ in range(cuda_graph_pad_size)
+                                           ])
+                encoder_seq_lens.extend(
+                    itertools.repeat(1, cuda_graph_pad_size))
+
+            else:
+                max_len_of_block_table = max(
+                    len(block_table) for block_table in cross_block_tables)
+
             cross_block_tables = make_tensor_with_pad(
                 cross_block_tables,
-                max_len=max(
-                    len(block_table) for block_table in cross_block_tables),
+                max_len=max_len_of_block_table,
                 pad=0,
                 dtype=torch.int32,
                 device=self.device,

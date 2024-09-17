@@ -243,6 +243,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             prefix_cache_hit: bool = False,
             reinit: bool = False,
             reinit_use_defaults: bool = False,
+            encoder_seq_len: int = 0,
         ):
             if reinit:
                 assert len(self.seq_ids) == len(seq_ids)  # type: ignore
@@ -256,6 +257,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.block_tables = block_tables
             self.computed_block_nums = computed_block_nums
             self.n_seqs = n_seqs
+            self.encoder_seq_len = encoder_seq_len
 
             if reinit:
                 if len(self.seq_ids) == 1 and reinit_use_defaults:
@@ -702,6 +704,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             assert n_seqs == 1
             self.decode_only = False
 
+        encoder_seq_len = 0
+
+        if self.runner.model_config.is_encoder_decoder_model:
+            encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
+
         inter_data = self.init_cached_inter_data(
             request_id=seq_group_metadata.request_id,
             seq_ids=seq_ids,
@@ -709,7 +716,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             block_tables=seq_group_metadata.block_tables,
             computed_block_nums=seq_group_metadata.computed_block_nums,
             reinit=True,
-            reinit_use_defaults=True)
+            reinit_use_defaults=True,
+            encoder_seq_len=encoder_seq_len)
 
         self.inter_data_list.append(inter_data)
 
@@ -719,11 +727,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         for per_seq_group_fn in self.per_seq_group_compute_fns:
             per_seq_group_fn(inter_data, seq_group_metadata)
 
-    def _use_captured_graph(self, batch_size: int,
-                            max_decode_seq_len: int) -> bool:
+    def _use_captured_graph(self,
+                            batch_size: int,
+                            max_decode_seq_len: int,
+                            max_encoder_seq_len: int = 0) -> bool:
         return (self.decode_only and not self.runner.model_config.enforce_eager
-                and batch_size <= self.runner.max_batchsize_to_capture
-                and max_decode_seq_len <= self.runner.max_seq_len_to_capture)
+                and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+                and max_decode_seq_len <= self.runner.max_seq_len_to_capture
+                and max_encoder_seq_len <= self.runner.max_seq_len_to_capture
+                and batch_size <= self.runner.max_batchsize_to_capture)
 
     def build(self) -> ModelInputForGPU:
         """Finalize the builder intermediate data and
@@ -763,15 +775,18 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     input_positions.extend(cur_input_positions)
 
         seq_lens = []
+        query_lens = []
         max_decode_seq_len = 0
+        max_encoder_seq_len = 0
         for inter_data in self.inter_data_list:
             seq_lens.extend(inter_data.seq_lens)
+            query_lens.extend(inter_data.query_lens)
             if not inter_data.is_prompt:
                 max_decode_seq_len = max(max_decode_seq_len,
                                          max(inter_data.seq_lens))
-        query_lens = []
-        for inter_data in self.inter_data_list:
-            query_lens.extend(inter_data.query_lens)
+                if self.runner.model_config.is_encoder_decoder_model:
+                    max_encoder_seq_len = max(max_encoder_seq_len,
+                                              inter_data.encoder_seq_len)
 
         # Mapping from request IDs to sequence IDs. Used for Jamba models
         # that manages the cache by itself.
@@ -781,8 +796,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         }
 
         batch_size = len(input_tokens)
-        use_captured_graph = self._use_captured_graph(batch_size,
-                                                      max_decode_seq_len)
+        use_captured_graph = self._use_captured_graph(
+            batch_size,
+            max_decode_seq_len,
+            max_encoder_seq_len=max_encoder_seq_len)
 
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
@@ -1364,7 +1381,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 for batch_size in reversed(batch_size_capture_list):
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
-                            batch_size))
+                            batch_size,
+                            is_encoder_decoder_model=self.model_config.
+                            is_encoder_decoder_model))
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
@@ -1380,10 +1399,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         )
                         self.set_active_prompt_adapters(
                             set(), prompt_adapter_mapping)
-
                     graph_runner = CUDAGraphRunner(
                         self.model, self.attn_backend.get_name(),
-                        self.attn_state.graph_clone(batch_size))
+                        self.attn_state.graph_clone(batch_size),
+                        self.model_config.is_encoder_decoder_model)
 
                     capture_inputs = {
                         "input_ids":
@@ -1420,6 +1439,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             self.model.get_seqlen_agnostic_capture_inputs(
                                 batch_size)
                         })
+                    if self.model_config.is_encoder_decoder_model:
+                        # add the additional inputs to capture for
+                        # encoder-decoder models.
+                        self._update_inputs_to_capture_for_enc_dec_model(
+                            capture_inputs)
+
                     graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
@@ -1429,6 +1454,24 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         elapsed_time = end_time - start_time
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
+
+    def _update_inputs_to_capture_for_enc_dec_model(self,
+                                                    capture_inputs: Dict[str,
+                                                                         Any]):
+        """
+        Updates the set of input tensors needed for CUDA graph capture in an
+        encoder-decoder model.
+
+        This method modifies the provided `capture_inputs` dictionary by
+        adding tensors specific to encoder-decoder specific models that
+        need to be captured for CUDA Graph replay.
+        """
+        # During the decode phase encoder_input_ids and encoder_positions are
+        # unset. Do the same thing for graph capture.
+        capture_inputs["encoder_input_ids"] = torch.tensor(
+            [], dtype=torch.long).cuda()
+        capture_inputs["encoder_positions"] = torch.tensor(
+            [], dtype=torch.long).cuda()
 
     @property
     def vocab_size(self) -> int:
@@ -1629,7 +1672,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 class CUDAGraphRunner:
 
     def __init__(self, model: nn.Module, backend_name: str,
-                 attn_state: AttentionState):
+                 attn_state: AttentionState, is_encoder_decoder_model: bool):
         self.model = model
         self.backend_name = backend_name
         self.attn_state = attn_state
@@ -1638,6 +1681,7 @@ class CUDAGraphRunner:
         self.output_buffers: Dict[str, torch.Tensor] = {}
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
+        self._is_encoder_decoder_model = is_encoder_decoder_model
 
     @property
     def graph(self):
@@ -1671,8 +1715,9 @@ class CUDAGraphRunner:
                 intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
+        # Wait for the warm up operations to finish before proceeding with
+        # Graph Capture.
         torch.cuda.synchronize()
-
         # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
@@ -1704,10 +1749,14 @@ class CUDAGraphRunner:
 
         # Save the input and output buffers.
         self.input_buffers = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "kv_caches": kv_caches,
-            **self.attn_state.get_graph_input_buffers(attn_metadata),
+            "input_ids":
+            input_ids,
+            "positions":
+            positions,
+            "kv_caches":
+            kv_caches,
+            **self.attn_state.get_graph_input_buffers(
+                attn_metadata, self._is_encoder_decoder_model),
             **kwargs,
         }
         if intermediate_inputs is not None:
@@ -1737,8 +1786,8 @@ class CUDAGraphRunner:
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
-        self.attn_state.prepare_graph_input_buffers(self.input_buffers,
-                                                    attn_metadata)
+        self.attn_state.prepare_graph_input_buffers(
+            self.input_buffers, attn_metadata, self._is_encoder_decoder_model)
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
@@ -1752,6 +1801,12 @@ class CUDAGraphRunner:
                 if key != "model_execute_time" and key != "model_forward_time":
                     self.input_buffers[key].copy_(intermediate_tensors[key],
                                                   non_blocking=True)
+        if self._is_encoder_decoder_model:
+            self.input_buffers["encoder_input_ids"].copy_(
+                kwargs['encoder_input_ids'], non_blocking=True)
+            self.input_buffers["encoder_positions"].copy_(
+                kwargs['encoder_positions'], non_blocking=True)
+
         # Run the graph.
         self.graph.replay()
         # Return the output tensor.

@@ -252,6 +252,13 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
+- label: Encoder Decoder tests # 5min
+  source_file_dependencies:
+  - vllm/
+  - tests/encoder_decoder
+  commands:
+    - pytest -v -s encoder_decoder
+
 - label: OpenAI-Compatible Tool Use # 20 min
   fast_check: false
   mirror_hardwares: [ amd ]
