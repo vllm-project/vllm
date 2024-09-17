@@ -2,26 +2,21 @@ FROM mambaorg/micromamba
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
 USER root
 
-ENV PATH="/usr/local/cargo/bin:$PATH:/opt/conda/bin/"
+ENV PATH="/usr/local/cargo/bin:/opt/conda/bin:$PATH"
 
-RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential ffmpeg libsm6 libxext6 libgl1 
+RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential ffmpeg libsm6 libxext6 libgl1 libdnnl-dev 
 
 # Some packages in requirements-cpu are installed here
 # IBM provides optimized packages for ppc64le processors in the open-ce project for mamba
 # Currently these may not be available for venv or pip directly
 RUN micromamba install -y -n base -c https://ftp.osuosl.org/pub/open-ce/1.11.0-p10/ -c defaults python=3.10 torchvision-cpu=0.16.2 rust && micromamba clean --all --yes
 
-COPY ./ /workspace/vllm
-
-WORKDIR /workspace/vllm
-
-# These packages will be in rocketce eventually
-RUN pip install -v cmake xformers torch==2.3.1 uvloop==0.20.0 -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
-
-RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
-
+COPY ./ /workspace/
 WORKDIR /workspace/
 
-RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
+# These packages will be in rocketce eventually
+RUN pip install -v cmake xformers torch==2.4.0 uvloop==0.20.0 -r requirements-build.txt -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
+
+RUN VLLM_TARGET_DEVICE=cpu pip install -e . --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
