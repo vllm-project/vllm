@@ -58,21 +58,33 @@ def causal_conv1d_fn(
     return (out, conv_states)
 
 
-def causal_conv1d_update(x: torch.Tensor,
-                         conv_state: torch.Tensor,
-                         weight: torch.Tensor,
-                         bias: Optional[torch.Tensor] = None,
-                         activation: Optional[str] = None):
+def causal_conv1d_update(x,
+                         conv_state,
+                         weight,
+                         bias=None,
+                         activation=None,
+                         cache_seqlens=None):
     """
-    x: (batch, dim)
-    conv_state: (batch, dim, width)
+    x: (batch, dim) or (batch, dim, seqlen)
+    conv_state: (batch, dim, state_len), where state_len >= width - 1
     weight: (dim, width)
     bias: (dim,)
+    cache_seqlens: (batch,), dtype int32.
+        If not None, the conv_state is treated as a circular buffer.
+        The conv_state will be updated by copying x to the conv_state 
+        starting at the index
+        @cache_seqlens % state_len.
 
-    out: (batch, dim)
+    out: (batch, dim) or (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    activation_bool = activation in ["silu", "swish"]
-    return ops.causal_conv1d_update(x, conv_state, weight, bias,
-                                    activation_bool)
+    activation = activation in ["silu", "swish"]
+    unsqueeze = x.dim() == 2
+    if unsqueeze:
+        x = x.unsqueeze(-1)
+    out = ops.causal_conv1d_update(x, conv_state, weight, bias, activation,
+                                   cache_seqlens)
+    if unsqueeze:
+        out = out.squeeze(-1)
+    return out
