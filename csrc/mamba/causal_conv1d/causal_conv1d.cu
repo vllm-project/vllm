@@ -120,7 +120,6 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     }
     CHECK_SHAPE(weight, dim, width);
 
-    TORCH_CHECK(x.stride(-1) == 1);
 
 
     if (bias_.has_value()) {
