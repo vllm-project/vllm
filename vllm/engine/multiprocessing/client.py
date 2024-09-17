@@ -247,8 +247,6 @@ class MQLLMEngineClient:
             self.health_loop = asyncio.create_task(
                 self.run_check_health_loop(timeout=VLLM_RPC_TIMEOUT))
 
-            # Notify MQLLMEngine client is ready to start sending requests.
-            await self._notify_ready(socket)
 
     def close(self):
         """Destroy the ZeroMQ Context."""
@@ -350,12 +348,6 @@ class MQLLMEngineClient:
             expected_type=RPCStartupResponse,
             error_message="Unable to start RPC Server",
             socket=socket)
-
-    async def _notify_ready(self, socket: Socket):
-        """Get the RPCServer that the RPCClient is ready"""
-
-        await self._send_one_way_rpc_request(
-            request=RPCStartupRequest.CLIENT_IS_READY, socket=socket)
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""

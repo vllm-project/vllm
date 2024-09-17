@@ -154,30 +154,21 @@ class MQLLMEngine:
         """Startup loop for sending data from Engine -> Client."""
 
         with self.make_data_socket() as socket:
+            try:
+                identity, message = socket.recv_multipart(copy=False)
+                request: RPCStartupRequest = pickle.loads(message.buffer)
 
-            # Loop until the RPCClient has all the data it needs.
-            client_is_ready = False
-            while not client_is_ready:
-                response: Any
-                try:
-                    identity, message = socket.recv_multipart(copy=False)
-                    request: RPCStartupRequest = pickle.loads(message.buffer)
+                # Handle the query from the Client.
+                if request == RPCStartupRequest.IS_SERVER_READY:
+                    tracing_enabled = self.engine.is_tracing_enabled()
+                    response = RPCStartupResponse(
+                        tracing_enabled=tracing_enabled)
 
-                    # Handle the query from the Client.
-                    if request == RPCStartupRequest.IS_SERVER_READY:
-                        tracing_enabled = self.engine.is_tracing_enabled()
-                        response = RPCStartupResponse(
-                            tracing_enabled=tracing_enabled)
-                    elif request == RPCStartupRequest.CLIENT_IS_READY:
-                        response = VLLM_RPC_SUCCESS_STR
-                        # Breakout of loop once client is ready.
-                        client_is_ready = True
+            except Exception as e:
+                response = e
 
-                except Exception as e:
-                    response = e
-
-                socket.send_multipart((identity, pickle.dumps(response)),
-                                      copy=False)
+            socket.send_multipart((identity, pickle.dumps(response)),
+                                    copy=False)
 
     def run_engine_loop(self):
         """Core busy loop of the LLMEngine."""

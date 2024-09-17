@@ -48,7 +48,6 @@ class RPCHealthRequest:
 
 class RPCStartupRequest(Enum):
     IS_SERVER_READY = 1
-    CLIENT_IS_READY = 2
 
 
 @dataclass
