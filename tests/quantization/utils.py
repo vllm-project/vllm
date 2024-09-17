@@ -4,7 +4,12 @@ from vllm.platforms import current_platform
 
 def is_quant_method_supported(quant_method: str) -> bool:
     # Currently, all quantization methods require Nvidia or AMD GPUs
-    capability = int(current_platform.get_device_capability() or -1)
+    if not (current_platform.is_cuda() or current_platform.is_rocm()):
+        return False
+
+    capability = current_platform.get_device_capability()
+    assert capability is not None
+
     min_capability = QUANTIZATION_METHODS[quant_method].get_min_capability()
 
-    return capability >= min_capability
+    return int(capability) >= min_capability
