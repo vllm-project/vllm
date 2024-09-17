@@ -486,7 +486,7 @@ async def completions_with_server_args(
                                                   stream=False,
                                                   max_tokens=5,
                                                   logprobs=num_logprobs)
-    assert outputs is not None
+    assert outputs is not None, "Completion API call failed."
 
     return outputs
 

@@ -117,13 +117,15 @@ def check_logprobs_close(
     for prompt_idx, (outputs_0,
                      outputs_1) in enumerate(zip(outputs_0_lst,
                                                  outputs_1_lst)):
-        assert len(output_0) == len(output_1)
+        assert len(outputs_0) == len(outputs_1)
         if len(outputs_0) == 3:
+            assert len(outputs_1) == 3
             # Break out tokens, text & sample logprobs
             # (prompt logprobs were not provided)
             output_ids_0, output_str_0, logprobs_0 = outputs_0
             output_ids_1, output_str_1, logprobs_1 = outputs_1
         elif len(outputs_0) == 4:
+            assert len(outputs_1) == 4
             # Break out tokens, text, sample logprobs & prompt logprobs
             (
                 output_ids_0,
