@@ -247,7 +247,6 @@ class MQLLMEngineClient:
             self.health_loop = asyncio.create_task(
                 self.run_check_health_loop(timeout=VLLM_RPC_TIMEOUT))
 
-
     def close(self):
         """Destroy the ZeroMQ Context."""
         # Close all sockets and terminate the context.

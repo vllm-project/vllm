@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
-    VLLM_RPC_TIMEOUT: int = 10000 # ms
+    VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False

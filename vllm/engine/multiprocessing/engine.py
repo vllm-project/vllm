@@ -1,7 +1,7 @@
 import pickle
 import signal
 from contextlib import contextmanager
-from typing import Any, Iterator, List, Optional, Union
+from typing import Iterator, List, Optional, Union
 
 import cloudpickle
 import zmq
@@ -154,6 +154,7 @@ class MQLLMEngine:
         """Startup loop for sending data from Engine -> Client."""
 
         with self.make_data_socket() as socket:
+            response: Union[RPCStartupResponse, BaseException]
             try:
                 identity, message = socket.recv_multipart(copy=False)
                 request: RPCStartupRequest = pickle.loads(message.buffer)
@@ -168,7 +169,7 @@ class MQLLMEngine:
                 response = e
 
             socket.send_multipart((identity, pickle.dumps(response)),
-                                    copy=False)
+                                  copy=False)
 
     def run_engine_loop(self):
         """Core busy loop of the LLMEngine."""
