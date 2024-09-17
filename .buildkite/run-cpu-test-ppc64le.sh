@@ -31,9 +31,9 @@ docker exec cpu-test bash -c "
 
 # online inference
 docker exec cpu-test bash -c "
-  /opt/conda/bin/python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
+  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
   timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-  /opt/conda/bin/python3 benchmarks/benchmark_serving.py \
+  python3 benchmarks/benchmark_serving.py \
     --backend vllm \
     --dataset-name random \
     --model facebook/opt-125m \
