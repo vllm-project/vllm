@@ -44,22 +44,36 @@ def nullable_str(val: str):
 
 
 def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
+    """Parses a string containing comma separate key [str] to value [int]
+    pairs into a dictionary.
+
+    Args:
+        val: String value to be parsed.
+
+    Returns:
+        Dictionary with parsed values.
+    """
     if len(val) == 0:
         return None
 
     out_dict: Dict[str, int] = {}
     for item in val.split(","):
-        try:
-            key, value = item.split("=")
-        except TypeError as exc:
-            msg = "Each item should be in the form KEY=VALUE"
-            raise ValueError(msg) from exc
+        kv_parts = [part.lower().strip() for part in item.split("=")]
+        if len(kv_parts) != 2:
+            raise argparse.ArgumentTypeError(
+                "Each item should be in the form KEY=VALUE")
+        key, value = kv_parts
 
         try:
-            out_dict[key] = int(value)
+            parsed_value = int(value)
         except ValueError as exc:
             msg = f"Failed to parse value of item {key}={value}"
-            raise ValueError(msg) from exc
+            raise argparse.ArgumentTypeError(msg) from exc
+
+        if key in out_dict and out_dict[key] != parsed_value:
+            raise argparse.ArgumentTypeError(
+                f"Conflicting values specified for key: {key}")
+        out_dict[key] = parsed_value
 
     return out_dict
 
