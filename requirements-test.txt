@@ -14,7 +14,7 @@ librosa # required for audio test
 opencv-python # required for video test
 peft
 requests
-ray[adag]>=2.35
+ray[adag]==2.35
 sentence-transformers # required for embedding
 soundfile # required for audio test
 compressed-tensors==0.4.0 # required for compressed-tensors
