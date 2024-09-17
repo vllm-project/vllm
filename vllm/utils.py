@@ -5,6 +5,7 @@ import datetime
 import enum
 import gc
 import os
+import random
 import socket
 import subprocess
 import sys
@@ -378,6 +379,22 @@ def get_cpu_memory() -> int:
     return psutil.virtual_memory().total
 
 
+def seed_everything(seed: int) -> None:
+    """
+    Set the seed of each random module.
+
+    Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    if _is_cuda_available_stateless():
+        torch.cuda.manual_seed_all(seed)
+
+    if is_xpu():
+        torch.xpu.manual_seed_all(seed)
+
+
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
@@ -639,9 +656,7 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -683,9 +698,7 @@ def create_kv_caches_with_random(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
 
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -748,6 +761,13 @@ def is_pin_memory_available() -> bool:
     return True
 
 
+def _is_cuda_available_stateless():
+    # Avoid circular import
+    from vllm.platforms import current_platform
+
+    return current_platform.is_cuda_available()
+
+
 class CudaMemoryProfiler:
 
     def __init__(self, device: Optional[torch.types.Device] = None):
@@ -755,7 +775,7 @@ class CudaMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        if torch.cuda.is_available():
+        if _is_cuda_available_stateless():
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():

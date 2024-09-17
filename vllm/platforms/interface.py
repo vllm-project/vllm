@@ -27,16 +27,23 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
-    @staticmethod
-    def get_device_capability(device_id: int = 0) -> Optional[Tuple[int, int]]:
+    @classmethod
+    def is_cuda_available(cls, device_id: int = 0) -> bool:
+        return cls.get_device_capability(device_id=device_id) is not None
+
+    @classmethod
+    def get_device_capability(
+        cls,
+        device_id: int = 0,
+    ) -> Optional[Tuple[int, int]]:
         return None
 
-    @staticmethod
-    def get_device_name(device_id: int = 0) -> str:
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
         raise NotImplementedError
 
-    @staticmethod
-    def inference_mode():
+    @classmethod
+    def inference_mode(cls):
         """A device-specific wrapper of `torch.inference_mode`.
 
         This wrapper is recommended because some hardware backends such as TPU

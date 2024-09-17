@@ -20,12 +20,12 @@ if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
 
-    @staticmethod
+    @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
+    def get_device_capability(cls, device_id: int = 0) -> Tuple[int, int]:
         return torch.cuda.get_device_capability(device_id)
 
-    @staticmethod
+    @classmethod
     @lru_cache(maxsize=8)
-    def get_device_name(device_id: int = 0) -> str:
+    def get_device_name(cls, device_id: int = 0) -> str:
         return torch.cuda.get_device_name(device_id)
