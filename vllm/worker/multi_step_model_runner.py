@@ -641,7 +641,7 @@ def _pythonize_sampler_output(
 
     seq_groups = sampling_metadata.seq_groups
     prompt_logprobs_are_requested_for_prefill = any([
-        ((sg.sampling_params.prompt_logprobs is not None) and sg.is_prompt)
+        sg.sampling_params.prompt_logprobs is not None and sg.is_prompt
         for sg in seq_groups
     ])
     any_logprobs_are_requested = prompt_logprobs_are_requested_for_prefill or any(
