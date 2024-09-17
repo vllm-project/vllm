@@ -523,6 +523,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
+                    k_scale,
+                    v_scale,
                 )
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
@@ -586,5 +588,4 @@ def use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
     return (not ON_NAVI and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
-            and kv_cache_dtype == "auto"
             and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)
