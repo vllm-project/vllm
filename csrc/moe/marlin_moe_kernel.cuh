@@ -299,46 +299,6 @@ template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int group_blocks = -1  // number of consecutive 16x16 blocks
                                        // with a separate quantization scale
           >
-__device__ inline void MarlinMoESingle(
-    const int4* __restrict__ A,  // fp16 input matrix of shape mxk
-    const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
-    int4* __restrict__ C,        // fp16 output buffer of shape mxn
-    const int* __restrict__ sorted_ids,      // int32 sorted ids of experts
-    const float* __restrict__ topk_weights,  // float topk weights
-    const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
-                                          // (k/groupsize)xn
-    const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
-                                          // (k/groupsize)x(n/pack_factor)
-    const int* __restrict__ g_idx,        // int32 group indices of shape k
-    const int* __restrict__ expert_offsets,
-    int num_groups,        // number of scale groups per output channel
-    int expert_idx,        // idx of current expert
-    int num_experts,       // number of experts
-    int topk,              // topk parameter of moe
-    int prob_m,            // batch dimension m
-    int prob_n,            // output dimension n
-    int prob_k,            // reduction dimension k
-    int tot_m,             // total number of rows in A and C
-    int* locks,            // extra global storage for barrier synchronization
-    bool replicate_input,  // do we use the same input for each expert?
-    bool apply_weights,    // apply weights to output
-    int current_m_block    // current m block to start kernel computation from
-);
-
-template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
-          const int threads,          // number of threads in a threadblock
-          const int thread_m_blocks,  // number of 16x16 blocks in the m
-                                      // dimension (batchsize) of the
-                                      // threadblock
-          const int thread_n_blocks,  // same for n dimension (output)
-          const int thread_k_blocks,  // same for k dimension (reduction)
-          const int stages,  // number of stages for the async global->shared
-                             // fetch pipeline
-          const bool has_act_order,    // whether act_order is enabled
-          const bool has_zp,           // whether zero-points are enabled
-          const int group_blocks = -1  // number of consecutive 16x16 blocks
-                                       // with a separate quantization scale
-          >
 __global__ void MarlinMoE(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
@@ -378,10 +338,10 @@ template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int thread_k_blocks,  // same for k dimension (reduction)
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
-          const bool has_act_order,    // whether act_order is enabled
-          const bool has_zp,           // whether zero-points are enabled
-          const int group_blocks = -1  // number of consecutive 16x16 blocks
-                                       // with a separate quantization scale
+          const bool has_act_order,  // whether act_order is enabled
+          const bool has_zp,         // whether zero-points are enabled
+          const int group_blocks     // number of consecutive 16x16 blocks
+                                     // with a separate quantization scale
           >
 __global__ void MarlinMoE(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
@@ -424,81 +384,8 @@ __global__ void MarlinMoE(
 const int USER_THREADS =
     256;               // Note: This is only used with user-provided thread_k/n
 const int STAGES = 4;  // 4 pipeline stages fit into shared memory
-// const int SHARED_MEM =
-//     96 * 1024; // max shared memory on compute capability 8.6 (< 8.0)
 
 static constexpr int min_thread_n = 64;
 static constexpr int min_thread_k = 64;
-
-// #define __CALL_IF_MOE(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS,               \
-//                       THREAD_K_BLOCKS, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS,   \
-//                       NUM_THREADS)                                            \
-//   else if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS &&          \
-//            thread_n_blocks == THREAD_N_BLOCKS &&                              \
-//            thread_k_blocks == THREAD_K_BLOCKS &&                              \
-//            has_act_order == HAS_ACT_ORDER && has_zp == HAS_ZP &&              \
-//            group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS) {      \
-//     cudaFuncSetAttribute(MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS, \
-//                                    THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES,  \
-//                                    HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS>,      \
-//                          cudaFuncAttributeMaxDynamicSharedMemorySize,         \
-//                          max_shared_mem);                                     \
-//     MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS,     \
-//               THREAD_K_BLOCKS, STAGES, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS>   \
-//         <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                    \
-//             A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,     \
-//             zp_ptr, g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx,    \
-//             num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,          \
-//             replicate_input, apply_weights, m_block, max_par,                 \
-//             cfg_max_m_blocks);                                                \
-//   }
-
-// #define GPTQ_CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
-//                                                                               \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-//                                                                               \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-//                                                                               \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
-//                                                                               \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)
-
-// #define AWQ_CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
-//                                                                              \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
-//                                                                              \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
-//                                                                              \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
-//   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)
-
 
 }  // namespace marlin_moe

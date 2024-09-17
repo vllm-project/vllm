@@ -299,6 +299,8 @@ set(VLLM_MOE_EXT_SRC
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
+      "csrc/moe/marlin_moe_kernel.cu")
+  list(APPEND VLLM_MOE_EXT_SRC
       "csrc/moe/marlin_moe_ops.cu")
 endif()
 
