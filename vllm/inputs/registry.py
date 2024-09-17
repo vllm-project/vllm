@@ -212,7 +212,7 @@ class InputRegistry:
         """The default input processor is a no-op."""
         return inputs
 
-    def register_input_processor(self, processor: InputProcessor):
+    def register_input_processor(self, processor: InputProcessor) -> Callable:
         """
         Register an input processor to a model class.
 
@@ -236,36 +236,42 @@ class InputRegistry:
 
         return wrapper
 
-    def process_input(self, model_config: "ModelConfig",
-                      inputs: LLMInputs) -> LLMInputs:
+    def _process_input(self, inputs: LLMInputs, model_config: "ModelConfig",
+                       processor: Callable, **processor_kwargs) -> LLMInputs:
         """
-        Apply an input processor to an instance of model inputs.
+        Apply an input processor to an instance of model inputs. This will
+        usually not be invoked be directly, and instead will be wrapped in
+        a functools partial once the processor is created.
 
         The model is identified by ``model_config``.
 
         See also:
             :ref:`input_processing_pipeline`
         """
-        processor = self._get_model_input_processor(model_config)
-        return processor(InputContext(model_config), inputs)
+        return processor(InputContext(model_config), inputs,
+                         **processor_kwargs)
 
-    def create_input_processor(self, model_config: "ModelConfig"):
+    def create_input_processor(self, model_config: "ModelConfig") -> Callable:
         """
-        Create an input processor (see :meth:`process_input`) for a
+        Create an input processor (see :meth:`_process_input`) for a
         specific model.
         """
         # Determine which kwargs can be leveraged for the input processor
         # and drop + warn for kwargs that are unimplemented.
+        processor = self._get_model_input_processor(model_config)
         processor_kwargs = self._get_allowed_kwarg_overrides(
-            callable=self._get_model_input_processor(model_config),
+            callable=processor,
             overrides=model_config.processor_kwargs,
         )
-        return functools.partial(self.process_input, model_config,
+        return functools.partial(self._process_input,
+                                 model_config=model_config,
+                                 processor=processor,
                                  **processor_kwargs)
 
     def _get_model_input_processor(self,
                                    model_config: "ModelConfig") -> Callable:
-        """Grabs the input processor for the provided model.
+        """
+        Grabs the input processor for the provided model.
         
         Args:
             model_config: Config whose model architecture we can leverage to
@@ -288,7 +294,8 @@ class InputRegistry:
         callable: Callable,
         overrides: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Given a callable processor, determine which kwarg overrides provided
+        """
+        Given a callable processor, determine which kwarg overrides provided
         via the model config are valid keyword arguments, and drop any that
         are not.
 
