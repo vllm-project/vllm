@@ -870,12 +870,6 @@ def init_custom_ar(meta: torch.Tensor, rank_data: torch.Tensor,
                                                  offsets, rank, full_nvlink)
 
 
-def should_custom_ar(inp: torch.Tensor, max_size: int, world_size: int,
-                     full_nvlink: bool) -> bool:
-    return torch.ops._C_custom_ar.should_custom_ar(inp, max_size, world_size,
-                                                   full_nvlink)
-
-
 def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
     torch.ops._C_custom_ar.all_reduce_reg(fa, inp, out)
 
