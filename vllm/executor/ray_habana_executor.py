@@ -13,7 +13,7 @@ from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (_run_task_with_lock,
                         error_on_invalid_device_count_status,
                         get_distributed_init_method, get_ip, get_open_port,
-                        get_vllm_instance_id, make_async)
+                        get_vllm_instance_id, is_fake_hpu, make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -87,18 +87,20 @@ class RayHabanaExecutor(DistributedGPUExecutor):
         driver_ip = get_ip()
         worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if not bundle.get("HPU", 0):
+            resource_name = "HPU" if not is_fake_hpu() else "CPU"
+            if not bundle.get(resource_name, 0):
                 continue
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_id,
             )
-
+            resources = {'HPU': num_gpus} if not is_fake_hpu() else {}
+            num_cpus = 0 if not is_fake_hpu() else num_gpus
             worker = ray.remote(
-                num_cpus=0,
+                num_cpus=num_cpus,
                 num_gpus=0,
-                resources={'HPU': num_gpus},
+                resources=resources,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
