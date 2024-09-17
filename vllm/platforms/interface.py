@@ -36,14 +36,16 @@ class Platform:
         return self._enum == PlatformEnum.CPU
 
     @classmethod
-    def is_cuda_available(cls, device_id: int = 0) -> bool:
-        return cls.get_device_capability(device_id=device_id) is not None
+    def is_cuda_available(cls) -> bool:
+        """Stateless version of :func:`torch.cuda.is_available`."""
+        return False
 
     @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,
     ) -> Optional[DeviceCapability]:
+        """Stateless version of :func:`torch.cuda.get_device_capability`."""
         return None
 
     @classmethod
