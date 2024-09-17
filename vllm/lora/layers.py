@@ -30,7 +30,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.utils import is_hpu
 
 if is_hpu():
-    from vllm.hpu.ops import dispatch_bgmv_embedding, dispatch_bgmv_linear
+    from vllm_hpu_extension.ops import (dispatch_bgmv_embedding,
+                                        dispatch_bgmv_linear)
 
 if TYPE_CHECKING:
     pass

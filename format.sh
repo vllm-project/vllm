@@ -113,7 +113,6 @@ mypy vllm/spec_decode --config-file pyproject.toml
 mypy vllm/transformers_utils --config-file pyproject.toml
 mypy vllm/usage --config-file pyproject.toml
 mypy vllm/worker --config-file pyproject.toml
-mypy vllm/hpu --config-file pyproject.toml
 
 
 # If git diff returns a file that is in the skip list, the file may be checked anyway:
