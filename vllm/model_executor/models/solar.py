@@ -196,11 +196,11 @@ class SolarDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
+
         if rope_scaling is not None and getattr(
                 config, "original_max_position_embeddings", None):
-            rope_scaling[
-                "original_max_position_embeddings"
-            ] = config.original_max_position_embeddings
+            rope_scaling["original_max_position_embeddings"] \
+                = config.original_max_position_embeddings
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
