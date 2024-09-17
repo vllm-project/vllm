@@ -175,10 +175,8 @@ class MistralTokenizer:
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         if isinstance(self.tokenizer, Tekkenizer):
-            return "".join(
-                t for t in tokens
-                if t not in self.tokenizer._all_special_tokens
-            )
+            return "".join(t for t in tokens
+                           if t not in self.tokenizer._all_special_tokens)
         else:
             return self.tokenizer.decode(tokens)  # type: ignore[arg-type]
 
