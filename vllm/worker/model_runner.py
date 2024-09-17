@@ -800,7 +800,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             batch_size,
             max_decode_seq_len,
             max_encoder_seq_len=max_encoder_seq_len)
-        #use_captured_graph = True
 
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
