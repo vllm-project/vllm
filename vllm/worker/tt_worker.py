@@ -52,33 +52,18 @@ class TTCacheEngine:
         self.num_kv_heads //= 8 # TP=8, tries to use distributed worker if you give LLM 8 TP
 
         self.block_size = cache_config.block_size
-        self.num_gpu_blocks = cache_config.num_gpu_blocks
-        if self.num_gpu_blocks:
-            self.num_gpu_blocks //= parallel_config.pipeline_parallel_size
+        self.num_tt_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
-        if self.num_cpu_blocks:
-            self.num_cpu_blocks //= parallel_config.pipeline_parallel_size
 
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
-        # Get attention backend.
-        # self.attn_backend = get_attn_backend(
-        #     model_config.get_num_attention_heads(parallel_config),
-        #     self.head_size,
-        #     self.num_kv_heads,
-        #     model_config.get_sliding_window(),
-        #     model_config.dtype,
-        #     cache_config.cache_dtype,
-        #     self.block_size,
-        # )
-
         # Initialize the cache.
         # List of KV caches. Entry is a list containing K and V tensors.
         self.tt_cache = self._allocate_kv_cache(
-            self.num_gpu_blocks, self.device_config.device_type)
+            self.num_tt_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
     def _allocate_kv_cache(
@@ -90,14 +75,10 @@ class TTCacheEngine:
         The assumption is that KV cache for a layer is packed into one tensor. 
         We will have a separate tensor for K and V.
         """
-        # kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-        #     num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        
         # K and V each have the following shape: (num_blocks, num_kv_heads, block_size, head_size)
         kv_cache_shape = (num_blocks, self.num_kv_heads, self.block_size, self.head_size)
         kv_cache: List[torch.Tensor] = []
         num_layers = self.num_attention_layers 
-        # num_layers = 1 # TODO: Debugging for 1 layer 
         if device == "cpu":
             for _ in range(num_layers):
                 # null block in CpuGpuBlockAllocator requires at least that
@@ -123,6 +104,7 @@ class TTCacheEngine:
                     layout=ttnn.TILE_LAYOUT,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     dtype=ttnn.bfloat8_b
+                    # TODO: Add caching to speed this up
                 ) for lp in (cache_k, cache_v)]
                 
                 kv_cache.append(kv_tt)
@@ -130,19 +112,12 @@ class TTCacheEngine:
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         raise NotImplementedError
-        # for i in range(self.num_attention_layers):
-        #     self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
-        #                                   src_to_dst)
 
     def swap_out(self, src_to_dst: torch.Tensor) -> None:
         raise NotImplementedError
-        # for i in range(self.num_attention_layers):
-        #     self.attn_backend.swap_blocks(self.gpu_cache[i], self.cpu_cache[i],
-        #                                   src_to_dst)
 
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         raise NotImplementedError
-        # self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(
@@ -271,15 +246,12 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = [
-            TTCacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
-        ]
-        self.tt_cache = [
-            self.cache_engine[ve].tt_cache
-            for ve in range(self.parallel_config.pipeline_parallel_size)
-        ]
+        self.cache_engine = TTCacheEngine(
+            self.cache_config, 
+            self.model_config, 
+            self.parallel_config, 
+            self.device_config)
+        self.tt_cache = self.cache_engine.tt_cache
     
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
@@ -350,7 +322,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         
         output = self.model_runner.execute_model(
             model_input=model_input,
-            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            kv_caches=self.kv_cache
             if self.kv_cache is not None else None,
             intermediate_tensors=intermediate_tensors,
             num_steps=num_steps,
