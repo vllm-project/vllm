@@ -188,7 +188,7 @@ def apply_int8_linear(
     # ops.scaled_int8_quant supports both dynamic and static quant.
     # * dynamic, layer.input_scale is None and x_scale computed from x.
     # * static, layer.input_scale is scalar and x_scale is input_scale.
-    x_q, x_scale = ops.scaled_int8_quant(input, input_scale)
+    x_q, x_scale, _ = ops.scaled_int8_quant(input, input_scale)
 
     return ops.cutlass_scaled_mm(x_q,
                                  weight,

@@ -44,22 +44,36 @@ def nullable_str(val: str):
 
 
 def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
+    """Parses a string containing comma separate key [str] to value [int]
+    pairs into a dictionary.
+
+    Args:
+        val: String value to be parsed.
+
+    Returns:
+        Dictionary with parsed values.
+    """
     if len(val) == 0:
         return None
 
     out_dict: Dict[str, int] = {}
     for item in val.split(","):
-        try:
-            key, value = item.split("=")
-        except TypeError as exc:
-            msg = "Each item should be in the form KEY=VALUE"
-            raise ValueError(msg) from exc
+        kv_parts = [part.lower().strip() for part in item.split("=")]
+        if len(kv_parts) != 2:
+            raise argparse.ArgumentTypeError(
+                "Each item should be in the form KEY=VALUE")
+        key, value = kv_parts
 
         try:
-            out_dict[key] = int(value)
+            parsed_value = int(value)
         except ValueError as exc:
             msg = f"Failed to parse value of item {key}={value}"
-            raise ValueError(msg) from exc
+            raise argparse.ArgumentTypeError(msg) from exc
+
+        if key in out_dict and out_dict[key] != parsed_value:
+            raise argparse.ArgumentTypeError(
+                f"Conflicting values specified for key: {key}")
+        out_dict[key] = parsed_value
 
     return out_dict
 
@@ -843,6 +857,13 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
+        if model_config.is_multimodal_model:
+            if self.enable_prefix_caching:
+                logger.warning(
+                    "--enable-prefix-caching is currently not "
+                    "supported for multimodal models and has been disabled.")
+            self.enable_prefix_caching = False
+
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
             self.max_model_len,  # neuron needs block_size = max_model_len
@@ -874,7 +895,10 @@ class EngineArgs:
             # If not explicitly set, enable chunked prefill by default for
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
-            if use_long_context:
+
+            # Chunked prefill is currently disabled for multimodal models by
+            # default.
+            if use_long_context and not model_config.is_multimodal_model:
                 is_gpu = device_config.device_type == "cuda"
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
