@@ -95,6 +95,8 @@ You can also build and install vLLM from source:
         $ export MAX_JOBS=6
         $ pip install -e .
 
+    This is especially useful when you are building on less powerful machines. For example, when you use WSL, it only `gives you half of the memory by default <https://learn.microsoft.com/en-us/windows/wsl/wsl-config>`_, and you'd better use ``export MAX_JOBS=1`` to avoid compiling multiple files simultaneously and running out of memory. The side effect is that the build process will be much slower. If you only touch the Python code, slow compilation is okay, as you are building in an editable mode: you can just change the code and run the Python script without any re-compilation or re-installation.
+
 .. tip::
     If you have trouble building vLLM, we recommend using the NVIDIA PyTorch Docker image.
 
