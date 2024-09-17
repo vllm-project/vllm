@@ -310,19 +310,18 @@ def test_prepare_decode(batch_size):
     for i in range(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
-        #seq_lens.append(seq_len)
-        seq_lens.extend([seq_len, seq_len])
         seq_data = SequenceData(
             array(VLLM_TOKEN_ID_ARRAY_TYPE, (range(seq_len))))
         encoder_seq_len = (i + 1) % (model_runner.block_size - 1) + 1
-        #encoder_seq_lens.append(encoder_seq_len)
-        encoder_seq_lens.extend([encoder_seq_len, encoder_seq_len])
         encoder_seq_data = SequenceData(
             array(VLLM_TOKEN_ID_ARRAY_TYPE, (range(encoder_seq_len))))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=False,
-            seq_data={0: seq_data, 1: seq_data},
+            seq_data={
+                0: seq_data,
+                1: seq_data
+            },
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
             encoder_seq_data=encoder_seq_data,
@@ -330,6 +329,10 @@ def test_prepare_decode(batch_size):
         )
         assert seq_group_metadata.token_chunk_size == 1
         seq_group_metadata_list.append(seq_group_metadata)
+        seq_lens.extend(
+            [seq_len for _ in range(len(seq_group_metadata.seq_data))])
+        encoder_seq_lens.extend(
+            [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))])
 
     # Build
     # * Decoder model inputs
@@ -400,32 +403,24 @@ def test_prepare_decode(batch_size):
 
     # Verify block tables are correct for prompts
     # - Decoder self-attention
-    flattened_block_tables = [block_table for block_table in block_tables.values()]
-    
-
-    expected = torch.tensor(
-        flattened_block_tables * len(seq_group_metadata_list),
-        dtype=torch.int32,
-        device=model_runner.device
-    )
-    #expected = torch.tensor(
-    #    [block_tables[0]  for _ in range(len(seq_group_metadata_list))],
-    #    dtype=torch.int32,
-    #    device=model_runner.device
-    # )
-    print('expected ' + str(expected))
-    print('attn_metadata.block_tables ' + str(attn_metadata.block_tables))
+    flattened_block_tables = [
+        block_table for block_table in block_tables.values()
+    ]
+    expected = torch.tensor(flattened_block_tables *
+                            len(seq_group_metadata_list),
+                            dtype=torch.int32,
+                            device=model_runner.device)
     assert torch.equal(
         attn_metadata.block_tables,
         expected,
     )
     # - Encoder/decoder cross-attention
-    expected = torch.tensor(
-        [cross_block_table for seq_group_metadata in seq_group_metadata_list for  _ in range(len(seq_group_metadata.seq_data))],
-        dtype=torch.int32,
-        device=model_runner.device)
-    print('expected ' + str(expected))
-    print('attn_metadata.cross_block_tables ' + str(attn_metadata.cross_block_tables))
+    expected = torch.tensor([
+        cross_block_table for seq_group_metadata in seq_group_metadata_list
+        for _ in range(len(seq_group_metadata.seq_data))
+    ],
+                            dtype=torch.int32,
+                            device=model_runner.device)
     assert torch.equal(
         attn_metadata.cross_block_tables,
         expected,
@@ -510,7 +505,7 @@ def test_prepare_decode_cuda_graph(batch_size):
     seq_lens: List[int] = []
     encoder_seq_lens: List[int] = []
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    block_tables = {0: [1]}
+    block_tables = {0: [1], 1: [3]}
     cross_block_table = [2]
     for i in range(batch_size):
         # make sure all tokens fit into one block
@@ -525,13 +520,20 @@ def test_prepare_decode_cuda_graph(batch_size):
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=False,
-            seq_data={0: seq_data},
+            seq_data={
+                0: seq_data,
+                1: seq_data
+            },
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
             encoder_seq_data=encoder_seq_data,
             cross_block_table=cross_block_table,
         )
         assert seq_group_metadata.token_chunk_size == 1
+        seq_lens.extend(
+            [seq_len for _ in range(len(seq_group_metadata.seq_data))])
+        encoder_seq_lens.extend(
+            [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))])
         seq_group_metadata_list.append(seq_group_metadata)
 
     model_input = model_runner.prepare_model_input(seq_group_metadata_list)
