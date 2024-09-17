@@ -67,9 +67,9 @@ class BaseLogitsProcessor:
         instruction = self._guide.get_next_instruction(
             state=self._fsm_state[seq_id])
 
-        if isinstance(instruction, Generate):
+        if type(instruction) == Generate:  # noqa: E721
             allowed_tokens = instruction.tokens
-        elif isinstance(instruction, Write):
+        elif type(instruction) == Write:  # noqa: E721
             # TODO: support fast forward tokens
             allowed_tokens = [instruction.tokens[0]]
         else:

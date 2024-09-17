@@ -1022,7 +1022,7 @@ class AsyncLLMEngine:
     async def start_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes
-        if isinstance(self.engine.model_executor, GPUExecutorAsync):
+        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
             self.engine.model_executor.start_profile()
         else:
             self.engine.model_executor._run_workers("start_profile")
@@ -1030,7 +1030,7 @@ class AsyncLLMEngine:
     async def stop_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes
-        if isinstance(self.engine.model_executor, GPUExecutorAsync):
+        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
