@@ -4,9 +4,12 @@ import pytest
 
 from vllm.utils import cuda_device_count_stateless
 
+from ..utils import fork_new_process_for_each_test
+
 
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tp_size", [1, 2])
+@fork_new_process_for_each_test
 def test_full_graph(model, tp_size):
 
     # Skip the test if there are not enough CUDA devices.
