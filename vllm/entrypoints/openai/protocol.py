@@ -181,6 +181,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
+    dry_multiplier: float = 0.0
+    dry_base: float = 0.0
+    dry_allowed_length: int = 2
+    dry_penalty_last_n: int = 0
+    dry_sequence_breakers: Optional[List[str]] = []
     early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
@@ -301,6 +306,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             top_p=self.top_p,
             top_k=self.top_k,
             min_p=self.min_p,
+            dry_multiplier=self.dry_multiplier,
+            dry_base=self.dry_base,
+            dry_allowed_length=self.dry_allowed_length,
+            dry_penalty_last_n=self.dry_penalty_last_n,
+            dry_sequence_breakers=self.dry_sequence_breakers,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
@@ -455,6 +465,11 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
+    dry_multiplier: float = 0.0
+    dry_base: float = 0.0
+    dry_allowed_length: int = 2
+    dry_penalty_last_n: int = 0
+    dry_sequence_breakers: Optional[List[str]] = []
     early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
@@ -546,6 +561,11 @@ class CompletionRequest(OpenAIBaseModel):
             top_p=self.top_p,
             top_k=self.top_k,
             min_p=self.min_p,
+            dry_multiplier=self.dry_multiplier,
+            dry_base=self.dry_base,
+            dry_allowed_length=self.dry_allowed_length,
+            dry_penalty_last_n=self.dry_penalty_last_n,
+            dry_sequence_breakers=self.dry_sequence_breakers,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,

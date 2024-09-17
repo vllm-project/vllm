@@ -134,6 +134,11 @@ class SamplingParams(
     top_p: float = 1.0
     top_k: int = -1
     min_p: float = 0.0
+    dry_multiplier: float = 0.0,
+    dry_base: float = 0.0,
+    dry_allowed_length: int = 2,
+    dry_penalty_last_n: int = 0,
+    dry_sequence_breakers: Optional[List[str]] = [],
     seed: Optional[int] = None
     use_beam_search: bool = False
     length_penalty: float = 1.0
@@ -174,6 +179,11 @@ class SamplingParams(
         top_p: Optional[float] = 1.0,
         top_k: int = -1,
         min_p: float = 0.0,
+        dry_multiplier: float = 0.0,
+        dry_base: float = 0.0,
+        dry_allowed_length: int = 2,
+        dry_penalty_last_n: int = 0,
+        dry_sequence_breakers: Optional[List[str]] = [],
         seed: Optional[int] = None,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
@@ -207,6 +217,11 @@ class SamplingParams(
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
             min_p=min_p,
+            dry_multiplier=dry_multiplier,
+            dry_base=dry_base,
+            dry_allowed_length=dry_allowed_length,
+            dry_penalty_last_n=dry_penalty_last_n,
+            dry_sequence_breakers=dry_sequence_breakers,
             seed=seed,
             use_beam_search=use_beam_search,
             length_penalty=length_penalty,
@@ -302,6 +317,15 @@ class SamplingParams(
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
+        if self.dry_multiplier is not None:
+            if self.dry_multiplier < 0:
+                raise ValueError(
+                    f"dry_multiplier must be at least 0, got {self.dry_multiplier}."
+                )
+            if self.dry_allowed_length < 0:
+                raise ValueError(
+                    f"dry_allowed_length must be at least 0, got {self.dry_allowed_length}."
+                )
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
@@ -429,6 +453,11 @@ class SamplingParams(
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
+            f"dry_multiplier={self.dry_multiplier}, "
+            f"dry_base={self.dry_base}, "
+            f"dry_allowed_length={self.dry_allowed_length}, "
+            f"dry_penalty_last_n={self.dry_penalty_last_n}, "
+            f"dry_sequence_breakers={self.dry_sequence_breakers}, "
             f"seed={self.seed}, "
             f"use_beam_search={self.use_beam_search}, "
             f"length_penalty={self.length_penalty}, "

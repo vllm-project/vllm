@@ -191,13 +191,14 @@ class Sampler(nn.Module):
 
         # Initialize new sampling tensors
         (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p) = SamplingTensors.from_sampling_metadata(
+         do_min_p, do_dry) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         self._sampling_tensors = sampling_tensors
         self._do_penalties = do_penalties
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
+        self._do_dry = do_dry
 
     def forward(
         self,
@@ -240,6 +241,7 @@ class Sampler(nn.Module):
         do_penalties = self._do_penalties
         do_top_p_top_k = self._do_top_p_top_k
         do_min_p = self._do_min_p
+        do_dry = self._do_dry
 
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
@@ -250,6 +252,15 @@ class Sampler(nn.Module):
                                       sampling_tensors.presence_penalties,
                                       sampling_tensors.frequency_penalties,
                                       sampling_tensors.repetition_penalties)
+
+        if do_dry:
+            logits = _apply_dry(logits, sampling_tensors.prompt_tokens,
+                                sampling_tensors.output_tokens,
+                                sampling_tensors.dry_multipliers,
+                                sampling_tensors.dry_bases,
+                                sampling_tensors.dry_allowed_lengths,
+                                sampling_tensors.dry_penalty_last_ns,
+                                sampling_tensors.dry_sequence_breakers)
 
         # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
@@ -407,6 +418,16 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
     logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts
     logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
+    return logits
+
+
+def _apply_dry(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
+               output_tokens_tensor: torch.Tensor,
+               dry_multipliers: torch.Tensor,
+               dry_bases: torch.Tensor,
+               dry_allowed_lengths: torch.Tensor,
+               dry_penalty_last_ns: torch.Tensor,
+               dry_sequence_breakers: torch.Tensor) -> torch.Tensor:
     return logits
 
 
