@@ -74,12 +74,16 @@ class DummyDataFactory(Protocol):
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        **processor_kwargs: Any,
     ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data to be inputted into the model.
 
         Note:
             :data:`InputProcessor` is not applied to the dummy data.
+            The processor_kwargs are overrides provided at initialization
+            time to values in the config whose values may affect the number
+            of tokens per instance.
         """
         ...
 
@@ -185,10 +189,17 @@ class InputRegistry:
             .get(model_cls, self._default_dummy_data_factory)
         mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
 
+        # Check to see if this model expects additional processor kwargs;
+        # even though the processor isn't used on the dummy data, values
+        # passed to it that override the config may have implications on
+        # the number dummy data, e.g., the number of image tokens per instance.
+        df_kwargs = self._get_dummy_factory_processor_kwargs(
+            model_config, dummy_factory)
         seq_data, mm_data = dummy_factory(
             InputContext(model_config),
             seq_len,
             _MultiModalCounts(mm_counts),
+            **df_kwargs,
         )
 
         # Having more tokens is over-conservative but otherwise fine
@@ -206,6 +217,21 @@ class InputRegistry:
                     f"for profiling, but found {num_items} instances instead.")
 
         return seq_data, mm_data
+
+    def _get_dummy_factory_processor_kwargs(
+            self, model_config: "ModelConfig",
+            dummy_factory: Callable) -> Dict[str, Any]:
+        # Dummy factory takes no additional kwargs; presumably this means that
+        # image processor kwargs have either not been implemented, or they have
+        # no affect on the token counts.
+        if len(inspect.signature(dummy_factory).parameters) < 4:
+            return {}
+        # Otherwise we may have overrides; filter them in the
+        # same way we filter the input processor overrides
+        return self._get_allowed_kwarg_overrides(
+            callable=dummy_factory,
+            overrides=model_config.processor_kwargs,
+            immutable_kwargs=("ctx", "seq_len", "mm_counts"))
 
     def _default_input_processor(self, ctx: InputContext,
                                  inputs: LLMInputs) -> LLMInputs:
