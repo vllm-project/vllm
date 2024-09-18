@@ -417,7 +417,13 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
 
 
 def build_app(args: Namespace) -> FastAPI:
-    app = FastAPI(lifespan=lifespan)
+    if args.disable_fastapi_docs:
+        app = FastAPI(openapi_url=None,
+                      docs_url=None,
+                      redoc_url=None,
+                      lifespan=lifespan)
+    else:
+        app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.root_path = args.root_path
 
