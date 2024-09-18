@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
-#keep _PARTITION_SIZE in sync with csrc/rocm/attention.cu
-_PARTITION_SIZE = 512
+
+_PARTITION_SIZE = 256
 ON_NAVI = "gfx1" in torch.cuda.get_device_properties("cuda").gcnArchName
 
 
@@ -517,10 +517,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
                 # common code for prefill
                 assert output[:num_prefill_tokens].shape == out.shape
-                if output.shape[0] > num_prefill_tokens:
-                    output[:num_prefill_tokens] = out
-                else:
-                    output = out
+                output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
                 output[:num_prefill_tokens] = PagedAttention.forward_prefix(
@@ -567,13 +564,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 )
                 max_logits = torch.empty_like(exp_sums)
                 ops.paged_attention_rocm(
-                    output, exp_sums, max_logits, tmp_output, decode_query,
-                    key_cache, value_cache, self.num_kv_heads, self.scale,
-                    decode_meta.block_tables, decode_meta.seq_lens_tensor,
-                    block_size, max_seq_len, self.alibi_slopes,
-                    self.kv_cache_dtype, k_scale, v_scale)
-                if num_prefill_tokens > 0:
-                    output = output[num_prefill_tokens:]
+                    output[num_prefill_tokens:], exp_sums, max_logits,
+                    tmp_output, decode_query, key_cache, value_cache,
+                    self.num_kv_heads, self.scale, decode_meta.block_tables,
+                    decode_meta.seq_lens_tensor, block_size, max_seq_len,
+                    self.alibi_slopes, self.kv_cache_dtype, k_scale, v_scale)
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
                     decode_query,
