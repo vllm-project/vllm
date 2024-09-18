@@ -8,7 +8,7 @@ from pydantic import Field
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -62,7 +62,7 @@ class OpenAIServing:
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        engine_client: EngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -73,7 +73,7 @@ class OpenAIServing:
     ):
         super().__init__()
 
-        self.async_engine_client = async_engine_client
+        self.engine_client = engine_client
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 
