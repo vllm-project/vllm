@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import openai
+import pytest
 import requests
 from openai.types.completion import Completion
 from transformers import AutoTokenizer
@@ -20,9 +21,10 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
+from vllm.utils import (FlexibleArgumentParser, cuda_device_count_stateless,
+                        get_open_port, is_hip)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -89,11 +91,11 @@ class RemoteOpenAIServer:
         is_local = os.path.isdir(model)
         if not is_local:
             engine_args = AsyncEngineArgs.from_cli_args(args)
-            engine_config = engine_args.create_engine_config()
-            dummy_loader = DefaultModelLoader(engine_config.load_config)
-            dummy_loader._prepare_weights(engine_config.model_config.model,
-                                          engine_config.model_config.revision,
-                                          fall_back_to_pt=True)
+            model_config = engine_args.create_model_config()
+            load_config = engine_args.create_load_config()
+
+            model_loader = get_model_loader(load_config)
+            model_loader.download_model(model_config)
 
         env = os.environ.copy()
         # the current process might initialize cuda,
@@ -356,12 +358,23 @@ def error_on_warning():
         yield
 
 
+def get_physical_device_indices(devices):
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices is None:
+        return devices
+
+    visible_indices = [int(x) for x in visible_devices.split(",")]
+    index_mapping = {i: physical for i, physical in enumerate(visible_indices)}
+    return [index_mapping[i] for i in devices if i in index_mapping]
+
+
 @_nvml()
 def wait_for_gpu_memory_to_clear(devices: List[int],
                                  threshold_bytes: int,
                                  timeout_s: float = 120) -> None:
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
+    devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
         output: Dict[int, str] = {}
@@ -437,6 +450,22 @@ def fork_new_process_for_each_test(
             signal.signal(signal.SIGTERM, old_signal_handler)
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
+
+    return wrapper
+
+
+def multi_gpu_test(*, num_gpus: int):
+    """
+    Decorate a test to be run only when multiple GPUs are available.
+    """
+    test_selector = getattr(pytest.mark, f"distributed_{num_gpus}_gpus")
+    test_skipif = pytest.mark.skipif(
+        cuda_device_count_stateless() < num_gpus,
+        reason=f"Need at least {num_gpus} GPUs to run the test.",
+    )
+
+    def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
+        return test_selector(test_skipif(fork_new_process_for_each_test(f)))
 
     return wrapper
 

@@ -242,6 +242,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
             VLLM_INSTANCE_ID,
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
+            **({
+                "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
+            } if envs.VLLM_ATTENTION_BACKEND is not None else {})
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
 
         self._env_vars_for_all_workers = (
@@ -427,18 +430,36 @@ class RayGPUExecutor(DistributedGPUExecutor):
         async_run_remote_workers_only to complete."""
         ray.get(parallel_worker_tasks)
 
-    def _compiled_ray_dag(self, enable_asyncio: bool):
+    def _check_ray_adag_installation(self):
         import pkg_resources
         from packaging import version
 
-        required_version = version.parse("2.32")
+        required_version = version.parse("2.35")
         current_version = version.parse(
             pkg_resources.get_distribution("ray").version)
-        if current_version < required_version:
-            raise ValueError(f"Ray version {required_version} or greater is "
+        # TODO: update the constraint once we adapt to the backward
+        # incompatible API change from ray 2.36
+        if current_version != required_version:
+            raise ValueError(f"Ray version {required_version} is "
                              f"required, but found {current_version}")
 
+        import importlib.util
+        adag_spec = importlib.util.find_spec(
+            "ray.experimental.compiled_dag_ref")
+        if adag_spec is None:
+            raise ValueError("Ray accelerated DAG is not installed. "
+                             "Run `pip install ray[adag]` to install it.")
+
+        cupy_spec = importlib.util.find_spec("cupy")
+        if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
+            raise ValueError(
+                "cupy is not installed but required since "
+                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set."
+                "Run `pip install ray[adag]` and check cupy installation.")
+
+    def _compiled_ray_dag(self, enable_asyncio: bool):
         assert self.parallel_config.use_ray
+        self._check_ray_adag_installation()
         from ray.dag import InputNode, MultiOutputNode
         from ray.experimental.channel.torch_tensor_type import TorchTensorType
 
