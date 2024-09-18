@@ -196,7 +196,9 @@ class MessageQueue:
             # see http://api.zeromq.org/3-3:zmq-setsockopt for more details
             self.local_socket.setsockopt(XPUB_VERBOSE, True)
             local_subscribe_port = get_open_port()
-            self.local_socket.bind(f"tcp://*:{local_subscribe_port}")
+            socket_addr = f"tcp://127.0.0.1:{local_subscribe_port}"
+            logger.debug("Binding to %s", socket_addr)
+            self.local_socket.bind(socket_addr)
 
             self.current_idx = 0
 
@@ -212,7 +214,8 @@ class MessageQueue:
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
             remote_subscribe_port = get_open_port()
-            self.remote_socket.bind(f"tcp://*:{remote_subscribe_port}")
+            socket_addr = f"tcp://*:{remote_subscribe_port}"
+            self.remote_socket.bind(socket_addr)
 
         else:
             remote_subscribe_port = None
@@ -255,8 +258,9 @@ class MessageQueue:
 
             self.local_socket = context.socket(SUB)
             self.local_socket.setsockopt_string(SUBSCRIBE, "")
-            self.local_socket.connect(
-                f"tcp://{handle.connect_ip}:{handle.local_subscribe_port}")
+            socket_addr = f"tcp://127.0.0.1:{handle.local_subscribe_port}"
+            logger.debug("Connecting to %s", socket_addr)
+            self.local_socket.connect(socket_addr)
 
             self.remote_socket = None
         else:
@@ -270,8 +274,9 @@ class MessageQueue:
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
-            self.remote_socket.connect(
-                f"tcp://{handle.connect_ip}:{handle.remote_subscribe_port}")
+            socket_addr = f"tcp://{handle.connect_ip}:{handle.remote_subscribe_port}"
+            logger.debug("Connecting to %s", socket_addr)
+            self.remote_socket.connect(socket_addr)
 
         return self
 
