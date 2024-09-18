@@ -788,10 +788,9 @@ class Scheduler:
             A count of priority-based preemptions.
         """
 
-        running_queue = self.running
         waiting_queue = self.waiting
 
-        running_queue = deque(sorted(running_queue, key=self._get_priority))
+        running_queue = deque(sorted(self.running, key=self._get_priority))
 
         blocks_to_swap_out: List[Tuple[int, int]] = []
         force_preemption_count = 0
