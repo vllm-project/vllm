@@ -330,6 +330,25 @@ if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda")
   return()
 endif ()
 
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  #
+  # _rocm_C extension
+  #
+  set(VLLM_ROCM_EXT_SRC
+    "csrc/rocm/torch_bindings.cpp"
+    "csrc/rocm/attention.cu")
+
+  define_gpu_extension_target(
+    _rocm_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_ROCM_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
+endif()
+
 #
 # Build vLLM flash attention from source
 #

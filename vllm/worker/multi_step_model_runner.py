@@ -4,13 +4,6 @@ from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 
-try:
-    from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-except ModuleNotFoundError:
-    # vllm_flash_attn is not installed, use the identical ROCm FA metadata
-    from vllm.attention.backends.rocm_flash_attn import (
-        ROCmFlashAttentionMetadata as FlashAttentionMetadata)
-
 import torch
 
 from vllm.distributed import get_pp_group
@@ -35,6 +28,8 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
+
+MULTI_STEP_ATTENTION_BACKENDS = ["flash-attn", "flashinfer"]
 
 
 def seq_output_builder():
@@ -230,11 +225,14 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         self._base_model_runner: GPUModelRunnerBase = base_model_runner
 
         self.is_multi_step = self.scheduler_config.is_multi_step
-        # used to copy tensors from GPU to CPU asynchronously
-        self._copy_stream = torch.cuda.Stream()
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
         self.pythonization_cache = PythonizationCache()
+
+    @functools.cached_property
+    def _copy_stream(self):
+        # used to copy tensors from GPU to CPU asynchronously
+        return torch.cuda.Stream()
 
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> StatefulModelInput:
@@ -486,27 +484,27 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
     def _advance_step(self, model_input: StatefulModelInput,
                       out: SamplerOutput) -> StatefulModelInput:
-        frozen_model_input = model_input.frozen_model_input
-        assert frozen_model_input is not None
-        assert frozen_model_input.attn_metadata is not None
+        if self.attn_backend.get_name() not in MULTI_STEP_ATTENTION_BACKENDS:
+            raise ValueError(
+                f"Multi-step not supported for attention backend: "
+                f"{self.attn_backend.get_name()}. Set VLLM_ATTENTION_BACKEND "
+                f"to a value from {MULTI_STEP_ATTENTION_BACKENDS}.")
 
+        sampled_token_ids = model_input.cached_outputs[-1].sampled_token_ids
         num_seqs = model_input.num_seqs
         num_queries = model_input.num_queries
-        assert num_seqs > 0
-        assert num_queries > 0
-        assert num_seqs >= num_queries
-
+        frozen_model_input = model_input.frozen_model_input
+        assert frozen_model_input is not None
         attn_metadata = frozen_model_input.attn_metadata
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        assert attn_metadata is not None
 
         attn_metadata.advance_step(
             frozen_model_input,
-            model_input.cached_outputs[-1].sampled_token_ids, self.block_size,
-            num_seqs, num_queries)
-
-        if frozen_model_input.seq_lens is not None:
-            for i in range(num_queries):
-                frozen_model_input.seq_lens[i] = attn_metadata.seq_lens[i]
+            sampled_token_ids,
+            self.block_size,
+            num_seqs,
+            num_queries,
+        )
 
         return model_input
 
@@ -616,34 +614,66 @@ def _pythonize_sampler_output(
 
     frozen_model_input = model_input.frozen_model_input
     assert frozen_model_input.sampling_metadata is not None
+    sampling_metadata = frozen_model_input.sampling_metadata
     # samples generation should have been skipped
     assert not output.outputs
 
     pinned_buffer = pinned_sampled_token_buffer[:model_input.num_queries]
 
-    # CPU GPU sync
-    pinned_buffer = pinned_buffer.copy_(sampled_token_ids, non_blocking=False)
+    # We guarantee output tensors are ready, so it is safe to
+    # pythonize the sampler output & obtain CPU-side logprobs.
+    #
+    # However we should check whether logprobs pythonization may
+    # be skipped entirely, i.e. because no logprobs were requested
+    # or pythonization was not deferred. To that end,
+    #
+    # * `prompt_logprobs_are_requested_for_prefill` signals that
+    #   there are *any* prefill-phase requests which specify that
+    #   prompt logprobs should be returned.
+    #
+    # * `any_logprobs_are_requested` signals that there are any
+    #   requests which (1) specify that sample logprobs should be
+    #   returned, or (2) are in the prefill phase AND specify that
+    #   prompt logprobs should be returned.
+    #
+    # Later on, these flags cause adjustments to the pythonization
+    # process to accommodate logprobs.
+
+    seq_groups = sampling_metadata.seq_groups
+    prompt_logprobs_are_requested_for_prefill = any([
+        sg.sampling_params.prompt_logprobs is not None and sg.is_prompt
+        for sg in seq_groups
+    ])
+    any_logprobs_are_requested = (
+        prompt_logprobs_are_requested_for_prefill
+        or any([sg.sampling_params.logprobs is not None for sg in seq_groups]))
+
+    if prompt_logprobs_are_requested_for_prefill:
+        # CPU GPU sync, after gathering *only* sampled tokens (since
+        # requesting prompt logprobs leads `sampled_token_ids` to
+        # include prompt token ids in addition to sampled token ids.)
+        sample_idx_tensor = torch.tensor(
+            [sdx for sg in seq_groups for sdx in sg.sample_indices])
+        pinned_buffer = pinned_buffer.copy_(
+            sampled_token_ids[sample_idx_tensor, :], non_blocking=False)
+    else:
+        # CPU GPU sync
+        pinned_buffer = pinned_buffer.copy_(sampled_token_ids,
+                                            non_blocking=False)
 
     # this will not block as the tensors are already on CPU
     samples_list = pinned_buffer.tolist()
 
-    sampling_metadata = frozen_model_input.sampling_metadata
-
     skip_sampler_cpu_output = (
         frozen_model_input.sampling_metadata.skip_sampler_cpu_output)
 
-    # We are guaranteed output tensors are ready, so it is safe to
-    # pythonize the sampler output & obtain CPU-side logprobs.
-    #
-    # However this computation may be skipped entirely
-    # if no pythonization was deferred.
-    seq_groups = sampling_metadata.seq_groups
-    logprobs_are_requested = any([
-        sg.sampling_params.logprobs is not None
-        or sg.sampling_params.prompt_logprobs is not None for sg in seq_groups
-    ])
+    # *Don't* skip logprobs pythonization *if*:
+    # * Any requests require logprobs to be returned in this
+    # iteration AND
+    # * These requests are being scheduled in a fashion which
+    # defers pythonization (i.e. multi-step scheduling.)
     do_pythonize_logprobs = (skip_sampler_cpu_output
-                             and logprobs_are_requested)
+                             and any_logprobs_are_requested)
     (
         prompt_logprobs,
         sample_logprobs,
@@ -668,7 +698,7 @@ def _pythonize_sampler_output(
                 prompt_logprobs[sgdx],
                 sample_logprobs[sgdx],
             )
-        elif logprobs_are_requested:
+        elif any_logprobs_are_requested:
             (
                 group_prompt_logprobs,
                 group_sample_logprobs,
@@ -698,7 +728,7 @@ def _pythonize_sampler_output(
                 seq_output.parent_seq_id = seq_ids[parent_id]
                 seq_output.output_token = next_token_id
 
-                if logprobs_are_requested:
+                if any_logprobs_are_requested:
                     seq_output.logprobs = group_sample_logprobs[tdx]
                 else:
                     logprobs = next(iter(seq_output.logprobs.values()))
@@ -716,7 +746,7 @@ def _pythonize_sampler_output(
                 seq_outputs.append(
                     SequenceOutput(seq_ids[parent_id], next_token_id,
                                    (group_sample_logprobs[tdx]
-                                    if logprobs_are_requested else {
+                                    if any_logprobs_are_requested else {
                                         next_token_id:
                                         Logprob(logprob=float('inf'),
                                                 rank=None,
@@ -724,12 +754,12 @@ def _pythonize_sampler_output(
                                     })))
         if cache is not None:
             completion_seq_group_output.prompt_logprobs = \
-                group_prompt_logprobs if logprobs_are_requested else None
+                group_prompt_logprobs if any_logprobs_are_requested else None
             output.outputs.append(completion_seq_group_output)
         else:
             output.outputs.append(
                 CompletionSequenceGroupOutput(
                     seq_outputs, (group_prompt_logprobs
-                                  if logprobs_are_requested else None)))
+                                  if any_logprobs_are_requested else None)))
 
     assert len(output.outputs) > 0

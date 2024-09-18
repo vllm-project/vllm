@@ -57,10 +57,10 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
-    VLLM_RPC_GET_DATA_TIMEOUT_MS: int = 5000
-    VLLM_ALLOW_ENGINE_USE_RAY: bool = False
+    VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
 
 
@@ -202,6 +202,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
      ("true", "1")),
+
+    # Internal flag to control whether we use custom op,
+    # or use the native pytorch implementation
+    "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
+    lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
@@ -388,16 +393,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # Time in ms for the zmq client to wait for a response from the backend
     # server for simple data operations
-    "VLLM_RPC_GET_DATA_TIMEOUT_MS":
-    lambda: int(os.getenv("VLLM_RPC_GET_DATA_TIMEOUT_MS", "5000")),
-
-    # If set, allow running the engine as a separate ray actor,
-    # which is a deprecated feature soon to be removed.
-    # See https://github.com/vllm-project/vllm/issues/7045
-    "VLLM_ALLOW_ENGINE_USE_RAY":
-    lambda:
-    (os.environ.get("VLLM_ALLOW_ENGINE_USE_RAY", "0").strip().lower() in
-     ("1", "true")),
+    "VLLM_RPC_TIMEOUT":
+    lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded

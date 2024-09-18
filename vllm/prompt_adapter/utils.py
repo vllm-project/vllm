@@ -8,13 +8,15 @@ from huggingface_hub import file_exists, hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError
 from safetensors.torch import load_file as safe_load_file
 
+from vllm.platforms import current_platform
+
 WEIGHTS_NAME = "adapter_model.bin"
 SAFETENSORS_WEIGHTS_NAME = "adapter_model.safetensors"
 
 
 # Get current device name based on available devices
 def infer_device() -> str:
-    if torch.cuda.is_available():
+    if current_platform.is_cuda_alike():
         return "cuda"
     return "cpu"
 
