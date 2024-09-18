@@ -768,11 +768,17 @@ def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                                           silu_activation)
 
 
-def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
-                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
-                         silu_activation: bool) -> torch.Tensor:
+def causal_conv1d_update(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias_: Optional[torch.Tensor],
+    silu_activation: bool,
+    conv_state_indices: Optional[torch.Tensor],
+) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                             silu_activation)
+                                             silu_activation,
+                                             conv_state_indices)
 
 
 def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
@@ -868,12 +874,6 @@ def init_custom_ar(meta: torch.Tensor, rank_data: torch.Tensor,
                    full_nvlink: bool) -> int:
     return torch.ops._C_custom_ar.init_custom_ar(meta, rank_data, handles,
                                                  offsets, rank, full_nvlink)
-
-
-def should_custom_ar(inp: torch.Tensor, max_size: int, world_size: int,
-                     full_nvlink: bool) -> bool:
-    return torch.ops._C_custom_ar.should_custom_ar(inp, max_size, world_size,
-                                                   full_nvlink)
 
 
 def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
