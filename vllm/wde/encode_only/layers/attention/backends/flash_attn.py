@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
@@ -6,6 +5,7 @@ import torch
 from vllm.wde.core.layers.attention.abstract import AttentionBackend, AttentionMetadataBuilder, AttentionImpl, AttentionType
 from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionMetadata
 from vllm.utils import is_pin_memory_available
+
 pin_memory = is_pin_memory_available()
 
 
@@ -37,12 +37,17 @@ class EncodeOnlyFlashAttentionMetadata(EncodeOnlyAttentionMetadata):
     pass
 
 
-class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[EncodeOnlyFlashAttentionMetadata]):
+class FlashAttentionMetadataBuilder(
+        AttentionMetadataBuilder[EncodeOnlyFlashAttentionMetadata]):
+
     def __init__(self):
         pass
 
     def __call__(self, seq_lens: List[int]):
-        seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.long, pin_memory=pin_memory, device="cpu")
+        seq_lens_tensor = torch.tensor(seq_lens,
+                                       dtype=torch.long,
+                                       pin_memory=pin_memory,
+                                       device="cpu")
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device="cpu")
@@ -51,21 +56,23 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[EncodeOnlyFlashAtte
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        return EncodeOnlyFlashAttentionMetadata(max_seq_len=max(seq_lens), seq_start_loc=seq_start_loc)
+        return EncodeOnlyFlashAttentionMetadata(max_seq_len=max(seq_lens),
+                                                seq_start_loc=seq_start_loc)
 
 
 class EncodeOnlyFlashAttentionImpl(AttentionImpl):
+
     def __init__(
-            self,
-            num_heads: int,
-            head_size: int,
-            scale: float,
-            num_kv_heads: int,
-            alibi_slopes: Optional[List[float]],
-            sliding_window: Optional[int],
-            kv_cache_dtype: str,
-            blocksparse_params: Optional[Dict[str, Any]] = None,
-            logits_soft_cap: Optional[float] = None,
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -98,21 +105,22 @@ class EncodeOnlyFlashAttentionImpl(AttentionImpl):
             raise ValueError(
                 "Sliding window is not supported in FlashAttention.")
 
-        support_head_sizes = EncodeOnlyFlashAttentionBackend.get_supported_head_sizes()
+        support_head_sizes = EncodeOnlyFlashAttentionBackend.get_supported_head_sizes(
+        )
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            attn_metadata: EncodeOnlyFlashAttentionMetadata,
-            k_scale: float = 1.0,
-            v_scale: float = 1.0,
-            attn_type: AttentionType = AttentionType.ENCODER,
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: EncodeOnlyFlashAttentionMetadata,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.ENCODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 

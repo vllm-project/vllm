@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass
 from typing import List, Iterable, Set
 import torch
@@ -34,11 +33,8 @@ class EncodeOnlySchedulerOutput(SchedulerOutput):
 
 class EncodeOnlyRequestOutput(RequestOutput):
 
-    def __init__(self,
-                 request_id: str,
-                 outputs: torch.Tensor,
-                 prompt_token_ids: List[int],
-                 finished: bool):
+    def __init__(self, request_id: str, outputs: torch.Tensor,
+                 prompt_token_ids: List[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished

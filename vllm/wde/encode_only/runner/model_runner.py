@@ -1,9 +1,7 @@
-
 import torch
 import torch.nn as nn
 from vllm.logger import init_logger
-from vllm.utils import (CudaMemoryProfiler,
-                              is_pin_memory_available)
+from vllm.utils import (CudaMemoryProfiler, is_pin_memory_available)
 
 from vllm.wde.core.config import DeviceConfig, LoadConfig
 from vllm.wde.encode_only.config import ModelConfig, EncodeOnlySchedulerConfig
@@ -14,6 +12,7 @@ logger = init_logger(__name__)
 
 
 class ModelRunner:
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -39,16 +38,14 @@ class ModelRunner:
         logger.info("Starting to load model %s...", self.model_config.model)
         with CudaMemoryProfiler() as m:
             loader = get_model_loader(self.load_config)
-            self.model = initialize_model(
-                model_config=self.model_config,
-                load_config=self.load_config,
-                device_config=self.device_config,
-                attn_backend=self.attn_backend)
+            self.model = initialize_model(model_config=self.model_config,
+                                          load_config=self.load_config,
+                                          device_config=self.device_config,
+                                          attn_backend=self.attn_backend)
 
-            loader.load_model(
-                self.model,
-                model_config=self.model_config,
-                device_config=self.device_config)
+            loader.load_model(self.model,
+                              model_config=self.model_config,
+                              device_config=self.device_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
@@ -60,4 +57,3 @@ class ModelRunner:
         model_input: ModelInputForGPU,
     ):
         return self.model(**model_input.to_dict())
-

@@ -1,4 +1,3 @@
-
 import torch
 
 from vllm.wde.core.llm_engine import LLMEngine
@@ -9,18 +8,23 @@ from vllm.wde.encode_only.schema.execute_io import ModelInputForGPU
 from vllm.wde.core.schema.execute_io import ExecuteInput
 
 from vllm.utils import is_pin_memory_available
+
 pin_memory = is_pin_memory_available()
 
 
 class EncodeOnlyModelInputBuilder(ModelInputBuilder):
-    def __init__(self, attention_metadata_builder: EncodeOnlyAttentionMetadataBuilder):
+
+    def __init__(
+            self,
+            attention_metadata_builder: EncodeOnlyAttentionMetadataBuilder):
         self.attention_metadata_builder = attention_metadata_builder
 
     @classmethod
     def from_engine(cls, engine: LLMEngine):
         return cls(engine.attn_backend.get_builder_cls()())
 
-    def __call__(self,  scheduler_output: EncodeOnlySchedulerOutput) -> ExecuteInput:
+    def __call__(self,
+                 scheduler_output: EncodeOnlySchedulerOutput) -> ExecuteInput:
         input_tokens = []
         input_positions = []
         seq_lens = []
@@ -31,14 +35,18 @@ class EncodeOnlyModelInputBuilder(ModelInputBuilder):
             input_positions.extend(list(range(0, n_tokens)))
             seq_lens.append(n_tokens)
 
-        input_ids = torch.tensor(input_tokens, dtype=torch.long, pin_memory=pin_memory, device="cpu")
-        positions = torch.tensor(input_positions, dtype=torch.long, pin_memory=pin_memory, device="cpu")
+        input_ids = torch.tensor(input_tokens,
+                                 dtype=torch.long,
+                                 pin_memory=pin_memory,
+                                 device="cpu")
+        positions = torch.tensor(input_positions,
+                                 dtype=torch.long,
+                                 pin_memory=pin_memory,
+                                 device="cpu")
         attn_metadata = self.attention_metadata_builder(seq_lens)
 
         model_input = ModelInputForGPU(input_ids=input_ids,
                                        positions=positions,
                                        attn_metadata=attn_metadata)
 
-        return ExecuteInput(worker_input=None,
-                            model_input=model_input)
-
+        return ExecuteInput(worker_input=None, model_input=model_input)

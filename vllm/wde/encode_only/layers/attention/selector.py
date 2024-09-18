@@ -7,6 +7,7 @@ import torch
 from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionBackend
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.logger import init_logger
+
 logger = init_logger(__name__)
 
 
@@ -39,6 +40,7 @@ def get_attn_backend(
 
 
 class AttnBackend:
+
     @classmethod
     def from_engine(cls, engine: LLMEngine):
         from vllm.wde.encode_only.layers.attention.backends.flash_attn import EncodeOnlyFlashAttentionBackend

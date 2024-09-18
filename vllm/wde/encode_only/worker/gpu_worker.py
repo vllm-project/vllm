@@ -1,4 +1,3 @@
-
 from typing import Optional
 
 import os
@@ -16,6 +15,7 @@ from vllm.config import ParallelConfig
 
 
 class Worker(WorkerBase):
+
     def __init__(
         self,
         engine_config: EncodeOnlyEngineConfig,
@@ -31,13 +31,10 @@ class Worker(WorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = ModelRunner(
-            self.model_config,
-            self.scheduler_config,
-            self.device_config,
-            self.load_config,
-            attn_backend
-        )
+        self.model_runner = ModelRunner(self.model_config,
+                                        self.scheduler_config,
+                                        self.device_config, self.load_config,
+                                        attn_backend)
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -89,9 +86,7 @@ class Worker(WorkerBase):
         distributed_init_method = get_distributed_init_method(ip, port)
 
         init_worker_distributed_environment(self.parallel_config, 0,
-                                            distributed_init_method,
-                                            0)
-
+                                            distributed_init_method, 0)
 
     @torch.inference_mode
     def load_model(self):
@@ -99,8 +94,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode
     def __call__(self, execute_input: EncodeOnlyExecuteInput):
-        output = self.model_runner.execute_model(
-            execute_input.model_input)
+        output = self.model_runner.execute_model(execute_input.model_input)
         return output
 
 
@@ -127,7 +121,6 @@ def init_worker_distributed_environment(
     from vllm.distributed import (ensure_model_parallel_initialized,
                                   init_distributed_environment,
                                   set_custom_all_reduce)
-
     """Initialize the distributed environment."""
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 

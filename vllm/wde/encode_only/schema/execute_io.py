@@ -1,5 +1,3 @@
-
-
 from dataclasses import dataclass
 import torch
 from vllm.wde.core.schema.execute_io import ModelInput, ExecuteInput
@@ -14,7 +12,8 @@ class ModelInputForGPU(ModelInput):
 
     def to(self, target_device, non_blocking=False):
         for k in self.__dict__.keys():
-            self.__dict__[k] = self.__dict__[k].to(device=target_device, non_blocking=non_blocking)
+            self.__dict__[k] = self.__dict__[k].to(device=target_device,
+                                                   non_blocking=non_blocking)
 
     def to_dict(self):
         return self.__dict__

@@ -37,18 +37,25 @@ logger = logging.get_logger(__name__)
 
 
 class XLMRobertaEmbeddings(nn.Module):
+
     def __init__(self, config: XLMRobertaConfig):
         super().__init__()
         self.config = config
-        self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+        self.position_embedding_type = getattr(config,
+                                               "position_embedding_type",
+                                               "absolute")
         assert self.position_embedding_type == "absolute"
 
-        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.word_embeddings = nn.Embedding(config.vocab_size,
+                                            config.hidden_size,
+                                            padding_idx=config.pad_token_id)
         self.token_type_embeddings0 = None
         self.position_embeddings = nn.Embedding(
-            config.max_position_embeddings, config.hidden_size, padding_idx=config.pad_token_id
-        )
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+            config.max_position_embeddings,
+            config.hidden_size,
+            padding_idx=config.pad_token_id)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
 
     def init_token_type_embeddings0(self):
         del self.token_type_embeddings0
@@ -56,8 +63,7 @@ class XLMRobertaEmbeddings(nn.Module):
             "token_type_embeddings0",
             torch.zeros(self.config.hidden_size,
                         dtype=self.word_embeddings.weight.dtype,
-                        device=self.word_embeddings.weight.device)
-        )
+                        device=self.word_embeddings.weight.device))
 
     def forward(self, input_ids, positions):
         embeddings = self.word_embeddings(input_ids)
@@ -74,6 +80,7 @@ class XLMRobertaEmbeddings(nn.Module):
 
 
 class XLMRobertaSelfAttention(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  attn_backend: EncodeOnlyAttentionBackend,
@@ -89,7 +96,7 @@ class XLMRobertaSelfAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
             config.hidden_size,
@@ -108,9 +115,9 @@ class XLMRobertaSelfAttention(nn.Module):
                                         attn_backend=attn_backend)
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attn_metadata: EncodeOnlyAttentionMetadata,
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: EncodeOnlyAttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -119,20 +126,26 @@ class XLMRobertaSelfAttention(nn.Module):
 
 
 class XLMRobertaSelfOutput(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.dense = ColumnParallelLinear(config.hidden_size, config.hidden_size, quant_config=quant_config)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dense = ColumnParallelLinear(config.hidden_size,
+                                          config.hidden_size,
+                                          quant_config=quant_config)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
 
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor,
+                input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.dense(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
 
 class XLMRobertaAttention(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  attn_backend: EncodeOnlyAttentionBackend,
@@ -142,19 +155,17 @@ class XLMRobertaAttention(nn.Module):
         self.output = XLMRobertaSelfOutput(config, quant_config)
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attn_metadata: EncodeOnlyAttentionMetadata,
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: EncodeOnlyAttentionMetadata,
     ) -> torch.Tensor:
-        self_outputs = self.self(
-            hidden_states,
-            attn_metadata
-        )
+        self_outputs = self.self(hidden_states, attn_metadata)
         attention_output = self.output(self_outputs, hidden_states)
         return attention_output
 
 
 class XLMRobertaIntermediate(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  quant_config: Optional[QuantizationConfig] = None):
@@ -172,68 +183,72 @@ class XLMRobertaIntermediate(nn.Module):
 
 
 class XLMRobertaOutput(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.dense = RowParallelLinear(config.intermediate_size, config.hidden_size,
+        self.dense = RowParallelLinear(config.intermediate_size,
+                                       config.hidden_size,
                                        bias=True,
                                        quant_config=quant_config)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
 
-    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor,
+                input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.dense(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
 
 class XLMRobertaLayer(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  attn_backend: EncodeOnlyAttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.attention = XLMRobertaAttention(config, attn_backend, quant_config)
+        self.attention = XLMRobertaAttention(config, attn_backend,
+                                             quant_config)
         self.intermediate = XLMRobertaIntermediate(config, quant_config)
         self.output = XLMRobertaOutput(config, quant_config)
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attn_metadata: EncodeOnlyAttentionMetadata,
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: EncodeOnlyAttentionMetadata,
     ) -> torch.Tensor:
-        attention_output = self.attention(
-            hidden_states,
-            attn_metadata
-        )
+        attention_output = self.attention(hidden_states, attn_metadata)
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
 
 class XLMRobertaEncoder(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  attn_backend: EncodeOnlyAttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.layer = nn.ModuleList([XLMRobertaLayer(config, attn_backend, quant_config)
-                                    for _ in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([
+            XLMRobertaLayer(config, attn_backend, quant_config)
+            for _ in range(config.num_hidden_layers)
+        ])
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attn_metadata: EncodeOnlyAttentionMetadata,
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: EncodeOnlyAttentionMetadata,
     ) -> torch.Tensor:
         for i, layer_module in enumerate(self.layer):
-            hidden_states = layer_module(
-                hidden_states,
-                attn_metadata
-            )
+            hidden_states = layer_module(hidden_states, attn_metadata)
         return hidden_states
 
 
 class XLMRobertaModel(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  attn_backend: EncodeOnlyAttentionBackend,
@@ -244,10 +259,10 @@ class XLMRobertaModel(nn.Module):
         self.encoder = XLMRobertaEncoder(config, attn_backend, quant_config)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            attn_metadata: EncodeOnlyAttentionMetadata,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: EncodeOnlyAttentionMetadata,
     ) -> torch.Tensor:
         positions += self.config.pad_token_id + 1
 
@@ -256,23 +271,26 @@ class XLMRobertaModel(nn.Module):
             positions=positions,
         )
 
-        encoder_outputs = self.encoder(
-            embedding_output,
-            attn_metadata
-        )
+        encoder_outputs = self.encoder(embedding_output, attn_metadata)
 
         return encoder_outputs
 
 
 class XLMRobertaLMHead(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.dense = ColumnParallelLinear(config.hidden_size, config.hidden_size, quant_config=quant_config)
-        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dense = ColumnParallelLinear(config.hidden_size,
+                                          config.hidden_size,
+                                          quant_config=quant_config)
+        self.layer_norm = nn.LayerNorm(config.hidden_size,
+                                       eps=config.layer_norm_eps)
 
-        self.decoder = ColumnParallelLinear(config.hidden_size, config.vocab_size, quant_config=quant_config)
+        self.decoder = ColumnParallelLinear(config.hidden_size,
+                                            config.vocab_size,
+                                            quant_config=quant_config)
         self.gelu = get_act_fn("gelu")
 
     def forward(self, features):
@@ -284,16 +302,19 @@ class XLMRobertaLMHead(nn.Module):
 
 
 class XLMRobertaForMaskedLM(nn.Module):
-    _ignore_weights_keys = ["roberta.pooler.dense.weight",
-                            "roberta.pooler.dense.bias",
-                            # token_type_embeddings is all zero
-                            "roberta.embeddings.token_type_embeddings.weight"]
+    _ignore_weights_keys = [
+        "roberta.pooler.dense.weight",
+        "roberta.pooler.dense.bias",
+        # token_type_embeddings is all zero
+        "roberta.embeddings.token_type_embeddings.weight"
+    ]
 
     def __init__(self,
                  config: XLMRobertaConfig,
                  attn_backend: EncodeOnlyAttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None,
-                 *args, **kwargs):
+                 *args,
+                 **kwargs):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
@@ -302,10 +323,10 @@ class XLMRobertaForMaskedLM(nn.Module):
         self.lm_head = XLMRobertaLMHead(config, quant_config)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            attn_metadata: EncodeOnlyAttentionMetadata,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: EncodeOnlyAttentionMetadata,
     ) -> torch.Tensor:
         sequence_output = self.roberta(
             input_ids,
@@ -367,12 +388,17 @@ class XLMRobertaForMaskedLM(nn.Module):
 
 
 class XLMRobertaClassificationHead(nn.Module):
+
     def __init__(self,
                  config: XLMRobertaConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.dense = ColumnParallelLinear(config.hidden_size, config.hidden_size, quant_config=quant_config)
-        self.out_proj = ColumnParallelLinear(config.hidden_size, config.num_labels, quant_config=quant_config)
+        self.dense = ColumnParallelLinear(config.hidden_size,
+                                          config.hidden_size,
+                                          quant_config=quant_config)
+        self.out_proj = ColumnParallelLinear(config.hidden_size,
+                                             config.num_labels,
+                                             quant_config=quant_config)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         x, _ = self.dense(features)
@@ -382,14 +408,16 @@ class XLMRobertaClassificationHead(nn.Module):
 
 
 class XLMRobertaForSequenceClassification(nn.Module):
-    _ignore_weights_keys = ["roberta.pooler.dense.weight",
-                            "roberta.pooler.dense.bias"]
+    _ignore_weights_keys = [
+        "roberta.pooler.dense.weight", "roberta.pooler.dense.bias"
+    ]
 
     def __init__(self,
                  config: XLMRobertaConfig,
                  attn_backend: EncodeOnlyAttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None,
-                 *args, **kwargs):
+                 *args,
+                 **kwargs):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
@@ -399,10 +427,10 @@ class XLMRobertaForSequenceClassification(nn.Module):
         self.classifier = XLMRobertaClassificationHead(config)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            attn_metadata: EncodeOnlyAttentionMetadata,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: EncodeOnlyAttentionMetadata,
     ) -> torch.Tensor:
 
         sequence_output = self.roberta(
@@ -436,7 +464,9 @@ class XLMRobertaForSequenceClassification(nn.Module):
             if name == "roberta.embeddings.token_type_embeddings.weight":
                 # token_type_ids is all zero, so we only need token_type_embeddings[0]
                 self.roberta.embeddings.init_token_type_embeddings0()
-                default_weight_loader(self.roberta.embeddings.token_type_embeddings0, loaded_weight[0])
+                default_weight_loader(
+                    self.roberta.embeddings.token_type_embeddings0,
+                    loaded_weight[0])
                 continue
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:

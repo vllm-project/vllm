@@ -9,6 +9,7 @@ from vllm.wde.core.processor.input_processor import InputProcessor, RequestProce
 
 
 class EncodeOnlyModelInputProcessor(InputProcessor):
+
     @classmethod
     def from_engine(cls, engine: LLMEngine):
         return cls()
@@ -27,6 +28,7 @@ class EncodeOnlyModelInputProcessor(InputProcessor):
 
 
 class EncodeOnlyModelRequestProcessor(RequestProcessor):
+
     def __init__(self, tokenizer: Tokenizer):
         self.tokenizer = tokenizer
 
@@ -34,7 +36,8 @@ class EncodeOnlyModelRequestProcessor(RequestProcessor):
     def from_engine(cls, engine: LLMEngine):
         return cls(engine.tokenizer)
 
-    def __call__(self, request: EncodeOnlyRequest) -> EncodeOnlySchedulableRequest:
+    def __call__(self,
+                 request: EncodeOnlyRequest) -> EncodeOnlySchedulableRequest:
         inputs = request.inputs
 
         if isinstance(inputs, str):
@@ -53,11 +56,8 @@ class EncodeOnlyModelRequestProcessor(RequestProcessor):
 
         schedulable_request = EncodeOnlySchedulableRequest(
             request_id=request.request_id,
-            inputs=EncodeOnlyInput(
-                prompt_token_ids=prompt_token_ids,
-                prompt=inputs.get("prompt")
-            ),
-            arrival_time=request.arrival_time
-        )
+            inputs=EncodeOnlyInput(prompt_token_ids=prompt_token_ids,
+                                   prompt=inputs.get("prompt")),
+            arrival_time=request.arrival_time)
 
         return schedulable_request

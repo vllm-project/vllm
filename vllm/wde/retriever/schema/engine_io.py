@@ -1,11 +1,10 @@
-
-
 from typing import List
 import torch
 from vllm.wde.core.schema.engine_io import RequestOutput
 
 
 class EmbeddingRequestOutput(RequestOutput):
+
     def __init__(self, request_id: str, outputs: torch.Tensor,
                  prompt_token_ids: List[int], finished: bool):
         self.request_id = request_id

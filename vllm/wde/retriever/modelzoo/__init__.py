@@ -1,4 +1,3 @@
-
 TASK = "retriever"
 WORKFLOW = "vllm.wde.retriever.workflow:RetrieverWorkflow"
 
@@ -6,5 +5,3 @@ WORKFLOW = "vllm.wde.retriever.workflow:RetrieverWorkflow"
 RETRIEVER_MODELS = {
     "XLMRobertaModel": (TASK, "bge_m3", "BGEM3Model", WORKFLOW),
 }
-
-
