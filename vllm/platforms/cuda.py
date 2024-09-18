@@ -11,7 +11,7 @@ from typing_extensions import ParamSpec
 
 from vllm.logger import init_logger
 
-from .interface import Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
@@ -96,19 +96,20 @@ def device_id_to_physical_device_id(device_id: int) -> int:
 class CudaPlatform(Platform):
     _enum = PlatformEnum.CUDA
 
-    @staticmethod
-    def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
+    @classmethod
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         physical_device_id = device_id_to_physical_device_id(device_id)
-        return get_physical_device_capability(physical_device_id)
+        major, minor = get_physical_device_capability(physical_device_id)
+        return DeviceCapability(major=major, minor=minor)
 
-    @staticmethod
-    def get_device_name(device_id: int = 0) -> str:
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         return get_physical_device_name(physical_device_id)
 
-    @staticmethod
+    @classmethod
     @with_nvml_context
-    def is_full_nvlink(physical_device_ids: List[int]) -> bool:
+    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
