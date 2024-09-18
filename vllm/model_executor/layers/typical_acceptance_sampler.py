@@ -155,8 +155,8 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
 
     def _get_recovered_token_ids(self, target_probs):
         """
-        The recovered token ids will fill the next target token id on
-        the first unmatched token. 
+        The recovered token ids will fill the first unmatched token
+        by the target token.
 
         Parameters
         ----------
