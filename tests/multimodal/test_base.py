@@ -5,7 +5,7 @@ from vllm.multimodal.base import MultiModalInputs, NestedTensors
 
 def assert_nested_tensors_equal(expected: NestedTensors,
                                 actual: NestedTensors):
-    assert type(expected) == type(actual)
+    assert type(expected) == type(actual)  # noqa: E721
     if isinstance(expected, torch.Tensor):
         assert torch.equal(expected, actual)
     else:

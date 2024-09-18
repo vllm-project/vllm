@@ -33,10 +33,8 @@ def is_block_tables_empty(block_tables: Union[None, Dict]):
     """
     if block_tables is None:
         return True
-    if isinstance(block_tables, dict) and all(
-            value is None for value in block_tables.values()):
-        return True
-    return False
+    return (isinstance(block_tables, dict)
+            and all(value is None for value in block_tables.values()))
 
 
 def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,

@@ -110,9 +110,9 @@ class AWQMarlinConfig(QuantizationConfig):
     def is_awq_marlin_compatible(cls, quant_config: Dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
-        num_bits = quant_config.get("bits", None)
-        group_size = quant_config.get("group_size", None)
-        has_zp = quant_config.get("zero_point", None)
+        num_bits = quant_config.get("bits")
+        group_size = quant_config.get("group_size")
+        has_zp = quant_config.get("zero_point")
 
         if quant_method != "awq":
             return False
