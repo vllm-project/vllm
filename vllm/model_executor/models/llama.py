@@ -375,6 +375,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
     }
+    modules_to_save = ["lm_head", "embed_tokens"]
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
     mistral_mapping = {

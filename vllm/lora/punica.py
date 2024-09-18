@@ -14,6 +14,7 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     from vllm.lora.ops.bgmv_expand import bgmv_expand
     from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
+    from vllm.lora.ops.bgmv_sample import bgmv_sample
     from vllm.lora.ops.bgmv_shrink import bgmv_shrink
     from vllm.lora.ops.sgmv_expand import sgmv_expand
     from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
@@ -602,3 +603,32 @@ class PunicaWrapper:
         bgmv_shrink(x, wa_t_all, buffer, self.sampler_indices, scale)
         bgmv_expand(buffer, wb_t_all, y, self.sampler_indices, add_inputs=True)
         y = y.view_as(y_org)
+
+    def bgmv_sample(self, hidden_states: torch.Tensor,
+                    lm_heads_all: torch.Tensor, lm_head_base: torch.Tensor):
+        '''
+
+        hidden_states - [num_tokens, hidden_dim]
+        lm_heads_all - [num_loras, vocab_size, hidden_dim]
+
+        the same as:
+
+        vocab_size=self.lm_head_tensors.shape[-2]
+        hidden_dim=hidden_states.size(0)
+        
+        logits = torch.zeros((hidden_dim, vocab_size),
+                                 dtype=torch.float32,
+                                 device=hidden_states.device)
+        
+        for i in range(len(hidden_states)):
+            if indices[i]==-1:
+                logits[i]=lm_head_base @ hidden_states[i]
+            else:
+                logits[i]=self.lm_head_tensors[indices[i]] @ hidden_states[i]
+        '''
+
+        indices = self.sampler_indices
+
+        logits = bgmv_sample(hidden_states, lm_heads_all, lm_head_base,
+                             indices)
+        return logits

@@ -73,6 +73,7 @@ class SupportsLoRA(Protocol):
     supported_lora_modules: ClassVar[List[str]]
     embedding_modules: ClassVar[Dict[str, str]]
     embedding_padding_modules: ClassVar[List[str]]
+    modules_to_save: ClassVar[List[str]]
 
     # lora_config is None when LoRA is not enabled
     def __init__(self, *, lora_config: Optional[LoRAConfig] = None) -> None:
