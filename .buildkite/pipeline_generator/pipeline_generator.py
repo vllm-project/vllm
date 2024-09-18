@@ -154,7 +154,7 @@ def get_external_hardware_tests(test_steps: List[TestStep]) -> List[Union[Buildk
             amd_test_command = [
                 "bash", 
                 ".buildkite/run-amd-test.sh", 
-                get_full_test_command(test_step.commands, test_step.working_dir)
+                f"'{get_full_test_command(test_step.commands, test_step.working_dir)}'",
             ]
             mirrored_buildkite_step = BuildkiteStep(
                 label = f"AMD: {test_step.label}",
@@ -163,7 +163,7 @@ def get_external_hardware_tests(test_steps: List[TestStep]) -> List[Union[Buildk
                 agents = {"queue": AgentQueue.AMD_GPU.value},
                 soft_fail = test_step.soft_fail,
                 env = {"DOCKER_BUILDKIT": "1"},
-                commands = amd_test_command,
+                commands = [" ".join(amd_test_command)],
             )
             buildkite_steps.append(mirrored_buildkite_step)
     return buildkite_steps
