@@ -17,6 +17,7 @@ class DockerPluginConfig(BaseModel):
 
 class KubernetesPodSpec(BaseModel):
     containers: List[Dict[str, Any]]
+    priority_class_name: str = Field(default="ci", alias="priorityClassName")
     node_selector: Dict[str, Any] = Field(default={"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}, alias="nodeSelector")
     volumes: List[Dict[str, Any]] = Field(default=[{"name": "devshm", "emptyDir": {"medium": "Memory"}}, {"name": "hf-cache", "hostPath": {"path": HF_HOME, "type": "Directory"}}])
 
