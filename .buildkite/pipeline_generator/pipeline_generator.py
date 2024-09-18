@@ -42,6 +42,7 @@ def _get_plugin_config(step: TestStep) -> Dict:
     docker_image_path = get_image_path()
 
     if step.gpu == "a100":
+        test_bash_command[-1] = f"'{test_bash_command[-1]}'"
         return get_kubernetes_plugin_config(
             docker_image_path, 
             test_bash_command,
