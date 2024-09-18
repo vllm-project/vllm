@@ -48,22 +48,30 @@ class MultiModalRegistry:
 
         self._limits_by_model = _MultiModalLimits()
 
-    def register_plugin(self, plugin: MultiModalPlugin) -> None:
+    def register_plugin(self, plugin: MultiModalPlugin):
         """
         Register a multi-modal plugin so it can be recognized by vLLM.
 
         See also:
             :ref:`adding_multimodal_plugin`
         """
-        data_type_key = plugin.get_data_key()
 
-        if data_type_key in self._plugins:
-            logger.warning(
-                "A plugin is already registered for data type %s, "
-                "and will be overwritten by the new plugin %s.", data_type_key,
-                plugin)
+        def wrapper(model_cls):
+            data_type_key = plugin.get_data_key()
 
-        self._plugins[data_type_key] = plugin
+            if data_type_key in self._plugins:
+                logger.warning(
+                    "A plugin is already registered for data type %s, "
+                    "and will be overwritten by the new plugin %s.",
+                    data_type_key, plugin)
+
+            self._plugins[data_type_key] = plugin
+            self.register_input_mapper(data_type_key)(model_cls)
+            self.register_max_multimodal_tokens(data_type_key)(model_cls)
+
+            return model_cls
+
+        return wrapper
 
     def _get_plugin(self, data_type_key: str):
         plugin = self._plugins.get(data_type_key)
@@ -184,7 +192,7 @@ class MultiModalRegistry:
         """
         limits_per_plugin = self._limits_by_model[model_config]
 
-        return sum((limits_per_plugin[key] *
+        return sum((limits_per_plugin.get(key, 0) *
                     plugin.get_max_multimodal_tokens(model_config))
                    for key, plugin in self._plugins.items())
 

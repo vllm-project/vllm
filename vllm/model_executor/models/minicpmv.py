@@ -52,6 +52,7 @@ from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.base import MultiModalInputs, MultiModalPlugin
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -274,7 +275,8 @@ def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
     return seq_data, mm_data
 
 
-def _get_image_bounds(tokenizer, input_ids: torch.Tensor) -> torch.Tensor:
+def _get_image_bounds(tokenizer, input_ids: List[int]) -> torch.Tensor:
+    input_ids = torch.tensor(input_ids)
     start_cond = input_ids == tokenizer.im_start_id
     end_cond = input_ids == tokenizer.im_end_id
     if hasattr(tokenizer, "slice_start_id"):
@@ -348,6 +350,20 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         multi_modal_data=multi_modal_data,
     )
     return llm_inputs
+
+
+class ImageBoundsPlugin(MultiModalPlugin):
+    """Plugin for audio data."""
+
+    def get_data_key(self) -> str:
+        return "image_bounds"
+
+    def _default_input_mapper(self, ctx: InputContext,
+                              data: object) -> MultiModalInputs:
+        return MultiModalInputs(image_bounds=data)
+
+    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
+        return 1
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
@@ -426,6 +442,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
         image_bounds = kwargs.pop("image_bounds", [])
+        print("image_bounds", image_bounds)
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
@@ -855,6 +872,7 @@ _SUPPORT_VERSION = {
 }
 
 
+@MULTIMODAL_REGISTRY.register_plugin(ImageBoundsPlugin())
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_minicpmv_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_minicpmv)
