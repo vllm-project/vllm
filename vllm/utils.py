@@ -33,6 +33,7 @@ from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -388,7 +389,7 @@ def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
 
-    if _is_cuda_alike_stateless():
+    if current_platform.is_cuda_alike():
         torch.cuda.manual_seed_all(seed)
 
     if is_xpu():
@@ -761,13 +762,6 @@ def is_pin_memory_available() -> bool:
     return True
 
 
-def _is_cuda_alike_stateless():
-    # Avoid circular import
-    from vllm.platforms import current_platform
-
-    return current_platform.is_cuda_alike()
-
-
 class CudaMemoryProfiler:
 
     def __init__(self, device: Optional[torch.types.Device] = None):
@@ -775,7 +769,7 @@ class CudaMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        if _is_cuda_alike_stateless():
+        if current_platform.is_cuda_alike():
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():
