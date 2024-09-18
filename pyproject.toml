@@ -42,6 +42,8 @@ ignore = [
     "E731",
     # Loop control variable not used within loop body
     "B007",
+    # f-string format
+    "UP032",
 ]
 
 [tool.mypy]

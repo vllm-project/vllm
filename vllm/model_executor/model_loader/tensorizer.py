@@ -408,9 +408,7 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
             "inferred as vLLM models, so setting vllm_tensorized=True is "
             "only necessary for models serialized prior to this change.")
         return True
-    if (".vllm_tensorized_marker" in deserializer):
-        return True
-    return False
+    return ".vllm_tensorized_marker" in deserializer
 
 
 def serialize_vllm_model(

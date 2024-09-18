@@ -417,9 +417,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def is_block_cached(self, block: Block) -> bool:
         assert block.content_hash is not None
-        if block.content_hash in self._cached_blocks:
-            return True
-        return False
+        return block.content_hash in self._cached_blocks
 
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         """Once a mutable block is full, it can be promoted to an immutable

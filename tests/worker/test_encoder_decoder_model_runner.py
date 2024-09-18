@@ -453,8 +453,7 @@ def test_prepare_decode(batch_size):
     # each sequence) in the decode phase
 
     expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for seq_len in seq_lens:
+    for selected_token_start_idx, seq_len in enumerate(seq_lens):
         # Compute the index offset of the final token in each
         # sequence's decoded outputs; since a single token is
         # decoded per iteration per sequence, then the length
@@ -463,7 +462,6 @@ def test_prepare_decode(batch_size):
         # generated tokens is 0 (i.e. the expected sampling index
         # for a given sequence is just `selected_token_start_idx`)
         expected_selected_token_indices.append(selected_token_start_idx)
-        selected_token_start_idx += 1
 
     sampling_metadata = model_input.sampling_metadata
     actual = sampling_metadata.selected_token_indices
