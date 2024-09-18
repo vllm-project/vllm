@@ -1,7 +1,7 @@
 from typing import (ClassVar, Dict, List, Literal, Optional, Protocol, Type,
                     Union, overload, runtime_checkable)
 
-from typing_extensions import TypeGuard
+from typing_extensions import TypeIs
 
 from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -10,12 +10,12 @@ logger = init_logger(__name__)
 
 
 @runtime_checkable
-class SupportsVision(Protocol):
-    """The interface required for all vision language models (VLMs)."""
+class SupportsMultiModal(Protocol):
+    """The interface required for all multi-modal models."""
 
-    supports_vision: ClassVar[Literal[True]] = True
+    supports_multimodal: ClassVar[Literal[True]] = True
     """
-    A flag that indicates this model supports vision inputs.
+    A flag that indicates this model supports multi-modal inputs.
 
     Note:
         There is no need to redefine this flag if this class is in the
@@ -29,30 +29,31 @@ class SupportsVision(Protocol):
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead
 @runtime_checkable
-class _SupportsVisionType(Protocol):
-    supports_vision: Literal[True]
+class _SupportsMultiModalType(Protocol):
+    supports_multimodal: Literal[True]
 
     def __call__(self, *, multimodal_config: MultiModalConfig) -> None:
         ...
 
 
 @overload
-def supports_vision(model: Type[object]) -> TypeGuard[Type[SupportsVision]]:
+def supports_multimodal(
+        model: Type[object]) -> TypeIs[Type[SupportsMultiModal]]:
     ...
 
 
 @overload
-def supports_vision(model: object) -> TypeGuard[SupportsVision]:
+def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]:
     ...
 
 
-def supports_vision(
+def supports_multimodal(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsVision]], TypeGuard[SupportsVision]]:
+) -> Union[TypeIs[Type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
     if isinstance(model, type):
-        return isinstance(model, _SupportsVisionType)
+        return isinstance(model, _SupportsMultiModalType)
 
-    return isinstance(model, SupportsVision)
+    return isinstance(model, SupportsMultiModal)
 
 
 @runtime_checkable
@@ -94,18 +95,18 @@ class _SupportsLoRAType(Protocol):
 
 
 @overload
-def supports_lora(model: Type[object]) -> TypeGuard[Type[SupportsLoRA]]:
+def supports_lora(model: Type[object]) -> TypeIs[Type[SupportsLoRA]]:
     ...
 
 
 @overload
-def supports_lora(model: object) -> TypeGuard[SupportsLoRA]:
+def supports_lora(model: object) -> TypeIs[SupportsLoRA]:
     ...
 
 
 def supports_lora(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsLoRA]], TypeGuard[SupportsLoRA]]:
+) -> Union[TypeIs[Type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
     result = _supports_lora(model)
 
     if not result:
@@ -137,7 +138,7 @@ def supports_lora(
 
 def _supports_lora(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsLoRA]], TypeGuard[SupportsLoRA]]:
+) -> Union[TypeIs[Type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
     if isinstance(model, type):
         return isinstance(model, _SupportsLoRAType)
 
@@ -172,18 +173,18 @@ class _HasInnerStateType(Protocol):
 
 
 @overload
-def has_inner_state(model: object) -> TypeGuard[HasInnerState]:
+def has_inner_state(model: object) -> TypeIs[HasInnerState]:
     ...
 
 
 @overload
-def has_inner_state(model: Type[object]) -> TypeGuard[Type[HasInnerState]]:
+def has_inner_state(model: Type[object]) -> TypeIs[Type[HasInnerState]]:
     ...
 
 
 def has_inner_state(
     model: Union[Type[object], object]
-) -> Union[TypeGuard[Type[HasInnerState]], TypeGuard[HasInnerState]]:
+) -> Union[TypeIs[Type[HasInnerState]], TypeIs[HasInnerState]]:
     if isinstance(model, type):
         return isinstance(model, _HasInnerStateType)
 

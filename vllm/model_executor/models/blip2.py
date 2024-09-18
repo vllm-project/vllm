@@ -1,4 +1,6 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from array import array
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -11,22 +13,46 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.opt import OPTModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
+                           SequenceData)
 
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
-from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .interfaces import SupportsMultiModal
+from .utils import merge_multimodal_embeddings
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
     "language_model.model": "language_model",
 }
+
+# We use this internally as placeholders since there is no image token
+# defined on the HuggingFace repo
+BLIP2_IMAGE_TOKEN = "<image>"
+BLIP2_IMAGE_TOKEN_ID = 50265
+
+
+class Blip2ImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
+
+
+class Blip2ImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+Blip2ImageInputs = Union[Blip2ImagePixelInputs, Blip2ImageEmbeddingInputs]
 
 
 class Blip2QFormerMultiHeadAttention(nn.Module):
@@ -375,20 +401,6 @@ class Blip2QFormerModel(nn.Module):
         return sequence_output
 
 
-class Blip2ImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
-
-
-Blip2ImageInputs = Blip2ImagePixelInputs
-
-# We use this internally as placeholders since there is no image token
-# defined on the HuggingFace repo
-BLIP2_IMAGE_TOKEN = "<image>"
-BLIP2_IMAGE_TOKEN_ID = 50265
-
-
 def get_blip2_image_feature_size(hf_config: Blip2Config) -> int:
     return hf_config.num_query_tokens
 
@@ -404,17 +416,41 @@ def get_max_blip2_image_tokens(ctx: InputContext):
     raise NotImplementedError(msg)
 
 
-def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
+def dummy_seq_data_for_blip2(
+    hf_config: Blip2Config,
+    seq_len: int,
+    num_images: int,
+    *,
+    image_token_id: int,
+    image_feature_size_override: Optional[int] = None,
+):
+    if image_feature_size_override is None:
+        image_feature_size = get_blip2_image_feature_size(hf_config)
+    else:
+        image_feature_size = image_feature_size_override
+
+    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                      [image_token_id]) * image_feature_size * num_images
+    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                       [0]) * (seq_len - image_feature_size * num_images)
+    return SequenceData(token_ids)
+
+
+def dummy_data_for_blip2(ctx: InputContext, seq_len: int,
+                         mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(Blip2Config)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
-    image_feature_size = get_blip2_image_feature_size(hf_config)
-    token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
-    seq_data = SequenceData(token_ids)
+    seq_data = dummy_seq_data_for_blip2(
+        hf_config,
+        seq_len,
+        num_images,
+        image_token_id=BLIP2_IMAGE_TOKEN_ID,
+    )
 
     if isinstance(vision_config, Blip2VisionConfig):
-        mm_data = dummy_image_for_blip(vision_config)
+        mm_data = dummy_image_for_blip(vision_config, num_images)
 
         return seq_data, mm_data
 
@@ -448,7 +484,7 @@ def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_blip2_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_blip2)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
-class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
+class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: Blip2Config,
@@ -458,6 +494,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
         super().__init__()
 
+        # currently all existing BLIP-2 models have `tie_word_embeddings`
+        # enabled
+        assert config.tie_word_embeddings
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -506,18 +545,38 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Blip2ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, torch.Tensor):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
-        return Blip2ImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+            # Remove the N dimension until multiple images are supported.
+            pixel_values = pixel_values.squeeze(1)
+
+            return Blip2ImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+
+            # Remove the N dimension until multiple images are supported.
+            image_embeds = image_embeds.squeeze(1)
+
+            return Blip2ImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
+
+        raise AssertionError("This line should be unreachable.")
 
     def _image_pixels_to_features(self, vision_model: BlipVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
@@ -538,6 +597,10 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
     def _process_image_input(self,
                              image_input: Blip2ImageInputs) -> torch.Tensor:
+
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
         assert self.vision_model is not None
         image_features = self._process_image_pixels(image_input)
 
@@ -595,9 +658,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    BLIP2_IMAGE_TOKEN_ID)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                BLIP2_IMAGE_TOKEN_ID)
 
             input_ids = None
         else:
@@ -611,8 +674,11 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.get_lm_head(), hidden_states,
                                        sampling_metadata)
         return logits
@@ -648,8 +714,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
             use_default_weight_loading = False
             if "vision" in name:
                 if self.vision_model is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
+                    # BlipVisionModel does not need sharding
                     use_default_weight_loading = True
             else:
                 for (param_name, weight_name,

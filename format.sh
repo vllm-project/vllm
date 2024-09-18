@@ -99,10 +99,8 @@ echo 'vLLM mypy:'
 mypy --follow-imports skip  # Note that this is less strict than CI
 mypy tests --follow-imports skip
 mypy vllm/attention --follow-imports skip
-mypy vllm/core --follow-imports skip
 mypy vllm/distributed --follow-imports skip
 mypy vllm/engine  --follow-imports skip
-mypy vllm/entrypoints --follow-imports skip
 mypy vllm/executor --follow-imports skip
 mypy vllm/lora --follow-imports skip
 mypy vllm/model_executor  --follow-imports skip
@@ -242,6 +240,11 @@ echo 'vLLM isort: Done'
 # NOTE: Keep up to date with .github/workflows/clang-format.yml
 CLANG_FORMAT_EXCLUDES=(
     'csrc/moe/topk_softmax_kernels.cu'
+    'csrc/quantization/gguf/ggml-common.h'
+    'csrc/quantization/gguf/dequantize.cuh'
+    'csrc/quantization/gguf/vecdotq.cuh'
+    'csrc/quantization/gguf/mmq.cuh'
+    'csrc/quantization/gguf/mmvq.cuh'
 )
 
 # Format specified files with clang-format

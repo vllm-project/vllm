@@ -1,12 +1,14 @@
 # default base image
-ARG BASE_IMAGE="763104351884.dkr.ecr.us-west-2.amazonaws.com/pytorch-inference-neuronx:2.1.1-neuronx-py310-sdk2.17.0-ubuntu20.04"
+ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.1.2-neuronx-py310-sdk2.19.1-ubuntu20.04"
 
 FROM $BASE_IMAGE
 
 RUN echo "Base image is $BASE_IMAGE"
 
 # Install some basic utilities
-RUN apt-get update && apt-get install python3 python3-pip -y
+RUN apt-get update \
+    && apt-get install python3 python3-pip -y \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 
 
 ### Mount Point ###
 # When launching the container, mount the code directory to /app

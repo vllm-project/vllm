@@ -40,13 +40,13 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA
 from .utils import is_pp_missing_parameter, make_layers
@@ -238,6 +238,7 @@ class Qwen2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -361,8 +362,11 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
                                    attn_metadata, intermediate_tensors)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

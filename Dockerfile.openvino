@@ -4,7 +4,8 @@
 FROM ubuntu:22.04 AS dev
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git
+    apt-get install -y python3-pip git && \
+    apt-get install -y ffmpeg libsm6 libxext6 libgl1 
 WORKDIR /workspace
 
 # copy requirements
@@ -21,7 +22,7 @@ COPY setup.py /workspace/vllm/
 # install build requirements
 RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/vllm/requirements-build.txt
 # build vLLM with OpenVINO backend
-RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu https://storage.openvinotoolkit.org/simple/wheels/pre-release" VLLM_TARGET_DEVICE="openvino" python3 -m pip install /workspace/vllm/
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE="openvino" python3 -m pip install /workspace/vllm/
 
 COPY examples/ /workspace/vllm/examples
 COPY benchmarks/ /workspace/vllm/benchmarks
