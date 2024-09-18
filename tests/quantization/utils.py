@@ -12,4 +12,4 @@ def is_quant_method_supported(quant_method: str) -> bool:
 
     min_capability = QUANTIZATION_METHODS[quant_method].get_min_capability()
 
-    return int(capability) >= min_capability
+    return capability.to_int() >= min_capability

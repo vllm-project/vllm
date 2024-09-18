@@ -25,9 +25,6 @@ class DeviceCapability(NamedTuple):
         """
         return self.major * 10 + self.minor
 
-    def __int__(self) -> int:
-        return self.to_int()
-
 
 class Platform:
     _enum: PlatformEnum
