@@ -1,13 +1,13 @@
 {
     "8": {
         "BLOCK_SIZE_M": 16,
-        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_N": 64,
         "BLOCK_SIZE_K": 256,
         "GROUP_SIZE_M": 1,
-        "num_warps": 8,
+        "num_warps": 4,
         "num_stages": 0,
-        "waves_per_eu": 0,
+        "waves_per_eu": 1,
         "matrix_instr_nonkdim": 16,
-        "kpack": 2
+        "kpack": 1
     }
 }
