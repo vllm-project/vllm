@@ -100,6 +100,7 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
   --ignore=entrypoints/openai/test_encoder_decoder.py \
   --ignore=entrypoints/openai/test_oot_registration.py \
   --ignore=entrypoints/openai/test_shutdown.py "}
+fi
 
 PARALLEL_JOB_COUNT=8
 # check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
