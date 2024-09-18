@@ -273,7 +273,8 @@ def test_prepare_prompt(batch_size):
                     "unsupported for encoder/ "
                     "decoder models")
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
-def test_prepare_decode(batch_size):
+@pytest.mark.parametrize("multiple_seqs_per_seq_group", [True, False])
+def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     '''
     Test the ability of the encoder/decoder model runner subclass to
     produce decode-phase model inputs & attention metadata.
@@ -288,6 +289,7 @@ def test_prepare_decode(batch_size):
     Arguments:
 
     * batch_size
+    * multiple_seqs_per_seq_group
     * backend_name: The attention backend under test
     * enforce_eager: Enforce eager mode if True (i.e. no CUDAGraph)
     '''
@@ -305,7 +307,12 @@ def test_prepare_decode(batch_size):
     seq_lens: List[int] = []
     encoder_seq_lens: List[int] = []
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    block_tables = {0: [1], 1: [3]}
+    block_tables = {
+        0: [1],
+        1: [3]
+    } if multiple_seqs_per_seq_group else {
+        0: [1]
+    }
     cross_block_table = [2]
     for i in range(batch_size):
         # make sure all tokens fit into one block
@@ -315,13 +322,14 @@ def test_prepare_decode(batch_size):
         encoder_seq_len = (i + 1) % (model_runner.block_size - 1) + 1
         encoder_seq_data = SequenceData(
             array(VLLM_TOKEN_ID_ARRAY_TYPE, (range(encoder_seq_len))))
+
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=False,
             seq_data={
                 0: seq_data,
                 1: seq_data
-            },
+            } if multiple_seqs_per_seq_group else {0: seq_data},
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
             encoder_seq_data=encoder_seq_data,
@@ -486,7 +494,8 @@ def test_prepare_decode(batch_size):
 
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
-def test_prepare_decode_cuda_graph(batch_size):
+@pytest.mark.parametrize("multiple_seqs_per_seq_group", [True, False])
+def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     """
     Tests that for encoder-decoder models with CUDA Graph capture and replay
     enabled, the tensors used during the decode phase are correctly padded 
@@ -501,12 +510,18 @@ def test_prepare_decode_cuda_graph(batch_size):
         enable_chunked_prefill=False,
         enforce_eager=False,
     )
-
+    block_tables = {
+        0: [1],
+        1: [3]
+    } if multiple_seqs_per_seq_group else {
+        0: [1]
+    }
     seq_lens: List[int] = []
     encoder_seq_lens: List[int] = []
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    block_tables = {0: [1], 1: [3]}
+    
     cross_block_table = [2]
+    expanded_batch_size = 0
     for i in range(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
@@ -521,7 +536,7 @@ def test_prepare_decode_cuda_graph(batch_size):
             seq_data={
                 0: seq_data,
                 1: seq_data
-            },
+            } if multiple_seqs_per_seq_group else {0: seq_data},
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
             encoder_seq_data=encoder_seq_data,
@@ -532,6 +547,7 @@ def test_prepare_decode_cuda_graph(batch_size):
             [seq_len for _ in range(len(seq_group_metadata.seq_data))])
         encoder_seq_lens.extend(
             [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))])
+        expanded_batch_size = expanded_batch_size + len(seq_group_metadata.seq_data)
         seq_group_metadata_list.append(seq_group_metadata)
 
     model_input = model_runner.prepare_model_input(seq_group_metadata_list)
@@ -547,7 +563,6 @@ def test_prepare_decode_cuda_graph(batch_size):
     # With CUDA Graph capture and replay enabled, the decoder and encoder
     # input sequences will be padded. Create the expected padded tensors
     # accordingly.
-    expanded_batch_size = batch_size * 2
     graph_batch_size = _get_graph_batch_size(expanded_batch_size)
     cuda_graph_pad_size = graph_batch_size - expanded_batch_size
     padded_seq_lens = seq_lens + list(itertools.repeat(1, cuda_graph_pad_size))
