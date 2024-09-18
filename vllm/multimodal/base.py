@@ -1,8 +1,9 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import (Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple,
-                    Type, TypedDict, TypeVar, Union, cast, final)
+from typing import (TYPE_CHECKING, Callable, Dict, List, Mapping, NamedTuple,
+                    Optional, Tuple, Type, TypedDict, TypeVar, Union, cast,
+                    final)
 
 import numpy as np
 import torch
@@ -11,11 +12,13 @@ from PIL import Image
 from torch import nn
 from typing_extensions import TypeAlias
 
-from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import JSONTree, is_list_of, json_map_leaves
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+    from vllm.sequence import SequenceGroupMetadata
 
 logger = init_logger(__name__)
 
@@ -252,7 +255,7 @@ class MultiModalPlugin(ABC):
 
         return wrapper
 
-    def map_input(self, model_config: ModelConfig,
+    def map_input(self, model_config: "ModelConfig",
                   data: MultiModalData[object]) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
@@ -324,7 +327,7 @@ class MultiModalPlugin(ABC):
 
         return wrapper
 
-    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
+    def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
@@ -396,7 +399,7 @@ class MultiModalPlaceholderMap:
 
     @classmethod
     def from_seq_group(
-        cls, seq_group: SequenceGroupMetadata, positions: range
+        cls, seq_group: "SequenceGroupMetadata", positions: range
     ) -> Tuple[Optional[MultiModalDataDict], Dict[str,
                                                   "MultiModalPlaceholderMap"]]:
         if (not seq_group.multi_modal_data

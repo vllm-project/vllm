@@ -1,9 +1,8 @@
 from functools import lru_cache
-from typing import List, Union
+from typing import TYPE_CHECKING, List, Union
 
 import numpy as np
 
-from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_video_processor
@@ -12,6 +11,9 @@ from vllm.utils import is_list_of
 
 from .base import MultiModalData, MultiModalInputs
 from .image import ImagePlugin
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -36,7 +38,7 @@ class VideoPlugin(ImagePlugin):
     def get_data_key(self) -> str:
         return "video"
 
-    def _get_hf_video_processor(self, model_config: ModelConfig):
+    def _get_hf_video_processor(self, model_config: "ModelConfig"):
         return cached_get_video_processor(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code)
