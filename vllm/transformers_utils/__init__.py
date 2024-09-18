@@ -1,6 +1,7 @@
 from vllm.envs import VLLM_USE_MODELSCOPE
 
 if VLLM_USE_MODELSCOPE:
+    # Patch here, before each import happens
     import modelscope
     from packaging import version
     if version.parse(modelscope.__version__) <= version.parse('1.18.0'):
