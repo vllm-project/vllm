@@ -121,7 +121,7 @@ async def run_server(args: Namespace,
 
     shutdown_task = await serve_http(
         app,
-        engine=engine,
+        limit_concurrency=engine.limit_concurrency,
         host=args.host,
         port=args.port,
         log_level=args.log_level,
