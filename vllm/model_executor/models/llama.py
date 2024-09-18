@@ -41,7 +41,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import (
+    Phi3LongRoPEScaledRotaryEmbedding, get_rope)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -178,13 +179,15 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k =  self.rotary_emb(positions, q, k) \
-            if self.rope_scaling is None \
-            else self.rotary_emb(
-                positions,
-                q,
-                k,
-                num_orig_input_tokens_tensor=attn_metadata.num_orig_input_tokens_tensor)
+        if self.rope_scaling is None or not isinstance(
+                self.rotary_emb, Phi3LongRoPEScaledRotaryEmbedding):
+            q, k = self.rotary_emb(positions, q, k)
+        else:
+            q, k = self.rotary_emb(positions,
+                                   q,
+                                   k,
+                                   num_orig_input_tokens_tensor=attn_metadata.
+                                   num_orig_input_tokens_tensor)
 
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)

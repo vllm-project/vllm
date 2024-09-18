@@ -882,7 +882,8 @@ def make_test_metadata(
             cross_slot_mapping=(None if cross_kv_mmap is None else
                                 cross_kv_mmap.slot_mapping),
             cross_block_tables=(None if cross_kv_mmap is None else
-                                cross_kv_mmap.block_tables))
+                                cross_kv_mmap.block_tables),
+            num_orig_input_tokens_tensor=encoder_seq_lens_tensor)
 
     else:  # not is_prompt
         # Decode-phase scenario
@@ -927,7 +928,8 @@ def make_test_metadata(
             cross_slot_mapping=(None if cross_kv_mmap is None else
                                 cross_kv_mmap.slot_mapping),
             cross_block_tables=(None if cross_kv_mmap is None else
-                                cross_kv_mmap.block_tables))
+                                cross_kv_mmap.block_tables),
+            num_orig_input_tokens_tensor=seq_lens_tensor)
 
 
 def assert_actual_matches_ideal(test_params: PhaseTestParameters,
