@@ -868,7 +868,7 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
-            prompt_adapter_request: Prompt Adapter request to use 
+            prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
 
         Yields:
@@ -1084,7 +1084,7 @@ class AsyncLLMEngine:
     async def start_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes
-        if type(self.engine.model_executor) == GPUExecutorAsync:
+        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
             self.engine.model_executor.start_profile()
         else:
             self.engine.model_executor._run_workers("start_profile")
@@ -1092,7 +1092,7 @@ class AsyncLLMEngine:
     async def stop_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes
-        if type(self.engine.model_executor) == GPUExecutorAsync:
+        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
