@@ -5,12 +5,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils import is_hip
 
 if HAS_TRITON:
     from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
-_PARTITION_SIZE = 512
+_PARTITION_SIZE = 512 if not is_hip() else 1024
 
 
 @dataclass

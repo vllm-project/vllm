@@ -20,7 +20,7 @@ MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
-PARTITION_SIZE = 512
+PARTITION_SIZE = 512 if not is_hip() else 1024
 DTYPES = [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [3]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
