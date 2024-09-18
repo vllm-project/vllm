@@ -1245,6 +1245,13 @@ def supports_dynamo() -> bool:
     return base_torch_version >= Version("2.4.0")
 
 
+# Some backends use pytorch version < 2.4.0 which doesn't
+# support `torch.library.custom_op`.
+def supports_custom_op() -> bool:
+    base_torch_version = Version(Version(torch.__version__).base_version)
+    return base_torch_version >= Version("2.4.0")
+
+
 class AtomicCounter:
     """An atomic, thread-safe counter"""
 
