@@ -21,8 +21,11 @@ class DeviceCapability(NamedTuple):
 
     def to_int(self) -> int:
         """
-        Express device capability as a two-digit integer ``<major><minor>``.
+        Express device capability as an integer ``<major><minor>``.
+
+        It is assumed that the minor version is always a single digit.
         """
+        assert self.minor < 10
         return self.major * 10 + self.minor
 
 
@@ -65,7 +68,7 @@ class Platform:
         The ``capability`` argument can either be:
 
         - A tuple ``(major, minor)``.
-        - A two-digit integer ``<major><minor>``.
+        - An integer ``<major><minor>``. (See :meth:`DeviceCapability.to_int`)
         """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:
@@ -73,9 +76,6 @@ class Platform:
 
         if isinstance(capability, tuple):
             return current_capability >= capability
-
-        if not 10 <= capability < 100:
-            raise ValueError("`capability` must be a two-digit integer.")
 
         return current_capability.to_int() >= capability
 
