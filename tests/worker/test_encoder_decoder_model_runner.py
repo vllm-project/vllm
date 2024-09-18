@@ -510,11 +510,9 @@ def test_prepare_decode_cuda_graph(batch_size):
     for i in range(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
-        seq_lens.append(seq_len)
         seq_data = SequenceData(
             array(VLLM_TOKEN_ID_ARRAY_TYPE, (range(seq_len))))
         encoder_seq_len = (i + 1) % (model_runner.block_size - 1) + 1
-        encoder_seq_lens.append(encoder_seq_len)
         encoder_seq_data = SequenceData(
             array(VLLM_TOKEN_ID_ARRAY_TYPE, (range(encoder_seq_len))))
         seq_group_metadata = SequenceGroupMetadata(
@@ -549,8 +547,9 @@ def test_prepare_decode_cuda_graph(batch_size):
     # With CUDA Graph capture and replay enabled, the decoder and encoder
     # input sequences will be padded. Create the expected padded tensors
     # accordingly.
-    graph_batch_size = _get_graph_batch_size(batch_size)
-    cuda_graph_pad_size = graph_batch_size - batch_size
+    expanded_batch_size = batch_size * 2
+    graph_batch_size = _get_graph_batch_size(expanded_batch_size)
+    cuda_graph_pad_size = graph_batch_size - expanded_batch_size
     padded_seq_lens = seq_lens + list(itertools.repeat(1, cuda_graph_pad_size))
     padded_encoder_seq_lens = encoder_seq_lens + list(
         itertools.repeat(1, cuda_graph_pad_size))
@@ -579,10 +578,13 @@ def test_prepare_decode_cuda_graph(batch_size):
 
     # Verify block tables are correct for prompts
     # - Decoder self-attention. Pad the block tables as expected.
-    expected = [block_tables[0] for _ in range(batch_size)]
-    expected.extend([[] for _ in range(cuda_graph_pad_size)])
+    flattened_block_tables = [
+        block_table for _ in range(len(seq_group_metadata_list))
+        for block_table in block_tables.values()
+    ]
+    flattened_block_tables.extend([[] for _ in range(cuda_graph_pad_size)])
     expected = make_tensor_with_pad(
-        expected,
+        flattened_block_tables,
         max_len=64,
         pad=0,
         dtype=torch.int32,
@@ -594,7 +596,10 @@ def test_prepare_decode_cuda_graph(batch_size):
     )
     # - Encoder/decoder cross-attention. Pad the cross-attention block tables
     # as expected.
-    expected = [cross_block_table for _ in range(len(seq_group_metadata_list))]
+    expected = [
+        cross_block_table for seq_group_metadata in seq_group_metadata_list
+        for _ in range(len(seq_group_metadata.seq_data))
+    ]
     expected.extend([[] for _ in range(cuda_graph_pad_size)])
     expected = make_tensor_with_pad(
         expected,
