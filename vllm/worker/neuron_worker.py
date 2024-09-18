@@ -66,7 +66,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent
         # to schedule without PagedAttention.
-        num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
+        num_gpu_blocks = self.scheduler_config.max_num_seqs
 
         # Swap not yet supported with Neuron backend.
         num_cpu_blocks = 0
