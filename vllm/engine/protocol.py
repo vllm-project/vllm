@@ -5,17 +5,17 @@ from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptInputs
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 @runtime_checkable
-class AsyncEngineClient(Protocol):
-    """Protocol class for Clients to AsyncLLMEngine"""
+class EngineClient(Protocol):
+    """Protocol class for Clients to Engine"""
 
     @property
     def is_running(self) -> bool:
@@ -30,8 +30,8 @@ class AsyncEngineClient(Protocol):
         ...
 
     @property
-    def limit_concurrency(self) -> Optional[int]:
-        """Maximum number of concurrently running requests."""
+    def dead_error(self) -> BaseException:
+        ...
 
     def generate(
         self,

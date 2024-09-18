@@ -17,12 +17,12 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
-                           SamplerOutput, SequenceGroupMetadata,
-                           SequenceGroupMetadataDelta)
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
@@ -166,6 +166,7 @@ class Worker(LocalOrDistributedWorkerBase):
             torch.cuda.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
+            gc.collect()
             torch.cuda.empty_cache()
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
         else:
@@ -453,14 +454,20 @@ def init_worker_distributed_environment(
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:
-        compute_capability = current_platform.get_device_capability()
-        if compute_capability[0] < 8:
+    if torch_dtype == torch.bfloat16:  # noqa: SIM102
+        if not current_platform.has_device_capability(80):
+            capability = current_platform.get_device_capability()
             gpu_name = current_platform.get_device_name()
+
+            if capability is None:
+                compute_str = "does not have a compute capability"
+            else:
+                version_str = capability.as_version_str()
+                compute_str = f"has compute capability {version_str}"
+
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}. "
+                f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
                 "You can use float16 instead by explicitly setting the"
                 "`dtype` flag in CLI, for example: --dtype=half.")
 

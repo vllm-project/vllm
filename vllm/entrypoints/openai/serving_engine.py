@@ -8,7 +8,7 @@ from pydantic import Field
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -16,11 +16,13 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
                                               EmbeddingRequest, ErrorResponse,
+                                              LoadLoraAdapterRequest,
                                               ModelCard, ModelList,
                                               ModelPermission,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
-                                              TokenizeRequest)
+                                              TokenizeRequest,
+                                              UnloadLoraAdapterRequest)
 # yapf: enable
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -32,6 +34,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import AtomicCounter
 
 logger = init_logger(__name__)
 
@@ -61,7 +64,7 @@ class OpenAIServing:
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        engine_client: EngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -72,12 +75,13 @@ class OpenAIServing:
     ):
         super().__init__()
 
-        self.async_engine_client = async_engine_client
+        self.engine_client = engine_client
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 
         self.served_model_names = served_model_names
 
+        self.lora_id_counter = AtomicCounter(0)
         self.lora_requests = []
         if lora_modules is not None:
             self.lora_requests = [
@@ -155,7 +159,7 @@ class OpenAIServing:
     async def _guided_decode_logits_processor(
             self, request: Union[ChatCompletionRequest, CompletionRequest],
             tokenizer: AnyTokenizer) -> Optional[LogitsProcessor]:
-        decoding_config = await self.async_engine_client.get_decoding_config()
+        decoding_config = await self.engine_client.get_decoding_config()
         guided_decoding_backend = request.guided_decoding_backend \
             or decoding_config.guided_decoding_backend
         return await get_guided_decoding_logits_processor(
@@ -403,3 +407,76 @@ class OpenAIServing:
         if logprob.decoded_token is not None:
             return logprob.decoded_token
         return tokenizer.decode(token_id)
+
+    async def _check_load_lora_adapter_request(
+            self, request: LoadLoraAdapterRequest) -> Optional[ErrorResponse]:
+        # Check if both 'lora_name' and 'lora_path' are provided
+        if not request.lora_name or not request.lora_path:
+            return self.create_error_response(
+                message="Both 'lora_name' and 'lora_path' must be provided.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST)
+
+        # Check if the lora adapter with the given name already exists
+        if any(lora_request.lora_name == request.lora_name
+               for lora_request in self.lora_requests):
+            return self.create_error_response(
+                message=
+                f"The lora adapter '{request.lora_name}' has already been"
+                "loaded.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST)
+
+        return None
+
+    async def _check_unload_lora_adapter_request(
+            self,
+            request: UnloadLoraAdapterRequest) -> Optional[ErrorResponse]:
+        # Check if either 'lora_name' or 'lora_int_id' is provided
+        if not request.lora_name and not request.lora_int_id:
+            return self.create_error_response(
+                message=
+                "either 'lora_name' and 'lora_int_id' needs to be provided.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST)
+
+        # Check if the lora adapter with the given name exists
+        if not any(lora_request.lora_name == request.lora_name
+                   for lora_request in self.lora_requests):
+            return self.create_error_response(
+                message=
+                f"The lora adapter '{request.lora_name}' cannot be found.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST)
+
+        return None
+
+    async def load_lora_adapter(
+            self,
+            request: LoadLoraAdapterRequest) -> Union[ErrorResponse, str]:
+        error_check_ret = await self._check_load_lora_adapter_request(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        lora_name, lora_path = request.lora_name, request.lora_path
+        unique_id = self.lora_id_counter.inc(1)
+        self.lora_requests.append(
+            LoRARequest(lora_name=lora_name,
+                        lora_int_id=unique_id,
+                        lora_path=lora_path))
+        return f"Success: LoRA adapter '{lora_name}' added successfully."
+
+    async def unload_lora_adapter(
+            self,
+            request: UnloadLoraAdapterRequest) -> Union[ErrorResponse, str]:
+        error_check_ret = await self._check_unload_lora_adapter_request(request
+                                                                        )
+        if error_check_ret is not None:
+            return error_check_ret
+
+        lora_name = request.lora_name
+        self.lora_requests = [
+            lora_request for lora_request in self.lora_requests
+            if lora_request.lora_name != lora_name
+        ]
+        return f"Success: LoRA adapter '{lora_name}' removed successfully."
