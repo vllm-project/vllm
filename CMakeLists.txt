@@ -13,6 +13,12 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
+# Prevent installation of dependencies (cutlass and flash-attention) by default.
+# This line in the install script only runs when component is not set.
+# When the component is set, this line does not run and flash-attention install rules do.
+# That means we can still install flash-attention by specifying --component vllm_flash_attn_c
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)")
+
 #
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
@@ -328,10 +334,14 @@ endif()
 #
 # Build flash attention from source
 #
-# IMPORTANT: This has to be the last thing we do, because flash-attention uses the same macros/fuctions as vLLM.
-# Because functions all belong to the global scope, flash-attention's funcitons overwrite vLLMs.
+# IMPORTANT: This has to be the last thing we do, because flash-attention uses the same macros/functions as vLLM.
+# Because functions all belong to the global scope, flash-attention's functions overwrite vLLMs.
 # They should be identical but if they aren't, this is a massive footgun.
 #
+# During default installation (no component specified), don't install flash attention.
+# That's because it needs to be installed at a different prefix.
+# To install flash attention, use the vllm_flash_attn_c component:
+# cmake --install . --prefix vllm/vllm_flash_attn --component vllm_flash_attn_c
 
 # If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
 # This is to enable local development of vllm-flash-attn within vLLM.
@@ -365,7 +375,8 @@ install(
         DIRECTORY ${flash-attention_SOURCE_DIR}/vllm_flash_attn/
         DESTINATION .
         COMPONENT vllm_flash_attn_c
+        EXCLUDE_FROM_ALL # Don't install by default
         FILES_MATCHING PATTERN "*.py"
 )
 
-# Nothing after flash-attention, see comment about macros abocve
+# Nothing after flash-attention, see comment about macros above
