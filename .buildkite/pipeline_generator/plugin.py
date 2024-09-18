@@ -43,10 +43,10 @@ def get_kubernetes_plugin_config(docker_image_path: str, test_bash_command: List
                 {"name": "HF_HOME", "value": HF_HOME},
                 {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
                 {
-                    "name": "HF_TOKEN", 
+                    "name": "HF_TOKEN",
                     "valueFrom": {
                         "secretKeyRef": {
-                            "name": "huggingface-token",
+                            "name": "hf-token-secret",
                             "key": "token"
                         }
                     }
