@@ -184,10 +184,14 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             # default oneccl will use `drmfd` as mechanism which need extra
             # dependency (libdrm and drm headers) on your system.
             ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE",
-                                                "sockets")
+                                                "drmfd")
+            ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
+            ENV_FI_PROVIDER = os.getenv("FI_PROVIDER", "cxi")
             ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
                                              str(parallel_config.world_size))
             os.environ['CCL_ZE_IPC_EXCHANGE'] = ENV_CCL_ZE_IPC_EXCHANGE
+            os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
+            os.environ["FI_PROVIDER"] = ENV_FI_PROVIDER
             os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
             os.environ["LOCAL_RANK"] = str(self.local_rank)
             init_distributed_environment(
