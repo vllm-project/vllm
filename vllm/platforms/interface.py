@@ -19,8 +19,14 @@ class DeviceCapability(NamedTuple):
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
 
-    def __int__(self) -> int:
+    def to_int(self) -> int:
+        """
+        Express device capability as a two-digit integer ``<major><minor>``.
+        """
         return self.major * 10 + self.minor
+
+    def __int__(self) -> int:
+        return self.to_int()
 
 
 class Platform:
