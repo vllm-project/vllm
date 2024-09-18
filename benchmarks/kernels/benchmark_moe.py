@@ -10,7 +10,7 @@ from ray.experimental.tqdm_ray import tqdm
 from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.fused_moe import *
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, seed_everything
 
 
 class BenchmarkConfig(TypedDict):
@@ -166,7 +166,7 @@ class BenchmarkWorker:
 
     def __init__(self, seed: int) -> None:
         torch.set_default_device("cuda")
-        torch.cuda.manual_seed_all(seed)
+        seed_everything(seed)
         self.seed = seed
 
     def benchmark(
@@ -180,7 +180,7 @@ class BenchmarkWorker:
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
     ) -> Tuple[Dict[str, int], float]:
-        torch.cuda.manual_seed_all(self.seed)
+        seed_everything(self.seed)
         dtype_str = get_config_dtype_str(dtype,
                                          use_int8_w8a16=use_int8_w8a16,
                                          use_fp8_w8a8=use_fp8_w8a8)

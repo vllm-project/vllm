@@ -6,7 +6,7 @@ import torch
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
-from vllm.utils import get_max_shared_memory_bytes, is_hip
+from vllm.utils import get_max_shared_memory_bytes, is_hip, seed_everything
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -139,10 +139,8 @@ def test_paged_attention(
 ) -> None:
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+
+    seed_everything(seed)
     torch.set_default_device(device)
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
@@ -354,10 +352,7 @@ def test_paged_attention_rocm(
     seed: int,
     device: str,
 ) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
@@ -506,10 +501,7 @@ def test_multi_query_kv_attention(
     seed: int,
     device: str,
 ) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
     # MAX_SEQ_LEN sometimes causes OOM in the reference implementation.
     # As the xformers library is already tested with its own tests, we can use

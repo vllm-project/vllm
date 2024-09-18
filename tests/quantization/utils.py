@@ -8,6 +8,8 @@ def is_quant_method_supported(quant_method: str) -> bool:
         return False
 
     capability = current_platform.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
-    return (capability >=
-            QUANTIZATION_METHODS[quant_method].get_min_capability())
+    assert capability is not None
+
+    min_capability = QUANTIZATION_METHODS[quant_method].get_min_capability()
+
+    return capability.to_int() >= min_capability

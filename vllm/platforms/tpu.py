@@ -6,6 +6,10 @@ from .interface import Platform, PlatformEnum
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
 
-    @staticmethod
-    def inference_mode():
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
+        raise NotImplementedError
+
+    @classmethod
+    def inference_mode(cls):
         return torch.no_grad()

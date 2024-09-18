@@ -32,9 +32,7 @@ class FBGEMMFp8Config(QuantizationConfig):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89
+        self.use_marlin = not current_platform.has_device_capability(89)
 
     @classmethod
     def get_name(cls) -> str:

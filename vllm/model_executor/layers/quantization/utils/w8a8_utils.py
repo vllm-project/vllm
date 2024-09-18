@@ -17,8 +17,9 @@ def cutlass_fp8_supported() -> bool:
     # cutlass is not supported on Rocm
     if is_hip():
         return False
-    capability = current_platform.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
     return ops.cutlass_scaled_mm_supports_fp8(capability)
 

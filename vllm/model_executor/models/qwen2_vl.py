@@ -207,7 +207,7 @@ class Qwen2VisionAttention(nn.Module):
                 selected_backend = backend_name_to_enum(backend_by_env_var)
         if selected_backend is None:
             # For Volta and Turing GPUs, use xformers instead.
-            device_available = current_platform.get_device_capability()[0] >= 8
+            device_available = current_platform.has_device_capability(80)
             if device_available:
                 from transformers.utils import is_flash_attn_2_available
 
