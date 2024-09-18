@@ -225,7 +225,6 @@ steps:
   - tests/tensorizer_loader
   commands:
     - apt-get update && apt-get install -y curl libsodium23
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
 
 - label: Benchmarks # 9min
@@ -251,7 +250,6 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - pip install lm-eval
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
 - label: Encoder Decoder tests # 5min
@@ -403,9 +401,6 @@ steps:
   - vllm/lora
   - tests/lora/test_long_context
   commands:
-    # FIXIT: find out which code initialize cuda before running the test
-    # before the fix, we need to use spawn to test it
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -x lora/test_long_context.py
 
 - label: Weight Loading Multiple GPU Test
@@ -453,5 +448,4 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - pip install lm-eval
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-large.txt -t 4
