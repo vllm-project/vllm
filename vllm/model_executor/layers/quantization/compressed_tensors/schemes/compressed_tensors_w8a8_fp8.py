@@ -8,10 +8,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, cutlass_fp8_supported, requantize_with_max_scale)
+    apply_fp8_linear, cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz,
+    requantize_with_max_scale)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.utils import is_hip
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -39,16 +41,37 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 logical_widths=layer.logical_widths,
             )
 
+            if is_hip():
+                weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                    weight=weight,
+                    weight_scale=max_w_scale,
+                    input_scale=layer.input_scale)
+                if input_scale is not None:
+                    layer.input_scale = Parameter(input_scale,
+                                                  requires_grad=False)
+
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight = layer.weight
+
+            if is_hip():
+                weight, weight_scale, input_scale = \
+                    normalize_e4m3fn_to_e4m3fnuz(
+                        weight=weight,
+                        weight_scale=layer.weight_scale,
+                        input_scale=layer.input_scale)
+                if input_scale is not None:
+                    layer.input_scale = Parameter(input_scale,
+                                                  requires_grad=False)
+            else:
+                weight_scale = layer.weight_scale.data
+
             layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
-            layer.weight_scale = Parameter(layer.weight_scale.data,
-                                           requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
         else:
             raise ValueError(f"Unknown quantization strategy {self.strategy}")
