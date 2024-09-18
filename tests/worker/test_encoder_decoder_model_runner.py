@@ -519,7 +519,7 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     seq_lens: List[int] = []
     encoder_seq_lens: List[int] = []
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    
+
     cross_block_table = [2]
     expanded_batch_size = 0
     for i in range(batch_size):
@@ -547,7 +547,8 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
             [seq_len for _ in range(len(seq_group_metadata.seq_data))])
         encoder_seq_lens.extend(
             [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))])
-        expanded_batch_size = expanded_batch_size + len(seq_group_metadata.seq_data)
+        expanded_batch_size = expanded_batch_size + len(
+            seq_group_metadata.seq_data)
         seq_group_metadata_list.append(seq_group_metadata)
 
     model_input = model_runner.prepare_model_input(seq_group_metadata_list)
