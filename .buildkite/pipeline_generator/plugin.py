@@ -17,11 +17,11 @@ class DockerPluginConfig(BaseModel):
 
 class KubernetesPodSpec(BaseModel):
     containers: List[Dict[str, Any]]
-    node_selector: Dict[str, Any] = {"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}
+    nodeSelector: Dict[str, Any] = {"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}
     volumes: List[Dict[str, Any]] = [{"name": "devshm", "emptyDir": {"medium": "Memory"}}, {"name": "hf-cache", "hostPath": {"path": HF_HOME, "type": "Directory"}}]
 
 class KubernetesPluginConfig(BaseModel):
-    pod_spec: KubernetesPodSpec
+    podSpec: KubernetesPodSpec
 
 def get_kubernetes_plugin_config(docker_image_path: str, test_bash_command: List[str], num_gpus: int) -> Dict:
     pod_spec = KubernetesPodSpec(
@@ -53,7 +53,7 @@ def get_kubernetes_plugin_config(docker_image_path: str, test_bash_command: List
             ]
         }]
     )
-    return {KUBERNETES_PLUGIN_NAME: KubernetesPluginConfig(pod_spec=pod_spec).dict(by_alias=True)}
+    return {KUBERNETES_PLUGIN_NAME: KubernetesPluginConfig(podSpec=pod_spec).dict(by_alias=True)}
 
 def get_docker_plugin_config(docker_image_path: str, test_bash_command: List[str], no_gpu: bool) -> Dict:
     docker_plugin_config = DockerPluginConfig(
