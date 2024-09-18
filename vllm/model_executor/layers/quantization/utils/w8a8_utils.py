@@ -6,11 +6,9 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils import is_hip
 
-# scaled_mm in pytorch on rocm has a bug that requires always
-# providing scaling factor for result. This value is created
-# as global value to avoid multiple tensor allocations, and
-# can be removed once pytorch fixes the bug.
-TORCH_SCALED_MM_SCALE_RESULT = torch.ones(1).cuda() if is_hip() else None
+# Input scaling factors are no longer optional in _scaled_mm starting
+# from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
+TORCH_DEVICE_IDENTITY = torch.ones(1).cuda() if is_hip() else None
 
 
 def cutlass_fp8_supported() -> bool:
@@ -131,19 +129,17 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            output = torch._scaled_mm(
-                qinput,
-                weight,
-                out_dtype=input.dtype,
-                scale_a=x_scale,
-                scale_b=weight_scale,
-                scale_result=TORCH_SCALED_MM_SCALE_RESULT,
-                bias=bias)
-            # Since in torch 2.5, scaled_mm only returns single value
-            # This should be removed when vllm-nvidia also moves to 2.5
-            if is_hip():
-                return torch.narrow(output, 0, 0, input.shape[0])
-            return torch.narrow(output[0], 0, 0, input.shape[0])
+            output = torch._scaled_mm(qinput,
+                                      weight,
+                                      out_dtype=input.dtype,
+                                      scale_a=x_scale,
+                                      scale_b=weight_scale,
+                                      bias=bias)
+            # A fix for discrepancy in scaled_mm which returns tuple
+            # for torch < 2.5 and a single value in torch >= 2.5
+            if type(output) is tuple and len(output) == 2:
+                return torch.narrow(output[0], 0, 0, input.shape[0])
+            return torch.narrow(output, 0, 0, input.shape[0])
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
@@ -161,12 +157,23 @@ def apply_fp8_linear(
             # For the scaled_mm fallback case, we break this down, since it
             # does not support s_w being a vector.
 
+            # Making sure the dummy tensor is on the same device as the weight
+            global TORCH_DEVICE_IDENTITY
+            if TORCH_DEVICE_IDENTITY.device != weight.device:
+                TORCH_DEVICE_IDENTITY = TORCH_DEVICE_IDENTITY.to(weight.device)
+
             # GEMM
             # This computes C = (X * W).
             # Output in fp32 to allow subsequent ops to happen in-place
-            output, _ = torch._scaled_mm(qinput,
-                                         weight,
-                                         out_dtype=torch.float32)
+            output = torch._scaled_mm(qinput,
+                                      weight,
+                                      scale_a=TORCH_DEVICE_IDENTITY,
+                                      scale_b=TORCH_DEVICE_IDENTITY,
+                                      out_dtype=torch.float32)
+            # A fix for discrepancy in scaled_mm which returns tuple
+            # for torch < 2.5 and a single value in torch >= 2.5
+            if type(output) is tuple and len(output) == 2:
+                output = output[0]
             # Unpad (undo num_token_padding)
             output = torch.narrow(output, 0, 0, input.shape[0])
             x_scale = torch.narrow(x_scale, 0, 0, input.shape[0])
