@@ -52,7 +52,7 @@ def get_kubernetes_plugin_config(docker_image_path: str, test_bash_command: List
             ]
         }]
     )
-    return {KUBERNETES_PLUGIN_NAME: KubernetesPluginConfig(pod_spec=pod_spec).dict(by_alias=True)}
+    return {KUBERNETES_PLUGIN_NAME: KubernetesPluginConfig(podSpec=pod_spec).dict(by_alias=True)}
 
 def get_docker_plugin_config(docker_image_path: str, test_bash_command: List[str], no_gpu: bool) -> Dict:
     docker_plugin_config = DockerPluginConfig(
