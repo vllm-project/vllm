@@ -16,9 +16,8 @@ from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
-from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
-                        cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_openvino, is_xpu,
+from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
+                        is_cpu, is_hip, is_neuron, is_openvino, is_xpu,
                         print_warning_once)
 
 if TYPE_CHECKING:
@@ -96,15 +95,15 @@ class ModelConfig:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-            If None, the user did not specify, so default to False -
-            except for encoder/decoder models, which currently require
-            eager mode.
+            If None, the user did not specify, so default to False.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode
+            to eager mode. Additionally for encoder-decoder models, if the
+            sequence length of the encoder input is larger than this, we fall
+            back to the eager mode.
         disable_sliding_window: Whether to disable sliding window. If True,
             we will disable the sliding window functionality of the model.
             If the model does not support sliding window, this argument is
@@ -186,32 +185,8 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
 
-        # Choose a default enforce_eager value if the user did not specify
-        # a value (enforce_eager is None)
-        if getattr(self.hf_config, 'is_encoder_decoder', False):
-            if self.enforce_eager is None:
-                # *Only for encoder/decoder models* and
-                # *only if enforce_eager is unset*, override
-                # to enforce_eager=True
-                #
-                # Add a logger message since it is *somewhat* non-intuitive that
-                # enforce_eager is True when the user has not specified its
-                # value.
-                logger.info("Forcing enforce_eager == True because "
-                            "enforce_eager setting was unspecified and "
-                            "CUDAGraph is not supported with encoder/ "
-                            "decoder models.")
-                self.enforce_eager = True
-
-            if not self.enforce_eager:
-                # Eager mode explicitly disabled by user for an encoder/
-                # decoder model; however CUDAGRAPH + encoder/decoder is
-                # not currently supported
-                raise ValueError(STR_NOT_IMPL_ENC_DEC_CUDAGRAPH)
-        elif self.enforce_eager is None:
-            # *Only for decoder-only models*, enforce_eager
-            # defaults to False if unset. This is intuitive
-            # so no logging message needed.
+        # Set enforce_eager to False if the value is unset.
+        if self.enforce_eager is None:
             self.enforce_eager = False
 
         if (not self.disable_sliding_window
@@ -379,7 +354,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        if self.enforce_eager:
+        if device_config.device_type == "cuda" and self.enforce_eager:
             logger.warning(
                 "To see benefits of async output processing, enable CUDA "
                 "graph. Since, enforce-eager is enabled, async output "
@@ -417,12 +392,6 @@ class ModelConfig:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported for the following "
                 f" architectures: {_PP_SUPPORTED_MODELS}.")
-
-        if self.quantization == "bitsandbytes" and (
-                parallel_config.tensor_parallel_size > 1
-                or parallel_config.pipeline_parallel_size > 1):
-            raise ValueError(
-                "BitAndBytes quantization with TP or PP is not supported yet.")
 
         # Remove the constraint after the bitsandbytes issue is fixed:
         # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1308
