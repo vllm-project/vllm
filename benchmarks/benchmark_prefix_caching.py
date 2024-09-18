@@ -112,11 +112,17 @@ def repeat_and_sort_requests(requests: List[Tuple[str, int, int]],
 
 def main(args):
     tokenizer = get_tokenizer(args.model, trust_remote_code=True)
-    input_length_range = tuple(map(int, args.input_length_range.split(':')))
 
     if args.dataset_path is not None:
+        if args.input_length_range == "":
+            print("[WARNING]: Dataset provided but --input-length-range is not"
+                  "specified. Setting it to 128:256")
+            args.input_length_range = "128:256"
+        input_length_range = tuple(map(int, args.input_length_range.split(':')))
+        
         print(f"Start to sample {args.num_prompts} prompts"
               "from {args.dataset_path}")
+        
         filtered_datasets = sample_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
@@ -126,8 +132,13 @@ def main(args):
         )
     else:
         prompt_len = len(tokenizer(PROMPT).input_ids)
-        filtered_datasets = [(PROMPT, prompt_len, args.output_len)
-                             ] * args.num_prompts
+        print("--dataset-path not provided. Use a fixed prompt w/ length ", prompt_len)
+        assert args.input_length_range == "", \
+            "Please set --dataset-path in order to control input length range"
+        
+        print('Using fixed prompt with length ')
+        filtered_datasets = [
+            (PROMPT, prompt_len, args.output_len)] * args.num_prompts
 
     llm = LLM(model=args.model,
               tokenizer_mode='auto',
@@ -135,7 +146,8 @@ def main(args):
               enforce_eager=True,
               use_v2_block_manager=args.use_v2_block_manager,
               tensor_parallel_size=args.tensor_parallel_size,
-              enable_prefix_caching=args.enable_prefix_caching)
+              enable_prefix_caching=args.enable_prefix_caching,
+              max_model_len=args.max_model_len)
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
@@ -191,8 +203,13 @@ if __name__ == "__main__":
                         help='Sort prompts by input length')
     parser.add_argument('--input-length-range',
                         type=str,
-                        default='128:256',
+                        default='',
                         help='Range of input lengths for sampling prompts,'
                         'specified as "min:max" (e.g., "128:256").')
+    parser.add_argument('--max-model-len',
+                        type=int,
+                        default=8000,
+                        help='Help control the model length so that vLLM '
+                        'does not use chunked prefill')
     args = parser.parse_args()
     main(args)
