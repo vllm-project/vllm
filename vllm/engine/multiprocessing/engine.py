@@ -1,5 +1,7 @@
 import pickle
 import signal
+import threading
+import time
 from contextlib import contextmanager
 from typing import Iterator, List, Optional, Union
 
@@ -12,8 +14,9 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
-                                         IPC_HEALTH_EXT, IPC_INPUT_EXT,
-                                         IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
+                                         IPC_HEALTH_IN_EXT, IPC_HEALTH_OUT_EXT,
+                                         IPC_INPUT_EXT, IPC_OUTPUT_EXT,
+                                         REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCGenerateRequest,
                                          RPCHealthRequest, RPCStartupRequest,
@@ -84,15 +87,26 @@ class MQLLMEngine:
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
+        # Receive health requests from the client
+        self.health_in_socket = self.ctx.socket(zmq.constants.PULL)
+        self.health_in_socket.bind(f"{ipc_path}{IPC_HEALTH_IN_EXT}")
+
         # Send health status back to client.
-        self.health_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.health_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
+        self.health_out_socket = self.ctx.socket(zmq.constants.PUSH)
+        self.health_out_socket.bind(f"{ipc_path}{IPC_HEALTH_OUT_EXT}")
 
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
 
         # Error state.
         self._errored_with: Optional[BaseException] = None
+
+        # Health checking thread
+        self.health_check_thread = threading.Thread(
+            target=self._health_check_loop)
+        self._health_check_stop_event = threading.Event()
+
+        self._last_alive_time = time.time()
 
     @property
     def dead_error(self) -> BaseException:
@@ -124,6 +138,8 @@ class MQLLMEngine:
             try:
                 logger.debug("Starting Startup Loop.")
                 self.run_startup_loop()
+                logger.debug("Starting health check thread")
+                self.health_check_thread.start()
                 logger.debug("Starting Engine Loop.")
                 self.run_engine_loop()
             except Exception as e:
@@ -134,9 +150,25 @@ class MQLLMEngine:
             logger.debug("MQLLMEngine is shut down.")
             self.cleanup()
 
+    def _health_check_loop(self):
+        while True:
+            if self.health_in_socket.poll(timeout=1000) != 0:
+                frames = self.health_in_socket.recv_multipart(copy=False)
+                request = pickle.loads(frames[0].buffer)
+                if not isinstance(request, RPCHealthRequest):
+                    logger.warning(
+                        "Received a non-health request request on "
+                        "the health request port: %s", str(type(request)))
+
+                self._handle_health_request()
+            if self._health_check_stop_event.is_set():
+                logger.debug("Exiting MQLLMEngine health check thread")
+                return
+
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
         # Closes all sockets and destroys context.
+        self._health_check_stop_event.set()
         self.ctx.destroy(linger=0)
         del self.engine
 
@@ -175,9 +207,11 @@ class MQLLMEngine:
         """Core busy loop of the LLMEngine."""
 
         while True:
+            self._alive()
             if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                    self._alive()
                     self.engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
 
@@ -193,7 +227,7 @@ class MQLLMEngine:
 
     def engine_step(self) -> List[RequestOutput]:
         """Engine step wrapper with error handling."""
-
+        self._alive()
         try:
             return self.engine.step()
         except SystemExit:
@@ -210,6 +244,7 @@ class MQLLMEngine:
         """Handle new input from the socket"""
         try:
             while self.input_socket.poll(timeout=0) != 0:
+                self._alive()
                 frames = self.input_socket.recv_multipart(copy=False)
                 request = pickle.loads(frames[0].buffer)
 
@@ -221,10 +256,8 @@ class MQLLMEngine:
                     self._handle_generate_request(request)
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)
-                elif isinstance(request, RPCHealthRequest):
-                    self._handle_health_request()
                 else:
-                    raise ValueError("Unknown RPCRequest Type: {request}")
+                    raise ValueError(f"Unknown RPCRequest Type: {request}")
 
         except Exception as e:
             self._set_errored(e)
@@ -272,12 +305,23 @@ class MQLLMEngine:
             logger.info("Aborted request %s.", request.request_id)
 
     def _handle_health_request(self):
+        # Send unhealthy if engine has already errored
         if self._errored_with is not None:
             self._send_unhealthy(self._errored_with)
 
+        # Check for life of the main loop
+        if time.time() - self._last_alive_time > 30:
+            self._send_unhealthy(RuntimeError("Engine loop has died"))
+
         # Raises error if unhealthy.
-        self.engine.check_health()
-        self._send_healthy()
+        try:
+            self.engine.check_health()
+            self._send_healthy()
+        except Exception as e:
+            # TODO: set errored_with here?
+            # Does it matter if we're just gonna kill the engine?
+            # Assume requests will be failing anyway if engine is unhealthy?
+            self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
@@ -287,12 +331,12 @@ class MQLLMEngine:
 
     def _send_healthy(self):
         """Send HEALTHY message to RPCClient."""
-        self.health_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
+        self.health_out_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
 
     def _send_unhealthy(self, error: BaseException):
         """Send UNHEALTHY message to RPCClient."""
         error_bytes = pickle.dumps(error)
-        self.health_socket.send_multipart((error_bytes, ), copy=False)
+        self.health_out_socket.send_multipart((error_bytes, ), copy=False)
 
     def _async_socket_engine_callback(self,
                                       request_outputs: REQUEST_OUTPUTS_T):
@@ -304,6 +348,9 @@ class MQLLMEngine:
         """Log and set errored status if this is the first issue."""
         if self._errored_with is None:
             self._errored_with = e
+
+    def _alive(self):
+        self._last_alive_time = time.time()
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,

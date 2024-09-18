@@ -16,12 +16,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
-                                         IPC_HEALTH_EXT, IPC_INPUT_EXT,
-                                         IPC_OUTPUT_EXT, RPC_REQUEST_T,
-                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCGenerateRequest,
-                                         RPCHealthRequest, RPCStartupRequest,
-                                         RPCStartupResponse)
+                                         IPC_HEALTH_IN_EXT, IPC_HEALTH_OUT_EXT,
+                                         IPC_INPUT_EXT, IPC_OUTPUT_EXT,
+                                         RPC_REQUEST_T, VLLM_RPC_SUCCESS_STR,
+                                         RPCAbortRequest, RPCError,
+                                         RPCGenerateRequest, RPCHealthRequest,
+                                         RPCStartupRequest, RPCStartupResponse)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptInputs
@@ -95,8 +95,14 @@ class MQLLMEngineClient:
         self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
         # IPC path for ack of check_health requests.
-        self.health_socket: Socket = self.context.socket(zmq.constants.PULL)
-        self.health_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
+        self.health_req_socket: Socket = self.context.socket(
+            zmq.constants.PUSH)
+        self.health_req_socket.connect(f"{ipc_path}{IPC_HEALTH_IN_EXT}")
+
+        # IPC path for ack of check_health requests.
+        self.health_ack_socket: Socket = self.context.socket(
+            zmq.constants.PULL)
+        self.health_ack_socket.connect(f"{ipc_path}{IPC_HEALTH_OUT_EXT}")
 
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
@@ -148,19 +154,19 @@ class MQLLMEngineClient:
 
         try:
             while True:
-                if await self.health_socket.poll(timeout=timeout) == 0:
+                if await self.health_ack_socket.poll(timeout=timeout) == 0:
                     # Wakeup every N seconds and do a health probe.
                     await self._send_one_way_rpc_request(
-                        RPCHealthRequest(), self.input_socket)
+                        RPCHealthRequest(), self.health_req_socket)
 
                     # Wait for ack from the health socket.
                     await self._await_ack(error_message="Health check failed.",
-                                          socket=self.health_socket)
+                                          socket=self.health_ack_socket)
                 else:
                     # Server sent a health status message unprompted.
                     await self._check_success(
                         error_message="Health check failed.",
-                        socket=self.health_socket)
+                        socket=self.health_ack_socket)
 
                 logger.debug("Health probe successful.")
 

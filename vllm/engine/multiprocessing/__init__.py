@@ -12,7 +12,8 @@ VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
 IPC_INPUT_EXT = "_input_socket"
 IPC_OUTPUT_EXT = "_output_socket"
-IPC_HEALTH_EXT = "_health_socket"
+IPC_HEALTH_OUT_EXT = "_health_out_socket"
+IPC_HEALTH_IN_EXT = "_health_in_socket"
 IPC_DATA_EXT = "_data_socket"
 
 
