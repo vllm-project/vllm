@@ -28,8 +28,6 @@ constexpr int kMaxBlocks = 36;
 // Counter may overflow, but it's fine since unsigned int overflow is
 // well-defined behavior.
 using FlagType = uint32_t;
-// Note: we don't want to use atomics for signals because peer atomics are no
-// supported on PCIe links.
 struct Signal {
   alignas(128) FlagType self_counter[kMaxBlocks][8];
   // Two sets of peer counters are needed for two syncs. The reason is that
