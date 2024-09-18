@@ -27,7 +27,8 @@ def get_kubernetes_plugin_config(docker_image_path: str, test_bash_command: List
     pod_spec = KubernetesPodSpec(
         containers=[{
             "image": docker_image_path, 
-            "command": test_bash_command,
+            "command": test_bash_command[0],
+            "args": test_bash_command[1:],
             "resources": {
                 "limits": {
                     "nvidia.com/gpu": num_gpus

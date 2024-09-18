@@ -79,7 +79,7 @@ def process_step(step: TestStep, run_all: str, list_file_diff: List[str]) -> Lis
     def step_should_run():
         """Determine whether the step should automatically run or not."""
         if step.optional:
-            return True
+            return False
         if not step.source_file_dependencies or run_all == "1":
             return True
         return any(source_file in diff_file 
