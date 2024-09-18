@@ -190,6 +190,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         'ID numbers being printed in log.'
                         '\n\nDefault: Unlimited')
 
+    parser.add_argument(
+        "--disable-fastapi-docs",
+        action='store_true',
+        default=False,
+        help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint"
+    )
+
     return parser
 
 

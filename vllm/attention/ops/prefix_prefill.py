@@ -709,8 +709,7 @@ if triton.__version__ >= "2.1.0":
                               alibi_slopes=None,
                               sliding_window=None):
 
-        cap = current_platform.get_device_capability()
-        BLOCK = 128 if cap[0] >= 8 else 64
+        BLOCK = 128 if current_platform.has_device_capability(80) else 64
         NUM_WARPS = 8
 
         # need to reduce num. blocks when using fp32

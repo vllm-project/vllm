@@ -25,10 +25,10 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install ruff==0.1.5 codespell==2.3.0 tomli==2.0.1 isort==5.13.2
+        pip install -r requirements-lint.txt
     - name: Analysing the code with ruff
       run: |
-        ruff .
+        ruff check .
     - name: Spelling check with codespell
       run: |
         codespell --toml pyproject.toml

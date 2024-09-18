@@ -8,7 +8,7 @@ from typing import Tuple, Union, cast
 from fastapi import Request
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -43,7 +43,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        engine_client: EngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -52,7 +52,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(async_engine_client=async_engine_client,
+        super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -78,6 +78,12 @@ class OpenAIServingCompletion(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        # If the engine is dead, raise the engine's DEAD_ERROR.
+        # This is required for the streaming case, where we return a
+        # success status before we actually start generating text :).
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+
         # Return error for unsupported features.
         if request.suffix is not None:
             return self.create_error_response(
@@ -95,8 +101,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.async_engine_client.get_tokenizer(
-                lora_request)
+            tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
@@ -124,8 +129,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                is_tracing_enabled = (
-                    await self.async_engine_client.is_tracing_enabled())
+                is_tracing_enabled = (await
+                                      self.engine_client.is_tracing_enabled())
                 trace_headers = None
                 if is_tracing_enabled:
                     trace_headers = extract_trace_headers(raw_request.headers)
@@ -133,7 +138,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         raw_request.headers):
                     log_tracing_disabled_warning()
 
-                generator = self.async_engine_client.generate(
+                generator = self.engine_client.generate(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     sampling_params,
                     request_id_item,

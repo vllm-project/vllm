@@ -183,10 +183,7 @@ class TP1DraftModelRunner(ModelRunner):
             return False
 
         # TODO: Add soft-tuning prompt adapter support
-        if self.prompt_adapter_config:
-            return False
-
-        return True
+        return not self.prompt_adapter_config
 
     @torch.inference_mode()
     def execute_model(

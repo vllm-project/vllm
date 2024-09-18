@@ -884,7 +884,7 @@ class MiniCPMV(MiniCPMVBaseModel):
             version = str(config.version).split(".")
             version = tuple([int(x) for x in version])
         # Dispatch class based on version
-        instance_class = _SUPPORT_VERSION.get(version, None)
+        instance_class = _SUPPORT_VERSION.get(version)
         if instance_class is None:
             raise ValueError(
                 "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")

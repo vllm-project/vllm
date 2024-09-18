@@ -1,10 +1,10 @@
-import random
 import time
 
 import torch
 
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
+                        seed_everything)
 
 
 @torch.inference_mode()
@@ -16,10 +16,7 @@ def main(num_tokens: int,
          do_profile: bool = False,
          num_warmup_iters: int = 5,
          num_iters: int = 100) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device("cuda")
 
     layer = RMSNorm(hidden_size).to(dtype=dtype)

@@ -16,7 +16,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="facebook/opt-125m", tensor_parallel_size=1)
 
 llm.start_profile()
 

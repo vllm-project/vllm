@@ -11,7 +11,7 @@ from vllm.sampling_params import SamplingParams
 # - Server:
 #
 # ```bash
-# vllm serve mistralai/Pixtral-12B-2409 --tokenizer_mode mistral --limit_mm_per_prompt 'image=4' --max_num_batched_tokens 16384
+# vllm serve mistralai/Pixtral-12B-2409 --tokenizer-mode mistral --limit-mm-per-prompt 'image=4' --max-model-len 16384
 # ```
 #
 # - Client:
@@ -45,6 +45,7 @@ def run_simple_demo():
     model_name = "mistralai/Pixtral-12B-2409"
     sampling_params = SamplingParams(max_tokens=8192)
 
+    # Lower max_num_seqs or max_model_len on low-VRAM GPUs.
     llm = LLM(model=model_name, tokenizer_mode="mistral")
 
     prompt = "Describe this image in one sentence."
@@ -83,7 +84,7 @@ def run_advanced_demo():
         model=model_name,
         tokenizer_mode="mistral",
         limit_mm_per_prompt={"image": max_img_per_msg},
-        max_num_batched_tokens=max_img_per_msg * max_tokens_per_img,
+        max_model_len=max_img_per_msg * max_tokens_per_img,
     )
 
     prompt = "Describe the following image."
