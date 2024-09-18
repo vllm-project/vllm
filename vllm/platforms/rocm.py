@@ -20,10 +20,6 @@ class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
 
     @classmethod
-    def is_cuda_alike(cls) -> bool:
-        return True
-
-    @classmethod
     @lru_cache(maxsize=8)
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         major, minor = torch.cuda.get_device_capability(device_id)

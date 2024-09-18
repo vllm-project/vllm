@@ -97,10 +97,6 @@ class CudaPlatform(Platform):
     _enum = PlatformEnum.CUDA
 
     @classmethod
-    def is_cuda_alike(cls) -> bool:
-        return True
-
-    @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         physical_device_id = device_id_to_physical_device_id(device_id)
         major, minor = get_physical_device_capability(physical_device_id)
