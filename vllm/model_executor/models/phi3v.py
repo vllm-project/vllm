@@ -362,7 +362,7 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int,
 
     image_feature_size = get_max_phi3v_image_tokens(ctx)
 
-    seq_data = dummy_seq_data_for_clip(
+    seq_data, ranges = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
         num_images,
@@ -376,7 +376,7 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
 
-    return seq_data, mm_data
+    return seq_data, mm_data, ranges
 
 
 # Reserve this function to also handle placeholders for additional images

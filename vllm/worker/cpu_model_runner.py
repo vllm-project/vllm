@@ -1,3 +1,4 @@
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -13,7 +14,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalInputs, MultiModalPlaceholderMap)
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_ERR_STRS, make_tensor_with_pad
 from vllm.worker.model_runner_base import (
@@ -145,6 +146,9 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_placeholder_maps: Dict[
+            str,
+            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -163,12 +167,18 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             # Token position ids
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(list(range(computed_len, seq_len)))
+            positions_range = range(computed_len, seq_len)
+            input_positions.extend(list(positions_range))
 
-            mm_data = seq_group_metadata.multi_modal_data
-            if mm_data:
+            if seq_group_metadata.multi_modal_data:
+                mm_data, placeholder_maps = MultiModalPlaceholderMap \
+                    .from_seq_group(seq_group_metadata, positions_range)
+
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 multi_modal_inputs_list.append(mm_kwargs)
+
+                for key, placeholder_map in placeholder_maps.items():
+                    multi_modal_placeholder_maps[key].extend(placeholder_map)
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
@@ -203,6 +213,10 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
+        placeholder_maps = {
+            key: placeholder_map.index_tensors(self.device)
+            for key, placeholder_map in multi_modal_placeholder_maps.items()
+        }
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
@@ -214,6 +228,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             num_decode_tokens=0,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_maps=placeholder_maps,
         )
 
         multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
@@ -288,6 +303,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_maps=None,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_decode_seq_len=max_decode_seq_len,

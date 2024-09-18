@@ -38,7 +38,8 @@ from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs, MultiModalRegistry)
+                             MultiModalInputs, MultiModalPlaceholderMap,
+                             MultiModalRegistry)
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -238,6 +239,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             # Multi-modal inputs.
             multi_modal_inputs: Optional[MultiModalInputs] = None,
+            multi_modal_placeholder_maps: Optional[Dict[
+                str, MultiModalPlaceholderMap]] = None,
 
             # Whether the prefix cache is hit (prefill only).
             prefix_cache_hit: bool = False,
@@ -355,6 +358,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             self.prompt_adapter_request = prompt_adapter_request
             self.multi_modal_inputs = multi_modal_inputs
+            self.multi_modal_placeholder_maps = multi_modal_placeholder_maps
             self.prefix_cache_hit = prefix_cache_hit
 
             self.n_seqs = len(self.seq_ids)
@@ -651,12 +655,16 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     def _compute_multi_modal_input(self, inter_data: InterDataForSeqGroup,
                                    seq_group_metadata: SequenceGroupMetadata):
         """If multi-modal data is given, add it to the input."""
-        mm_data = seq_group_metadata.multi_modal_data
+        positions = inter_data.input_positions[0]
+        mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
+            seq_group_metadata,
+            range(positions[0], positions[0] + len(positions)))
         if not mm_data:
             return
 
         mm_kwargs = self.multi_modal_input_mapper(mm_data)
         inter_data.multi_modal_inputs = mm_kwargs
+        inter_data.multi_modal_placeholder_maps = placeholder_maps
 
         # special processing for mrope position deltas.
         if self.runner.model_is_mrope:
@@ -1184,7 +1192,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, dummy_multi_modal_data = self.input_registry \
+            (seq_data,
+             dummy_multi_modal_data,
+             dummy_placeholders) = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
                                           self.mm_registry)
@@ -1198,6 +1208,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
                 multi_modal_data=dummy_multi_modal_data,
+                multi_modal_placeholders=dummy_placeholders,
             )
             seqs.append(seq)
 

@@ -302,7 +302,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int,
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
 
-    seq_data = dummy_seq_data_for_clip(
+    seq_data, ranges = dummy_seq_data_for_clip(
         vision_config,
         seq_len,
         num_images,
@@ -324,7 +324,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int,
         image_height_override=max_image_height,
     )
 
-    return seq_data, mm_data
+    return seq_data, mm_data, ranges
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_internvl)

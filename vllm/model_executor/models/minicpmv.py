@@ -277,7 +277,7 @@ def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
     seq_data = dummy_seq_data_for_minicpmv(seq_len, num_images)
     mm_data = dummy_image_for_minicpmv(hf_config, num_images)
 
-    return seq_data, mm_data
+    return seq_data, mm_data, None
 
 
 def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):

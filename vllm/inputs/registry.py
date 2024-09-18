@@ -15,7 +15,8 @@ from .data import LLMInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.multimodal import MultiModalDataDict, MultiModalRegistry
+    from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
+                                 MultiModalRegistry)
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
@@ -65,6 +66,9 @@ class InputContext:
 
 N = TypeVar("N", bound=Type[nn.Module])
 
+DummyDataTuple = Tuple["SequenceData", Optional["MultiModalDataDict"],
+                       Optional["MultiModalPlaceholderDict"]]
+
 
 class DummyDataFactory(Protocol):
 
@@ -73,7 +77,7 @@ class DummyDataFactory(Protocol):
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> DummyDataTuple:
         """
         Create dummy data to be inputted into the model.
 
@@ -119,7 +123,7 @@ class InputRegistry:
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> DummyDataTuple:
         """
         The default dummy data factory represents the longest possible text
         that can be inputted to the model.
@@ -133,8 +137,9 @@ class InputRegistry:
         dummy_seq_data = SequenceData(
             array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * seq_len)
         dummy_multi_modal_data = None
+        dummy_placeholders = None
 
-        return dummy_seq_data, dummy_multi_modal_data
+        return dummy_seq_data, dummy_multi_modal_data, dummy_placeholders
 
     def register_dummy_data(self, factory: DummyDataFactory):
         """
@@ -163,7 +168,7 @@ class InputRegistry:
         model_config: "ModelConfig",
         seq_len: int,
         mm_registry: "MultiModalRegistry",
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> DummyDataTuple:
         """
         Create dummy data for profiling the memory usage of a model.
 
@@ -184,7 +189,7 @@ class InputRegistry:
             .get(model_cls, self._default_dummy_data_factory)
         mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
 
-        seq_data, mm_data = dummy_factory(
+        seq_data, mm_data, ranges = dummy_factory(
             InputContext(model_config),
             seq_len,
             _MultiModalCounts(mm_counts),
@@ -204,7 +209,7 @@ class InputRegistry:
                     f"Expected at least {num_expected} dummy '{k}' instances "
                     f"for profiling, but found {num_items} instances instead.")
 
-        return seq_data, mm_data
+        return seq_data, mm_data, ranges
 
     def _default_input_processor(self, ctx: InputContext,
                                  inputs: LLMInputs) -> LLMInputs:

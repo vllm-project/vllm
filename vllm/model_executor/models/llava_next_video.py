@@ -111,33 +111,35 @@ def dummy_data_for_llava_next_video(ctx: InputContext, seq_len: int,
     video_feature_size = frames_per_video * tokens_per_frame
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = dummy_seq_data_for_clip(
+        seq_data, ranges = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             num_videos,
             image_token_id=hf_config.video_token_index,
             image_feature_size_override=video_feature_size,
+            mm_key="video",
         )
 
         pil_frame = dummy_image_for_clip(vision_config, num_images=1)
         np_frame = np.array(pil_frame["image"])
         mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
         mm_data = {"video": mm_data_per_video}
-        return seq_data, mm_data
+        return seq_data, mm_data, ranges
     elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data = dummy_seq_data_for_siglip(
+        seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
             num_videos,
             image_token_id=hf_config.video_token_index,
             image_feature_size_override=video_feature_size,
+            mm_key="video",
         )
 
         pil_frame = dummy_image_for_siglip(vision_config, num_images=1)
         np_frame = np.array(pil_frame["image"])
         mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
         mm_data = {"video": mm_data_per_video}
-        return seq_data, mm_data
+        return seq_data, mm_data, ranges
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -148,6 +150,11 @@ def input_processor_for_llava_next_video(ctx: InputContext,
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "video" not in multi_modal_data:
         return llm_inputs
+    if "multi_modal_placeholders" in llm_inputs and "video" in llm_inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return llm_inputs
+
     video_data = multi_modal_data["video"]
 
     model_config = ctx.model_config
@@ -163,7 +170,7 @@ def input_processor_for_llava_next_video(ctx: InputContext,
 
         tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
-        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
             tokenizer,
             llm_inputs.get("prompt"),
             llm_inputs["prompt_token_ids"],
@@ -173,7 +180,8 @@ def input_processor_for_llava_next_video(ctx: InputContext,
 
         return LLMInputs(prompt_token_ids=new_token_ids,
                          prompt=new_prompt,
-                         multi_modal_data=multi_modal_data)
+                         multi_modal_data=multi_modal_data,
+                         multi_modal_placeholders={"video": ranges})
 
     elif is_list_of(video_data, np.ndarray):
         raise NotImplementedError(

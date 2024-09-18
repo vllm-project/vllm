@@ -850,7 +850,7 @@ def dummy_data_for_qwen(
     # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
     mm_data = {"image": image if num_images == 1 else [image] * num_images}
-    return SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, toks)), mm_data
+    return SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, toks)), mm_data, None
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)

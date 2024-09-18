@@ -106,7 +106,12 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int, num_images: int):
     token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, image_token_ids) * num_images
     token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
                        [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceData(token_ids), {
+        "image": [{
+            "offset": i * image_feature_size,
+            "length": image_feature_size
+        } for i in range(num_images)]
+    }
 
 
 def dummy_image_for_fuyu(
@@ -122,11 +127,11 @@ def dummy_image_for_fuyu(
 def dummy_data_for_fuyu(ctx: InputContext, seq_len: int,
                         mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
-    seq_data = dummy_seq_data_for_fuyu(ctx, seq_len, num_images)
+    seq_data, ranges = dummy_seq_data_for_fuyu(ctx, seq_len, num_images)
     mm_data = dummy_image_for_fuyu(num_images,
                                    image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
                                    image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT)
-    return seq_data, mm_data
+    return seq_data, mm_data, ranges
 
 
 def _fuyu_image_preprocess(image_processor: FuyuImageProcessor,

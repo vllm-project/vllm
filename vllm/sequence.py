@@ -21,7 +21,7 @@ from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
-    from vllm.multimodal.base import MultiModalDataDict
+    from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -459,6 +459,10 @@ class Sequence:
         return self.inputs.get("multi_modal_data") or {}
 
     @property
+    def multi_modal_placeholders(self) -> "MultiModalPlaceholderDict":
+        return self.inputs.get("multi_modal_placeholders") or {}
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -689,6 +693,10 @@ class SequenceGroup:
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.
         return self.seqs[0].multi_modal_data
+
+    @property
+    def multi_modal_placeholders(self) -> "MultiModalPlaceholderDict":
+        return self.seqs[0].multi_modal_placeholders
 
     @property
     def lora_int_id(self) -> int:
@@ -937,6 +945,7 @@ class SequenceGroupMetadata(
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
+    multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None

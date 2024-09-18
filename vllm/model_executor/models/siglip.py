@@ -61,6 +61,7 @@ def dummy_seq_data_for_siglip(
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
+    mm_key: str = "image",
 ):
     if image_feature_size_override is None:
         image_feature_size = get_siglip_image_feature_size(hf_config)
@@ -71,7 +72,12 @@ def dummy_seq_data_for_siglip(
                       [image_token_id]) * image_feature_size
     token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
                        [0]) * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceData(token_ids), {
+        mm_key: [{
+            "offset": i * image_feature_size,
+            "length": image_feature_size
+        } for i in range(num_images)]
+    }
 
 
 def dummy_image_for_siglip(
@@ -103,6 +109,11 @@ def input_processor_for_siglip(
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
 
+    if "multi_modal_placeholders" in llm_inputs and "image" in llm_inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return llm_inputs
+
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
@@ -116,7 +127,7 @@ def input_processor_for_siglip(
     else:
         image_feature_size = image_feature_size_override
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         llm_inputs.get("prompt"),
         llm_inputs["prompt_token_ids"],
@@ -125,11 +136,10 @@ def input_processor_for_siglip(
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(
-        prompt_token_ids=new_token_ids,
-        prompt=new_prompt,
-        multi_modal_data=multi_modal_data,
-    )
+    return LLMInputs(prompt_token_ids=new_token_ids,
+                     prompt=new_prompt,
+                     multi_modal_data=multi_modal_data,
+                     multi_modal_placeholders={"image": ranges})
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/models/siglip/modeling_siglip.py#L249 # noqa

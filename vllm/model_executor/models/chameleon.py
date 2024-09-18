@@ -76,7 +76,12 @@ def dummy_seq_data_for_chameleon(
                       [image_token_id]) * image_feature_size * num_images
     token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
                        [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceData(token_ids), {
+        "image": [{
+            "offset": i * image_feature_size,
+            "length": image_feature_size
+        } for i in range(num_images)]
+    }
 
 
 def dummy_image_for_chameleon(
@@ -100,14 +105,14 @@ def dummy_data_for_chameleon(ctx: InputContext, seq_len: int,
                              mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
 
-    seq_data = dummy_seq_data_for_chameleon(
+    seq_data, ranges = dummy_seq_data_for_chameleon(
         seq_len,
         num_images,
         image_token_id=CHAMELEON_IMAGE_TOKEN_ID,
     )
 
     mm_data = dummy_image_for_chameleon(num_images)
-    return seq_data, mm_data
+    return seq_data, mm_data, ranges
 
 
 def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
@@ -122,9 +127,14 @@ def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
 
+    if "multi_modal_placeholders" in llm_inputs and "image" in llm_inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return llm_inputs
+
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         llm_inputs.get("prompt"),
         llm_inputs["prompt_token_ids"],
@@ -143,7 +153,8 @@ def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
     # NOTE: Create a defensive copy of the original inputs
     return LLMInputs(prompt_token_ids=new_token_ids,
                      prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+                     multi_modal_data=multi_modal_data,
+                     multi_modal_placeholders={"image": ranges})
 
 
 class ChameleonLayerNorm(nn.LayerNorm):

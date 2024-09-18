@@ -695,7 +695,7 @@ def dummy_data_for_qwen2_vl(
 
     return dummy_seqdata, {
         "image": dummy_image if num_images == 1 else [dummy_image] * num_images
-    }
+    }, None
 
 
 def _get_llm_num_vision_tokens(

@@ -19,6 +19,13 @@ AudioTuple = Tuple[np.ndarray, int]
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 HF_PLACEHOLDER = "<|audio|>"
 
+CHUNKED_PREFILL_KWARGS = {
+    "enable_chunked_prefill": True,
+    "max_num_seqs": 2,
+    # Use a very small limit to exercise chunked prefill.
+    "max_num_batched_tokens": 16
+}
+
 
 @pytest.fixture(scope="session")
 def audio_assets():
@@ -70,8 +77,7 @@ def run_test(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-    tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    **kwargs,
 ):
     """Inference result should be the same between hf and vllm."""
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -81,11 +87,8 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
 
-    with vllm_runner(model,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(model, dtype=dtype, enforce_eager=True,
+                     **kwargs) as vllm_model:
         vllm_outputs_per_audio = [
             vllm_model.generate_greedy_logprobs([vllm_prompt],
                                                 max_tokens,
@@ -137,18 +140,16 @@ def run_multi_audio_test(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-    tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    **kwargs,
 ):
     with vllm_runner(model,
                      dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
                      limit_mm_per_prompt={
                          "audio":
                          max((len(audio) for _, audio in prompts_and_audios))
-                     }) as vllm_model:
+                     },
+                     **kwargs) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             [prompt for prompt, _ in prompts_and_audios],
             max_tokens,
@@ -163,8 +164,9 @@ def run_multi_audio_test(
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("vllm_kwargs", [{}, CHUNKED_PREFILL_KWARGS])
 def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
-                num_logprobs: int) -> None:
+                num_logprobs: int, vllm_kwargs: dict) -> None:
 
     vllm_prompt = _get_prompt(1, "Describe the audio above.", VLLM_PLACEHOLDER)
     hf_prompt = _get_prompt(1, "Describe the audio above.", HF_PLACEHOLDER)
@@ -176,16 +178,17 @@ def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
-        tensor_parallel_size=1,
+        **vllm_kwargs,
     )
 
 
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("vllm_kwargs", [{}, CHUNKED_PREFILL_KWARGS])
 def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
-                                     max_tokens: int,
-                                     num_logprobs: int) -> None:
+                                     max_tokens: int, num_logprobs: int,
+                                     vllm_kwargs: dict) -> None:
 
     vllm_prompt = _get_prompt(len(audio_assets),
                               "Describe each of the audios above.",
@@ -198,5 +201,5 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
-        tensor_parallel_size=1,
+        **vllm_kwargs,
     )

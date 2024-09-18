@@ -29,12 +29,12 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.utils import (filter_weights, flatten_bn,
-                                              init_vllm_registered_model,
-                                              merge_multimodal_embeddings)
+from vllm.model_executor.models.utils import (
+    filter_weights, flatten_bn, init_vllm_registered_model,
+    merge_multimodal_embeddings_from_map)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs, NestedTensors
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
+                             NestedTensors)
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
@@ -49,13 +49,13 @@ logger = init_logger(__name__)
 class UltravoxAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: NestedTensors
-    """Shape: `(batch_size, num_audios, 80, M)"""
+    """Shape: `(batch_size, num_audios, 80, M)`"""
 
 
 class UltravoxAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
     data: NestedTensors
-    """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
+    """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)`"""
 
 
 UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
@@ -85,21 +85,26 @@ def dummy_data_for_ultravox(
     feature_extractor = whisper_feature_extractor(ctx)
 
     audio_count = mm_counts["audio"]
+    audio_length = min(get_ultravox_max_audio_tokens(ctx),
+                       seq_len // audio_count)
 
-    audio_placeholder = array(
-        VLLM_TOKEN_ID_ARRAY_TYPE,
-        [_AUDIO_PLACEHOLDER_TOKEN]) * get_ultravox_max_audio_tokens(ctx)
+    audio_placeholder = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                              [_AUDIO_PLACEHOLDER_TOKEN]) * audio_length
 
-    # Add a separator between each chunk.
-    audio_token_ids = (audio_placeholder +
-                       array(VLLM_TOKEN_ID_ARRAY_TYPE, [0])) * audio_count
+    audio_token_ids = audio_placeholder * audio_count
     other_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                             [0]) * (seq_len - len(audio_token_ids))
-
     audio_and_sr = (np.array([0.0] * feature_extractor.chunk_length), 1)
-    mm_dict = {"audio": [audio_and_sr] * audio_count}
+    mm_dict = {"audio": [audio_and_sr for _ in range(audio_count)]}
+    mm_placeholders = {
+        "audio": [{
+            "offset": i * audio_length,
+            "length": audio_length
+        } for i in range(audio_count)]
+    }
 
-    return (SequenceData(audio_token_ids + other_token_ids), mm_dict)
+    return (SequenceData(audio_token_ids + other_token_ids), mm_dict,
+            mm_placeholders)
 
 
 def input_mapper_for_ultravox(ctx: InputContext, data: object):
@@ -146,6 +151,11 @@ def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
     if multi_modal_data is None or "audio" not in multi_modal_data:
         return llm_inputs
 
+    if "multi_modal_placeholders" in llm_inputs and "audio" in llm_inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return llm_inputs
+
     feature_extractor = whisper_feature_extractor(ctx)
     audios = multi_modal_data["audio"]
     if not isinstance(audios, list):
@@ -174,7 +184,7 @@ def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
 
     tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         llm_inputs.get("prompt"),
         llm_inputs["prompt_token_ids"],
@@ -185,7 +195,8 @@ def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
     # NOTE: Create a defensive copy of the original inputs
     return LLMInputs(prompt_token_ids=new_token_ids,
                      prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+                     multi_modal_data=multi_modal_data,
+                     multi_modal_placeholders={"audio": ranges})
 
 
 class StackAudioFrames(nn.Module):
@@ -423,9 +434,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
 
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, audio_embeddings,
-                _AUDIO_PLACEHOLDER_TOKEN)
+            merge_multimodal_embeddings_from_map(
+                inputs_embeds, audio_embeddings,
+                attn_metadata.multi_modal_placeholder_maps["audio"])
             input_ids = None
         else:
             inputs_embeds = None

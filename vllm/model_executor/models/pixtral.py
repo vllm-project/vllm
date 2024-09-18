@@ -65,7 +65,7 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
 
     seq_data = SequenceData(token_ids)
     mm_data = {"image": max_num_images_per_request * [image]}
-    return seq_data, mm_data
+    return seq_data, mm_data, None
 
 
 def input_mapper_for_pixtral(ctx: InputContext,

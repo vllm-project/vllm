@@ -7,6 +7,8 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
 
 import torch
 
+from vllm.multimodal import MultiModalPlaceholderMap
+
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import (ModelRunnerBase,
                                                ModelRunnerInputBase,
@@ -104,6 +106,11 @@ class AttentionMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
+
+    # The index tensors that relate multi-modal embeddings to the corresponding
+    # placeholders.
+    multi_modal_placeholder_maps: Optional[Dict[
+        str, MultiModalPlaceholderMap.IndexTensors]]
 
     @property
     @abstractmethod

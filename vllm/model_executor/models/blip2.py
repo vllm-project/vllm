@@ -433,7 +433,12 @@ def dummy_seq_data_for_blip2(
                       [image_token_id]) * image_feature_size * num_images
     token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
                        [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceData(token_ids), {
+        "image": [{
+            "offset": i * image_feature_size,
+            "length": image_feature_size
+        } for i in range(num_images)]
+    }
 
 
 def dummy_data_for_blip2(ctx: InputContext, seq_len: int,
@@ -442,7 +447,7 @@ def dummy_data_for_blip2(ctx: InputContext, seq_len: int,
     vision_config = hf_config.vision_config
     num_images = mm_counts["image"]
 
-    seq_data = dummy_seq_data_for_blip2(
+    seq_data, ranges = dummy_seq_data_for_blip2(
         hf_config,
         seq_len,
         num_images,
@@ -452,7 +457,7 @@ def dummy_data_for_blip2(ctx: InputContext, seq_len: int,
     if isinstance(vision_config, Blip2VisionConfig):
         mm_data = dummy_image_for_blip(vision_config, num_images)
 
-        return seq_data, mm_data
+        return seq_data, mm_data, ranges
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)

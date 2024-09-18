@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, Generic, Iterable, List, Optional, Tuple,
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict
+    from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 
 
 class TextPrompt(TypedDict):
@@ -120,6 +120,12 @@ class LLMInputs(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+    """
+
+    multi_modal_placeholders: NotRequired[
+        Optional["MultiModalPlaceholderDict"]]
+    """
+    Placeholder ranges for the multi-modal data.
     """
 
 
