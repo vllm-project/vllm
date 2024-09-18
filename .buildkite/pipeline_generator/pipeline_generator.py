@@ -45,7 +45,7 @@ def _get_plugin_config(step: TestStep) -> Dict:
         return get_kubernetes_plugin_config(
             docker_image_path, 
             test_bash_command,
-            step.num_gpus if step.num_gpus else 1
+            step.num_gpus
         )
     return get_docker_plugin_config(
         docker_image_path, 
@@ -78,8 +78,8 @@ def process_step(step: TestStep, run_all: str, list_file_diff: List[str]) -> Lis
 
     def step_should_run():
         """Determine whether the step should automatically run or not."""
-        if step.gpu == "a100":
-            return False
+        if step.optional:
+            return True
         if not step.source_file_dependencies or run_all == "1":
             return True
         return any(source_file in diff_file 
@@ -111,6 +111,17 @@ def generate_build_step() -> BuildkiteStep:
         env={"DOCKER_BUILDKIT": "1"}, 
         retry={"automatic": [{"exit_status": -1, "limit": 2}, {"exit_status": -10, "limit": 2}]}, 
         commands=build_commands,
+        depends_on=None,
+    )
+    return step
+
+def mock_build_step() -> BuildkiteStep:
+    step = BuildkiteStep(
+        label=":docker: build image",
+        key="build",
+        agents={"queue": AgentQueue.AWS_CPU.value},
+        env={"DOCKER_BUILDKIT": "1"},
+        commands=["echo 'Mock build step'"],
         depends_on=None,
     )
     return step
@@ -165,7 +176,7 @@ def main(run_all: str = -1, list_file_diff: str = None):
 
     # Read test from yaml file and convert to Buildkite format steps
     test_steps = read_test_steps(TEST_PATH)
-    buildkite_steps = [generate_build_step()]
+    buildkite_steps = [mock_build_step()]
     for step in test_steps:
         buildkite_test_step = process_step(step, run_all, list_file_diff)
         buildkite_steps.extend(buildkite_test_step)
