@@ -323,6 +323,8 @@ class LlamaVLImageProcessor(BaseImageProcessor):
             # ), "Images and masks must have the same length"
 
             # preprocess is called for each batch now, so add batch dimension here.
+            if not isinstance(images, list):
+                images = [images]
             images = [images]
 
             max_num_images = max(len(x) for x in images)

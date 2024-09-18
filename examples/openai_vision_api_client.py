@@ -55,6 +55,8 @@ chat_completion_from_url = client.chat.completions.create(
 result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output:", result)
 
+print("remove me: testing done, exitting...")
+import sys; sys.exit(0)
 
 ## Use base64 encoded image in the payload
 def encode_image_base64_from_url(image_url: str) -> str:
