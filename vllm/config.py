@@ -17,7 +17,7 @@ from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        is_cpu, is_hip, is_neuron, is_openvino, is_xpu,
+                        is_hip, is_neuron, is_openvino, is_xpu,
                         print_warning_once)
 
 if TYPE_CHECKING:
@@ -1035,20 +1035,20 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if is_neuron():
+            if current_platform.is_cuda_alike():
+                self.device_type = "cuda"
+            elif is_neuron():
                 self.device_type = "neuron"
             elif is_openvino():
                 self.device_type = "openvino"
             elif current_platform.is_tpu():
                 self.device_type = "tpu"
-            elif is_cpu():
+            elif current_platform.is_cpu():
                 self.device_type = "cpu"
             elif is_xpu():
                 self.device_type = "xpu"
             else:
-                # We don't call torch.cuda.is_available() here to
-                # avoid initializing CUDA before workers are forked
-                self.device_type = "cuda"
+                raise RuntimeError("Failed to infer device type")
         else:
             # Device type is assigned explicitly
             self.device_type = device

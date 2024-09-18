@@ -116,10 +116,10 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _check_scheme_supported(self,
                                 min_capability: int,
                                 error: bool = True) -> bool:
-        capability = current_platform.get_device_capability()  # type: ignore
+        capability_tuple = current_platform.get_device_capability()
 
-        if capability is not None:
-            capability = capability[0] * 10 + capability[1]
+        if capability_tuple is not None:
+            capability = capability_tuple.to_int()
             supported = capability >= min_capability
             if error and not supported:
                 raise RuntimeError(
