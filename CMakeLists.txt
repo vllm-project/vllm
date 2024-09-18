@@ -13,11 +13,8 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
-# Prevent installation of dependencies (cutlass and flash-attention) by default.
-# This line in the install script only runs when component is not set.
-# When the component is set, this line does not run and flash-attention install rules do.
-# That means we can still install flash-attention by specifying --component vllm_flash_attn_c
-install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)")
+# Prevent installation of dependencies (cutlass) by default.
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 
 #
 # Supported python versions.  These versions will be searched in order, the
@@ -99,7 +96,7 @@ set(VLLM_EXT_SRC
 
 define_gpu_extension_target(
   _core_C
-  DESTINATION .
+  DESTINATION vllm
   LANGUAGE CXX
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
@@ -287,15 +284,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 define_gpu_extension_target(
-  _C
-  DESTINATION .
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-  USE_SABI 3
-  WITH_SOABI)
+_C
+DESTINATION vllm
+LANGUAGE ${VLLM_GPU_LANG}
+SOURCES ${VLLM_EXT_SRC}
+COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+ARCHITECTURES ${VLLM_GPU_ARCHES}
+INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+USE_SABI 3
+WITH_SOABI)
 
 #
 # _moe_C extension
@@ -312,7 +309,7 @@ endif()
 
 define_gpu_extension_target(
   _moe_C
-  DESTINATION .
+  DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_MOE_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
@@ -332,51 +329,59 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
-# Build flash attention from source
+# Build vLLM flash attention from source
 #
-# IMPORTANT: This has to be the last thing we do, because flash-attention uses the same macros/functions as vLLM.
-# Because functions all belong to the global scope, flash-attention's functions overwrite vLLMs.
+# IMPORTANT: This has to be the last thing we do, because vllm-flash-attn uses the same macros/functions as vLLM.
+# Because functions all belong to the global scope, vllm-flash-attn's functions overwrite vLLMs.
 # They should be identical but if they aren't, this is a massive footgun.
 #
-# During default installation (no component specified), don't install flash attention.
-# That's because it needs to be installed at a different prefix.
-# To install flash attention, use the vllm_flash_attn_c component:
-# cmake --install . --prefix vllm/vllm_flash_attn --component vllm_flash_attn_c
+# The vllm-flash-attn install rules are nested under vllm to make sure the library gets installed in the correct place.
+# To only install vllm-flash-attn, use --component vllm-flash-attn_c.
+# If no component is specified, vllm-flash-attn is still installed.
 
 # If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
 # This is to enable local development of vllm-flash-attn within vLLM.
 # It can be set as an environment variable or passed as a cmake argument.
+# The environment variable takes precedence.
 if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
   set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
 endif()
 
 if(VLLM_FLASH_ATTN_SRC_DIR)
-  FetchContent_Declare(flash-attention SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
+  FetchContent_Declare(vllm-flash-attn SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
 else()
   # TODO(luka) use vllm-project version
   FetchContent_Declare(
-          flash-attention
+          vllm-flash-attn
           GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
           GIT_TAG 52f4339a7889e9a9dfad080a05c63d9e4eeaa533
           GIT_PROGRESS TRUE
   )
 endif()
 
-# Set the parent build flag so that the flash-attention library does not redo compile flag and arch initialization.
+# Set the parent build flag so that the vllm-flash-attn library does not redo compile flag and arch initialization.
 set(VLLM_PARENT_BUILD ON)
 
-# Fetch the flash-attention library
-FetchContent_MakeAvailable(flash-attention)
-add_dependencies(default vllm_flash_attn_c)
-message(STATUS "Flash-attention is available at ${flash-attention_SOURCE_DIR}")
+# Make sure vllm-flash-attn install rules are nested under vllm/
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY FALSE)" COMPONENT vllm_flash_attn_c)
+install(CODE "set(OLD_CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
+install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" COMPONENT vllm_flash_attn_c)
 
-# Copy over the flash-attention python files
+# Fetch the vllm-flash-attn library
+FetchContent_MakeAvailable(vllm-flash-attn)
+add_dependencies(default vllm_flash_attn_c)
+message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
+
+# Restore the install prefix
+install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" COMPONENT vllm_flash_attn_c)
+
+# Copy over the vllm-flash-attn python files
 install(
-        DIRECTORY ${flash-attention_SOURCE_DIR}/vllm_flash_attn/
-        DESTINATION .
+        DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
+        DESTINATION vllm/vllm_flash_attn
         COMPONENT vllm_flash_attn_c
-        EXCLUDE_FROM_ALL # Don't install by default
         FILES_MATCHING PATTERN "*.py"
 )
 
-# Nothing after flash-attention, see comment about macros above
+# Nothing after vllm-flash-attn, see comment about macros above
