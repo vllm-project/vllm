@@ -479,6 +479,8 @@ if _build_core_ext():
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+
+if _is_cuda():
     ext_modules.append(
         CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
 
