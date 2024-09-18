@@ -1,5 +1,6 @@
 from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Union, cast,
+                    overload)
 
 from tqdm import tqdm
 
@@ -88,7 +89,9 @@ class LLM:
             to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode.
+            to eager mode. Additionally for encoder-decoder models, if the
+            sequence length of the encoder input is larger than this, we fall
+            back to the eager mode.
         disable_custom_all_reduce: See ParallelConfig
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
@@ -137,9 +140,7 @@ class LLM:
         LLM constructor.
 
         Note: if enforce_eager is unset (enforce_eager is None)
-        it defaults to False for decoder-only models and True
-        for encoder/decoder models, since encoder/decoder models
-        do not currently support CUDAGraph.
+        it defaults to False.
         '''
 
         if "disable_log_stats" not in kwargs:
@@ -357,6 +358,7 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> List[RequestOutput]:
         """
         Generate responses for a chat conversation.
@@ -401,6 +403,7 @@ class LLM:
                 messages=messages,
                 chat_template=chat_template,
                 add_generation_prompt=add_generation_prompt,
+                tools=tools,
             )
         else:
             prompt = apply_hf_chat_template(
@@ -408,6 +411,7 @@ class LLM:
                 conversation=conversation,
                 chat_template=chat_template,
                 add_generation_prompt=add_generation_prompt,
+                tools=tools,
             )
 
         inputs: PromptInputs
