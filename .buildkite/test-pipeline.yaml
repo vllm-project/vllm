@@ -27,6 +27,103 @@
 #   Note that all steps execute in parallel. 
 
 steps:
+- label: Core Test # 10min
+  mirror_hardwares: [amd]
+  fast_check: true
+  source_file_dependencies:
+  - vllm/core
+  - vllm/distributed
+  - tests/core
+  commands:
+  - pytest -v -s core
+
+- label: Regression Test # 5min
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/test_regression
+  commands: 
+  - pytest -v -s test_regression.py
+  working_dir: "/vllm-workspace/tests" # optional
+
+- label: Engine Test # 10min
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/engine
+  - tests/tokenization
+  commands:
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py
+  # OOM in the CI unless we run this separately
+  - pytest -v -s tokenization
+
+
+- label: LogitsProcessor Test # 5min
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/model_executor/layers
+  - tests/test_logits_processor
+  commands: 
+  - pytest -v -s test_logits_processor.py
+
+- label: Speculative decoding tests # 22min
+  source_file_dependencies:
+  - vllm/spec_decode
+  - tests/spec_decode
+  commands:
+    # See https://github.com/vllm-project/vllm/issues/5152
+    - export VLLM_ATTENTION_BACKEND=XFORMERS
+    - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
+    - pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
+
+- label: LoRA Test %N # 30min each
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/lora
+  - tests/lora
+  commands: 
+  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
+  parallelism: 4
+
+- label: Kernels Test %N # 30min each
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - csrc/
+  - vllm/attention
+  - tests/kernels
+  commands:
+    - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
+
+- label: Tensorizer Test # 11min
+  mirror_hardwares: [amd]
+  soft_fail: true
+  source_file_dependencies:
+  - vllm/model_executor/model_loader
+  - tests/tensorizer_loader
+  commands:
+    - apt-get update && apt-get install -y curl libsodium23
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s tensorizer_loader
+
+- label: Benchmarks # 9min
+  working_dir: "/vllm-workspace/.buildkite"
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - benchmarks/
+  commands:
+  - pip install aiohttp
+  - bash run-benchmarks.sh
+
+- label: OpenAI-Compatible Tool Use # 20 min
+  fast_check: false
+  mirror_hardwares: [ amd ]
+  source_file_dependencies:
+    - vllm/
+    - tests/tool_use
+  commands:
+    - pytest -v -s tool_use
+    
 - label: Weight Loading Multiple GPU Test - Large Models # optional
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
@@ -55,8 +152,8 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: LM Eval Large Models # optional
-  optional: true
   gpu: a100
+  optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
