@@ -25,8 +25,9 @@
 namespace vllm {
 
 constexpr int kMaxBlocks = 36;
-// Using uint64_t to allow incrementing for long running tasks.
-using FlagType = uint64_t;
+// Counter may overflow, but it's fine since unsigned int overflow is
+// well-defined behavior.
+using FlagType = uint32_t;
 // Note: we don't want to use atomics for signals because peer atomics are no
 // supported on PCIe links.
 struct Signal {
@@ -132,26 +133,26 @@ DINLINE O downcast(array_t<float, O::size> val) {
 }
 
 static DINLINE void st_flag_release(FlagType* flag_addr, FlagType flag) {
-  asm volatile("st.release.sys.global.u64 [%1], %0;" ::"l"(flag),
+  asm volatile("st.release.sys.global.u32 [%1], %0;" ::"r"(flag),
                "l"(flag_addr));
 }
 
 static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
   FlagType flag;
-  asm volatile("ld.acquire.sys.global.u64 %0, [%1];"
-               : "=l"(flag)
+  asm volatile("ld.acquire.sys.global.u32 %0, [%1];"
+               : "=r"(flag)
                : "l"(flag_addr));
   return flag;
 }
 
 static DINLINE void st_flag_volatile(FlagType* flag_addr, FlagType flag) {
-  asm volatile("st.volatile.global.u64 [%1], %0;" ::"l"(flag), "l"(flag_addr));
+  asm volatile("st.volatile.global.u32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
 }
 
 static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
   FlagType flag;
-  asm volatile("ld.volatile.global.u64 %0, [%1];"
-               : "=l"(flag)
+  asm volatile("ld.volatile.global.u32 %0, [%1];"
+               : "=r"(flag)
                : "l"(flag_addr));
   return flag;
 }
