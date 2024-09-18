@@ -442,7 +442,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # during vLLM memory profiling.
             cross_block_tables = []
             for seq_group_metadata in seq_group_metadata_list:
-                for _ in enumerate(seq_group_metadata.seq_data.items()):
+                for _ in range(len(seq_group_metadata.seq_data.items())):
                     encoder_seq_lens.append(
                         seq_group_metadata.encoder_seq_data.get_len())
                     cross_block_table = seq_group_metadata.cross_block_table
