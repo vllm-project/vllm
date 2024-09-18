@@ -41,11 +41,9 @@ class GPUExecutor:
 
     @classmethod
     def from_engine(cls, engine: LLMEngine):
-        return cls(
-            engine_config=engine.engine_config,
-            workflow=engine.workflow,
-            attn_backend=engine.attn_backend
-        )
+        return cls(engine_config=engine.engine_config,
+                   workflow=engine.workflow,
+                   attn_backend=engine.attn_backend)
 
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
@@ -61,8 +59,8 @@ class GPUExecutor:
         self.worker.init_device()
         self.worker.load_model()
 
-    def execute_model(self, executor_input: ExecuteInput
-    ) -> Optional[ExecuteOutput]:
+    def execute_model(self,
+                      executor_input: ExecuteInput) -> Optional[ExecuteOutput]:
         executor_input.model_input.to(self.worker.device)
         output = self.worker(executor_input)
         if self.output_to_cpu:
@@ -76,14 +74,9 @@ class GPUExecutor:
 class GPUAsyncExecutor(GPUExecutor):
     support_scheduling = ["async_scheduling"]
 
-    def __init__(
-        self,
-        engine_config: EngineConfig,
-        workflow: Workflow,
-        attn_backend: EncodeOnlyAttentionBackend,
-        executor_in: Queue,
-        executor_out: Queue
-    ) -> None:
+    def __init__(self, engine_config: EngineConfig, workflow: Workflow,
+                 attn_backend: EncodeOnlyAttentionBackend, executor_in: Queue,
+                 executor_out: Queue) -> None:
         super().__init__(engine_config, workflow, attn_backend)
         self.executor_in = executor_in
         self.executor_out = executor_out
@@ -97,13 +90,11 @@ class GPUAsyncExecutor(GPUExecutor):
 
     @classmethod
     def from_engine(cls, engine: LLMEngine):
-        return cls(
-            engine_config=engine.engine_config,
-            workflow=engine.workflow,
-            attn_backend=engine.attn_backend,
-            executor_in=engine.executor_in,
-            executor_out=engine.executor_out
-        )
+        return cls(engine_config=engine.engine_config,
+                   workflow=engine.workflow,
+                   attn_backend=engine.attn_backend,
+                   executor_in=engine.executor_in,
+                   executor_out=engine.executor_out)
 
     def simple_execute_loop(self):
         while True:
@@ -118,8 +109,6 @@ class GPUAsyncExecutor(GPUExecutor):
             self.executor_out.put((scheduler_output, executor_output))
 
     def double_buffer_execute_loop(self):
-        # Looks cool
-        # But offers little performance improvement and takes up twice the GPU memory
         from dataclasses import dataclass
         from vllm.wde.core.schema.engine_io import SchedulerOutput
 
@@ -155,8 +144,10 @@ class GPUAsyncExecutor(GPUExecutor):
                     break
 
                 with torch.cuda.stream(compute_stream):
-                    current_task.executor_input.model_input.to(self.worker.device, non_blocking=True)
-                    current_task.executor_output = self.execute_model(current_task.executor_input)
+                    current_task.executor_input.model_input.to(
+                        self.worker.device, non_blocking=True)
+                    current_task.executor_output = self.execute_model(
+                        current_task.executor_input)
                     end_compute = torch.cuda.Event()
             else:
                 with torch.cuda.stream(compute_stream):
@@ -168,31 +159,32 @@ class GPUAsyncExecutor(GPUExecutor):
                     go_on = False
                 else:
                     with torch.cuda.stream(io_stream):
-                        next_task.executor_input.model_input.to(self.worker.device, non_blocking=True)
+                        next_task.executor_input.model_input.to(
+                            self.worker.device, non_blocking=True)
 
                     compute_stream.wait_stream(io_stream)
 
                     with torch.cuda.stream(compute_stream):
-                        next_task.executor_output = self.execute_model(next_task.executor_input)
+                        next_task.executor_output = self.execute_model(
+                            next_task.executor_input)
             except queue.Empty:
                 pass
-                #logger.info("Executor_in Queue Empty. "
-                #            "If this occurs frequently, "
-                #            "setting max_num_on_the_fly higher help.")
 
             end_compute.wait()
             if self.output_to_cpu:
                 with torch.cuda.stream(io_stream):
                     current_task.executor_output.to("cpu", non_blocking=True)
                     io_stream.synchronize()
-            self.executor_out.put((current_task.scheduler_output, current_task.executor_output))
+            self.executor_out.put(
+                (current_task.scheduler_output, current_task.executor_output))
 
             current_task = next_task
             next_task = None
 
     def ensure_start_execute_loop(self):
         if self.executor_thread is None or not self.executor_thread.is_alive():
-            self.executor_thread = Thread(target=self.execute_loop, daemon=True)
+            self.executor_thread = Thread(target=self.execute_loop,
+                                          daemon=True)
             self.executor_thread.start()
 
     def shutdown_execute_loop(self):

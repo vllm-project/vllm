@@ -1,4 +1,3 @@
-
 from abc import ABC, abstractmethod
 from typing import Deque, Union, Iterable, List
 from collections import deque
@@ -8,6 +7,7 @@ from vllm.wde.core.schema.engine_io import Request, SchedulerOutput, RequestOutp
 from vllm.wde.core.processor.input_processor import RequestProcessor
 
 from vllm.logger import init_logger
+
 logger = init_logger(__name__)
 
 
@@ -15,9 +15,9 @@ class Scheduler(ABC):
     support_scheduling = []
 
     def __init__(
-            self,
-            scheduler_config: SchedulerConfig,
-            request_processor: RequestProcessor,
+        self,
+        scheduler_config: SchedulerConfig,
+        request_processor: RequestProcessor,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.request_processor = request_processor
@@ -41,13 +41,14 @@ class Scheduler(ABC):
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         if isinstance(request_id, str):
-            request_id = (request_id,)
+            request_id = (request_id, )
         request_ids = set(request_id)
 
         self.requests -= request_ids
         self.aborted_requests += request_ids
 
-    def remove_abort_request(self, request_outputs: List[RequestOutput]) -> List[RequestOutput]:
+    def remove_abort_request(
+            self, request_outputs: List[RequestOutput]) -> List[RequestOutput]:
         if len(self.aborted_requests) == 0:
             return request_outputs
 
@@ -57,7 +58,10 @@ class Scheduler(ABC):
         if len(need_abort) == 0:
             return request_outputs
 
-        request_outputs = [request for request in request_outputs if request.request_id not in need_abort]
+        request_outputs = [
+            request for request in request_outputs
+            if request.request_id not in need_abort
+        ]
         self.aborted_requests -= need_abort
 
         return request_outputs
@@ -73,5 +77,7 @@ class Scheduler(ABC):
         raise NotImplementedError
 
     def free_finished_request(self, request_outputs: List[RequestOutput]):
-        finished_request_ids = set(request.request_id for request in request_outputs if request.finished)
+        finished_request_ids = set(request.request_id
+                                   for request in request_outputs
+                                   if request.finished)
         self.requests -= finished_request_ids

@@ -1,4 +1,3 @@
-
 from typing import Dict, List, Optional, Tuple, Union
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
@@ -12,15 +11,18 @@ INVALID_TOKEN_ID = -1
 
 
 class Tokenizer(object):
+
     def __init__(self, tokenizer_name: str, **kwargs):
         self.tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, **kwargs)
 
     @classmethod
     def from_engine(cls, engine):
-        init_kwargs = dict(tokenizer_name=engine.engine_config.model_config.tokenizer,
-                           tokenizer_mode=engine.engine_config.model_config.tokenizer_mode,
-                           trust_remote_code=engine.engine_config.model_config.trust_remote_code,
-                           revision=engine.engine_config.model_config.tokenizer_revision)
+        init_kwargs = dict(
+            tokenizer_name=engine.engine_config.model_config.tokenizer,
+            tokenizer_mode=engine.engine_config.model_config.tokenizer_mode,
+            trust_remote_code=engine.engine_config.model_config.
+            trust_remote_code,
+            revision=engine.engine_config.model_config.tokenizer_revision)
 
         return cls(**init_kwargs)
 
@@ -60,7 +62,7 @@ class Tokenizer(object):
         # Only prompt, without the generated token.
         all_token_ids = seq.get_token_ids()
         prompt_token_ids = all_token_ids[:-1]
-        tokenizer = self.tokenizer
+        tokenizer = self.get_tokenizer_for_seq(seq)
         prefix_offset = 0
         read_offset = 0
         next_iter_prefix_offset = 0
@@ -81,18 +83,18 @@ class Tokenizer(object):
                 if (sample_logprob.decoded_token is None
                         and token_id != INVALID_TOKEN_ID):
                     prompt_token_ids_with_token = (
-                            prompt_token_ids[:token_position] + [token_id])
+                        prompt_token_ids[:token_position] + [token_id])
                     (new_tokens, new_text, new_prefix_offset,
                      new_read_offset) = detokenize_incrementally(
-                        tokenizer=tokenizer,
-                        all_input_ids=prompt_token_ids_with_token,
-                        prev_tokens=prev_tokens,
-                        prefix_offset=prefix_offset,
-                        read_offset=read_offset,
-                        skip_special_tokens=prms.skip_special_tokens,
-                        spaces_between_special_tokens=prms.
-                        spaces_between_special_tokens,
-                    )
+                         tokenizer=tokenizer,
+                         all_input_ids=prompt_token_ids_with_token,
+                         prev_tokens=prev_tokens,
+                         prefix_offset=prefix_offset,
+                         read_offset=read_offset,
+                         skip_special_tokens=prms.skip_special_tokens,
+                         spaces_between_special_tokens=prms.
+                         spaces_between_special_tokens,
+                     )
 
                     sample_logprob.decoded_token = new_text
 
@@ -125,7 +127,7 @@ class Tokenizer(object):
         """
         all_input_ids = seq.get_token_ids()
         token_id_generated_this_iteration = all_input_ids[-1]
-        tokenizer = self.tokenizer
+        tokenizer = self.get_tokenizer_for_seq(seq)
 
         # Convert prompt token IDs to tokens if necessary.
         # Do it here so that we don't have to repeat this
@@ -133,21 +135,21 @@ class Tokenizer(object):
         if seq.tokens is None:
             (seq.tokens, seq.prefix_offset,
              seq.read_offset) = convert_prompt_ids_to_tokens(
-                tokenizer=tokenizer,
-                prompt_ids=all_input_ids[:-1],
-                skip_special_tokens=prms.skip_special_tokens,
-            )
+                 tokenizer=tokenizer,
+                 prompt_ids=all_input_ids[:-1],
+                 skip_special_tokens=prms.skip_special_tokens,
+             )
 
         (new_tokens, new_decoded_token_text, prefix_offset,
          read_offset) = detokenize_incrementally(
-            tokenizer=tokenizer,
-            all_input_ids=all_input_ids,
-            prev_tokens=seq.tokens,
-            prefix_offset=seq.prefix_offset,
-            read_offset=seq.read_offset,
-            skip_special_tokens=prms.skip_special_tokens,
-            spaces_between_special_tokens=prms.spaces_between_special_tokens,
-        )
+             tokenizer=tokenizer,
+             all_input_ids=all_input_ids,
+             prev_tokens=seq.tokens,
+             prefix_offset=seq.prefix_offset,
+             read_offset=seq.read_offset,
+             skip_special_tokens=prms.skip_special_tokens,
+             spaces_between_special_tokens=prms.spaces_between_special_tokens,
+         )
 
         # Decode logprobs
         logprobs = seq.output_logprobs[-1]
@@ -184,7 +186,7 @@ class Tokenizer(object):
 
 
 def get_cached_tokenizer(
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Get tokenizer with cached properties.
 

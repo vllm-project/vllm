@@ -14,28 +14,26 @@ class EncodeOnlyModelConfig(ModelConfig):
 
 
 class EncodeOnlySchedulerConfig(SchedulerConfig):
+
     def __init__(self,
                  max_model_len: int,
                  max_num_batched_tokens: Optional[int] = None,
                  max_num_requests: Optional[int] = None,
                  max_num_seqs: Optional[int] = None,
                  max_num_on_the_fly: Optional[int] = 3,
-                 scheduling: str = "sync"
-                 ) -> None:
+                 scheduling: str = "sync") -> None:
         self.max_model_len = max_model_len
         self.max_num_requests: int = 0
         self.max_num_batched_tokens: int = 0
         self.max_num_on_the_fly: int = max_num_on_the_fly
         self.scheduling = scheduling
 
-        self.set_args(max_num_batched_tokens,
-                      max_num_requests,
-                      max_num_seqs)
+        self.set_args(max_num_batched_tokens, max_num_requests, max_num_seqs)
 
     def set_args(self,
                  max_num_batched_tokens: Optional[int] = None,
                  max_num_requests: Optional[int] = None,
-                 max_num_seqs: Optional[int] = None, ):
+                 max_num_seqs: Optional[int] = None):
         if max_num_seqs is not None:
             self.max_num_requests = max_num_seqs
         else:
@@ -88,25 +86,14 @@ class EncodeOnlyEngineConfig(EngineConfig):
             "quantization=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "seed=%d, served_model_name=%s, max_num_on_the_fly=%d, scheduling=%s)",
-            VLLM_VERSION,
-            self.model_config.model,
-            self.model_config.tokenizer,
-            self.model_config.skip_tokenizer_init,
-            self.model_config.tokenizer_mode,
-            self.model_config.revision,
-            self.model_config.rope_scaling,
-            self.model_config.rope_theta,
-            self.model_config.tokenizer_revision,
-            self.model_config.trust_remote_code,
-            self.model_config.dtype,
-            self.model_config.max_model_len,
-            self.load_config.download_dir,
-            self.load_config.load_format,
-            self.model_config.quantization,
+            VLLM_VERSION, self.model_config.model, self.model_config.tokenizer,
+            self.model_config.tokenizer_mode, self.model_config.revision,
+            self.model_config.rope_scaling, self.model_config.rope_theta,
+            self.model_config.trust_remote_code, self.model_config.dtype,
+            self.model_config.max_model_len, self.load_config.download_dir,
+            self.load_config.load_format, self.model_config.quantization,
             self.model_config.quantization_param_path,
-            self.device_config.device,
-            self.model_config.seed,
+            self.device_config.device, self.model_config.seed,
             self.model_config.served_model_name,
             self.scheduler_config.max_num_on_the_fly,
-            self.scheduler_config.scheduling
-        )
+            self.scheduler_config.scheduling)

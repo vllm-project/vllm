@@ -1,4 +1,3 @@
-
 from vllm.wde.core.workflow import Workflow
 
 
@@ -19,7 +18,9 @@ class EncodeOnlyWorkflow(Workflow):
         workflow = cls()
         if engine.engine_config.scheduler_config.scheduling in ["sync"]:
             workflow.Executor += ":GPUExecutor"
-        elif engine.engine_config.scheduler_config.scheduling in ["async", "double_buffer"]:
+        elif engine.engine_config.scheduler_config.scheduling in [
+                "async", "double_buffer"
+        ]:
             workflow.Executor += ":GPUAsyncExecutor"
 
         return workflow

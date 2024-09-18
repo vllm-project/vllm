@@ -1,8 +1,8 @@
-
 from dataclasses import dataclass, fields
 from typing import List, Optional, Union
 
 from vllm.logger import init_logger
+
 logger = init_logger(__name__)
 
 

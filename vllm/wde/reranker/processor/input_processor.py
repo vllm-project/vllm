@@ -10,6 +10,7 @@ from vllm.wde.core.processor.input_processor import InputProcessor, RequestProce
 
 
 class RerankerInputProcessor(InputProcessor):
+
     @classmethod
     def from_engine(cls, engine: LLMEngine):
         return cls()
@@ -34,6 +35,7 @@ class RerankerInputProcessor(InputProcessor):
 
 
 class RerankerRequestProcessor(RequestProcessor):
+
     def __init__(self, tokenizer: Tokenizer):
         self.tokenizer = tokenizer
 
@@ -41,15 +43,13 @@ class RerankerRequestProcessor(RequestProcessor):
     def from_engine(cls, engine: LLMEngine):
         return cls(engine.tokenizer)
 
-    def __call__(self, request: RerankerRequest) -> EncodeOnlySchedulableRequest:
+    def __call__(self,
+                 request: RerankerRequest) -> EncodeOnlySchedulableRequest:
         text_pair = (request.inputs.query, request.inputs.passage)
         prompt_token_ids = self.tokenizer.encode(text_pair)
         schedulable_request = EncodeOnlySchedulableRequest(
             request_id=request.request_id,
-            inputs=EncodeOnlyInput(
-                prompt_token_ids=prompt_token_ids,
-                prompt=None
-            ),
-            arrival_time=request.arrival_time
-        )
+            inputs=EncodeOnlyInput(prompt_token_ids=prompt_token_ids,
+                                   prompt=None),
+            arrival_time=request.arrival_time)
         return schedulable_request

@@ -1,4 +1,3 @@
-
 from typing import List, Dict, Optional, Type
 import torch.nn as nn
 
@@ -9,15 +8,14 @@ from vllm.wde.retriever.modelzoo import RETRIEVER_MODELS
 from vllm.wde.reranker.modelzoo import RERANKER_MODELS
 
 from vllm.logger import init_logger
-logger = init_logger(__name__)
 
+logger = init_logger(__name__)
 
 _MODELS_LIST = [ENCODE_ONLY_MODELS, RETRIEVER_MODELS, RERANKER_MODELS]
 
 _MODELS = dict()
 for m in _MODELS_LIST:
     _MODELS.update(**m)
-
 
 # Architecture -> type.
 # out of tree models

@@ -1,6 +1,3 @@
-import argparse
-import dataclasses
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
 
@@ -8,8 +5,6 @@ from vllm.wde.core.arg_utils import EngineArgs
 from vllm.wde.core.config import DeviceConfig, LoadConfig, filter_unexpected_fields
 from vllm.wde.encode_only.config import EncodeOnlyModelConfig, EncodeOnlySchedulerConfig, EncodeOnlyEngineConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -84,8 +79,7 @@ class EncodeOnlyEngineArgs(EngineArgs):
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             max_num_on_the_fly=self.max_num_on_the_fly,
-            scheduling=self.scheduling
-        )
+            scheduling=self.scheduling)
 
         load_config = LoadConfig(
             load_format=self.load_format,
@@ -94,9 +88,7 @@ class EncodeOnlyEngineArgs(EngineArgs):
             ignore_patterns=self.ignore_patterns,
         )
 
-        return EncodeOnlyEngineConfig(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            load_config=load_config
-        )
+        return EncodeOnlyEngineConfig(model_config=model_config,
+                                      scheduler_config=scheduler_config,
+                                      device_config=device_config,
+                                      load_config=load_config)

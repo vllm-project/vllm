@@ -1,5 +1,3 @@
-
-
 from abc import ABC, abstractmethod
 
 from vllm.wde.core.llm_engine import LLMEngine
@@ -21,4 +19,3 @@ class ModelInputBuilder(ABC):
     @abstractmethod
     def from_engine(cls, engine: LLMEngine):
         raise NotImplementedError
-

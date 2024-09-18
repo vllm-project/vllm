@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass, field
 from typing import Set
 from vllm.wde.core.schema.engine_io import SchedulableRequest
@@ -8,6 +7,7 @@ from vllm.wde.encode_only.processor.input_processor import EncodeOnlyModelReques
 from vllm.wde.encode_only.config import EncodeOnlySchedulerConfig
 
 from vllm.logger import init_logger
+
 logger = init_logger(__name__)
 
 
@@ -22,7 +22,8 @@ class SchedulingBudget:
         assert num_new_tokens != 0
         assert num_new_request != 0
         return (self.num_batched_tokens + num_new_tokens <= self.token_budget
-                and self.num_curr_request + num_new_request <= self.max_num_requests)
+                and self.num_curr_request + num_new_request
+                <= self.max_num_requests)
 
     def add_num_batched_tokens(self, req_id: str, num_batched_tokens: int):
         if req_id in self._curr_requests:
@@ -44,9 +45,9 @@ class EncodeOnlyScheduler(Scheduler):
     support_scheduling = ["sync_scheduling", "async_scheduling"]
 
     def __init__(
-            self,
-            scheduler_config: EncodeOnlySchedulerConfig,
-            request_processor: EncodeOnlyModelRequestProcessor,
+        self,
+        scheduler_config: EncodeOnlySchedulerConfig,
+        request_processor: EncodeOnlyModelRequestProcessor,
     ) -> None:
         super().__init__(scheduler_config, request_processor)
 
@@ -85,4 +86,3 @@ class EncodeOnlyScheduler(Scheduler):
             scheduler_outputs.append(request)
 
         return EncodeOnlySchedulerOutput(requests=scheduler_outputs)
-

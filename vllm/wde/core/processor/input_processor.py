@@ -1,4 +1,3 @@
-
 from abc import ABC, abstractmethod
 from typing import Optional, Union
 from vllm.wde.core.llm_engine import LLMEngine
@@ -28,6 +27,7 @@ class RequestProcessor(ABC):
     """
     Request -> RequestProcessor -> SchedulableRequest
     """
+
     @abstractmethod
     def __call__(self, request: Request) -> SchedulableRequest:
         raise NotImplementedError

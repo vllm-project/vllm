@@ -104,12 +104,13 @@ def _get_quantization_config(
     return None
 
 
-def initialize_model(model_config: ModelConfig,
-                     load_config: LoadConfig,
-                     device_config: DeviceConfig,
-                     attn_backend: AttentionBackend,
-                     cache_config: Optional[CacheConfig] = None,
-                     ) -> nn.Module:
+def initialize_model(
+    model_config: ModelConfig,
+    load_config: LoadConfig,
+    device_config: DeviceConfig,
+    attn_backend: AttentionBackend,
+    cache_config: Optional[CacheConfig] = None,
+) -> nn.Module:
     """Initialize a model with the given configurations."""
 
     target_device = torch.device(device_config.device)
@@ -131,7 +132,9 @@ class BaseModelLoader(ABC):
         self.load_config = load_config
 
     @abstractmethod
-    def load_model(self, model: nn.Module, *,
+    def load_model(self,
+                   model: nn.Module,
+                   *,
                    model_config: ModelConfig,
                    device_config: DeviceConfig,
                    scheduler_config: Optional[SchedulerConfig] = None,
@@ -268,7 +271,9 @@ class DefaultModelLoader(BaseModelLoader):
 
         return weights_iterator
 
-    def load_model(self, model: nn.Module, *,
+    def load_model(self,
+                   model: nn.Module,
+                   *,
                    model_config: ModelConfig,
                    device_config: DeviceConfig,
                    scheduler_config: Optional[SchedulerConfig] = None,
@@ -305,7 +310,9 @@ class DummyModelLoader(BaseModelLoader):
             raise ValueError(f"Model loader extra config is not supported for "
                              f"load format {load_config.load_format}")
 
-    def load_model(self, model: nn.Module, *,
+    def load_model(self,
+                   model: nn.Module,
+                   *,
                    model_config: ModelConfig,
                    device_config: DeviceConfig,
                    scheduler_config: Optional[SchedulerConfig] = None,
@@ -598,7 +605,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 offsets = np.concatenate(([0], np.cumsum(num_elements)))
                 set_weight_attrs(param, {"bnb_shard_offsets": offsets})
 
-    def load_model(self, model: nn.Module, *,
+    def load_model(self,
+                   model: nn.Module,
+                   *,
                    model_config: ModelConfig,
                    device_config: DeviceConfig,
                    scheduler_config: Optional[SchedulerConfig] = None,

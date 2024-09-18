@@ -1,8 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import (Any, Dict, Generic, List, Optional,
-                    Type, TypeVar)
+from typing import (Any, Dict, Generic, List, Optional, Type, TypeVar)
 
 import torch
 

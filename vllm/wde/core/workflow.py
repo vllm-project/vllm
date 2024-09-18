@@ -1,5 +1,3 @@
-
-
 class Workflow:
     EngineArgs: str
     Scheduler: str

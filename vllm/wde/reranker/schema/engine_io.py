@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass
 from typing import Sequence, Union, List
 from vllm.wde.core.schema.engine_io import Request
@@ -21,11 +20,8 @@ class RerankerRequest(Request):
 
 class RerankerRequestOutput(RequestOutput):
 
-    def __init__(self,
-                 request_id: str,
-                 score: float,
-                 prompt_token_ids: List[int],
-                 finished: bool):
+    def __init__(self, request_id: str, score: float,
+                 prompt_token_ids: List[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished

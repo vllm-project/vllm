@@ -1,4 +1,3 @@
-
 from abc import ABC, abstractmethod
 from typing import List
 import torch
@@ -12,8 +11,7 @@ class OutputProcessor(ABC):
     """
 
     @abstractmethod
-    def __call__(self,
-                 scheduler_output: SchedulerOutput,
+    def __call__(self, scheduler_output: SchedulerOutput,
                  execute_output: torch.Tensor) -> List[RequestOutput]:
         raise NotImplementedError
 

@@ -139,15 +139,15 @@ class CacheConfig:
     """
 
     def __init__(
-            self,
-            block_size: int,
-            gpu_memory_utilization: float,
-            swap_space: int,
-            cache_dtype: str,
-            num_gpu_blocks_override: Optional[int] = None,
-            sliding_window: Optional[int] = None,
-            enable_prefix_caching: bool = False,
-            cpu_offload_gb: float = 0,
+        self,
+        block_size: int,
+        gpu_memory_utilization: float,
+        swap_space: int,
+        cache_dtype: str,
+        num_gpu_blocks_override: Optional[int] = None,
+        sliding_window: Optional[int] = None,
+        enable_prefix_caching: bool = False,
+        cpu_offload_gb: float = 0,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -202,8 +202,8 @@ class CacheConfig:
                 "Run with --kv-cache-dtype auto to use prefix caching.")
 
     def verify_with_parallel_config(
-            self,
-            parallel_config: "ParallelConfig",
+        self,
+        parallel_config: "ParallelConfig",
     ) -> None:
         total_cpu_memory = get_cpu_memory()
         # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
@@ -270,24 +270,24 @@ class ModelConfig:
     """
 
     def __init__(
-            self,
-            model: str,
-            tokenizer: str,
-            tokenizer_mode: str,
-            trust_remote_code: bool,
-            dtype: Union[str, torch.dtype],
-            seed: int,
-            revision: Optional[str] = None,
-            code_revision: Optional[str] = None,
-            rope_scaling: Optional[dict] = None,
-            rope_theta: Optional[float] = None,
-            tokenizer_revision: Optional[str] = None,
-            max_model_len: Optional[int] = None,
-            quantization: Optional[str] = None,
-            quantization_param_path: Optional[str] = None,
-            disable_sliding_window: bool = False,
-            skip_tokenizer_init: bool = False,
-            served_model_name: Optional[Union[str, List[str]]] = None,
+        self,
+        model: str,
+        tokenizer: str,
+        tokenizer_mode: str,
+        trust_remote_code: bool,
+        dtype: Union[str, torch.dtype],
+        seed: int,
+        revision: Optional[str] = None,
+        code_revision: Optional[str] = None,
+        rope_scaling: Optional[dict] = None,
+        rope_theta: Optional[float] = None,
+        tokenizer_revision: Optional[str] = None,
+        max_model_len: Optional[int] = None,
+        quantization: Optional[str] = None,
+        quantization_param_path: Optional[str] = None,
+        disable_sliding_window: bool = False,
+        skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -448,8 +448,8 @@ class ModelConfig:
         # KV heads.
         falcon_model_types = ["falcon", "RefinedWeb", "RefinedWebModel"]
         new_decoder_arch_falcon = (
-                self.hf_config.model_type in falcon_model_types
-                and getattr(self.hf_config, "new_decoder_architecture", False))
+            self.hf_config.model_type in falcon_model_types
+            and getattr(self.hf_config, "new_decoder_architecture", False))
         if not new_decoder_arch_falcon and getattr(self.hf_text_config,
                                                    "multi_query", False):
             # Multi-query attention, only one KV head.
@@ -510,10 +510,8 @@ class ModelConfig:
                        ["attention"] * num_layers)
 
     def get_num_attention_layers(self) -> int:
-        return len([
-            t for t in self.get_layers_block_type()
-            if t == "attention"
-        ])
+        return len(
+            [t for t in self.get_layers_block_type() if t == "attention"])
 
 
 class SchedulerConfig:
@@ -530,8 +528,8 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 
 
 def _get_and_verify_dtype(
-        config: PretrainedConfig,
-        dtype: Union[str, torch.dtype],
+    config: PretrainedConfig,
+    dtype: Union[str, torch.dtype],
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
@@ -598,10 +596,10 @@ def get_served_model_name(model: str,
 
 
 def _get_and_verify_max_len(
-        hf_config: PretrainedConfig,
-        max_model_len: Optional[int],
-        disable_sliding_window: bool,
-        sliding_window_len: Optional[int],
+    hf_config: PretrainedConfig,
+    max_model_len: Optional[int],
+    disable_sliding_window: bool,
+    sliding_window_len: Optional[int],
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -767,7 +765,10 @@ def filter_unexpected_fields(cls):
 
     def new_init(self, *args, **kwargs):
         expected_fields = {field.name for field in fields(cls)}
-        cleaned_kwargs = {key: value for key, value in kwargs.items() if key in expected_fields}
+        cleaned_kwargs = {
+            key: value
+            for key, value in kwargs.items() if key in expected_fields
+        }
         original_init(self, *args, **cleaned_kwargs)
 
     cls.__init__ = new_init

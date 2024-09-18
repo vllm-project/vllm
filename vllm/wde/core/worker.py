@@ -1,11 +1,10 @@
-
 import importlib
 import os
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 from vllm.logger import init_logger
 
 from vllm.utils import (enable_trace_function_call_for_thread,
-                              update_environment_variables)
+                        update_environment_variables)
 
 logger = init_logger(__name__)
 
