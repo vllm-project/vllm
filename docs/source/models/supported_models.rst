@@ -194,12 +194,12 @@ Multimodal Language Models
 
   * - Architecture
     - Models
-    - Supported Modalities
+    - Modalities
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
-    - Image
+    - Image\ :sup:`E`
     - :code:`Salesforce/blip2-opt-2.7b`, :code:`Salesforce/blip2-opt-6.7b`, etc.
     -
   * - :code:`ChameleonForConditionalGeneration`
@@ -214,43 +214,74 @@ Multimodal Language Models
     - 
   * - :code:`InternVLChatModel`
     - InternVL2
-    - Image
+    - Image\ :sup:`E+`
     - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
     - 
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
-    - Image
+    - Image\ :sup:`E+`
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
     -
   * - :code:`LlavaNextForConditionalGeneration`
     - LLaVA-NeXT
-    - Image
+    - Image\ :sup:`E+`
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
+    -
+  * - :code:`LlavaNextVideoForConditionalGeneration`
+    - LLaVA-NeXT-Video
+    - Video
+    - :code:`llava-hf/LLaVA-NeXT-Video-7B-hf`, etc. (see note)
+    -
+  * - :code:`MiniCPMV`
+    - MiniCPM-V
+    - Image\ :sup:`+`
+    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     -
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
-    - Image
+    - Image\ :sup:`E`
     - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
     - 
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision, Phi-3.5-Vision
-    - Image
+    - Image\ :sup:`E+`
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
-  * - :code:`MiniCPMV`
-    - MiniCPM-V
-    - Image
-    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
+  * - :code:`PixtralForConditionalGeneration`
+    - Pixtral
+    - Image\ :sup:`+`
+    - :code:`mistralai/Pixtral-12B-2409`
+    -
+  * - :code:`QWenLMHeadModel`
+    - Qwen-VL
+    - Image\ :sup:`E`
+    - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
+    -
+  * - :code:`Qwen2VLForConditionalGeneration`
+    - Qwen2-VL (see note)
+    - Image\ :sup:`+` / Video\ :sup:`+`
+    - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
   * - :code:`UltravoxModel`
     - Ultravox
-    - Audio
+    - Audio\ :sup:`E+`
     - :code:`fixie-ai/ultravox-v0_3`
     -
+
+| :sup:`E` Pre-computed embeddings can be inputted for this modality.
+| :sup:`+` Multiple items can be inputted per text prompt for this modality.
 
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+
+.. note::
+  For :code:`LLaVA-NeXT-Video` and :code:`Qwen2-VL`, the latest release of :code:`huggingface/transformers` doesn't work yet, so we need to use a developer version (:code:`21fac7abba2a37fae86106f87fcf9974fd1e3830`) for now.
+  This can be installed by running the following command: 
+
+  .. code-block:: bash
+    
+    pip install git+https://github.com/huggingface/transformers.git@21fac7abba2a37fae86106f87fcf9974fd1e3830
 
 ----
 

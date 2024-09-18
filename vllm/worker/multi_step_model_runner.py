@@ -13,7 +13,6 @@ except ModuleNotFoundError:
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
@@ -22,6 +21,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 get_pythonized_sample_results)
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
+from vllm.utils import PyObjectCache
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -35,6 +35,29 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
+
+
+def seq_output_builder():
+    return SequenceOutput(
+        0, 0,
+        {0: Logprob(logprob=float('inf'), rank=None, decoded_token=None)})
+
+
+def completion_seq_group_output_builder():
+    return CompletionSequenceGroupOutput([], None)
+
+
+# Used by pythonization to reduce python object allocations
+class PythonizationCache:
+
+    def __init__(self):
+        self.cached_seq_output = PyObjectCache(seq_output_builder)
+        self.cached_completion_seq_group_output = PyObjectCache(
+            completion_seq_group_output_builder)
+
+    def reset(self):
+        self.cached_seq_output.reset()
+        self.cached_completion_seq_group_output.reset()
 
 
 @dataclass
@@ -59,6 +82,7 @@ class ModelOutput:
     pythonized: bool = False
     # On-device tensor containing the logprobs of each token.
     logprobs: Optional["torch.Tensor"] = None
+    pythonization_cache: Optional[PythonizationCache] = None
 
     def pythonize(self, input_metadata: "StatefulModelInput",
                   copy_stream: torch.cuda.Stream,
@@ -97,7 +121,8 @@ class ModelOutput:
         with torch.cuda.stream(copy_stream):
             _pythonize_sampler_output(input_metadata, self.sampler_output,
                                       pinned_sampled_token_buffer,
-                                      self.sampled_token_ids, self.logprobs)
+                                      self.sampled_token_ids, self.logprobs,
+                                      self.pythonization_cache)
 
         # Erase the logprobs GPU-side tensor.
         # Note that although _pythonize_sampler_output() runs in its
@@ -209,6 +234,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         self._copy_stream = torch.cuda.Stream()
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
+        self.pythonization_cache = PythonizationCache()
+
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> StatefulModelInput:
         model_input = (StatefulModelInput.from_broadcasted_tensor_dict(
@@ -237,14 +264,23 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                                output_proc_callback: Callable):
         # Proceed with pythonization and output_proc in order.
         # Stop on the first one that fails to pythonize
+        output_proc_callback()
+
         cont = True
         for model_output in model_input.cached_outputs:
             if not model_output.pythonized:
                 model_output.maybe_pythonize(model_input, self._copy_stream,
                                              self.pinned_sampled_token_ids)
                 if model_output.pythonized:
-                    output_proc_callback(
-                        sampler_output=model_output.sampler_output)
+                    ctx = output_proc_callback.keywords["ctx"]
+                    ctx.append_output(
+                        outputs=[model_output.sampler_output],
+                        seq_group_metadata_list=ctx.seq_group_metadata_list,
+                        scheduler_outputs=ctx.scheduler_outputs,
+                        is_async=False,
+                        is_last_step=False)
+
+                    output_proc_callback()
                 else:
                     cont = False
 
@@ -255,21 +291,47 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                                output_proc_callback: Optional[Callable]):
         assert model_input.frozen_model_input is not None
 
+        has_async_callback = output_proc_callback is not None
+
         outputs = []
         for output_id in range(len(model_input.cached_outputs)):
-            is_last_output = output_id == len(model_input.cached_outputs) - 1
-
             output = model_input.cached_outputs[output_id]
-            if not output.pythonized:
+            is_last_step = output_id == len(model_input.cached_outputs) - 1
+
+            # For non-async case:
+            #   -- We simply add the outputs
+            # For async case:
+            #   -- Invoke callback, pythonize, add to callback queue and repeat
+            #   -- For last output, just add to callback queue
+            if has_async_callback:
+                assert output_proc_callback is not None
+
+                # Invoke callback before pythonize (to overlap with GPU)
+                output_proc_callback()
+
+                # Pythonize
+                if not output.pythonized:
+                    output.pythonize(model_input, self._copy_stream,
+                                     self.pinned_sampled_token_ids)
+
+                    # For non last step, add to callback queue to chain
+                    # callbacks=>pythonize pairs (for GPU overlap)
+                    if not is_last_step:
+                        ctx = output_proc_callback.keywords[  # type: ignore
+                            "ctx"]  # type: ignore
+                        ctx.append_output(
+                            outputs=[output.sampler_output],
+                            seq_group_metadata_list=ctx.
+                            seq_group_metadata_list,
+                            scheduler_outputs=ctx.scheduler_outputs,
+                            is_async=False,
+                            is_last_step=False)
+                    else:
+                        outputs.append(output.sampler_output)
+            else:
                 output.pythonize(model_input, self._copy_stream,
                                  self.pinned_sampled_token_ids)
-
-                if model_input.frozen_model_input.use_async_and_multi_step:
-                    assert output_proc_callback is not None
-                    output_proc_callback(sampler_output=output.sampler_output,
-                                         is_last_output=is_last_output)
-
-            outputs.append(output.sampler_output)
+                outputs.append(output.sampler_output)
 
         return outputs
 
@@ -330,7 +392,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
         output_proc_callback = None
-        if frozen_model_input.use_async_and_multi_step:
+        if frozen_model_input.async_callback is not None:
             output_proc_callback = frozen_model_input.async_callback
             assert output_proc_callback is not None
             async_callback = functools.partial(
@@ -367,7 +429,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             model_input.cached_outputs.append(
                 ModelOutput(output[0], output_ready_event,
                             output[0].sampled_token_ids, False,
-                            output[0].logprobs))
+                            output[0].logprobs, self.pythonization_cache))
 
             # These GPU tensors are not required by multi-step;
             # erase them to ensure they are not pythonized or
@@ -378,7 +440,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
             # Pythonize the output if CPU is ahead and the previous step is
             # ready.
-            if not frozen_model_input.use_async_and_multi_step:
+            if frozen_model_input.async_callback is None:
                 for model_output in model_input.cached_outputs:
                     model_output.maybe_pythonize(model_input,
                                                  self._copy_stream,
@@ -397,6 +459,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         if model_input.is_last_step:
             outputs = self._final_process_outputs(model_input,
                                                   output_proc_callback)
+            self.pythonization_cache.reset()
             return outputs
 
         # should be [SamplerOutput]
@@ -435,19 +498,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         attn_metadata = frozen_model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        attn_metadata.advance_step(num_seqs, num_queries)
 
-        # Update GPU tensors
-        ops.advance_step(
-            num_seqs=num_seqs,
-            num_queries=num_queries,
-            block_size=self.block_size,
-            input_tokens=frozen_model_input.input_tokens,
-            sampled_token_ids=model_input.cached_outputs[-1].sampled_token_ids,
-            input_positions=frozen_model_input.input_positions,
-            seq_lens=attn_metadata.seq_lens_tensor,
-            slot_mapping=attn_metadata.slot_mapping,
-            block_tables=attn_metadata.block_tables)
+        attn_metadata.advance_step(
+            frozen_model_input,
+            model_input.cached_outputs[-1].sampled_token_ids, self.block_size,
+            num_seqs, num_queries)
 
         if frozen_model_input.seq_lens is not None:
             for i in range(num_queries):
@@ -537,6 +592,7 @@ def _pythonize_sampler_output(
     pinned_sampled_token_buffer: torch.Tensor,
     sampled_token_ids: torch.Tensor,
     logprobs_tensor: Optional[torch.Tensor],
+    cache: Optional[PythonizationCache],
 ) -> None:
     """ This function is only called when the output tensors are ready. 
     See :class:`ModelOutput`. 
@@ -597,6 +653,9 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
+        if seq_group.sampling_params.logits_processors:
+            assert len(seq_group.sampling_params.logits_processors) == 0, (
+                "Logits Processors are not supported in multi-step decoding")
 
         if do_pythonize_logprobs:
             assert prompt_logprobs is not None
@@ -621,23 +680,56 @@ def _pythonize_sampler_output(
         seq_ids = seq_group.seq_ids
         next_token_ids = sample_result
         parent_ids = [0]
-        seq_outputs: List[SequenceOutput] = []
-        if seq_group.sampling_params.logits_processors:
-            assert len(seq_group.sampling_params.logits_processors) == 0, (
-                "Logits Processors are not supported in multi-step decoding")
+
+        if cache is not None:
+            completion_seq_group_output: CompletionSequenceGroupOutput = \
+                cache.cached_completion_seq_group_output.get_object()
+            completion_seq_group_output.samples.clear()
+            seq_outputs: List[
+                SequenceOutput] = completion_seq_group_output.samples
+        else:
+            seq_outputs = []
+
         for tdx, (parent_id,
                   next_token_id) in enumerate(zip(parent_ids, next_token_ids)):
-            seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id,
-                               (group_sample_logprobs[tdx]
-                                if logprobs_are_requested else {
-                                    next_token_id:
-                                    Logprob(logprob=float('inf'),
-                                            rank=None,
-                                            decoded_token=None)
-                                })))
-        output.outputs.append(
-            CompletionSequenceGroupOutput(
-                seq_outputs,
-                (group_prompt_logprobs if logprobs_are_requested else None)))
+            if cache is not None:
+                seq_output: SequenceOutput = cache.cached_seq_output.get_object(
+                )
+                seq_output.parent_seq_id = seq_ids[parent_id]
+                seq_output.output_token = next_token_id
+
+                if logprobs_are_requested:
+                    seq_output.logprobs = group_sample_logprobs[tdx]
+                else:
+                    logprobs = next(iter(seq_output.logprobs.values()))
+                    seq_output.logprobs.clear()
+
+                    logprobs.logprob = float('inf')
+                    logprobs.rank = None
+                    logprobs.decoded_token = None
+
+                    seq_output.logprobs[next_token_id] = logprobs
+
+                seq_outputs.append(seq_output)
+
+            else:
+                seq_outputs.append(
+                    SequenceOutput(seq_ids[parent_id], next_token_id,
+                                   (group_sample_logprobs[tdx]
+                                    if logprobs_are_requested else {
+                                        next_token_id:
+                                        Logprob(logprob=float('inf'),
+                                                rank=None,
+                                                decoded_token=None)
+                                    })))
+        if cache is not None:
+            completion_seq_group_output.prompt_logprobs = \
+                group_prompt_logprobs if logprobs_are_requested else None
+            output.outputs.append(completion_seq_group_output)
+        else:
+            output.outputs.append(
+                CompletionSequenceGroupOutput(
+                    seq_outputs, (group_prompt_logprobs
+                                  if logprobs_are_requested else None)))
+
     assert len(output.outputs) > 0
