@@ -1,6 +1,6 @@
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Union, cast,
-                    overload)
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
+                    Union, cast, overload)
 
 from tqdm import tqdm
 
@@ -348,7 +348,7 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
-    
+
     def generate_beam_search(
         self,
         prompts: List[str],
