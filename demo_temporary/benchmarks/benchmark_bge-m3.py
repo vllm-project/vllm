@@ -26,8 +26,9 @@ def benchmark_hf(args):
             elapsed_time = end - start
             delay = elapsed_time / n_step
 
-            print(f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
-                  f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
+            print(
+                f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
+                f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
 
 
 def benchmark_vllm(args):
@@ -41,17 +42,15 @@ def benchmark_vllm(args):
     prompt = "if" * args.input_len
     requests = [prompt for _ in range(args.num_prompts)]
 
-    engine_args = EngineArgs(
-        model=args.model,
-        tokenizer=args.tokenizer,
-        seed=args.seed,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        max_model_len=args.max_model_len,
-        device=args.device,
-        max_num_seqs=32,
-        scheduling=args.scheduling
-    )
+    engine_args = EngineArgs(model=args.model,
+                             tokenizer=args.tokenizer,
+                             seed=args.seed,
+                             trust_remote_code=args.trust_remote_code,
+                             dtype=args.dtype,
+                             max_model_len=args.max_model_len,
+                             device=args.device,
+                             max_num_seqs=32,
+                             scheduling=args.scheduling)
 
     engine = LLMEngine.from_engine_args(engine_args)
 
@@ -71,8 +70,9 @@ def benchmark_vllm(args):
         elapsed_time = end - start
         delay = elapsed_time / n_step
 
-        print(f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
-              f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
+        print(
+            f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
+            f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
 
         engine.executor.shutdown_execute_loop()
         gc.collect()

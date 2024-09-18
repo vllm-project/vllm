@@ -9,11 +9,10 @@ def patch():
 
     def p_execute_loop(self, *args, **kwargs):
         import torch
-        with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ]) as prof:
+        with torch.profiler.profile(activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+        ]) as prof:
             simple_execute_loop(self, *args, **kwargs)
 
         prof.export_chrome_trace(f"simple_execute_loop.json")
@@ -24,16 +23,14 @@ def patch():
 
     def p_execute_loop(self, *args, **kwargs):
         import torch
-        with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ]) as prof:
+        with torch.profiler.profile(activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+        ]) as prof:
             double_buffer_execute_loop(self, *args, **kwargs)
         prof.export_chrome_trace(f"double_buffer_execute_loop.json")
 
     GPUAsyncExecutor.double_buffer_execute_loop = p_execute_loop
-
 
 
 def benchmark_vllm(args):
@@ -57,8 +54,7 @@ def benchmark_vllm(args):
         quantization_param_path=args.quantization_param_path,
         device=args.device,
         max_num_seqs=32,
-        scheduling=args.scheduling
-    )
+        scheduling=args.scheduling)
 
     engine = LLMEngine.from_engine_args(engine_args)
 
@@ -78,8 +74,9 @@ def benchmark_vllm(args):
         elapsed_time = end - start
         delay = elapsed_time / n_step
 
-        print(f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
-              f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
+        print(
+            f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
+            f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
 
         engine.executor.shutdown_execute_loop()
 

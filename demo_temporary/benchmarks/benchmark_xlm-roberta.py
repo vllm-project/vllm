@@ -11,7 +11,9 @@ def benchmark_hf(args):
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[args.dtype]
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    model = AutoModelForMaskedLM.from_pretrained(args.model,  torch_dtype=torch_dtype).to(args.device)
+    model = AutoModelForMaskedLM.from_pretrained(args.model,
+                                                 torch_dtype=torch_dtype).to(
+                                                     args.device)
 
     prompt = "if" * args.input_len
     requests = [prompt for _ in range(args.num_prompts)]
@@ -22,7 +24,8 @@ def benchmark_hf(args):
             n_step = 0
             for i in range(0, len(requests), batchsize):
                 batch = requests[i:i + batchsize]
-                encoded_input = tokenizer(batch, return_tensors='pt').to(args.device)
+                encoded_input = tokenizer(batch,
+                                          return_tensors='pt').to(args.device)
                 output = model(**encoded_input)
                 n_step += 1
             end = time.perf_counter()
@@ -30,8 +33,9 @@ def benchmark_hf(args):
             elapsed_time = end - start
             delay = elapsed_time / n_step
 
-            print(f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
-                  f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
+            print(
+                f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
+                f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
 
 
 def benchmark_vllm(args):
@@ -56,8 +60,7 @@ def benchmark_vllm(args):
         quantization_param_path=args.quantization_param_path,
         device=args.device,
         max_num_seqs=32,
-        scheduling=args.scheduling
-    )
+        scheduling=args.scheduling)
 
     engine = LLMEngine.from_engine_args(engine_args)
 
@@ -77,8 +80,9 @@ def benchmark_vllm(args):
         elapsed_time = end - start
         delay = elapsed_time / n_step
 
-        print(f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
-              f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
+        print(
+            f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
+            f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
 
         engine.executor.shutdown_execute_loop()
         gc.collect()
@@ -117,7 +121,6 @@ if __name__ == '__main__':
         with ProcessPoolExecutor(1) as executor:
             f = executor.submit(benchmark_vllm, args)
             f.result()
-
 
     for scheduling in ["sync", "async", "double_buffer"]:
         print(scheduling)

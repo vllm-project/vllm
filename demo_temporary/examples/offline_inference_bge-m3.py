@@ -7,7 +7,6 @@ prompts = [
     "The future of AI is",
 ]
 
-
 llm = LLM(model='BAAI/bge-m3')
 
 outputs = llm.encode(prompts)
