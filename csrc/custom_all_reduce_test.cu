@@ -2,7 +2,8 @@
  * This is a standalone test for custom allreduce.
  * To compile, make sure you have MPI and NCCL installed in your system.
  * export MPI_HOME=xxx
- * nvcc -O2 -arch=native -std=c++17 custom_all_reduce_test.cu -o custom_all_reduce_test -lnccl -I${MPI_HOME} -lmpi
+ * nvcc -O2 -arch=native -std=c++17 custom_all_reduce_test.cu -o
+ * custom_all_reduce_test -lnccl -I${MPI_HOME} -lmpi
  *
  * Warning: this C++ test is not designed to be very readable and was used
  * during the rapid prototyping process.
@@ -304,7 +305,8 @@ int main(int argc, char** argv) {
   // Uncomment to scan through different block size configs.
   // for (int threads : {256, 512, 1024}) {
   //   for (int block_limit = 16; block_limit < 112; block_limit += 4) {
-  //     run<half>(myRank, nRanks, comm, threads, block_limit, 1024 * 1024, performance_test);
+  //     run<half>(myRank, nRanks, comm, threads, block_limit, 1024 * 1024,
+  //     performance_test);
   //   }
   // }
   // Scan through different sizes to test performance.

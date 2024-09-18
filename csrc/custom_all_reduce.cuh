@@ -132,12 +132,15 @@ DINLINE O downcast(array_t<float, O::size> val) {
 }
 
 static DINLINE void st_flag_release(FlagType* flag_addr, FlagType flag) {
-  asm volatile("st.release.sys.global.u64 [%1], %0;" ::"l"(flag), "l"(flag_addr));
+  asm volatile("st.release.sys.global.u64 [%1], %0;" ::"l"(flag),
+               "l"(flag_addr));
 }
 
 static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
   FlagType flag;
-  asm volatile("ld.acquire.sys.global.u64 %0, [%1];" : "=l"(flag) : "l"(flag_addr));
+  asm volatile("ld.acquire.sys.global.u64 %0, [%1];"
+               : "=l"(flag)
+               : "l"(flag_addr));
   return flag;
 }
 
