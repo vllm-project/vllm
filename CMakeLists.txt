@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.26)
 
+# When building directly using CMake, make sure you run the install step
+# (it places the .so files in the correct location).
+#
+# Example:
+# mkdir build && cd build
+# cmake -G Ninja -DVLLM_PYTHON_EXECUTABLE=`which python3` -DCMAKE_INSTALL_PREFIX=.. ..
+# cmake --build . --target install
+#
+# If you want to only build one target, make sure to install it manually:
+# cmake --build . --target _C
+# cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
@@ -73,19 +84,6 @@ endif()
 find_package(Torch REQUIRED)
 
 #
-# Add the `default` target which detects which extensions should be
-# built based on platform/architecture.  This is the same logic that
-# setup.py uses to select which extensions should be built and should
-# be kept in sync.
-#
-# The `default` target makes direct use of cmake easier since knowledge
-# of which extensions are supported has been factored in, e.g.
-#
-# mkdir build && cd build
-# cmake -G Ninja -DVLLM_PYTHON_EXECUTABLE=`which python3` -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=../vllm ..
-# cmake --build . --target default
-#
-add_custom_target(default)
 message(STATUS "Enabling core extension.")
 
 # Define _core_C extension
@@ -102,8 +100,6 @@ define_gpu_extension_target(
   COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
   USE_SABI 3
   WITH_SOABI)
-
-add_dependencies(default _core_C)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -283,6 +279,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     csrc/quantization/machete/machete_pytorch.cu)
 endif()
 
+message(STATUS "Enabling C extension.")
 define_gpu_extension_target(
 _C
 DESTINATION vllm
@@ -307,6 +304,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/moe/marlin_moe_ops.cu")
 endif()
 
+message(STATUS "Enabling moe extension.")
 define_gpu_extension_target(
   _moe_C
   DESTINATION vllm
@@ -317,16 +315,10 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-
-
-if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
-  message(STATUS "Enabling C extension.")
-  add_dependencies(default _C)
-
-  message(STATUS "Enabling moe extension.")
-  add_dependencies(default _moe_C)
-
-endif()
+# vllm-flash-attn currently only supported on CUDA
+if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda")
+  return()
+endif ()
 
 #
 # Build vLLM flash attention from source
@@ -369,7 +361,6 @@ install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" COMP
 
 # Fetch the vllm-flash-attn library
 FetchContent_MakeAvailable(vllm-flash-attn)
-add_dependencies(default vllm_flash_attn_c)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
 # Restore the install prefix
