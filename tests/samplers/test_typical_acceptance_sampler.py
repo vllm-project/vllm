@@ -480,13 +480,13 @@ def test_accept_tokens_set_non_default_posteriors(seed: int,
 @pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_replacement_token_ids(seed: int, disable_bonus_tokens: bool,
-                               device: str):
+def test_get_recovered_token_ids(seed: int, disable_bonus_tokens: bool,
+                                 device: str):
     """
     Test the TypicalAcceptanceSampler's method for generating
     replacement token IDs.
 
-    This test verifies that the `_replacement_token_ids` method of the 
+    This test verifies that the `_get_recovered_token_ids` method of the 
     TypicalAcceptanceSampler correctly identifies the token IDs to be used
     as replacements based on the target probability distribution.
     Specifically, it ensures that the method correctly identifies the
@@ -501,10 +501,7 @@ def test_replacement_token_ids(seed: int, disable_bonus_tokens: bool,
         strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
     typical_acceptance_sampler.init_gpu_tensors(device=device)
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
-    expected_replacement_tokens = -torch.ones(
-        (batch_size, k), dtype=torch.long)
-    expected_replacement_tokens[:, 0] = torch.argmax(target_probs[:, 0, :],
-                                                     dim=1)
+    expected_replacement_tokens = torch.argmax(target_probs, dim=-1)
     actual_replacement_tokens = (
-        typical_acceptance_sampler._replacement_token_ids(target_probs))
+        typical_acceptance_sampler._get_recovered_token_ids(target_probs))
     assert torch.all(expected_replacement_tokens == actual_replacement_tokens)
