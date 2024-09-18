@@ -92,7 +92,7 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     values = [
         int(os.environ.get(e, d)) for e, d in zip(env_vars, default_values)
     ]
-    for e, v, d in zip(env_vars, values, defaults):
+    for e, v, d in zip(env_vars, values, default_values):
         logger.info('%s=%s (default:%s)', e, v, d)
     return values
 
