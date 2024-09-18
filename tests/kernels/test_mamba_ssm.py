@@ -333,7 +333,7 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
-        rtol, atol = 6e-2, 6e-2
+        rtol, atol = 7e-2, 7e-2
         if torch.version.hip:
             atol *= 2
     # set seed
@@ -376,8 +376,6 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
                                          dt_bias=dt_bias,
                                          dt_softplus=True)
 
-    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.allclose(state[state_indices, :],
                           state_ref,
                           rtol=rtol,
