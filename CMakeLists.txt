@@ -188,7 +188,16 @@ set(VLLM_EXT_SRC
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
+  "csrc/xqa/decoder_mmha/xqa_kernel_launcher.cu"
+  "csrc/xqa/decoder_mmha/decoder_xqa_impl_precompiled.cpp"
+  "csrc/xqa/decoder_mmha/decoder_xqa_runner.cpp"
+  "csrc/xqa/decoder_mmha/decoder_xqa_impl_common.cpp"
+  "csrc/xqa/decoder_mmha/decoder_xqa_impl.cpp"
+  "csrc/xqa/decoder_mmha/env_utils.cpp"
   "csrc/torch_bindings.cpp")
+
+file(GLOB XQA_CUBIN_CPP_SOURCES "csrc/xqa/kernels/decoderMaskedMultiheadAttention/cubin/*.cubin.cpp")
+list(APPEND VLLM_EXT_SRC ${XQA_CUBIN_CPP_SOURCES})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   include(FetchContent)
@@ -319,7 +328,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
 
-  message(STATUS "Enabling moe extension.")
-  add_dependencies(default _moe_C)
+  #  message(STATUS "Enabling moe extension.")
+  #add_dependencies(default _moe_C)
 
 endif()

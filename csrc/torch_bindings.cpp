@@ -46,7 +46,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
-
+  // PagedAttention xqa.
+  ops.def(
+      "xqa_paged_attention("
+      "    Tensor! out,"
+      "    Tensor query, Tensor key_value_cache,"
+      "    int num_heads, int num_kv_heads, int rotary_embedding_dim,"
+      "    float scale, Tensor block_tables, Tensor seq_lens, int block_size,"
+      "    int max_seq_len, str kv_cache_dtype,"
+      "    float k_scale, float v_scale) -> ()");
+  ops.impl("xqa_paged_attention", torch::kCUDA, &xqa_paged_attention);
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");

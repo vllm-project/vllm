@@ -125,7 +125,26 @@ def paged_attention_v2(
         alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
-
+def xqa_paged_attention(
+    out: torch.Tensor,
+    query: torch.Tensor,
+    kv_cache: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    rotary_embedding_dim: int,
+    scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+) -> None:
+    torch.ops._C.xqa_paged_attention(
+        out, query, kv_cache, num_heads, num_kv_heads, rotary_embedding_dim, scale,
+        block_tables, seq_lens, block_size, max_seq_len, kv_cache_dtype,
+        k_scale, v_scale)
 
 # pos encoding ops
 def rotary_embedding(
