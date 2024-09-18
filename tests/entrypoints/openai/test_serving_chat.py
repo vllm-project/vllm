@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 from vllm.config import MultiModalConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -52,8 +52,9 @@ def test_async_serving_chat_init():
 
 
 def test_serving_chat_should_set_correct_max_tokens():
-    mock_engine = MagicMock(spec=AsyncLLMEngine)
+    mock_engine = MagicMock(spec=MQLLMEngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
 
     serving_chat = OpenAIServingChat(mock_engine,
                                      MockModelConfig(),

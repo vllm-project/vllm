@@ -1,21 +1,21 @@
 import asyncio
 import signal
 from http import HTTPStatus
-from typing import Any, Optional
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
 
 from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
+from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
 
 logger = init_logger(__name__)
 
 
-async def serve_http(app: FastAPI, limit_concurrency: Optional[int],
-                     **uvicorn_kwargs: Any):
+async def serve_http(app: FastAPI, **uvicorn_kwargs: Any):
     logger.info("Available routes are:")
     for route in app.routes:
         methods = getattr(route, "methods", None)
@@ -25,15 +25,6 @@ async def serve_http(app: FastAPI, limit_concurrency: Optional[int],
             continue
 
         logger.info("Route: %s, Methods: %s", path, ', '.join(methods))
-
-    # Set concurrency limits in uvicorn if running in multiprocessing mode
-    # since zmq has maximum socket limit of zmq.constants.SOCKET_LIMIT (65536).
-    if limit_concurrency is not None:
-        logger.info(
-            "Launching Uvicorn with --limit_concurrency %s. To avoid this "
-            "limit at the expense of performance run with "
-            "--disable-frontend-multiprocessing", limit_concurrency)
-        uvicorn_kwargs["limit_concurrency"] = limit_concurrency
 
     config = uvicorn.Config(app, **uvicorn_kwargs)
     server = uvicorn.Server(config)
@@ -63,7 +54,7 @@ async def serve_http(app: FastAPI, limit_concurrency: Optional[int],
             logger.debug(
                 "port %s is used by process %s launched with command:\n%s",
                 port, process, " ".join(process.cmdline()))
-        logger.info("Gracefully stopping http server")
+        logger.info("Shutting down FastAPI HTTP server.")
         return server.shutdown()
 
 
@@ -90,11 +81,22 @@ def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
         return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     @app.exception_handler(AsyncEngineDeadError)
-    async def engine_dead_handler(_, __):
+    async def async_engine_dead_handler(_, __):
         """Kill the server if the async engine is already dead. It will
         not handle any further requests."""
         if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH:
             logger.fatal("AsyncLLMEngine is already dead, terminating server "
+                         "process")
+            server.should_exit = True
+
+        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    @app.exception_handler(MQEngineDeadError)
+    async def mq_engine_dead_handler(_, __):
+        """Kill the server if the mq engine is already dead. It will
+        not handle any further requests."""
+        if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH:
+            logger.fatal("MQLLMEngine is already dead, terminating server "
                          "process")
             server.should_exit = True
 
