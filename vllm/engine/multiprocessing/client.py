@@ -380,6 +380,13 @@ class MQLLMEngineClient:
     def errored(self) -> bool:
         return self._errored_with is not None
 
+    @property
+    def dead_error(self) -> BaseException:
+        if self._errored_with is not None:
+            return ENGINE_DEAD_ERROR(self._errored_with)
+        else:
+            return ENGINE_DEAD_ERROR()
+
     async def generate(
         self,
         inputs: PromptInputs,
