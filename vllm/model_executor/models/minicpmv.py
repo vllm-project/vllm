@@ -422,7 +422,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
             if len(image_bounds) > 0:
                 image_indices = torch.stack([
                     torch.arange(start, end, dtype=torch.long)
-                    for start, end in image_bounds.tolist()
+                    for start, end in image_bounds[0].tolist()
                 ]).to(vlm_embedding.device)
                 vlm_embedding.scatter_(
                     0,
