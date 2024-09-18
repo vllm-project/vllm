@@ -352,8 +352,8 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     return llm_inputs
 
 
-class ImageBoundsPlugin(MultiModalPlugin):
-    """Plugin for audio data."""
+class _ImageBoundsPlugin(MultiModalPlugin):
+    """Plugin for image bounds auxiliary data."""
 
     def get_data_key(self) -> str:
         return "image_bounds"
@@ -422,7 +422,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
             if len(image_bounds) > 0:
                 image_indices = torch.stack([
                     torch.arange(start, end, dtype=torch.long)
-                    for start, end in image_bounds[0].tolist()
+                    for start, end in image_bounds.tolist()
                 ]).to(vlm_embedding.device)
                 vlm_embedding.scatter_(
                     0,
@@ -442,7 +442,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
         image_bounds = kwargs.pop("image_bounds", [])
-        print("image_bounds", image_bounds)
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
@@ -455,6 +454,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         if len(pixel_values) != len(tgt_sizes):
             raise ValueError("Inconsistent batch lengths, found: "
                              f"{len(pixel_values)} vs. {len(tgt_sizes)}")
+
+        if image_bounds != []:
+            # Batch size of 'image_bounds' is always 1
+            assert image_bounds.shape[0] == 1
+            image_bounds = image_bounds[0]
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
@@ -872,7 +876,7 @@ _SUPPORT_VERSION = {
 }
 
 
-@MULTIMODAL_REGISTRY.register_plugin(ImageBoundsPlugin())
+@MULTIMODAL_REGISTRY.register_plugin(_ImageBoundsPlugin())
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_minicpmv_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_minicpmv)

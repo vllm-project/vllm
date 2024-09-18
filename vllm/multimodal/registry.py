@@ -66,6 +66,7 @@ class MultiModalRegistry:
                     data_type_key, plugin)
 
             self._plugins[data_type_key] = plugin
+
             self.register_input_mapper(data_type_key)(model_cls)
             self.register_max_multimodal_tokens(data_type_key)(model_cls)
 
@@ -192,7 +193,7 @@ class MultiModalRegistry:
         """
         limits_per_plugin = self._limits_by_model[model_config]
 
-        return sum((limits_per_plugin.get(key, 0) *
+        return sum((limits_per_plugin.get(key, 1) *
                     plugin.get_max_multimodal_tokens(model_config))
                    for key, plugin in self._plugins.items())
 
