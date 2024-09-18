@@ -11,7 +11,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set
+from typing import AsyncIterator, Set
 
 import uvloop
 from fastapi import APIRouter, FastAPI, Request
@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def build_async_engine_client(
-        args: Namespace) -> AsyncIterator[Optional[EngineClient]]:
+        args: Namespace) -> AsyncIterator[EngineClient]:
 
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
@@ -110,7 +110,7 @@ async def build_async_engine_client(
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
-) -> AsyncIterator[Optional[EngineClient]]:
+) -> AsyncIterator[EngineClient]:
     """
     Create EngineClient, either:
         - in-process using the AsyncLLMEngine Directly
@@ -188,10 +188,8 @@ async def build_async_engine_client_from_engine_args(
                     break
                 except TimeoutError:
                     if not engine_process.is_alive():
-                        logger.error("Engine process died before responding "
-                                     "to readiness probe")
-                        yield None
-                        return
+                        raise RuntimeError(
+                            "Engine process failed to start") from None
 
             yield mp_engine_client  # type: ignore[misc]
         finally:
@@ -532,10 +530,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     signal.signal(signal.SIGTERM, signal_handler)
 
     async with build_async_engine_client(args) as engine_client:
-        # If None, creation of the client failed and we exit.
-        if engine_client is None:
-            return
-
         app = build_app(args)
 
         model_config = await engine_client.get_model_config()
