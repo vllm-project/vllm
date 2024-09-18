@@ -3,7 +3,8 @@ from typing import List, Optional, Set, Tuple
 
 import torch
 
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer

@@ -1,7 +1,6 @@
 from typing import (Dict, Iterable, List, Literal, Optional, Protocol, Tuple,
                     Union, overload)
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.func import functional_call
@@ -13,6 +12,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal.base import NestedTensors
+from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 
 
@@ -96,12 +96,13 @@ def flatten_bn(
 
 def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     """
-    Recursively concatenates NestedTensors along any heterogeneously sized
-    dimensions.
+    Recursively flattens and concatenates NestedTensors on all but the last
+    dimension.
     """
 
     if isinstance(embeddings, torch.Tensor):
-        return embeddings
+        # Flatten all but the last dimension.
+        return embeddings.flatten(0, -2)
 
     return torch.cat(tuple(_flatten_embeddings(t) for t in embeddings))
 
@@ -136,15 +137,13 @@ def merge_multimodal_embeddings(input_ids: torch.Tensor,
     assert isinstance(num_expected_tokens, int)
 
     flattened = _flatten_embeddings(multimodal_embeddings)
-    *dims, embed_dim = flattened.shape
-    num_multimodal_embeddings = np.prod(dims)
-    if num_multimodal_embeddings != num_expected_tokens:
+    if flattened.shape[0] != num_expected_tokens:
         expr = _embedding_count_expression(multimodal_embeddings)
         raise ValueError(
-            f"Attempted to assign {expr} = {num_multimodal_embeddings} "
+            f"Attempted to assign {expr} = {flattened.shape[0]} "
             f"multimodal tokens to {num_expected_tokens} placeholders")
 
-    inputs_embeds[mask] = flattened.view(num_expected_tokens, embed_dim)
+    inputs_embeds[mask] = flattened
     return inputs_embeds
 
 
@@ -281,3 +280,18 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         if name.startswith(missing_layer_name):
             return True
     return False
+
+
+def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
+
+    def make_empty_intermediate_tensors(
+            batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            key: torch.zeros((batch_size, hidden_size),
+                             dtype=dtype,
+                             device=device)
+            for key in keys
+        })
+
+    return make_empty_intermediate_tensors
