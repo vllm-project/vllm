@@ -1289,6 +1289,7 @@ class LLMEngine:
             # torch.distributed ops which may otherwise timeout, and unblocks
             # the RPC thread in the workers so that they can process any other
             # queued control plane messages, such as add/remove lora adapters.
+            logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
         return ctx.request_outputs

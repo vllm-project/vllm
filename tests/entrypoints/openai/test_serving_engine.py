@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               UnloadLoraAdapterRequest)
@@ -18,7 +18,7 @@ LORA_UNLOADING_SUCCESS_MESSAGE = (
 
 
 async def _async_serving_engine_init():
-    mock_engine_client = MagicMock(spec=AsyncEngineClient)
+    mock_engine_client = MagicMock(spec=EngineClient)
     mock_model_config = MagicMock(spec=ModelConfig)
     # Set the max_model_len attribute to avoid missing attribute
     mock_model_config.max_model_len = 2048
