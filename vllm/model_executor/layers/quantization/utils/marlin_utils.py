@@ -29,8 +29,9 @@ def query_marlin_supported_quant_types(has_zp: bool,
                                        device_capability: Optional[int] = None
                                        ):
     if device_capability is None:
-        major, minor = current_platform.get_device_capability()
-        device_capability = major * 10 + minor
+        capability_tuple = current_platform.get_device_capability()
+        device_capability = (-1 if capability_tuple is None else
+                             capability_tuple.to_int())
 
     if device_capability < 80:
         return []
@@ -52,8 +53,9 @@ def _check_marlin_supported(
         device_capability: Optional[int] = None) -> Tuple[bool, Optional[str]]:
 
     if device_capability is None:
-        major, minor = current_platform.get_device_capability()
-        device_capability = major * 10 + minor
+        capability_tuple = current_platform.get_device_capability()
+        device_capability = (-1 if capability_tuple is None else
+                             capability_tuple.to_int())
 
     supported_types = query_marlin_supported_quant_types(
         has_zp, device_capability)

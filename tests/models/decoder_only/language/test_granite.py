@@ -2,15 +2,10 @@
 
 Run `pytest tests/models/test_granite.py`.
 """
-import importlib.metadata
-
 import pytest
+import transformers
 
 from ...utils import check_logprobs_close
-
-TRANSFORMERS_VERSION = tuple(
-    map(int,
-        importlib.metadata.version("transformers").split(".")))
 
 MODELS = [
     "ibm/PowerLM-3b",
@@ -18,7 +13,7 @@ MODELS = [
 
 
 # GraniteForCausalLM will be in transformers >= 4.45
-@pytest.mark.skipif(TRANSFORMERS_VERSION < (4, 45),
+@pytest.mark.skipif(transformers.__version__ < "4.45",
                     reason="granite model test requires transformers >= 4.45")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])

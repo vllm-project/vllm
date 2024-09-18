@@ -1,17 +1,13 @@
 """Utils for model executor."""
-import random
 from typing import Any, Dict, Optional
 
-import numpy as np
 import torch
+
+from vllm.utils import seed_everything
 
 
 def set_random_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    seed_everything(seed)
 
 
 def set_weight_attrs(

@@ -13,6 +13,7 @@ from vllm.attention.backends.utils import (CommonAttentionState,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -299,7 +300,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         else:
             # if not using triton, navi3x/navi21/navi10 do not use flash-attn
             # either
-            if torch.cuda.get_device_capability()[0] != 9:
+            if not current_platform.has_device_capability(90):
                 self.use_naive_attn = True
             else:
                 try:

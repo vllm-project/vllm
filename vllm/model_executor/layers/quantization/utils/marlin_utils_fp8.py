@@ -10,8 +10,7 @@ from .marlin_utils import marlin_make_workspace, marlin_permute_scales
 
 
 def is_fp8_marlin_supported():
-    capability = current_platform.get_device_capability()
-    return capability[0] >= 8
+    return current_platform.has_device_capability(80)
 
 
 def apply_fp8_marlin_linear(

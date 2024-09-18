@@ -6,7 +6,7 @@ import torch
 
 from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding,
                                                          get_rope)
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, seed_everything
 
 
 def benchmark_rope_kernels_multi_lora(
@@ -22,9 +22,7 @@ def benchmark_rope_kernels_multi_lora(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
