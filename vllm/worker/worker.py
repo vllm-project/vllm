@@ -455,7 +455,7 @@ def init_worker_distributed_environment(
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:  # noqa: SIM102
-        if not current_platform.has_device_capability(major=8):
+        if not current_platform.has_device_capability(80):
             capability = current_platform.get_device_capability()
             gpu_name = current_platform.get_device_name()
 

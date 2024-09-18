@@ -1,5 +1,5 @@
 import enum
-from typing import NamedTuple, Optional, Tuple, overload
+from typing import NamedTuple, Optional, Tuple, Union
 
 import torch
 
@@ -54,45 +54,30 @@ class Platform:
         return None
 
     @classmethod
-    @overload
     def has_device_capability(
         cls,
-        capability: Tuple[int, int],
-        *,
+        capability: Union[Tuple[int, int], int],
         device_id: int = 0,
     ) -> bool:
-        ...
+        """
+        Test whether this platform is compatible with a device capability.
 
-    @classmethod
-    @overload
-    def has_device_capability(
-        cls,
-        *,
-        major: int,
-        minor: int = 0,
-        device_id: int = 0,
-    ) -> bool:
-        ...
+        The ``capability`` argument can either be:
 
-    @classmethod
-    def has_device_capability(
-        cls,
-        capability: Optional[Tuple[int, int]] = None,
-        *,
-        major: Optional[int] = None,
-        minor: int = 0,
-        device_id: int = 0,
-    ) -> bool:
+        - A tuple ``(major, minor)``.
+        - A two-digit integer ``<major><minor>``.
+        """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:
             return False
 
-        if capability is not None:
-            major, minor = capability
-        else:
-            assert major is not None
+        if isinstance(capability, tuple):
+            return current_capability >= capability
 
-        return current_capability >= DeviceCapability(major=major, minor=minor)
+        if not 10 <= capability < 100:
+            raise ValueError("`capability` must be a two-digit integer.")
+
+        return current_capability.to_int() >= capability
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

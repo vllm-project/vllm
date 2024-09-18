@@ -8,7 +8,7 @@ from vllm.utils import is_cpu, is_hip
 from .utils import (dense_to_crow_col, get_head_sliding_step,
                     get_sparse_attn_mask)
 
-IS_COMPUTE_8_OR_ABOVE = current_platform.has_device_capability(major=8)
+IS_COMPUTE_8_OR_ABOVE = current_platform.has_device_capability(80)
 
 if IS_COMPUTE_8_OR_ABOVE:
     from .blocksparse_attention_kernel import blocksparse_flash_attn_varlen_fwd

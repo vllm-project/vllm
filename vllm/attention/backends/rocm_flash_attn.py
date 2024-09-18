@@ -300,7 +300,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         else:
             # if not using triton, navi3x/navi21/navi10 do not use flash-attn
             # either
-            if not current_platform.has_device_capability(major=9):
+            if not current_platform.has_device_capability(90):
                 self.use_naive_attn = True
             else:
                 try:
