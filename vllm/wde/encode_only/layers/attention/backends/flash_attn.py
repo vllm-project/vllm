@@ -2,14 +2,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
 import torch
-from vllm.wde.core.layers.attention.abstract import AttentionBackend, AttentionMetadataBuilder, AttentionImpl, AttentionType
-from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionMetadata
-from vllm.utils import is_pin_memory_available
+from vllm.wde.core.layers.attention.abstract import AttentionType
+from vllm.wde.encode_only.layers.attention.backends.abstract import (
+    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionBackend,
+    EncodeOnlyAttentionMetadataBuilder, EncodeOnlyAttentionImpl)
 
-pin_memory = is_pin_memory_available()
 
-
-class EncodeOnlyFlashAttentionBackend(AttentionBackend):
+class EncodeOnlyFlashAttentionBackend(EncodeOnlyAttentionBackend):
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -17,7 +16,7 @@ class EncodeOnlyFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "flash-attn"
+        return "flash_attn"
 
     @staticmethod
     def get_impl_cls() -> Type["EncodeOnlyFlashAttentionImpl"]:
@@ -29,7 +28,7 @@ class EncodeOnlyFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> Type["EncodeOnlyAttentionMetadataBuilder"]:
-        return FlashAttentionMetadataBuilder
+        return EncodeOnlyFlashAttentionMetadataBuilder
 
 
 @dataclass
@@ -37,30 +36,12 @@ class EncodeOnlyFlashAttentionMetadata(EncodeOnlyAttentionMetadata):
     pass
 
 
-class FlashAttentionMetadataBuilder(
-        AttentionMetadataBuilder[EncodeOnlyFlashAttentionMetadata]):
-
-    def __init__(self):
-        pass
-
-    def __call__(self, seq_lens: List[int]):
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.long,
-                                       pin_memory=pin_memory,
-                                       device="cpu")
-        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                    dtype=torch.int32,
-                                    device="cpu")
-        torch.cumsum(seq_lens_tensor,
-                     dim=0,
-                     dtype=seq_start_loc.dtype,
-                     out=seq_start_loc[1:])
-
-        return EncodeOnlyFlashAttentionMetadata(max_seq_len=max(seq_lens),
-                                                seq_start_loc=seq_start_loc)
+class EncodeOnlyFlashAttentionMetadataBuilder(
+        EncodeOnlyAttentionMetadataBuilder[EncodeOnlyFlashAttentionMetadata]):
+    pass
 
 
-class EncodeOnlyFlashAttentionImpl(AttentionImpl):
+class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
 
     def __init__(
         self,

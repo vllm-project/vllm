@@ -79,21 +79,16 @@ class EncodeOnlyEngineConfig(EngineConfig):
         logger.info(
             "Initializing an Encode Only engine (v%s) with config: "
             "model=%r, tokenizer=%r, "
-            "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
+            "tokenizer_mode=%s, "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, "
-            "quantization=%s, "
-            "quantization_param_path=%s, device_config=%s, "
-            "seed=%d, served_model_name=%s, max_num_on_the_fly=%d, scheduling=%s)",
-            VLLM_VERSION, self.model_config.model, self.model_config.tokenizer,
-            self.model_config.tokenizer_mode, self.model_config.revision,
-            self.model_config.rope_scaling, self.model_config.rope_theta,
+            "device_config=%s, served_model_name=%s, "
+            "max_num_on_the_fly=%d, scheduling=%s)", VLLM_VERSION,
+            self.model_config.model, self.model_config.tokenizer,
+            self.model_config.tokenizer_mode,
             self.model_config.trust_remote_code, self.model_config.dtype,
             self.model_config.max_model_len, self.load_config.download_dir,
-            self.load_config.load_format, self.model_config.quantization,
-            self.model_config.quantization_param_path,
-            self.device_config.device, self.model_config.seed,
+            self.load_config.load_format, self.device_config.device,
             self.model_config.served_model_name,
             self.scheduler_config.max_num_on_the_fly,
             self.scheduler_config.scheduling)

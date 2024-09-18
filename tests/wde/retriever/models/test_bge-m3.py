@@ -1,19 +1,18 @@
-
 import numpy as np
 import pytest
 import random
-from typing import  List, TypeVar
-
+from typing import List, TypeVar
 
 from transformers import BatchEncoding, BatchFeature
 import torch
 import torch.nn as nn
-from tests.wde.utils import VllmRunner, cleanup, is_cpu
+from tests.wde.utils import VllmRunner, cleanup, is_cpu, compare_embeddings_np
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class FlagEmbeddingRunner:
+
     def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
             # Check if the input is already on the GPU
@@ -72,17 +71,7 @@ def example_prompts():
     return prompts
 
 
-MODELS = [
-    'BAAI/bge-m3'
-]
-
-
-def compare_embeddings_np(embeddings1, embeddings2):
-    similarities = [
-        e1 @ e2.T
-        for e1, e2 in zip(embeddings1, embeddings2)
-    ]
-    return similarities
+MODELS = ['BAAI/bge-m3']
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -90,19 +79,15 @@ def compare_embeddings_np(embeddings1, embeddings2):
 @pytest.mark.parametrize("max_num_seqs", [2, 3, 5, 7])
 @pytest.mark.parametrize("scheduling", ["sync", "async", "double_buffer"])
 @torch.inference_mode
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_num_seqs: int,
-    scheduling: str
-) -> None:
+def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+                dtype: str, max_num_seqs: int, scheduling: str) -> None:
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model, dtype=dtype, max_num_seqs=max_num_seqs, scheduling=scheduling) as vllm_model:
+    with vllm_runner(model,
+                     dtype=dtype,
+                     max_num_seqs=max_num_seqs,
+                     scheduling=scheduling) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
         vllm_outputs = [t.cpu().numpy() for t in vllm_outputs]
 
@@ -110,5 +95,5 @@ def test_models(
     all_similarities = np.stack(similarities)
     tolerance = 1e-2
     assert np.all((all_similarities <= 1.0 + tolerance)
-                     & (all_similarities >= 1.0 - tolerance)
-                     ), f"Not all values are within {tolerance} of 1.0"
+                  & (all_similarities >= 1.0 - tolerance)
+                  ), f"Not all values are within {tolerance} of 1.0"
