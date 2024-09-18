@@ -282,7 +282,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 and self.response_format.type == "json_object"):
             guided_json_object = True
 
-        guided_decoding = GuidedDecodingParams(
+        guided_decoding = GuidedDecodingParams.from_optional(
             json=self._get_guided_json_from_tool() or self.guided_json,
             regex=self.guided_regex,
             choice=self.guided_choice,
@@ -548,7 +548,7 @@ class CompletionRequest(OpenAIBaseModel):
                 and self.response_format.type == "json_object"):
             guided_json_object = True
 
-        guided_decoding = GuidedDecodingParams(
+        guided_decoding = GuidedDecodingParams.from_optional(
             json=self.guided_json,
             regex=self.guided_regex,
             choice=self.guided_choice,

@@ -3,6 +3,7 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
+from json import dumps
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import msgspec
@@ -39,7 +40,7 @@ to sample from."""
 @dataclass
 class GuidedDecodingParams:
     """One of these fields will be used to build a logit processor."""
-    json: Optional[Union[Dict, BaseModel, str]] = None
+    json: Optional[Union[BaseModel, str]] = None
     regex: Optional[str] = None
     choice: Optional[List[str]] = None
     grammar: Optional[str] = None
@@ -47,6 +48,31 @@ class GuidedDecodingParams:
     """These are other options that can be set"""
     backend: Optional[str] = None
     whitespace_pattern: Optional[str] = None
+
+    @staticmethod
+    def from_optional(
+        json: Optional[Union[Dict, BaseModel, str]],
+        regex: Optional[str] = None,
+        choice: Optional[List[str]] = None,
+        grammar: Optional[str] = None,
+        json_object: Optional[bool] = None,
+        backend: Optional[str] = None,
+        whitespace_pattern: Optional[str] = None,
+    ) -> "GuidedDecodingParams":
+        if isinstance(json, dict):
+            # Serialize dicts to json strings up-front
+            # msgspec decoders will complain about a type union with both
+            # Dict and BaseModel in it
+            json = dumps(json)
+        return GuidedDecodingParams(
+            json=json,
+            regex=regex,
+            choice=choice,
+            grammar=grammar,
+            json_object=json_object,
+            backend=backend,
+            whitespace_pattern=whitespace_pattern,
+        )
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
@@ -150,6 +176,13 @@ class SamplingParams(
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
+        guided_decoding: If provided, the engine will construct a guided
+            decoding logits processor from these parameters. Defaults to None.
+        logit_bias: If provided, the engine will construct a logits processor
+            that applies these logit biases. Defaults to None.
+        allowed_token_ids: If provided, the engine will construct a logits
+            processor which only retains scores for the given token ids.
+            Defaults to None.
     """
 
     n: int = 1
@@ -192,7 +225,7 @@ class SamplingParams(
 
     # Fields used to construct logits processors
     guided_decoding: Optional[GuidedDecodingParams] = None
-    logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None
+    logit_bias: Optional[Dict[int, float]] = None
     allowed_token_ids: Optional[List[int]] = None
 
     @staticmethod
@@ -229,6 +262,12 @@ class SamplingParams(
         logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None,
         allowed_token_ids: Optional[List[int]] = None,
     ) -> "SamplingParams":
+        if logit_bias is not None:
+            logit_bias = {
+                int(token): bias
+                for token, bias in logit_bias.items()
+            }
+
         return SamplingParams(
             n=1 if n is None else n,
             best_of=best_of,
