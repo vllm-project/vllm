@@ -97,10 +97,10 @@ def _get_quantization_config(
     """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
-        capability = current_platform.get_device_capability()  # type: ignore
+        capability_tuple = current_platform.get_device_capability()
 
-        if capability is not None:
-            capability = capability[0] * 10 + capability[1]
+        if capability_tuple is not None:
+            capability = capability_tuple.to_int()
             if capability < quant_config.get_min_capability():
                 raise ValueError(
                     f"The quantization method {model_config.quantization} "

@@ -241,10 +241,8 @@ def test_prepare_decode_cuda_graph(batch_size):
 
     # Verify Sampling
     expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for _ in context_lens:
+    for selected_token_start_idx, _ in enumerate(context_lens):
         expected_selected_token_indices.append(selected_token_start_idx)
-        selected_token_start_idx += 1
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
         seq_lens,
