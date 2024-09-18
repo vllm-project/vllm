@@ -86,9 +86,7 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
             assert attn._k_scale == 1.0
             assert attn._v_scale == 1.0
 
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        if capability >= 89 and not force_marlin:
+        if current_platform.has_device_capability(89) and not force_marlin:
             # For GPUs with hardware support, we keep weights in fp8
             assert fc1.weight.dtype == torch.float8_e4m3fn
         else:

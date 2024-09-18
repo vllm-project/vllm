@@ -48,7 +48,7 @@ WTYPE_ZEROPOINTS = [
 #  `is_quant_method_supported` conflates kernels with quantization methods
 #  an assumption which is breaking down as quantizations methods can have
 #  have kernels and some kernels support multiple quantization methods.
-IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
+IS_SUPPORTED_BY_GPU = current_platform.has_device_capability(90)
 
 
 def rand_data(shape, dtype=torch.float16):

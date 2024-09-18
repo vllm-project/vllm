@@ -454,14 +454,20 @@ def init_worker_distributed_environment(
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:
-        compute_capability = current_platform.get_device_capability()
-        if compute_capability[0] < 8:
+    if torch_dtype == torch.bfloat16:  # noqa: SIM102
+        if not current_platform.has_device_capability(80):
+            capability = current_platform.get_device_capability()
             gpu_name = current_platform.get_device_name()
+
+            if capability is None:
+                compute_str = "does not have a compute capability"
+            else:
+                version_str = capability.as_version_str()
+                compute_str = f"has compute capability {version_str}"
+
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU has compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}. "
+                f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
                 "You can use float16 instead by explicitly setting the"
                 "`dtype` flag in CLI, for example: --dtype=half.")
 
