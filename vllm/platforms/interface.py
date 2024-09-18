@@ -25,7 +25,7 @@ class DeviceCapability(NamedTuple):
 
         It is assumed that the minor version is always a single digit.
         """
-        assert self.minor < 10
+        assert 0 <= self.minor < 10
         return self.major * 10 + self.minor
 
 
