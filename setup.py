@@ -170,14 +170,17 @@ class cmake_build_ext(build_ext):
 
         if is_sccache_available():
             cmake_args += [
+                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
+                '-DCMAKE_HIP_COMPILER_LAUNCHER=sccache',
             ]
         elif is_ccache_available():
             cmake_args += [
+                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
+                '-DCMAKE_HIP_COMPILER_LAUNCHER=ccache',
             ]
 
         # Pass the python executable to cmake so it can find an exact
@@ -368,7 +371,9 @@ def get_vllm_version() -> str:
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
-            version += f"+cu{cuda_version_str}"
+            # skip this for source tarball, required for pypi
+            if "sdist" not in sys.argv:
+                version += f"+cu{cuda_version_str}"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
@@ -459,6 +464,9 @@ if _build_core_ext():
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
+if _is_hip():
+    ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
+
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
@@ -502,6 +510,7 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "video": ["opencv-python"],  # Required for video processing
         "audio": ["librosa", "soundfile"]  # Required for audio processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
