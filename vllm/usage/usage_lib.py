@@ -17,6 +17,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
+from vllm.platforms import current_platform
 from vllm.version import __version__ as VLLM_VERSION
 
 _config_home = envs.VLLM_CONFIG_ROOT
@@ -151,7 +152,7 @@ class UsageMessage:
                            usage_context: UsageContext,
                            extra_kvs: Dict[str, Any]) -> None:
         # Platform information
-        if torch.cuda.is_available():
+        if current_platform.is_cuda_alike():
             device_property = torch.cuda.get_device_properties(0)
             self.gpu_count = torch.cuda.device_count()
             self.gpu_type = device_property.name

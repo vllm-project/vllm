@@ -1,5 +1,6 @@
 from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Union, cast,
+                    overload)
 
 from tqdm import tqdm
 
@@ -19,7 +20,7 @@ from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -88,7 +89,9 @@ class LLM:
             to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode.
+            to eager mode. Additionally for encoder-decoder models, if the
+            sequence length of the encoder input is larger than this, we fall
+            back to the eager mode.
         disable_custom_all_reduce: See ParallelConfig
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
@@ -137,9 +140,7 @@ class LLM:
         LLM constructor.
 
         Note: if enforce_eager is unset (enforce_eager is None)
-        it defaults to False for decoder-only models and True
-        for encoder/decoder models, since encoder/decoder models
-        do not currently support CUDAGraph.
+        it defaults to False.
         '''
 
         if "disable_log_stats" not in kwargs:
@@ -357,6 +358,7 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> List[RequestOutput]:
         """
         Generate responses for a chat conversation.
@@ -401,6 +403,7 @@ class LLM:
                 messages=messages,
                 chat_template=chat_template,
                 add_generation_prompt=add_generation_prompt,
+                tools=tools,
             )
         else:
             prompt = apply_hf_chat_template(
@@ -408,6 +411,7 @@ class LLM:
                 conversation=conversation,
                 chat_template=chat_template,
                 add_generation_prompt=add_generation_prompt,
+                tools=tools,
             )
 
         inputs: PromptInputs
@@ -642,14 +646,12 @@ class LLM:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
-        if isinstance(params, list):
-            params = [
-                self._add_guided_processor(param, guided_options)
-                if isinstance(param, SamplingParams) else param
-                for param in params
-            ]
-        elif isinstance(params, SamplingParams):
-            params = self._add_guided_processor(params, guided_options)
+        for sp in params if isinstance(params, list) else (params, ):
+            if isinstance(sp, SamplingParams):
+                self._add_guided_processor(sp, guided_options)
+
+                # We only care about the final output
+                sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
         for i, request_inputs in enumerate(inputs):
@@ -709,9 +711,6 @@ class LLM:
                          f"output: {0:.2f} toks/s"),
             )
 
-        # In the loop below, only finished outputs are used
-        self.llm_engine.step_return_finished_only = True
-
         # Run the engine.
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
@@ -724,6 +723,7 @@ class LLM:
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
+                            assert output.prompt_token_ids is not None
                             total_in_toks += len(output.prompt_token_ids)
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
@@ -734,9 +734,6 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
-
-        # Restore original behavior
-        self.llm_engine.step_return_finished_only = False
 
         if use_tqdm:
             pbar.close()

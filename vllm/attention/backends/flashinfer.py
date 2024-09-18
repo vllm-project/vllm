@@ -172,7 +172,8 @@ class FlashInferState(AttentionState):
         state._prefill_wrapper = self._get_prefill_wrapper()
         return state
 
-    def graph_capture_get_metadata_for_batch(self, batch_size: int):
+    def graph_capture_get_metadata_for_batch(
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
         assert self._is_graph_capturing
         _indptr_buffer = self._graph_indptr_buffer[:batch_size + 1]
         _last_page_len_buffer = self._graph_last_page_len_buffer[:batch_size]
@@ -232,12 +233,17 @@ class FlashInferState(AttentionState):
         attn_metadata.begin_forward()
         return attn_metadata
 
-    def get_graph_input_buffers(self, attn_metadata):
+    def get_graph_input_buffers(self,
+                                attn_metadata,
+                                is_encoder_decoder_model: bool = False):
         return {
             "slot_mapping": attn_metadata.slot_mapping,
         }
 
-    def prepare_graph_input_buffers(self, input_buffers, attn_metadata):
+    def prepare_graph_input_buffers(self,
+                                    input_buffers,
+                                    attn_metadata,
+                                    is_encoder_decoder_model: bool = False):
         return
 
     def begin_forward(self, model_input):
@@ -597,9 +603,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.runner.graph_block_tables[:batch_size]
+            max_blocks = input_block_tables.shape[1]
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
-                    input_block_tables[i, :len(block_table)] = block_table
+                    num_blocks = len(block_table)
+                    if num_blocks <= max_blocks:
+                        input_block_tables[i, :num_blocks] = block_table
+                    else:
+                        # It may be possible to have more blocks allocated due
+                        # to lookahead slots of multi-step, however, they are
+                        # not used anyway, so can be safely ignored.
+                        input_block_tables[
+                            i, :max_blocks] = block_table[:max_blocks]
+
             block_tables = torch.from_numpy(input_block_tables).to(
                 device, non_blocking=True)
 
