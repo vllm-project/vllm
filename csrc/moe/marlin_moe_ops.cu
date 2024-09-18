@@ -1849,6 +1849,7 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
     for (int m_block = 0; m_block < tot_m_blocks;
          m_block += 4 * exec_cfg.max_m_blocks) {
       // make it max possible value
+      int thread_m_blocks = exec_cfg.max_m_blocks;
 
       if (false) {
       }
@@ -1866,6 +1867,7 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
                                ", has_act_order = " + str(has_act_order) +
                                ", num_groups = " + str(num_groups) +
                                ", group_size = " + str(group_size) +
+                               ", thread_m_blocks = " + str(thread_m_blocks) +
                                ", thread_n_blocks = " + str(thread_n_blocks) +
                                ", thread_k_blocks = " + str(thread_k_blocks));
       }
