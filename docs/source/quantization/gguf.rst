@@ -9,14 +9,14 @@ GGUF
 
 .. warning::
 
-   Currently, vllm only supports loading from single-file GGUF models. If you have a multi-files GGUF model, you can use `gguf-split <https://github.com/ggerganov/llama.cpp/pull/6135>`_ tool to merge them to a single-file model.
+   Currently, vllm only supports loading single-file GGUF models. If you have a multi-files GGUF model, you can use `gguf-split <https://github.com/ggerganov/llama.cpp/pull/6135>`_ tool to merge them to a single-file model.
 
 To run a GGUF model with vLLM, you can download and use the local GGUF model from `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF <https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF>`_ with the following command:
 
 .. code-block:: console
 
    $ wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
-   $ # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion from GGUF through transformers.
+   $ # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
    $ vllm serve --model ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0
 
 .. warning::
