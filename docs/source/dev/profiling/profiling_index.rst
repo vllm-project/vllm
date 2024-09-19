@@ -21,8 +21,8 @@ Traces can be visualized using https://ui.perfetto.dev/.
 .. tip::
 
    To stop the profiler - it flushes out all the profile trace files to the directory. This takes time, for example for about 100 requests worth of data for a llama 70b, it takes about 10 minutes to flush out on a H100.
-   Set the env variable VLLM_RPC_GET_DATA_TIMEOUT_MS to a big number before you start the server. Say something like 30 minutes.
-   ``export VLLM_RPC_GET_DATA_TIMEOUT_MS=1800000``
+   Set the env variable VLLM_RPC_TIMEOUT to a big number before you start the server. Say something like 30 minutes.
+   ``export VLLM_RPC_TIMEOUT=1800000``
   
 Example commands and usage:
 ===========================
