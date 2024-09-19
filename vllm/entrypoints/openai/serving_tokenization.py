@@ -1,8 +1,9 @@
 from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
-from vllm.entrypoints.chat_utils import (apply_chat_template,
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
+                                         apply_mistral_chat_template,
                                          load_chat_template,
                                          parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
@@ -18,6 +19,7 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -27,7 +29,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        engine_client: EngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -35,7 +37,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
     ):
-        super().__init__(async_engine_client=async_engine_client,
+        super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -64,8 +66,9 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
+        prompt: Union[str, List[int]]
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
 
@@ -77,12 +80,20 @@ class OpenAIServingTokenization(OpenAIServing):
                 logger.warning(
                     "Multi-modal inputs are ignored during tokenization")
 
-            prompt = apply_chat_template(
-                tokenizer,
-                conversation=conversation,
-                chat_template=self.chat_template,
-                add_generation_prompt=request.add_generation_prompt,
-            )
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt = apply_mistral_chat_template(
+                    tokenizer,
+                    messages=request.messages,
+                    chat_template=self.chat_template,
+                    add_generation_prompt=request.add_generation_prompt,
+                )
+            else:
+                prompt = apply_hf_chat_template(
+                    tokenizer,
+                    conversation=conversation,
+                    chat_template=self.chat_template,
+                    add_generation_prompt=request.add_generation_prompt,
+                )
         else:
             prompt = request.prompt
 
@@ -121,7 +132,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
         self._log_inputs(request_id,
                          request.tokens,

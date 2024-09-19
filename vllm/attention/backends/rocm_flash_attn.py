@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
@@ -12,8 +13,12 @@ from vllm.attention.backends.utils import (CommonAttentionState,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+_PARTITION_SIZE_ROCM = 512
+_ON_NAVI = "gfx1" in torch.cuda.get_device_properties("cuda").gcnArchName
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
@@ -295,7 +300,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         else:
             # if not using triton, navi3x/navi21/navi10 do not use flash-attn
             # either
-            if torch.cuda.get_device_capability()[0] != 9:
+            if not current_platform.has_device_capability(90):
                 self.use_naive_attn = True
             else:
                 try:
@@ -480,20 +485,64 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output[num_prefill_tokens:] = PagedAttention.forward_decode(
-                decode_query,
-                key_cache,
-                value_cache,
-                decode_meta.block_tables,
-                decode_meta.seq_lens_tensor,
-                decode_meta.max_decode_seq_len,
-                self.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                k_scale,
-                v_scale,
-            )
+            # Whether to use rocm custom paged attention or not
+            num_seqs, num_heads, head_size = decode_query.shape
+            block_size = value_cache.shape[3]
+            gqa_ratio = num_heads // self.num_kv_heads
+            use_custom = _use_rocm_custom_paged_attention(
+                decode_query.dtype, head_size, block_size, gqa_ratio,
+                decode_meta.max_decode_seq_len)
+            if use_custom:
+                max_seq_len = decode_meta.max_decode_seq_len
+                max_num_partitions = (
+                    (max_seq_len + _PARTITION_SIZE_ROCM - 1) //
+                    _PARTITION_SIZE_ROCM)
+                assert _PARTITION_SIZE_ROCM % block_size == 0
+                tmp_output = torch.empty(
+                    size=(num_seqs, num_heads, max_num_partitions, head_size),
+                    dtype=output.dtype,
+                    device=output.device,
+                )
+                exp_sums = torch.empty(
+                    size=(num_seqs, num_heads, max_num_partitions),
+                    dtype=torch.float32,
+                    device=output.device,
+                )
+                max_logits = torch.empty_like(exp_sums)
+                ops.paged_attention_rocm(
+                    output[num_prefill_tokens:],
+                    exp_sums,
+                    max_logits,
+                    tmp_output,
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    self.num_kv_heads,
+                    self.scale,
+                    decode_meta.block_tables,
+                    decode_meta.seq_lens_tensor,
+                    block_size,
+                    max_seq_len,
+                    self.alibi_slopes,
+                    self.kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                )
+            else:
+                output[num_prefill_tokens:] = PagedAttention.forward_decode(
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    decode_meta.block_tables,
+                    decode_meta.seq_lens_tensor,
+                    decode_meta.max_decode_seq_len,
+                    self.kv_cache_dtype,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                    k_scale,
+                    v_scale,
+                )
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
@@ -532,3 +581,13 @@ def _sdpa_attention(
             start = end
 
     return output
+
+
+def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
+                                     block_size: int, gqa_ratio: int,
+                                     max_seq_len: int) -> bool:
+    # rocm custom page attention not support on navi (gfx1*)
+    return (not _ON_NAVI and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)
