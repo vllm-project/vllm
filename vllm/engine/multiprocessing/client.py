@@ -16,11 +16,10 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
-                                         IPC_HEALTH_IN_EXT, IPC_HEALTH_OUT_EXT,
-                                         IPC_INPUT_EXT, IPC_OUTPUT_EXT,
-                                         RPC_REQUEST_T, VLLM_RPC_SUCCESS_STR,
-                                         RPCAbortRequest, RPCError,
-                                         RPCGenerateRequest, RPCHealthRequest,
+                                         IPC_HEALTH_EXT, IPC_INPUT_EXT,
+                                         IPC_OUTPUT_EXT, RPC_REQUEST_T,
+                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+                                         RPCError, RPCGenerateRequest,
                                          RPCStartupRequest, RPCStartupResponse)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -94,15 +93,9 @@ class MQLLMEngineClient:
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
-        # IPC path for ack of check_health requests.
-        self.health_req_socket: Socket = self.context.socket(
-            zmq.constants.PUSH)
-        self.health_req_socket.connect(f"{ipc_path}{IPC_HEALTH_IN_EXT}")
-
-        # IPC path for ack of check_health requests.
-        self.health_ack_socket: Socket = self.context.socket(
-            zmq.constants.PULL)
-        self.health_ack_socket.connect(f"{ipc_path}{IPC_HEALTH_OUT_EXT}")
+        # IPC path for acking heartbeats.
+        self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
+        self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
 
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
@@ -142,31 +135,25 @@ class MQLLMEngineClient:
             socket.close(linger=0)
 
     async def run_check_health_loop(self, timeout: int):
-        """Background loop that continually probes the RPCServer for health.
-        
-        The loop sends CHECK_HEALTH requests to the INPUT_SOCKET, which
-        the MQLLMEngine server is blocking on.
-
-        The Server replies on the HEALTH_SOCKET (rather than on the 
-        OUTPUT_SOCKET such that the messages are not intermingled with
-        output streaming).
+        """Background loop that continually listens to the RPCServer for
+        heartbeats.
         """
-
         try:
             while True:
-                if await self.health_ack_socket.poll(timeout=timeout) == 0:
-                    # Wakeup every N seconds and do a health probe.
-                    await self._send_one_way_rpc_request(
-                        RPCHealthRequest(), self.health_req_socket)
+                if await self.heartbeat_socket.poll(timeout=timeout) == 0:
+                    # No heartbeat was received. Set error and exit the loop
+                    self._set_errored(
+                        TimeoutError("No heartbeat received "
+                                     "from MQLLMEngine"))
+                    logger.debug("Shutting down MQLLMEngineClient check "
+                                 "health loop due to timeout")
+                    break
 
-                    # Wait for ack from the health socket.
-                    await self._await_ack(error_message="Health check failed.",
-                                          socket=self.health_ack_socket)
                 else:
-                    # Server sent a health status message unprompted.
+                    # Heartbeat received- check the message
                     await self._check_success(
                         error_message="Health check failed.",
-                        socket=self.health_ack_socket)
+                        socket=self.heartbeat_socket)
 
                 logger.debug("Health probe successful.")
 

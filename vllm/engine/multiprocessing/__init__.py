@@ -12,8 +12,7 @@ VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
 IPC_INPUT_EXT = "_input_socket"
 IPC_OUTPUT_EXT = "_output_socket"
-IPC_HEALTH_OUT_EXT = "_health_out_socket"
-IPC_HEALTH_IN_EXT = "_health_in_socket"
+IPC_HEALTH_EXT = "_health_socket"
 IPC_DATA_EXT = "_data_socket"
 
 
@@ -43,10 +42,6 @@ class RPCAbortRequest:
     request_id: str
 
 
-class RPCHealthRequest:
-    pass
-
-
 class RPCStartupRequest(Enum):
     IS_SERVER_READY = 1
 
@@ -56,8 +51,7 @@ class RPCStartupResponse:
     tracing_enabled: bool
 
 
-RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCHealthRequest,
-                      RPCStartupRequest]
+RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCStartupRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
 

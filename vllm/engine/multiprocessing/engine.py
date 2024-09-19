@@ -14,13 +14,11 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
-                                         IPC_HEALTH_IN_EXT, IPC_HEALTH_OUT_EXT,
-                                         IPC_INPUT_EXT, IPC_OUTPUT_EXT,
-                                         REQUEST_OUTPUTS_T,
+                                         IPC_HEALTH_EXT, IPC_INPUT_EXT,
+                                         IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCGenerateRequest,
-                                         RPCHealthRequest, RPCStartupRequest,
-                                         RPCStartupResponse)
+                                         RPCStartupRequest, RPCStartupResponse)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -32,6 +30,7 @@ CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
+HEARTBEAT_INTERVAL_MS = 1000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
@@ -87,13 +86,9 @@ class MQLLMEngine:
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
-        # Receive health requests from the client
-        self.health_in_socket = self.ctx.socket(zmq.constants.PULL)
-        self.health_in_socket.bind(f"{ipc_path}{IPC_HEALTH_IN_EXT}")
-
-        # Send health status back to client.
-        self.health_out_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.health_out_socket.bind(f"{ipc_path}{IPC_HEALTH_OUT_EXT}")
+        # Send heartbeats back to client.
+        self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
+        self.heartbeat_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
 
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
@@ -103,7 +98,7 @@ class MQLLMEngine:
 
         # Health checking thread
         self.health_check_thread = threading.Thread(
-            target=self._health_check_loop)
+            target=self._heartbeat_loop)
         self._health_check_stop_event = threading.Event()
 
         self._last_alive_time = time.time()
@@ -149,21 +144,6 @@ class MQLLMEngine:
         finally:
             logger.debug("MQLLMEngine is shut down.")
             self.cleanup()
-
-    def _health_check_loop(self):
-        while True:
-            if self.health_in_socket.poll(timeout=1000) != 0:
-                frames = self.health_in_socket.recv_multipart(copy=False)
-                request = pickle.loads(frames[0].buffer)
-                if not isinstance(request, RPCHealthRequest):
-                    logger.warning(
-                        "Received a non-health request request on "
-                        "the health request port: %s", str(type(request)))
-
-                self._handle_health_request()
-            if self._health_check_stop_event.is_set():
-                logger.debug("Exiting MQLLMEngine health check thread")
-                return
 
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
@@ -304,7 +284,15 @@ class MQLLMEngine:
         if self.log_requests:
             logger.info("Aborted request %s.", request.request_id)
 
-    def _handle_health_request(self):
+    def _heartbeat_loop(self):
+        while not self._health_check_stop_event.wait(
+                timeout=HEARTBEAT_INTERVAL_MS):
+            # Loops every `HEARTBEAT_INTERVAL_MS` until the stop event is set
+            self._heartbeat()
+
+        logger.debug("Exiting MQLLMEngine health check thread")
+
+    def _heartbeat(self):
         # Send unhealthy if engine has already errored
         if self._errored_with is not None:
             self._send_unhealthy(self._errored_with)
@@ -331,12 +319,12 @@ class MQLLMEngine:
 
     def _send_healthy(self):
         """Send HEALTHY message to RPCClient."""
-        self.health_out_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
+        self.heartbeat_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
 
     def _send_unhealthy(self, error: BaseException):
         """Send UNHEALTHY message to RPCClient."""
         error_bytes = pickle.dumps(error)
-        self.health_out_socket.send_multipart((error_bytes, ), copy=False)
+        self.heartbeat_socket.send_multipart((error_bytes, ), copy=False)
 
     def _async_socket_engine_callback(self,
                                       request_outputs: REQUEST_OUTPUTS_T):
