@@ -10,6 +10,7 @@ GGUF
 To run a GGUF model with vLLM, you can download and use the local GGUF model from `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF <https://huggingface.co/TheBloke/Llama-2-7b-Chat-AWQ>`_ with the following command:
 
 .. code-block:: console
+
    $ wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
    $ # We recommend using the tokenizer from source model to avoid long-time tokenizer conversion from GGUF.
    $ vllm serve --model ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0
@@ -19,7 +20,9 @@ To run a GGUF model with vLLM, you can download and use the local GGUF model fro
    We recommend using the tokenizer from the source model instead of GGUF model. Because the tokenizer conversion from GGUF is time-consuming and unstable, especially some models with large vocab size.
 
 You can also use the GGUF model directly through the LLM entrypoint:
+
 .. code-block:: python
+
    from vllm import LLM, SamplingParams
 
    # In this script, we demonstrate how to pass input to the chat method:
