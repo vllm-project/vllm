@@ -1,6 +1,7 @@
 import os
 from typing import List, Optional, Tuple
 import time
+import math
 
 import torch
 
@@ -61,6 +62,7 @@ class TTCacheEngine:
 
         # Initialize the cache.
         # List of KV caches. Entry is a list containing K and V tensors.
+        logger.info("Allocating kv caches")
         self.tt_cache = self._allocate_kv_cache(
             self.num_tt_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
@@ -228,10 +230,10 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
-        # TODO: Add proper implementation, ignoring block allocation for now
-        # Note: can use --max-num-batched-tokens to set max number of batched tokens per iteration in EngineArgs
-        # num_tt_blocks = int(self.scheduler_config.max_model_len / self.cache_config.block_size)
-        num_tt_blocks = 128  # TODO: debugging
+        # TODO: Add proper implementation
+        # max_context_per_user = self.scheduler_config.max_model_len
+        max_context_per_user = 4096  # TODO: debugging
+        num_tt_blocks = math.ceil(max_context_per_user * self.scheduler_config.max_num_seqs / self.cache_config.block_size)
         num_cpu_blocks = 0
         return num_tt_blocks, num_cpu_blocks
 
@@ -369,19 +371,12 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return dispatch_core_type
     
     def _open_t3k_mesh_device(self):
-        device_ids = [0, 4, 5, 1, 2, 6, 7, 3]
-        num_devices_requested = len(device_ids)
         device_params = {}
-        
-        self.pci_ids = [ttnn.GetPCIeDeviceID(i) for i in device_ids[:num_devices_requested]]
-
         mesh_device = ttnn.open_mesh_device(
-            ttnn.MeshShape(1, num_devices_requested),
-            device_ids[:num_devices_requested],
+            ttnn.MeshShape(2, 4),
             dispatch_core_type=self._get_dispatch_core_type(),
             **device_params,
         )
-
         logger.debug(f"multidevice with {mesh_device.get_num_devices()} devices is created")
         return mesh_device
     
