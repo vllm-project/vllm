@@ -101,7 +101,7 @@ def _sgmv_shrink_kernel(
 
 
 @torch.inference_mode()
-def sgmv_shrink(
+def _sgmv_shrink(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,
     output_tensor: torch.Tensor,
@@ -111,7 +111,7 @@ def sgmv_shrink(
     batches: int,
     max_seq_length: int,
     scaling: float,
-):
+) -> None:
     """
 
     Args:
@@ -187,3 +187,11 @@ def sgmv_shrink(
         SPLIT_K,
     )
     return
+
+
+try:
+    sgmv_shrink = torch.library.custom_op("lora::sgmv_shrink",
+                                          _sgmv_shrink,
+                                          mutates_args=["output_tensor"])
+except AttributeError:
+    sgmv_shrink = _sgmv_shrink

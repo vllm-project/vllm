@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.layers.sampler import _apply_top_k_top_p, _get_bin_counts_and_mask
+from vllm.model_executor.layers.sampler import MaybeDeferredSampleResultType, SampleResultArgsType, SampleReturnType, SamplerOutput, _apply_top_k_top_p, _get_bin_counts_and_mask
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -18,8 +18,7 @@ from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
-                           PromptLogprobs, SampleLogprobs, SamplerOutput,
-                           SequenceOutput)
+                           PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.utils import (PyObjectCache, async_tensor_h2d,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
@@ -31,6 +30,10 @@ _SAMPLING_EPS = 1e-5
 class MultiheadSampler(nn.Module):
     def __init__(self):
         super().__init__()
+        # Whether or not the SamplerOutput should have on-device tensors
+        # containing the sampled token ids and probabilities. This is used by
+        # speculative decoding.
+        self.include_gpu_probs_tensor = False
     
     def forward(
         self,
@@ -61,11 +64,61 @@ class MultiheadSampler(nn.Module):
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        # Compute the log probabilities.
+        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
         
-        id_next = torch.multinomial(probs, 1).to(logits.device)
-        id_next = id_next.reshape(-1, num_heads).tolist()
-        return self.build_sampler_output(id_next, sampling_metadata)
+        # Sample the next tokens.
+        maybe_deferred_sample_results, maybe_sampled_tokens_tensor = self._sample(
+            probs,
+            logprobs,
+            sampling_metadata,
+            sampling_tensors,
+            include_gpu_probs_tensor=self.include_gpu_probs_tensor,
+            modify_greedy_probs=False
+        )
         
+        sampled_token_ids_tensor = maybe_sampled_tokens_tensor.reshape(-1, num_heads)
+        id_next = sampled_token_ids_tensor.tolist()
+
+        if self.include_gpu_probs_tensor:
+            # Since we will defer sampler result Pythonization,
+            # preserve GPU-side tensors in support of later
+            # deferred pythonization of logprobs
+            sampled_token_ids_tensor = sampled_token_ids_tensor.to(dtype=torch.long, device=probs.device)
+            on_device_tensors = (probs, logprobs, sampled_token_ids_tensor)
+        else:
+            # Since Pythonization has already happened, don't preserve
+            # GPU-side tensors.
+            on_device_tensors = None
+
+        return self.build_sampler_output(id_next, sampling_metadata, 
+                                         on_device_tensors=on_device_tensors,
+                                         maybe_deferred_sample_results=maybe_deferred_sample_results,
+                                         skip_sampler_cpu_output=sampling_metadata.skip_sampler_cpu_output)
+
+    def _sample(
+        self,
+        probs: torch.Tensor,
+        logprobs: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        sampling_tensors: SamplingTensors,
+        include_gpu_probs_tensor: bool,
+        modify_greedy_probs: bool,
+    ) -> SampleReturnType:
+        id_next_tensor = torch.multinomial(probs, 1).to(dtype=torch.long, device=probs.device)
+ 
+        maybe_deferred_args = SampleResultArgsType(
+            sampling_metadata=sampling_metadata,
+            sample_metadata=None,
+            multinomial_samples=None,
+            greedy_samples=id_next_tensor,
+            beam_search_logprobs=None,
+            sample_results_dict={})
+        
+        if not sampling_metadata.skip_sampler_cpu_output:
+            return id_next_tensor, id_next_tensor
+        else:
+            return maybe_deferred_args, id_next_tensor
 
     def _init_sampling_tensors(self,
                                num_heads: int,
@@ -213,22 +266,35 @@ class MultiheadSampler(nn.Module):
     
     def build_sampler_output(self,
                              sample_results: List[List[int]],
-                             sampling_metadata: SamplingMetadata) -> SamplerOutput:
+                             sampling_metadata: SamplingMetadata,
+                             maybe_deferred_sample_results: MaybeDeferredSampleResultType = None,
+                             on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor,torch.Tensor]] = None,
+                             skip_sampler_cpu_output: bool = False) -> SamplerOutput:
         sampler_output: List[CompletionSequenceGroupOutput] = []
-        for seq_group, sample_result in zip(sampling_metadata.seq_groups, sample_results):
-            seq_ids = seq_group.seq_ids
-            parent_id = 0 # no beam search for now
-            seq_outputs: List[SequenceOutput] = []
-            log_prob = { sample_result[0]: Logprob(logprob=inf, rank=None, decoded_token=None) }
-            seq_output = SequenceOutput(seq_ids[parent_id], sample_result[0], log_prob)
-            seq_output.output_tokens = sample_result
-            seq_outputs.append(seq_output)
-            sampler_output.append(CompletionSequenceGroupOutput(seq_outputs, prompt_logprobs=None))
+        if skip_sampler_cpu_output:
+            pass
+        else:
+            for seq_group, sample_result in zip(sampling_metadata.seq_groups, sample_results):
+                seq_ids = seq_group.seq_ids
+                parent_id = 0 # no beam search for now
+                seq_outputs: List[SequenceOutput] = []
+                log_prob = { sample_result[0]: Logprob(logprob=inf, rank=None, decoded_token=None) }
+                seq_output = SequenceOutput(seq_ids[parent_id], sample_result[0], log_prob)
+                seq_output.output_tokens = sample_result
+                seq_outputs.append(seq_output)
+                sampler_output.append(CompletionSequenceGroupOutput(seq_outputs, prompt_logprobs=None))
         
-        sampled_token_probs, logprobs_tensor, sampled_token_ids = (None, None, None)
+        # If not specified, store None values in SamplerOutput.
+        if on_device_tensors is not None:
+            (sampled_token_probs, logprobs_tensor,
+            sampled_token_ids) = on_device_tensors
+        else:
+            sampled_token_probs, logprobs_tensor, sampled_token_ids = (None, None,
+                                                                    None)
         return SamplerOutput(
             outputs=sampler_output,
             sampled_token_probs=sampled_token_probs,
             sampled_token_ids=sampled_token_ids,
             logprobs=logprobs_tensor,
+            deferred_sample_results_args=maybe_deferred_sample_results,
         )

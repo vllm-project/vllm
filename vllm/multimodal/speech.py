@@ -36,7 +36,7 @@ class SpeechPlugin(MultiModalPlugin):
                 p=2.0,
                 dim=0,
                 eps=1e-12,
-                ).unsqueeze_(0)
+                )
 
             return MultiModalInputs({"speech": n})
         elif isinstance(data, torch.Tensor):

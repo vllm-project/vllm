@@ -2,13 +2,17 @@
 import argparse
 import asyncio
 from asyncio import tasks
+from datetime import datetime
 import json
+import os
 import random
 import time
-from typing import List, Optional, Tuple, AsyncGenerator
+from typing import Any, Dict, List, Optional, Tuple, AsyncGenerator
 import warnings
 
 import numpy as np
+import pypinyin
+from tokenizers import Tokenizer
 import torch
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -33,6 +37,7 @@ def calculate_metrics(
     itls: List[float] = []
     tpots: List[float] = []
     ttfts: List[float] = []
+    e2els: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             # We use the tokenizer to count the number of output tokens for all
@@ -41,12 +46,13 @@ def calculate_metrics(
             # Note : this may inflate the output token count slightly
             output_len = len(outputs[i].output_tokens)
             actual_output_lens.append(output_len)
-            total_input += input_requests[i][1]
+            total_input += len(input_requests[i][1])
             if output_len > 1:
                 tpots.append(
                     (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
+            e2els.append(outputs[i].latency)
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -56,26 +62,35 @@ def calculate_metrics(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
             stacklevel=2)
+    selected_percentiles = [50, 95, 99]
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
-        input_throughput=total_input / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
+        total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0) *
         1000,  # ttfts is empty if streaming is not supported by backend
-        median_ttft_ms=np.median(ttfts or 0) * 1000,
         std_ttft_ms=np.std(ttfts or 0) * 1000,
-        p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
+        median_ttft_ms=np.median(ttfts or 0) * 1000,
+        percentiles_ttft_ms=[(p, np.percentile(ttfts or 0, p) * 1000)
+                             for p in selected_percentiles],
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
-        median_tpot_ms=np.median(tpots or 0) * 1000,
         std_tpot_ms=np.std(tpots or 0) * 1000,
-        p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
+        median_tpot_ms=np.median(tpots or 0) * 1000,
+        percentiles_tpot_ms=[(p, np.percentile(tpots or 0, p) * 1000)
+                             for p in selected_percentiles],
         mean_itl_ms=np.mean(itls or 0) * 1000,
-        median_itl_ms=np.median(itls or 0) * 1000,
         std_itl_ms=np.std(itls or 0) * 1000,
-        p99_itl_ms=np.percentile(itls or 0, 99) * 1000,
+        median_itl_ms=np.median(itls or 0) * 1000,
+        percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000)
+                            for p in selected_percentiles],
+        mean_e2el_ms=np.median(e2els or 0) * 1000,
+        std_e2el_ms=np.std(e2els or 0) * 1000,
+        median_e2el_ms=np.mean(e2els or 0) * 1000,
+        percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
+                             for p in selected_percentiles],
     )
 
     return metrics, actual_output_lens
@@ -103,7 +118,7 @@ async def generate_streaming(llm: AsyncLLMEngine, request_func_input: RequestFun
     ttft = 0.0
     st = time.perf_counter()
     most_recent_timestamp = st
-    sampling_params = SamplingParams(n=1, temperature=1, detokenize=False, stop_token_ids=[625], max_tokens=2048, top_k=1)
+    sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
     results_generator = llm.generate(request_func_input.prompt, sampling_params, request_id=request_id)
     async for request_output in results_generator:
         token_ids = request_output.outputs[0].token_ids
@@ -182,12 +197,12 @@ async def run_vllm_async(
     tasks: List[asyncio.Task] = []
     request_id = 0
     async for request in get_request(requests, request_rate):
-        prompt, prompt_len, output_len = request
+        prompt, token_ids, output_len = request
         request_func_input = RequestFuncInput(
             api_url="",
             model=model,
-            prompt=prompt,
-            prompt_len=prompt_len,
+            prompt={"prompt_token_ids": token_ids},
+            prompt_len=len(token_ids),
             output_len=output_len,
             use_beam_search=use_beam_search,
         )
@@ -219,27 +234,53 @@ async def run_vllm_async(
                                  metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
-    print("{:<40} {:<10.2f}".format("Input token throughput (tok/s):",
-                                    metrics.input_throughput))
     print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
                                     metrics.output_throughput))
+    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
+                                    metrics.total_token_throughput))
     print("{s:{c}^{n}}".format(s='Time to First Token', n=50, c='-'))
-    print("{:<40} {:<10.2f}".format("Mean TTFT (ms):", metrics.mean_ttft_ms))
-    print("{:<40} {:<10.2f}".format("Median TTFT (ms):",
-                                    metrics.median_ttft_ms))
-    print("{:<40} {:<10.2f}".format("P99 TTFT (ms):", metrics.p99_ttft_ms))
+    for p, v in metrics.percentiles_ttft_ms:
+        print("{:<40} {:<10.2f}".format(f"{p}th percentile (ms):", v))
     print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',
                                n=50,
                                c='-'))
-    print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", metrics.mean_tpot_ms))
-    print("{:<40} {:<10.2f}".format("Median TPOT (ms):",
-                                    metrics.median_tpot_ms))
-    print("{:<40} {:<10.2f}".format("P99 TPOT (ms):", metrics.p99_tpot_ms))
-    print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
-    print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
-    print("{:<40} {:<10.2f}".format("Median ITL (ms):", metrics.median_itl_ms))
-    print("{:<40} {:<10.2f}".format("P99 ITL (ms):", metrics.p99_itl_ms))
-    print("=" * 50)
+    for p, v in metrics.percentiles_tpot_ms:
+        print("{:<40} {:<10.2f}".format(f"{p}th percentile (ms):", v))
+
+    benchmark_result = {
+        "duration": benchmark_duration,
+        "completed": metrics.completed,
+        "total_input_tokens": metrics.total_input,
+        "total_output_tokens": metrics.total_output,
+        "request_throughput": metrics.request_throughput,
+        "output_throughput": metrics.output_throughput,
+        "total_token_throughput": metrics.total_token_throughput,
+        "input_lens": [output.prompt_len for output in outputs],
+        "output_lens": actual_output_lens,
+        "ttfts": [output.ttft for output in outputs],
+        "itls": [output.itl for output in outputs],
+        "generated_texts": [output.generated_text for output in outputs],
+        "errors": [output.error for output in outputs],
+    }
+
+    result_json: Dict[str, Any] = {}
+
+    # Setup
+    current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+    result_json["date"] = current_dt
+
+    # Traffic
+    result_json["request_rate"] = (
+        request_rate if request_rate < float("inf") else "inf")
+
+    # Merge with benchmark result
+    result_json = {**result_json, **benchmark_result}
+
+    # Save to file
+    base_model_id = 'xtts'
+    file_name = f"vllm-{request_rate}qps-{base_model_id}-{current_dt}.json"  #noqa
+    # with open(file_name, "w") as outfile:
+    #     json.dump(result_json, outfile)
 
 def run_vllm(
     requests: List[Tuple[str, int, int]],
@@ -289,22 +330,13 @@ def run_vllm(
     )
 
     # Add the requests to the engine.
-    prompts: List[str] = []
+    prompts = []
     sampling_params: List[SamplingParams] = []
-    for prompt, _, output_len in requests:
-        prompts.append(prompt)
-        sampling_params.append(
-            SamplingParams(
-                n=1,
-                temperature=1,
-                detokenize=False,
-                stop_token_ids=[625],
-                max_tokens=2048,
-                top_k=1
-            ))
-    print(prompts)
-    outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-    print("warmup done")
+    for prompt, ids, output_len in requests:
+        prompts.append({"prompt_token_ids": ids})
+
+    sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
+
     start = time.perf_counter()
     outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
     end = time.perf_counter()
@@ -378,13 +410,24 @@ def main(args: argparse.Namespace):
     random.seed(args.seed)
 
     # Sample the requests.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code)
     lines = open(args.dataset).read().splitlines()
-    requests = [(f'[Stts][spk_emb][speed_5]{line}[Ptts]', len(tokenizer(line).input_ids), 2048) for line in lines]
+    requests = []
+    # combin tokenizer path
+    
+    tokenizer = Tokenizer.from_file(os.path.join(args.tokenizer, 'vocab.json'))
+    for text in lines:
+        pinyin = "".join([p[0] for p in pypinyin.pinyin(text, style=pypinyin.Style.TONE3, heteronym=False, neutral_tone_with_five=True)])
+        txt = f"[zh-cn]{pinyin}"
+        txt = txt.replace(" ", "[SPACE]")
+        token_ids = tokenizer.encode(txt).ids
+        token_ids.insert(0, 7001)
+        token_ids.append(0)
+        token_ids.append(7003)
+        requests.append((text, token_ids, 2048))
+
     requests = requests[:args.num_prompts]
     
-    total_input_tokens = sum(count for _, count, _ in requests)
+    total_input_tokens = sum(len(ids) for _, ids, _ in requests)
     
     if args.streaming:
         asyncio.run(run_vllm_async(requests, args.model, args.tokenizer, args.quantization,
