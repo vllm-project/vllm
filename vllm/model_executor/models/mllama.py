@@ -105,13 +105,17 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
     assert hf_config.vision_config.image_size % 14 == 0, "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14) ** 2 + 1
     num_tokens = num_tiles * token_per_chunk
-    llm_inputs["prompt"] = llm_inputs["encoder_prompt"]
-    llm_inputs["prompt_token_ids"] = llm_inputs["encoder_prompt_token_ids"]
+    if llm_inputs.get("prompt") is None:
+        llm_inputs["prompt"] = llm_inputs["encoder_prompt"]
+        llm_inputs["prompt_token_ids"] = llm_inputs["encoder_prompt_token_ids"]
+        if 198 in llm_inputs["prompt_token_ids"]:
+            index_198 = llm_inputs["prompt_token_ids"].index(198)
+            if index_198 > 0 and llm_inputs["prompt_token_ids"][index_198 - 1] == LLAMA_IMAGE_TOKEN_ID:
+                llm_inputs["prompt_token_ids"] = llm_inputs["prompt_token_ids"][:index_198] + llm_inputs["prompt_token_ids"][index_198+1:]
     llm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
     llm_inputs["encoder_prompt_token_ids"] = [LLAMA_IMAGE_TOKEN_ID] * num_tokens
 
     assert "decoder_multi_modal_data" not in llm_inputs, "multi-modal data should be put in encoder message of LLaMA Vision"
-
     return llm_inputs
 
 
