@@ -26,7 +26,7 @@ class BGEM3Model(nn.Module, LoadWeightsMixin):
                  attn_backend: EncodeOnlyAttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None,
                  sentence_pooling_method="cls",
-                 normlized=True,
+                 normalized=True,
                  *args,
                  **kwargs):
         super().__init__()
@@ -34,7 +34,7 @@ class BGEM3Model(nn.Module, LoadWeightsMixin):
         self.quant_config = quant_config
         self.sentence_pooling_method = sentence_pooling_method
         assert self.sentence_pooling_method == 'cls'
-        self.normlized = normlized
+        self.normalized = normalized
         self.roberta = XLMRobertaModel(config, attn_backend, quant_config)
 
     def forward(
@@ -54,7 +54,7 @@ class BGEM3Model(nn.Module, LoadWeightsMixin):
 
         dense_vecs = sequence_output[seq_start_loc[:-1]]
 
-        if self.normlized:
+        if self.normalized:
             dense_vecs = torch.nn.functional.normalize(dense_vecs, dim=-1)
 
         return dense_vecs
