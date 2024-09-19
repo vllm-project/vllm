@@ -102,6 +102,12 @@ define_gpu_extension_target(
 
 add_dependencies(default _core_C)
 
+if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
+    NOT VLLM_TARGET_DEVICE STREQUAL "rocm" AND
+    NOT VLLM_TARGET_DEVICE STREQUAL "cpu")
+    return()
+endif()
+
 #
 # The CUDA device extensions need CPU CMake scripts to support Heterogeneous Speculative Decoding.
 #
