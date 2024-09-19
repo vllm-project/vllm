@@ -6,7 +6,7 @@ from typing import Iterator, List, Optional, Union
 import cloudpickle
 import zmq
 
-from vllm import AsyncEngineArgs, LLMEngine
+from vllm import AsyncEngineArgs, LLMEngine, SamplingParams
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 # yapf conflicts with isort for this block
@@ -15,8 +15,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCGenerateRequest,
-                                         RPCHealthRequest, RPCStartupRequest,
+                                         RPCError, RPCHealthRequest,
+                                         RPCProcessRequest, RPCStartupRequest,
                                          RPCStartupResponse)
 # yapf: enable
 from vllm.logger import init_logger
@@ -39,8 +39,8 @@ class MQLLMEngine:
     in concurrnet manner. It runs a background loop and uses zeromq to 
     receive new requests and stream outputs incrementally via ipc.
     
-    The :class:`LLMEngine.generate` is kicked off when a new 
-    RPCGenerateRequest is received by the input_socket.
+    The :class:`LLMEngine` generate or encode process is kicked off when a new
+    RPCProcessRequest is received by the input_socket.
     
     The self.engine_loop checks the input_socket for new requests,
     adds them to the LLMEngine if there are any, calls the internal
@@ -213,12 +213,13 @@ class MQLLMEngine:
                 frames = self.input_socket.recv_multipart(copy=False)
                 request = pickle.loads(frames[0].buffer)
 
-                if isinstance(request, RPCGenerateRequest):
+                if isinstance(request, RPCProcessRequest):
                     if len(frames) > 1:
                         # Use cloudpickle for logits processors
+                        assert isinstance(request.params, SamplingParams)
                         lprocs = cloudpickle.loads(frames[1].buffer)
-                        request.sampling_params.logits_processors = lprocs
-                    self._handle_generate_request(request)
+                        request.params.logits_processors = lprocs
+                    self._handle_process_request(request)
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)
                 elif isinstance(request, RPCHealthRequest):
@@ -231,8 +232,8 @@ class MQLLMEngine:
             self._send_unhealthy(e)
             raise e
 
-    def _handle_generate_request(self, request: RPCGenerateRequest):
-        """Handle RPCGenerateRequest by adding it to the LLMEngine."""
+    def _handle_process_request(self, request: RPCProcessRequest):
+        """Handle RPCProcessRequest by adding it to the LLMEngine."""
         request_id = request.request_id
 
         if self._errored_with is not None:
@@ -245,7 +246,7 @@ class MQLLMEngine:
             self.engine.add_request(
                 request_id=request_id,
                 inputs=request.inputs,
-                params=request.sampling_params,
+                params=request.params,
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
                 prompt_adapter_request=request.prompt_adapter_request)
