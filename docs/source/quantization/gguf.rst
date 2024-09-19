@@ -5,7 +5,7 @@ GGUF
 
 .. warning::
 
-   Please note that GGUF support in vLLM is highly experimental and under-optimized at the moment. Currently, you can use GGUF as a way to reduce memory footprint. If you encounter any issues, please report them to the vLLM team.
+   Please note that GGUF support in vLLM is highly experimental and under-optimized at the moment, it might be incompatible with other features. Currently, you can use GGUF as a way to reduce memory footprint. If you encounter any issues, please report them to the vLLM team.
 
 .. warning::
 
@@ -18,6 +18,13 @@ To run a GGUF model with vLLM, you can download and use the local GGUF model fro
    $ wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
    $ # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
    $ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
+You can also add `--tensor-parallel-size 2` to enable tensor parallelism inference with 2 GPUs:
+
+.. code-block:: console
+
+   $ # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
+   $ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0 --tensor-parallel-size 2
 
 .. warning::
 
