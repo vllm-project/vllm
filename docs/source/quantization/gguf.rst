@@ -19,7 +19,7 @@ To run a GGUF model with vLLM, you can download and use the local GGUF model fro
    $ # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
    $ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0
 
-You can also add `--tensor-parallel-size 2` to enable tensor parallelism inference with 2 GPUs:
+You can also add ``--tensor-parallel-size 2`` to enable tensor parallelism inference with 2 GPUs:
 
 .. code-block:: console
 
