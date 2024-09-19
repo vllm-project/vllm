@@ -146,12 +146,14 @@ def paged_attention_rocm(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
                                       block_size, max_seq_len, alibi_slopes,
-                                      kv_cache_dtype)
+                                      kv_cache_dtype, k_scale, v_scale)
 
 
 # pos encoding ops
@@ -768,11 +770,17 @@ def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                                           silu_activation)
 
 
-def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
-                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
-                         silu_activation: bool) -> torch.Tensor:
+def causal_conv1d_update(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias_: Optional[torch.Tensor],
+    silu_activation: bool,
+    conv_state_indices: Optional[torch.Tensor],
+) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                             silu_activation)
+                                             silu_activation,
+                                             conv_state_indices)
 
 
 def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
