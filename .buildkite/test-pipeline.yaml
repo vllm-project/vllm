@@ -84,7 +84,7 @@ steps:
 - label: Entrypoints Test # 20min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   commands:
