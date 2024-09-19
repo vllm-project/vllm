@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Mapping, Optional, Union
 
+from vllm import PoolingParams
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -21,9 +22,9 @@ class MQEngineDeadError(RuntimeError):
 
 
 @dataclass
-class RPCGenerateRequest:
+class RPCProcessRequest:
     inputs: PromptInputs
-    sampling_params: SamplingParams
+    params: Union[SamplingParams, PoolingParams]
     request_id: str
     lora_request: Optional[LoRARequest] = None
     trace_headers: Optional[Mapping[str, str]] = None
@@ -55,7 +56,7 @@ class RPCStartupResponse:
     tracing_enabled: bool
 
 
-RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCHealthRequest,
+RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCHealthRequest,
                       RPCStartupRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
