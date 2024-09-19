@@ -13,31 +13,27 @@
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.utils import print_warning_once
 
 
@@ -166,7 +162,7 @@ class OlmoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.q_norm(q), self.k_norm(k)
+        q, k = self.q_norm(q.contiguous()), self.k_norm(k.contiguous())
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -188,7 +184,7 @@ class OlmoeDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           4096)
-        
+
         self.self_attn = OlmoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -207,11 +203,8 @@ class OlmoeDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=1e-5)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=1e-5)
-
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
 
     def forward(
         self,
@@ -261,9 +254,9 @@ class OlmoeModel(nn.Module):
         )
         self.layers = nn.ModuleList([
             OlmoeDecoderLayer(config,
-                                 layer_idx,
-                                 cache_config,
-                                 quant_config=quant_config)
+                              layer_idx,
+                              cache_config,
+                              quant_config=quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -387,7 +380,7 @@ class OlmoeForCausalLM(nn.Module):
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
-                                  weight_name,
+                                  name,
                                   shard_id=shard_id,
                                   expert_id=expert_id)
                     break
