@@ -375,7 +375,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
-          GIT_TAG 31e390bfc2ed48e5f90708597191ed5ad6befb8c
+          GIT_TAG 2b29222280edc4d48fcadecffa0223840ea6de83
           GIT_PROGRESS TRUE
   )
 endif()
