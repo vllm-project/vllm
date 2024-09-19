@@ -18,30 +18,6 @@ from .base import MultiModalInputs, MultiModalPlugin
 import base64
 import pickle
 
-class FishSpeechPlugin(MultiModalPlugin):
-
-    def get_data_key(self) -> str:
-        return "audio1"
-
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
-        if isinstance(data, str):
-            base64_decoded = base64.b64decode(data)
-            deserialized_data = pickle.loads(base64_decoded)
-            tensor = torch.from_numpy(deserialized_data)
-            return MultiModalInputs({"audio": tensor})
-        elif isinstance(data, torch.Tensor):
-            raise NotImplementedError("Embeddings input is not supported yet")
-
-        raise TypeError(f"Invalid image type: {type(data)}")
-
-    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
-        return 16
-
-    @staticmethod
-    def get_default_audio():
-        return 'a'
-
 class SpeechPlugin(MultiModalPlugin):
 
     def get_data_key(self) -> str:
