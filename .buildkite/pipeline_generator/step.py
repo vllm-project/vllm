@@ -6,7 +6,6 @@ class TestStep(BaseModel):
     """This class represents a test step defined in the test configuration file."""
     label: str
     fast_check: bool = False
-    commands: List[str] = Field(default_factory=list)
     mirror_hardwares: List[str] = Field(default_factory=list)
     gpu: str = ""
     num_gpus: int = 1
@@ -17,6 +16,8 @@ class TestStep(BaseModel):
     soft_fail: bool = False
     parallelism: int = 1
     optional: bool = False
+    command: Optional[str] = None
+    commands: Optional[List[str]] = None
 
 class BuildkiteStep(BaseModel):
     """This class represents a step in Buildkite format."""
