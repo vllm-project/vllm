@@ -1721,8 +1721,8 @@ class LLMEngine:
         if prompt_ids is None:
             if prompt_embeds is None:
                 raise ValueError("You must provide a prompt")
-
-            self._validate_prompt_embeds(prompt_embeds)
+            else:
+                self._validate_prompt_embeds(prompt_embeds)
         else:
             if prompt_embeds is None:
                 self._validate_prompt_ids(prompt_ids)
