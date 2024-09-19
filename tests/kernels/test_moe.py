@@ -276,8 +276,8 @@ def test_fused_marlin_moe(
 
         opcheck(torch.ops._moe_C.marlin_gemm_moe,
                 (a, qweight1, sorted_token_ids, topk_weights, topk_ids,
-                 scales1, g_idx1, sort_indices1, workspace, m, 2 * n, k, True,
-                 e, topk, block_size_m, True, False))
+                 scales1, g_idx1, sort_indices1, workspace, quant_type,
+                 m, 2 * n, k, True, e, topk, block_size_m, True, False))
 
 
 @pytest.mark.skip("This test is here for the sake of debugging, "
