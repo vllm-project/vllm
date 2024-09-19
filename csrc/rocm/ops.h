@@ -10,4 +10,5 @@ void paged_attention(torch::Tensor& out, torch::Tensor& exp_sums,
                      torch::Tensor& context_lens, int64_t block_size,
                      int64_t max_context_len,
                      const c10::optional<torch::Tensor>& alibi_slopes,
-                     const std::string& kv_cache_dtype);
+                     const std::string& kv_cache_dtype, double k_scale,
+                     double v_scale);
