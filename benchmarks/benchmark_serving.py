@@ -626,9 +626,9 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
             )
-            input_requests = [(prompt, prompt_len, output_len)
+            input_requests = [(prompt, prompt_len, output_len, None)
                               for prompt, prompt_formatted, prompt_len,
-                              output_len in input_requests]
+                              output_len, _ in input_requests]
         else:
             assert (
                 tokenizer.chat_template or tokenizer.default_chat_template
@@ -641,9 +641,9 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
             )
-            input_requests = [(prompt_formatted, prompt_len, output_len)
+            input_requests = [(prompt_formatted, prompt_len, output_len, None)
                               for prompt, prompt_formatted, prompt_len,
-                              output_len in input_requests]
+                              output_len, _ in input_requests]
 
     elif args.dataset_name == "hf":
         input_requests = sample_hf_requests(
