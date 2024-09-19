@@ -496,12 +496,18 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Compute tokens.
         if inter_data.is_prompt:
             if seq_data.prompt_embeds is None:
-                tokens = seq_data.get_token_ids()[context_len:seq_len]
+                tokens = seq_data.get_token_ids()
+                if context_len != 0 or seq_len < len(tokens):
+                    tokens = tokens[context_len:seq_len]
+
                 input_embeds_mask = torch.zeros(seq_len - context_len,
                                                 dtype=torch.bool)
             else:
                 tokens = [0] * seq_len
-                input_embeds = seq_data.prompt_embeds[context_len:seq_len]
+
+                if context_len != 0 or seq_len < len(seq_data.prompt_embeds):
+                    input_embeds = seq_data.prompt_embeds[context_len:seq_len]
+
                 input_embeds_mask = torch.ones(seq_len - context_len,
                                                dtype=torch.bool)
         else:
@@ -811,20 +817,20 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     max_encoder_seq_len = max(max_encoder_seq_len,
                                               inter_data.encoder_seq_len)
 
-        input_embeds = [
+        input_embeds_lst = [
             inter_data.input_embeds for inter_data in self.inter_data_list
             if inter_data.input_embeds is not None
         ] or None
-        input_embeds_masks = [
+        input_embeds_masks_lst = [
             inter_data.input_embeds_mask for inter_data in self.inter_data_list
             if inter_data.input_embeds_mask is not None
         ] or None
-        if input_embeds:
-            input_embeds = torch.cat(input_embeds).to(
+        if input_embeds_lst:
+            input_embeds = torch.cat(input_embeds_lst).to(
                 device=self.runner.device,
                 dtype=self.runner.model_config.dtype)
-        if input_embeds_masks:
-            input_embeds_masks = torch.cat(input_embeds_masks).to(
+        if input_embeds_masks_lst:
+            input_embeds_masks = torch.cat(input_embeds_masks_lst).to(
                 self.runner.device)
 
         # Mapping from request IDs to sequence IDs. Used for Jamba models
