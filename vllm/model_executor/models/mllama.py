@@ -964,7 +964,7 @@ class MllamaTextModel(nn.Module):
         super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size + 8, config.hidden_size, self.padding_idx)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size + 8, config.hidden_size)
         self.cross_attention_layers = config.cross_attention_layers
 
         layers = []
