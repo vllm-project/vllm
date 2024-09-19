@@ -120,9 +120,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89 or envs.VLLM_TEST_FORCE_FP8_MARLIN
+        self.use_marlin = (not current_platform.has_device_capability(89)
+                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
         # Disable marlin for rocm
         if is_hip():
             self.use_marlin = False
