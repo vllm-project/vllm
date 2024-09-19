@@ -11,15 +11,14 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizers import (BaichuanTokenizer,
-                                                MistralTokenizer,
-                                                LlamaVLTokenizer)
+                                                MistralTokenizer)
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
-                     MistralTokenizer, LlamaVLTokenizer]
+                     MistralTokenizer]
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:

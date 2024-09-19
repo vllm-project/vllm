@@ -23,7 +23,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              GraniteConfig, InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MLPSpeculatorConfig,
                                              MPTConfig, NemotronConfig,
-                                             RWConfig, UltravoxConfig, LlamaVLConfig)
+                                             RWConfig, UltravoxConfig)
 
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
@@ -51,7 +51,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "ultravox": UltravoxConfig,
-    "llamavl": LlamaVLConfig,
     # Granite can be removed from here once we have upgraded to
     # transformers 4.45+
     "granite": GraniteConfig,

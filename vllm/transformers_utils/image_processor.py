@@ -41,10 +41,6 @@ def get_image_processor(
     from transformers.image_processing_utils import BaseImageProcessor
 
     try:
-        print("processor_name", processor_name)
-        if "Vision-Early" in processor_name and "checkpoints" in processor_name:
-            from .multimodal_processors.llamavl import LlamaVLImageProcessor
-            return LlamaVLImageProcessor(processor_name, *args, **kwargs)
         processor = AutoImageProcessor.from_pretrained(
             processor_name,
             *args,
