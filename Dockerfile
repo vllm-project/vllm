@@ -8,7 +8,7 @@
 ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.12
 ENV DEBIAN_FRONTEND=noninteractive
@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo wget numactl gcc g++ libtcmalloc-minimal4 libnuma-dev \
+    && apt-get install -y ccache software-properties-common git curl sudo wget numactl gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
