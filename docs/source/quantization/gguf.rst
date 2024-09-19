@@ -17,7 +17,7 @@ To run a GGUF model with vLLM, you can download and use the local GGUF model fro
 
    $ wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
    $ # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
-   $ vllm serve --model ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0
+   $ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0
 
 .. warning::
 
