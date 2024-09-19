@@ -350,13 +350,14 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
     ${GPU_INCLUDE_DIRECTORIES})
 
-  # TODO: is torch_python_LIBRARY needed?
-  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${torch_python_LIBRARY}
-    ${GPU_LIBRARIES})
+  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
 
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
   if (GPU_LANGUAGE STREQUAL "CUDA")
+    if ("${CUDA_CUDA_LIB}" STREQUAL "")
+      set(CUDA_CUDA_LIB "${CUDA_CUDA_LIBRARY}")
+    endif()
     target_link_libraries(${GPU_MOD_NAME} PRIVATE ${CUDA_CUDA_LIB}
       ${CUDA_LIBRARIES})
   else()
