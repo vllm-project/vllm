@@ -11,6 +11,7 @@ import zmq.asyncio
 from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
+from vllm import PoolingParams
 from vllm.config import DecodingConfig, EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
@@ -19,8 +20,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCGenerateRequest,
-                                         RPCHealthRequest, RPCStartupRequest,
+                                         RPCError, RPCHealthRequest,
+                                         RPCProcessRequest, RPCStartupRequest,
                                          RPCStartupResponse)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
@@ -111,20 +112,8 @@ class MQLLMEngineClient:
 
     @staticmethod
     def is_unsupported_config(engine_args: AsyncEngineArgs):
-        if engine_args.pipeline_parallel_size > 1:
-            return True
-
-        is_embedding = ModelConfig(
-            model=engine_args.model,
-            revision=engine_args.revision,
-            tokenizer=engine_args.model,
-            tokenizer_mode="auto",
-            trust_remote_code=engine_args.trust_remote_code,
-            quantization=engine_args.quantization,
-            seed=0,
-            dtype="auto").embedding_mode
-
-        return is_embedding
+        # Pipeline parallel not yet supported
+        return engine_args.pipeline_parallel_size > 1
 
     @contextmanager
     def get_data_socket(self) -> Iterator[Socket]:
@@ -382,12 +371,9 @@ class MQLLMEngineClient:
 
     @property
     def dead_error(self) -> BaseException:
-        if self._errored_with is not None:
-            return ENGINE_DEAD_ERROR(self._errored_with)
-        else:
-            return ENGINE_DEAD_ERROR()
+        return ENGINE_DEAD_ERROR(self._errored_with)
 
-    async def generate(
+    def generate(
         self,
         inputs: PromptInputs,
         sampling_params: SamplingParams,
@@ -396,6 +382,67 @@ class MQLLMEngineClient:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncGenerator[RequestOutput, None]:
+        """Generate outputs for a request.
+
+        Generate outputs for a request. This method is a coroutine. It adds the
+        request into the waiting queue of the LLMEngine and streams the outputs
+        from the LLMEngine to the caller.
+
+        Args:
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
+                for more details about the format of each input.
+            sampling_params: The sampling parameters of the request.
+            request_id: The unique id of the request.
+            lora_request: LoRA request to use for generation, if any.
+            trace_headers: OpenTelemetry trace headers.
+            prompt_adapter_request: Prompt Adapter request to use
+                                            for generation, if any.
+        """
+        return self._process_request(inputs, sampling_params, request_id,
+                                     lora_request, trace_headers,
+                                     prompt_adapter_request)
+
+    def encode(
+        self,
+        inputs: PromptInputs,
+        pooling_params: PoolingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+        """Generate outputs for a request from an embedding model.
+
+        Generate outputs for a request. This method is a coroutine. It adds the
+        request into the waiting queue of the LLMEngine and streams the outputs
+        from the LLMEngine to the caller.
+
+        Args:
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
+                for more details about the format of each input.
+            pooling_params: The pooling parameters of the request.
+            request_id: The unique id of the request.
+            lora_request: LoRA request to use for generation, if any.
+            trace_headers: OpenTelemetry trace headers.
+
+        Yields:
+            The output `EmbeddingRequestOutput` objects from the LLMEngine
+            for the request.
+        """
+        return self._process_request(inputs, pooling_params, request_id,
+                                     lora_request, trace_headers)
+
+    async def _process_request(
+        self,
+        inputs: PromptInputs,
+        params: Union[SamplingParams, PoolingParams],
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+    ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
+            EmbeddingRequestOutput, None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # If already dead, error out.
@@ -410,19 +457,19 @@ class MQLLMEngineClient:
         try:
             # 2) Detach logits processors so that they can be pickled
             # separately (may require cloudpickle which is slower)
-            if sampling_params.logits_processors:
+            if isinstance(params, SamplingParams) and params.logits_processors:
                 # Defensive shallow copy
-                sampling_params = copy.copy(sampling_params)
-                logits_processors = sampling_params.logits_processors
-                sampling_params.logits_processors = None
+                params = copy.copy(params)
+                logits_processors = params.logits_processors
+                params.logits_processors = None
                 lp_bytes = cloudpickle.dumps(logits_processors)
             else:
                 lp_bytes = None
 
             request_bytes = pickle.dumps(
-                RPCGenerateRequest(
+                RPCProcessRequest(
                     inputs=inputs,
-                    sampling_params=sampling_params,
+                    params=params,
                     request_id=request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
@@ -452,8 +499,3 @@ class MQLLMEngineClient:
                     await self.abort(request_id)
         finally:
             self.output_queues.pop(request_id)
-
-    async def encode(self, *args,
-                     **kwargs) -> AsyncGenerator[EmbeddingRequestOutput, None]:
-        raise NotImplementedError(
-            "Embeddings not supported with multiprocessing backend")
