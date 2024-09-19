@@ -190,12 +190,10 @@ class InputRegistry:
             .get(model_cls, self._default_dummy_data_factory)
         mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
 
-        # Check to see if this model expects additional processor kwargs;
-        # even though the processor isn't used on the dummy data, values
-        # passed to it that override the config may have implications on
-        # the number dummy data, e.g., the number of image tokens per instance.
-        processor_kwargs = self._get_dummy_factory_processor_kwargs(
-            model_config, dummy_factory)
+        processor_kwargs = get_allowed_kwarg_only_overrides(
+            callable=dummy_factory,
+            overrides=model_config.processor_kwargs
+        )
 
         seq_data, mm_data = dummy_factory(InputContext(model_config), seq_len,
                                           _MultiModalCounts(mm_counts),
@@ -217,18 +215,6 @@ class InputRegistry:
 
         return seq_data, mm_data
 
-    def _get_dummy_factory_processor_kwargs(
-            self, model_config: "ModelConfig",
-            dummy_factory: Callable) -> Dict[str, Any]:
-        # Dummy factory takes no additional kwargs; presumably this means that
-        # image processor kwargs have either not been implemented, or they have
-        # no affect on the token counts.
-        if len(inspect.signature(dummy_factory).parameters) < 4:
-            return {}
-        # Otherwise we may have overrides; filter them in the
-        # same way we filter the input processor overrides
-        return get_allowed_kwarg_only_overrides(
-            callable=dummy_factory, overrides=model_config.processor_kwargs)
 
     def _default_input_processor(self, ctx: InputContext,
                                  inputs: LLMInputs) -> LLMInputs:
