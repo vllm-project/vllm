@@ -33,7 +33,6 @@ from .clip import (CLIPVisionModel, dummy_seq_data_for_clip,
                    dummy_video_for_clip, get_clip_image_feature_size,
                    get_clip_patch_grid_length, input_processor_for_clip)
 from .interfaces import SupportsMultiModal
-from .llava_next import _get_llava_next_num_unpadded_features
 from .siglip import (SiglipVisionModel, dummy_seq_data_for_siglip,
                      dummy_video_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
@@ -98,6 +97,35 @@ LlavaOnevisionMultiInputs = Union[LlavaOnevisionImageInputs,
                                   LlavaOnevisionVideoPixelInputs]
 
 
+def _get_llava_onevision_image_unppaded_feature_size(height, width, patches,
+                                                     scale_height,
+                                                     scale_width):
+    current_height = patches * scale_height
+    current_width = patches * scale_width
+
+    original_aspect_ratio = width / height
+    current_aspect_ratio = current_width / current_height
+    if original_aspect_ratio > current_aspect_ratio:
+        new_height = int(height * (current_width / width))
+        padding = (current_height - new_height) // 2
+        current_height -= padding * 2
+    else:
+        new_width = int(width * (current_height / height))
+        padding = (current_width - new_width) // 2
+        current_width -= padding * 2
+
+    unpadded_features = current_height * current_width
+    newline_features = current_height
+
+    ratio = math.sqrt(current_height * current_width / (9 * patches**2))
+    if ratio > 1.1:
+        unpadded_features = int(current_height // ratio) * int(
+            current_width // ratio)
+        newline_features = int(current_height // ratio)
+
+    return (unpadded_features, newline_features)
+
+
 def get_llava_onevision_image_feature_size(
     hf_config: LlavaOnevisionConfig,
     *,
@@ -139,9 +167,9 @@ def get_llava_onevision_image_feature_size(
     (
         unpadded_feature_size,
         newline_feature_size,
-    ) = _get_llava_next_num_unpadded_features(input_height, input_width,
-                                              num_patches, num_patch_height,
-                                              num_patch_width)
+    ) = _get_llava_onevision_image_unppaded_feature_size(
+        input_height, input_width, num_patches, num_patch_height,
+        num_patch_width)
 
     return unpadded_feature_size + newline_feature_size + base_feature_size
 
