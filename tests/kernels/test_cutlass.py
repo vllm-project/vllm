@@ -15,6 +15,9 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 
+capability = current_platform.get_device_capability()
+capability = capability[0] * 10 + capability[1]
+
 
 def to_fp8(tensor: torch.Tensor):
     finfo = torch.finfo(torch.float8_e4m3fn)
