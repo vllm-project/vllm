@@ -4,6 +4,7 @@ import contextlib
 import datetime
 import enum
 import gc
+import inspect
 import os
 import random
 import socket
@@ -1235,6 +1236,55 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+def get_allowed_kwarg_only_overrides(
+    callable: Callable,
+    overrides: Optional[Dict[str, Any]],
+    immutable_kwargs: Optional[Tuple[str, ...]],
+) -> Dict[str, Any]:
+    """
+    Given a callable processor, determine which kwarg overrides provided
+    via the model config are valid keyword arguments, and drop any that
+    are not.
+
+    Args:
+        processor: Callable processor which takes 0 or more kwargs.
+        model_config: Config which may contain init time processor kwargs.
+        immutable_kwargs: Reserved kwarg keys that can't be overridden.
+
+    Returns:
+        Dictionary containing the processor kwargs to be wrapped when
+        creating the callable processor partial.
+    """
+    if not isinstance(overrides, dict):
+        return {}
+
+    if immutable_kwargs:
+        for name in immutable_kwargs:
+            if name in overrides:
+                logger.warning(
+                    "%s is a reserved kwarg and will be dropped "
+                    "from the input processor overrides", name)
+                del overrides[name]
+
+    allowed_kwargs = list(inspect.signature(callable).parameters.keys())
+    # Drop any processor_kwargs provided by the user that are
+    # not kwarg names accepted by the provided input processor.
+    filtered_overrides = {
+        kwarg_name: val
+        for kwarg_name, val in overrides.items()
+        if kwarg_name in allowed_kwargs
+    }
+
+    # If anything is dropped, log a warning
+    dropped_keys = set(overrides) - set(filtered_overrides)
+    if dropped_keys:
+        logger.warning(
+            "The following kwarg overrides are not implemented "
+            "by the input processor and will be dropped: %s", dropped_keys)
+
+    return filtered_overrides
 
 
 # Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.

@@ -13,9 +13,9 @@ from typing_extensions import TypeAlias
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
-from vllm.inputs.registry import get_allowed_kwarg_overrides
 from vllm.logger import init_logger
-from vllm.utils import JSONTree, is_list_of, json_map_leaves
+from vllm.utils import (JSONTree, get_allowed_kwarg_only_overrides, is_list_of,
+                        json_map_leaves)
 
 logger = init_logger(__name__)
 
@@ -334,10 +334,10 @@ class MultiModalPlugin(ABC):
                            f"for model class {model_cls.__name__} in {self}.")
 
         if callable(max_mm_tokens):
-            processor_kwargs = get_allowed_kwarg_overrides(
+            processor_kwargs = get_allowed_kwarg_only_overrides(
                 callable=max_mm_tokens,
                 overrides=model_config.processor_kwargs,
-                immutable_kwargs=("ctx",))
+                immutable_kwargs=("ctx", ))
             max_mm_tokens = max_mm_tokens(InputContext(model_config),
                                           **processor_kwargs)
 
