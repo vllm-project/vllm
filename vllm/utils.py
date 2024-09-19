@@ -934,16 +934,16 @@ class _SequenceLike(Protocol):
 _S = TypeVar("_S", bound=_SequenceLike)
 
 
-def maybe_slice(lst: _S, start: int, stop: int) -> _S:
+def maybe_slice(seq: _S, start: int, stop: int) -> _S:
     """
     Slice a sequence, returning the original one where possible.
 
     This avoids unnecessary copying of the sequence.
     """
-    if start != 0 or stop < len(lst):
-        return lst[start:stop]
+    if start != 0 or stop < len(seq):
+        return seq[start:stop]
 
-    return lst
+    return seq
 
 
 def init_cached_hf_modules() -> None:
