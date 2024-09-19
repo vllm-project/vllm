@@ -191,7 +191,6 @@ async def run_vllm_async(
         use_v2_block_manager=use_v2_block_manager,
         disable_async_output_proc=disable_async_output_proc,
         worker_use_ray=False,
-        engine_use_ray=False,
         disable_log_requests=True,
     )
 
