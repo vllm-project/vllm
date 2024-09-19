@@ -601,9 +601,12 @@ class AsyncLLMEngine:
         return self._errored_with is not None
 
     @property
-    def limit_concurrency(self) -> Optional[int]:
-        """Maximum number of concurrently running requests."""
-        return None
+    def dead_error(self) -> BaseException:
+        return AsyncEngineDeadError(
+            "Background loop is not running. If it was running, "
+            "inspect the output to find the stacktrace of the "
+            "error that caused the background loop to stop "
+            "(AsyncEngineDeadError).")
 
     def set_errored(self, exc: Exception) -> None:
         self._errored_with = exc
@@ -1042,7 +1045,7 @@ class AsyncLLMEngine:
     async def start_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes
-        if type(self.engine.model_executor) == GPUExecutorAsync:
+        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
             self.engine.model_executor.start_profile()
         else:
             self.engine.model_executor._run_workers("start_profile")
@@ -1050,7 +1053,7 @@ class AsyncLLMEngine:
     async def stop_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes
-        if type(self.engine.model_executor) == GPUExecutorAsync:
+        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
