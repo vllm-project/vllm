@@ -45,7 +45,7 @@ def get_max_speech_tokens(ctx: InputContext):
 @MULTIMODAL_REGISTRY.register_speech_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_ttsllm)
 @MULTIMODAL_REGISTRY.register_max_speech_tokens(get_max_speech_tokens)
-class ChatTtsLlm(nn.Module):
+class FishTtsLlm(nn.Module):
     def __init__(self,
                  config: LlamaConfig,
                  cache_config: Optional[CacheConfig] = None,
@@ -72,7 +72,6 @@ class ChatTtsLlm(nn.Module):
         ])
         self.logits_processor = LogitsProcessor(self.num_audio_tokens)
         self.sampler = MultiheadSampler()
-        # self.samplers = [Sampler(head_idx) for head_idx in range(self.num_output_head)]
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -149,12 +148,6 @@ class ChatTtsLlm(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        # head_logits = logits.permute(1, 0, 2)
-        # next_tokens = self.samplers[0](head_logits[0], sampling_metadata)
-        # for i in range(self.num_output_head - 1):
-        #     output = self.samplers[i](head_logits[i + 1], sampling_metadata)
-        #     self.merge_sample_results(next_tokens, output)
-
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
@@ -173,8 +166,6 @@ class ChatTtsLlm(nn.Module):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.get_input_embeddings(input_ids, is_prompt)
-            # spk_emb = kwargs.get("speech", None)
-            # self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
         model_output = self.gpt(
             input_ids=input_ids,
             inputs_embeds=hidden_states,
