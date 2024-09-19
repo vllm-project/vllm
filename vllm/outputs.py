@@ -128,7 +128,7 @@ class RequestOutput:
 
         # Init cache (if needed)
         if use_cache and seq_group.cached_request_output is None:
-            seq_group.cached_request_output = RequestOutput(
+            seq_group.cached_request_output = RequestOutput(  # type: ignore
                 request_id="",
                 prompt=None,
                 prompt_token_ids=[],
@@ -181,7 +181,7 @@ class RequestOutput:
 
             if use_cache:
                 # Get cached output object
-                cached_outputs = seq_group.cached_request_output.outputs
+                cached_outputs = seq_group.cached_request_output.outputs  # type: ignore
                 if i >= len(cached_outputs):
                     cached_outputs.append(
                         CompletionOutput(index=i,
@@ -212,7 +212,8 @@ class RequestOutput:
 
             else:
                 output = CompletionOutput(
-                    seqs.index(seq), output_text, output_token_ids,
+                    seqs.index(seq), output_text, [output_token_ids]
+                    if isinstance(output_token_ids, int) else output_token_ids,
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
                     SequenceStatus.get_finished_reason(seq.status),

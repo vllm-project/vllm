@@ -502,7 +502,7 @@ class Sequence:
         return ""
 
     def get_output_token_ids_to_return(
-            self, delta: bool) -> GenericSequence[int] | int:
+            self, delta: bool) -> Union[GenericSequence[int], int]:
         """If delta is True, only new tokens since the last call to
         this method are returned"""
         if not delta:

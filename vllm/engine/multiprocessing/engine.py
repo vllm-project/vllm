@@ -67,7 +67,7 @@ class MQLLMEngine:
                  log_requests: bool = True,
                  **kwargs) -> None:
         # For MQLLMEngine, we can use cached outputs, since each new request
-        # output is immediately pickled and send over the socket, which frees 
+        # output is immediately pickled and send over the socket, which frees
         # the python object to be reused again.
         use_cached_outputs = True
 

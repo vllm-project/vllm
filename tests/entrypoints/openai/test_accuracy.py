@@ -19,20 +19,11 @@ FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.58
 DEFAULT_ARGS = ["--max-model-len", "4096", "--disable-log-requests"]
-# MORE_ARGS_LIST = [["--enable-chunked-prefill"], ["--num-scheduler-steps", "8"]]
+# MORE_ARGS_LIST = [["--enable-chunked
+# -prefill"], ["--num-scheduler-steps", "8"]]
 MORE_ARGS_LIST = [[
     "--num-scheduler-steps", "8", "--multi-step-stream-outputs"
 ]]
-
-# @pytest.fixture(scope="module")
-# def server():
-#     args = [
-#         "--max-model-len", "4096", "--enable-chunked-prefill",
-#         "--disable-log-requests", "--enforce-eager"
-#     ]
-
-#     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-#         yield remote_server
 
 
 @pytest.mark.parametrize("more_args", MORE_ARGS_LIST)

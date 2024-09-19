@@ -488,7 +488,7 @@ class MQLLMEngineClient:
 
                     if isinstance(request_output, BaseException):
                         raise request_output
-                    
+
                     finished = request_output.finished
                     yield request_output
             finally:

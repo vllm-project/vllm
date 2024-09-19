@@ -95,8 +95,7 @@ class OutputData(NamedTuple):
 
 class SchedulerContext:
 
-    def __init__(self,
-                 multi_step_stream_outputs: bool = False):
+    def __init__(self, multi_step_stream_outputs: bool = False):
         self.output_queue: Deque[OutputData] = deque()
         self.request_outputs: List[Union[RequestOutput,
                                          EmbeddingRequestOutput]] = []
@@ -117,10 +116,6 @@ class SchedulerContext:
                        is_async=is_async,
                        is_last_step=is_last_step,
                        skip=[]))
-
-    # TODO: Remove
-    # use_request_output_cache: bool = True
-    # request_output_cache: PyObjectCache = PyObjectCache(request_output_builder)
 
 
 class LLMEngine:
