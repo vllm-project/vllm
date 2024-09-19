@@ -184,6 +184,10 @@ class cmake_build_ext(build_ext):
         # match.
         cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
 
+        # Pass the python path to cmake so it can reuse the build dependencies
+        # on subsequent calls to python.
+        cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
+
         #
         # Setup parallelism and build tool
         #
@@ -279,7 +283,7 @@ def _build_custom_ops() -> bool:
 
 
 def _build_core_ext() -> bool:
-    return not _is_neuron() and not _is_tpu() and not _is_openvino()
+    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu())
 
 
 def get_hipcc_rocm_version():
@@ -358,7 +362,8 @@ def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "version.py"))
 
     if _no_device():
-        version += "+empty"
+        if envs.VLLM_TARGET_DEVICE == "empty":
+            version += "+empty"
     elif _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
@@ -497,6 +502,7 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "audio": ["librosa", "soundfile"]  # Required for audio processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
     package_data=package_data,

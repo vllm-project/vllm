@@ -1,3 +1,4 @@
+from array import array
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import torch
@@ -11,16 +12,19 @@ from vllm.config import CacheConfig, LoRAConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.multi_head_sampler import MultiheadSampler
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.speech import SpeechPlugin
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors
 
+from einops import rearrange
+from transformers.generation import TopKLogitsWarper, TopPLogitsWarper
 
 import lzma
 import numpy as np
@@ -30,7 +34,7 @@ def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int, mm_counts: Mapping[st
     from vllm.sequence import SequenceData
 
 
-    dummy_seq_data = SequenceData([[0] * ctx.model_config.hf_config.num_output_head] * seq_len)
+    dummy_seq_data = SequenceData([0] * seq_len)
     dummy_multi_modal_data = {"audio": SpeechPlugin.sample_random_speaker()}
 
     return dummy_seq_data, dummy_multi_modal_data
@@ -48,23 +52,27 @@ class ChatTtsLlm(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         
+        self.config = config
+        
         # static parameters, put them in config later
         self.num_audio_tokens = config.num_audio_tokens
         self.num_text_tokens = config.num_text_tokens
         self.num_output_head = config.num_output_head
-        self.spk_emb_token_id = 21143
+        self.audio_start_token_id = config.audio_start_token_id
 
         self.gpt = LlamaModel(config)
         self.model_dim = self.gpt.config.hidden_size
-        self.emb_all = nn.ModuleList([
-            VocabParallelEmbedding(self.num_audio_tokens + self.num_text_tokens, self.model_dim) for _ in range(self.num_output_head)
+        self.emb_text = VocabParallelEmbedding(self.num_text_tokens, self.model_dim) 
+        self.emb_code = nn.ModuleList([
+            VocabParallelEmbedding(self.num_audio_tokens, self.model_dim) for _ in range(self.num_output_head)
         ])
         
         self.lm_head = nn.ModuleList([
             nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_output_head)
         ])
         self.logits_processor = LogitsProcessor(self.num_audio_tokens)
-        self.sampler = Sampler()
+        self.sampler = MultiheadSampler()
+        # self.samplers = [Sampler(head_idx) for head_idx in range(self.num_output_head)]
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -72,9 +80,18 @@ class ChatTtsLlm(nn.Module):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
+            # (".gate_up_proj", ".gate_proj", 0),
+            # (".gate_up_proj", ".up_proj", 1),
         ]
+        
+        if getattr(self.config, "use_fused_mlp", True):
+            stacked_params_mapping.extend(
+                [
+                    (".gate_up_proj", ".gate_proj", 0),
+                    (".gate_up_proj", ".up_proj", 1)
+                ]
+            )
+        
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -97,12 +114,25 @@ class ChatTtsLlm(nn.Module):
                 except KeyError:
                     pass
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        code_emb = [
-            self.emb_all[i](input_ids[:,i])
-            for i in range(self.num_output_head)
-        ]
-        emb = torch.stack(code_emb, 2).sum(2)
+    def get_input_embeddings(self, input_ids: torch.Tensor, is_prompt: bool) -> torch.Tensor:
+        if is_prompt:
+            emb = self.emb_text(input_ids)
+            audio_start = torch.tensor([1024, 1024], device=input_ids.device)
+            code_emb = [
+                self.emb_code[i](audio_start[i])
+                for i in range(self.num_output_head)
+            ]
+            start_token = torch.stack(code_emb, 1).sum(1).to(emb.dtype)
+
+            # find the index of the speaker token
+            indices = (input_ids == self.audio_start_token_id).nonzero(as_tuple=True)
+            if indices[0].size(0) != 0:
+                emb.index_put_(indices, start_token)
+        else:
+            code_emb = [
+                self.emb_code[i](input_ids[:,i]) for i in range(self.num_output_head)
+            ]
+            emb = torch.stack(code_emb, 2).sum(2)
         return emb
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -119,21 +149,13 @@ class ChatTtsLlm(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        head_logits = logits.permute(1, 0, 2)
-        next_tokens = self.sampler(head_logits[0], sampling_metadata)
-        for i in range(self.num_output_head - 1):
-            output = self.sampler(head_logits[i + 1], sampling_metadata)
-            self.merge_sample_results(next_tokens, output)
+        # head_logits = logits.permute(1, 0, 2)
+        # next_tokens = self.samplers[0](head_logits[0], sampling_metadata)
+        # for i in range(self.num_output_head - 1):
+        #     output = self.samplers[i](head_logits[i + 1], sampling_metadata)
+        #     self.merge_sample_results(next_tokens, output)
 
-        for output in next_tokens.outputs:
-            for sample in output.samples:
-                sample.output_token += self.num_text_tokens
-                for i in range(self.num_output_head):
-                    sample.output_tokens[i] += self.num_text_tokens
-                dic = {}
-                for k,v in sample.logprobs.items():
-                    dic[k + self.num_text_tokens] = v
-                sample.logprobs = dic
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def forward(
@@ -144,12 +166,15 @@ class ChatTtsLlm(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        is_prompt: bool = False,
         **kwargs: object
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.get_input_embeddings(input_ids)
-        spk_emb = kwargs.get("speech", None)
-        if spk_emb is not None:
-            self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.get_input_embeddings(input_ids, is_prompt)
+            # spk_emb = kwargs.get("speech", None)
+            # self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
         model_output = self.gpt(
             input_ids=input_ids,
             inputs_embeds=hidden_states,
@@ -167,15 +192,18 @@ class ChatTtsLlm(nn.Module):
         attn_metadata: AttentionMetadata,
         input_ids: torch.Tensor,
     ):
-        assert emb.size(1) == spk_emb.size(1)
-        assert attn_metadata.seq_lens_tensor.size(0) == spk_emb.size(0)
-        # convert spk_emb to the same dtype as emb
-        spk_emb = spk_emb.to(emb.dtype)
+        audio_start = torch.tensor([1024, 1024], device=input_ids.device)
+        code_emb = [
+            self.emb_code[i](audio_start[i])
+            for i in range(self.num_output_head)
+        ]
+        start_token = torch.stack(code_emb, 1).sum(1).to(emb.dtype)
+
         # find the index of the speaker token
-        indices = (input_ids[:,0] == self.spk_emb_token_id).nonzero(as_tuple=True)
+        indices = (input_ids == self.audio_start_token_id).nonzero(as_tuple=True)
         if indices[0].size(0) == 0:
             return
-        emb.index_put_(indices, spk_emb)
+        emb.index_put_(indices, start_token)
 
     def merge_sample_results(
         self,
@@ -185,3 +213,4 @@ class ChatTtsLlm(nn.Module):
         for o_a, o_b in zip(source.outputs, target.outputs):
             for s_a, s_b in zip(o_a.samples, o_b.samples):
                 s_a.output_tokens.append(s_b.output_token)
+    
