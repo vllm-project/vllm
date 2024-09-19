@@ -904,6 +904,9 @@ class CachingRequest(OpenAIBaseModel):
     description: Optional[str] = None
     metadata: Optional[List[Dict[str, str]]] = None
 
+    # Redundant fields for compatibility
+    max_tokens: Optional[int] = None
+
 
 class CachingResponse(OpenAIBaseModel):
     id: str
@@ -912,4 +915,4 @@ class CachingResponse(OpenAIBaseModel):
     created_at: float
     expired_at: float
     tokens: int
-    error: Dict[str, str]
+    error: Optional[Dict[str, str]] = None

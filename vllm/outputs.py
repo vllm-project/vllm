@@ -289,6 +289,9 @@ class CachingRequestOutput:
         self.error = error
         self.object = object
 
+        # for compatability
+        self.finished = status in ["ready", "error", "inactive"]
+
     @classmethod
     def from_seq_group(cls,
                        seq_group: 'SequenceGroup') -> "CachingRequestOutput":

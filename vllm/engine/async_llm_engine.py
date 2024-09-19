@@ -20,7 +20,7 @@ from vllm.inputs import LLMInputs, PromptInputs, TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput, CachingRequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -148,7 +148,8 @@ class RequestTracker:
 
     def process_request_output(self,
                                request_output: Union[RequestOutput,
-                                                     EmbeddingRequestOutput],
+                                                     EmbeddingRequestOutput,
+                                                     CachingRequestOutput],
                                *,
                                verbose: bool = False) -> None:
         """Process a request output from the engine."""
@@ -875,7 +876,7 @@ class AsyncLLMEngine:
     async def caching(self, inputs: PromptInputs, request_id: str,
                       expired_at: Optional[float],
                       ttl: Optional[float]) -> RequestOutput:
-        assert isinstance(inputs, TokensPrompt)
+        # assert isinstance(inputs, TokensPrompt)
         async for output in self._process_request(
                 request_id, inputs,
                 CachingParams(expired_at=expired_at, ttl=ttl)):

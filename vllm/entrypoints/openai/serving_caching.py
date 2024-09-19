@@ -66,12 +66,12 @@ class OpenAIServingCaching(OpenAIServing):
 
         try:
             model_config = self.model_config
-            tokenizer = await self.async_engine_client.get_tokenizer()
+            tokenizer = await self.async_engine_client.get_tokenizer(None)
 
             conversation, mm_futures = parse_chat_messages(
                 request.messages, model_config, tokenizer)
 
-            if mm_futures is not None:  # TODO
+            if len(mm_futures) > 0:  # TODO
                 raise NotImplementedError(
                     "Context caching with mm is not supported")
 
@@ -116,8 +116,8 @@ class OpenAIServingCaching(OpenAIServing):
             response = await self.async_engine_client.caching(
                 inputs=engine_inputs,
                 request_id=request_id,
-                expired_at=CachingRequest.expired_at,
-                ttl=CachingRequest.ttl)
+                expired_at=request.expired_at,
+                ttl=request.ttl)
 
             return CachingResponse(id=response.id,
                                    status=response.status,
