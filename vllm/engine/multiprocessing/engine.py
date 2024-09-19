@@ -20,6 +20,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCError, RPCProcessRequest,
                                          RPCStartupRequest, RPCStartupResponse)
 # yapf: enable
+from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -30,7 +31,6 @@ CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
-HEARTBEAT_INTERVAL_MS = 1000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
@@ -99,6 +99,9 @@ class MQLLMEngine:
         # Heartbeat thread
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop)
         self._heartbeat_stop_event = threading.Event()
+        # The heartbeat needs to be faster than what the client will wait for
+        # The VLLM_RPC_TIMEOUT duration is in ms, and we need one in seconds
+        self.heartbeat_interval_seconds = VLLM_RPC_TIMEOUT / 3000.0
 
         self._last_alive_time = time.time()
 
@@ -286,8 +289,8 @@ class MQLLMEngine:
 
     def _heartbeat_loop(self):
         while not self._heartbeat_stop_event.wait(
-                timeout=HEARTBEAT_INTERVAL_MS):
-            # Loops every `HEARTBEAT_INTERVAL_MS` until the stop event is set
+                timeout=self.heartbeat_interval_seconds):
+            # Loops until the stop event is set
             self._heartbeat()
 
         logger.debug("Exiting MQLLMEngine heartbeat thread")

@@ -123,7 +123,7 @@ class MQLLMEngineClient:
         finally:
             socket.close(linger=0)
 
-    async def run_check_health_loop(self, timeout: int):
+    async def run_heartbeat_loop(self, timeout: int):
         """Background loop that continually listens to the RPCServer for
         heartbeats.
         """
@@ -141,10 +141,10 @@ class MQLLMEngineClient:
                 else:
                     # Heartbeat received- check the message
                     await self._check_success(
-                        error_message="Health check failed.",
+                        error_message="Heartbeat failed.",
                         socket=self.heartbeat_socket)
 
-                logger.debug("Health probe successful.")
+                logger.debug("Heartbeat successful.")
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient check health loop.")
@@ -227,7 +227,7 @@ class MQLLMEngineClient:
 
             # Start health_loop.
             self.health_loop = asyncio.create_task(
-                self.run_check_health_loop(timeout=VLLM_RPC_TIMEOUT))
+                self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
 
     def close(self):
         """Destroy the ZeroMQ Context."""
