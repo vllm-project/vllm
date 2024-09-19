@@ -49,6 +49,7 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
@@ -693,9 +694,10 @@ def dummy_data_for_qwen2_vl(
     dummy_image = Image.new("RGB", (max_resized_width, max_resized_height),
                             color=0)
 
-    return dummy_seqdata, {
-        "image": dummy_image if num_images == 1 else [dummy_image] * num_images
-    }, None
+    return DummyData(dummy_seqdata, {
+        "image":
+        dummy_image if num_images == 1 else [dummy_image] * num_images
+    })
 
 
 def _get_llm_num_vision_tokens(

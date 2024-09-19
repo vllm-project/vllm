@@ -10,6 +10,7 @@ from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionConfig,
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -457,7 +458,7 @@ def dummy_data_for_blip2(ctx: InputContext, seq_len: int,
     if isinstance(vision_config, Blip2VisionConfig):
         mm_data = dummy_image_for_blip(vision_config, num_images)
 
-        return seq_data, mm_data, ranges
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)

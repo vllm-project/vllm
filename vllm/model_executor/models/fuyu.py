@@ -28,6 +28,7 @@ from transformers import FuyuConfig, FuyuImageProcessor
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -131,7 +132,7 @@ def dummy_data_for_fuyu(ctx: InputContext, seq_len: int,
     mm_data = dummy_image_for_fuyu(num_images,
                                    image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
                                    image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT)
-    return seq_data, mm_data, ranges
+    return DummyData(seq_data, mm_data, ranges)
 
 
 def _fuyu_image_preprocess(image_processor: FuyuImageProcessor,

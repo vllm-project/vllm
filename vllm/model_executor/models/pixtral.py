@@ -15,6 +15,7 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -71,7 +72,13 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
 
     seq_data = SequenceData(token_ids)
     mm_data = {"image": num_images * [image]}
-    return seq_data, mm_data, None
+    mm_placeholders = {
+        "image": [{
+            "offset": i,
+            "length": image_feature_size
+        } for i in range(num_images)]
+    }
+    return DummyData(seq_data, mm_data, mm_placeholders)
 
 
 def input_mapper_for_pixtral(ctx: InputContext,

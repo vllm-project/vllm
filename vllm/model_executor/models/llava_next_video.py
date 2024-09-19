@@ -12,6 +12,7 @@ from transformers import (CLIPVisionConfig, LlavaNextVideoConfig,
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization.base_config import (
@@ -124,7 +125,7 @@ def dummy_data_for_llava_next_video(ctx: InputContext, seq_len: int,
         np_frame = np.array(pil_frame["image"])
         mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
         mm_data = {"video": mm_data_per_video}
-        return seq_data, mm_data, ranges
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, SiglipVisionConfig):
         seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
@@ -139,7 +140,7 @@ def dummy_data_for_llava_next_video(ctx: InputContext, seq_len: int,
         np_frame = np.array(pil_frame["image"])
         mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
         mm_data = {"video": mm_data_per_video}
-        return seq_data, mm_data, ranges
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)

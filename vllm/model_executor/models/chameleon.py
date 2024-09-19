@@ -13,6 +13,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -112,7 +113,7 @@ def dummy_data_for_chameleon(ctx: InputContext, seq_len: int,
     )
 
     mm_data = dummy_image_for_chameleon(num_images)
-    return seq_data, mm_data, ranges
+    return DummyData(seq_data, mm_data, ranges)
 
 
 def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):

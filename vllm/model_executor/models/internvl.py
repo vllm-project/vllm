@@ -19,6 +19,7 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -324,7 +325,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int,
         image_height_override=max_image_height,
     )
 
-    return seq_data, mm_data, ranges
+    return DummyData(seq_data, mm_data, ranges)
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_internvl)

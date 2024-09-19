@@ -28,6 +28,7 @@ from transformers import CLIPVisionConfig, PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -376,7 +377,7 @@ def dummy_data_for_phi3v(ctx: InputContext, seq_len: int,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
 
-    return seq_data, mm_data, ranges
+    return DummyData(seq_data, mm_data, ranges)
 
 
 # Reserve this function to also handle placeholders for additional images

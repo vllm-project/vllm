@@ -297,25 +297,26 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, _ = self.input_registry \
+            dummy_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
                                           self.mm_registry)
 
             # Having more tokens is over-conservative but otherwise fine
-            assert len(seq_data.prompt_token_ids) >= seq_len, (
+            assert len(dummy_data.seq_data.prompt_token_ids) >= seq_len, (
                 f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(seq_data.prompt_token_ids)}")
+                f"but got: {len(dummy_data.seq_data.prompt_token_ids)}")
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: seq_data},
+                seq_data={group_id: dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                encoder_seq_data=seq_data,
+                encoder_seq_data=dummy_data.seq_data,
                 cross_block_table=None,
-            )
+                multi_modal_data=dummy_data.multi_modal_data,
+                multi_modal_placeholders=dummy_data.multi_modal_placeholders)
             seqs.append(seq)
 
         # Run the model with the dummy inputs.

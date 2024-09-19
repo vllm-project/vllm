@@ -13,6 +13,7 @@ from typing_extensions import NotRequired
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -185,7 +186,7 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
             image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         )
 
-        return seq_data, mm_data, ranges
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, SiglipVisionConfig):
         seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
@@ -202,7 +203,7 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
             image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         )
 
-        return seq_data, mm_data, ranges
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)

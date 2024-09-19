@@ -20,7 +20,7 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY
 from vllm.inputs.data import LLMInputs
-from vllm.inputs.registry import InputContext
+from vllm.inputs.registry import DummyData, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -103,8 +103,8 @@ def dummy_data_for_ultravox(
         } for i in range(audio_count)]
     }
 
-    return (SequenceData(audio_token_ids + other_token_ids), mm_dict,
-            mm_placeholders)
+    return DummyData(SequenceData(audio_token_ids + other_token_ids), mm_dict,
+                     mm_placeholders)
 
 
 def input_mapper_for_ultravox(ctx: InputContext, data: object):

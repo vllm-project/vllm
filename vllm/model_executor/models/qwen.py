@@ -24,6 +24,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -850,7 +851,8 @@ def dummy_data_for_qwen(
     # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
     mm_data = {"image": image if num_images == 1 else [image] * num_images}
-    return SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, toks)), mm_data, None
+    return DummyData(SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, toks)),
+                     mm_data)
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)

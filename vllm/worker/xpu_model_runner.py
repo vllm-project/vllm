@@ -468,7 +468,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, dummy_multi_modal_data = self.input_registry \
+            dummy_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
                                           self.mm_registry)
@@ -476,12 +476,12 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: seq_data},
+                seq_data={group_id: dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
                 lora_request=None,
-                multi_modal_data=dummy_multi_modal_data,
-            )
+                multi_modal_data=dummy_data.multi_modal_data,
+                multi_modal_placeholders=dummy_data.multi_modal_placeholders)
             seqs.append(seq)
 
         # Run the model with the dummy inputs.
