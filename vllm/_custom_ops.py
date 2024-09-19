@@ -201,7 +201,8 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    ops = torch.ops._C_cpu if input.device.type == "cpu" else torch.ops._C
+    ops.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
 def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
