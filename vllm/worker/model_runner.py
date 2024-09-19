@@ -1720,7 +1720,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         is_prefill_run = prefill_meta is not None
 
         return all([
-            dist_kv.IS_KV_DECODE_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE,
+            dist_kv.IS_KV_CONSUMER,
             not is_profile_run,
             is_prefill_run, 
         ])
@@ -1741,7 +1741,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         is_prefill_run = prefill_meta is not None
 
         return all([
-            dist_kv.IS_KV_PREFILL_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE,
+            dist_kv.IS_KV_PRODUCER,
             not is_profile_run,
             is_prefill_run
         ])
