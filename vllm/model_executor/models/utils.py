@@ -1,5 +1,5 @@
-from typing import (Dict, Iterable, List, Literal, Optional, Protocol, Tuple,
-                    Union, overload)
+from typing import (Callable, Dict, Iterable, List, Literal, Optional, Protocol,
+                    Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -284,12 +284,14 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
 
 def get_inputs_embeds(
     input_ids: torch.Tensor,
-    embeddings_module: torch.nn.Module,
+    embeddings_module: Callable[[torch.Tensor], torch.Tensor],
     inputs_embeds: Optional[torch.Tensor] = None,
     inputs_embeds_masks: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Get the input embeddings from either `input_ids` and `inputs_embeds`."""
     if inputs_embeds is not None:
+        assert inputs_embeds_masks is not None
+
         if inputs_embeds_masks.all().item():
             hidden_states = inputs_embeds
         else:
@@ -297,6 +299,7 @@ def get_inputs_embeds(
             hidden_states[inputs_embeds_masks] = inputs_embeds
     else:
         hidden_states = embeddings_module(input_ids)
+
     return hidden_states
 
 
