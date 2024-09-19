@@ -435,18 +435,18 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_input_tokens_tensor = self._empty_long_tensor()
             encoder_input_positions_tensor = self._empty_long_tensor()
             cross_slot_mapping_tensor = self._empty_long_tensor()
-
             # Extract cross-attention block tables &
             # seq len from each sequence group metadata.
             # Cross-attention block tables are empty
             # during vLLM memory profiling.
             cross_block_tables = []
             for seq_group_metadata in seq_group_metadata_list:
-                encoder_seq_lens.append(
-                    seq_group_metadata.encoder_seq_data.get_len())
-                cross_block_table = seq_group_metadata.cross_block_table
-                cross_block_tables.append([] if (
-                    cross_block_table is None) else cross_block_table)
+                for _ in range(len(seq_group_metadata.seq_data)):
+                    encoder_seq_lens.append(
+                        seq_group_metadata.encoder_seq_data.get_len())
+                    cross_block_table = seq_group_metadata.cross_block_table
+                    cross_block_tables.append([] if (
+                        cross_block_table is None) else cross_block_table)
 
             if (model_input.attn_metadata is not None
                     and model_input.attn_metadata.use_cuda_graph):
