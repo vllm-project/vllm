@@ -194,14 +194,12 @@ class InputRegistry:
         # even though the processor isn't used on the dummy data, values
         # passed to it that override the config may have implications on
         # the number dummy data, e.g., the number of image tokens per instance.
-        df_kwargs = self._get_dummy_factory_processor_kwargs(
+        processor_kwargs = self._get_dummy_factory_processor_kwargs(
             model_config, dummy_factory)
-        seq_data, mm_data = dummy_factory(
-            InputContext(model_config),
-            seq_len,
-            _MultiModalCounts(mm_counts),
-            **df_kwargs,
-        )
+
+        seq_data, mm_data = dummy_factory(InputContext(model_config), seq_len,
+                                          _MultiModalCounts(mm_counts),
+                                          **processor_kwargs)
 
         # Having more tokens is over-conservative but otherwise fine
         num_tokens = seq_data.prompt_token_ids

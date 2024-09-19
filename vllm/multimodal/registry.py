@@ -138,6 +138,14 @@ class MultiModalRegistry:
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
+        # TODO - there is a bit of weirdness here in the way mapper handles
+        # the args, because for the HF one, we pass processor_kwargs at init
+        # time and don't need them at func time, for the function's we are
+        # wrapping in processor like interfaces, we pass them at the time
+        # of invocation.
+        #
+        # Currently it works, but warns when the default processor is used,
+        # which is bad.
         return functools.partial(self.map_input, model_config)
 
     def register_max_multimodal_tokens(

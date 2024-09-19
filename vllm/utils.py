@@ -1239,7 +1239,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 
 
 def get_allowed_kwarg_only_overrides(
-    callable: Callable,
+    callable: Optional[Callable],
     overrides: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
@@ -1259,7 +1259,7 @@ def get_allowed_kwarg_only_overrides(
         to overwrite one or more keyword only arguments when invoking the
         callable.
     """
-    if not isinstance(overrides, dict):
+    if not overrides or not callable:
         return {}
 
     allowed_override_names = [

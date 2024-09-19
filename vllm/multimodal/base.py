@@ -257,11 +257,14 @@ class MultiModalPlugin(ABC):
         model_cls, _ = get_model_architecture(model_config)
 
         mapper = self._input_mappers.get(model_cls)
+        processor_kwargs = get_allowed_kwarg_only_overrides(
+            callable=mapper, overrides=model_config.processor_kwargs)
+
         if mapper is None:
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
 
-        return mapper(InputContext(model_config), data)
+        return mapper(InputContext(model_config), data, **processor_kwargs)
 
     @abstractmethod
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
