@@ -624,6 +624,7 @@ class MllamaVisionModel(nn.Module):
         # patch embedding
         patch_embeds = self.patch_embedding(pixel_values.to(self.layernorm_pre.weight.dtype))
         hidden_state = patch_embeds
+        hidden_state = ps.get_tp_group().all_gather(hidden_state)
 
         # tile embeddings
         _, num_patches, dim = hidden_state.shape
@@ -649,7 +650,6 @@ class MllamaVisionModel(nn.Module):
         # Pad the tensor
         hidden_state = F.pad(hidden_state, padding, mode="constant", value=0)
         slice_index = -num_padding_patches if num_padding_patches > 0 else None
-        # import pdb; pdb.set_trace()
 
         if attention_mask is not None:
             attention_mask = attention_mask.reshape(batch_size * num_concurrent_media, -1)
@@ -850,27 +850,13 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-class MllamaTextSelfAttention(LlamaAttention):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        rope_scaling = kwargs.get("rope_scaling", None)
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=rope_scaling,
-            is_neox_style=False, # force to use neox=False
-        )
-
-
 # Copied from transformers.models.llama.modeling_llama.LlamaDecoderLayer with LlamaDecoder->MllamaSelfAttentionDecoder, Llama->MllamaText, LLAMA->MLLAMA_TEXT
 class MllamaSelfAttentionDecoderLayer(nn.Module):
     def __init__(self, config: MllamaTextConfig, layer_idx: int, cache_config: Optional[CacheConfig] = None):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = MllamaTextSelfAttention(
+        self.self_attn = LlamaAttention(
             config=config,
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -1403,6 +1389,11 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         #     cross_attention_mask = cross_attention_mask[:, :, cache_position]
         #     full_text_row_masked_out_mask = full_text_row_masked_out_mask[:, :, cache_position]
 
+        # print("input_ids", input_ids, cross_attention_states is None)
+        # if positions.numel() == 1:
+        #     global step_name
+        #     step_name = f"decode_{positions.item()}"
+
         outputs = self.language_model(
             input_ids=input_ids,
             positions=positions,
@@ -1412,6 +1403,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )
+        # if positions.numel() == 1 and positions.item() == 20:
+        #     exit(0)
 
         return outputs
 

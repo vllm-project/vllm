@@ -112,12 +112,9 @@ def get_tokenizer(
             'encoding and decoding.',
             FutureWarning,
             stacklevel=2)
-    print("get tokenizer, tokenizer_name:", tokenizer_name, "Meta-Llama-3.2-11B-Vision-Early" in tokenizer_name,)
     if tokenizer_mode == "mistral":
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
                                                      revision=revision)
-    elif ("Meta-Llama-3.2-11B-Vision-Early" in str(tokenizer_name) or "Meta-Llama-3.2-90B-Vision-Early" in str(tokenizer_name)) and "checkpoints" not in str(tokenizer_name):
-        tokenizer = LlamaVLTokenizer.from_pretrained(str(tokenizer_name))
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
