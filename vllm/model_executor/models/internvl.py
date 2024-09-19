@@ -376,6 +376,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         self.img_context_token_id = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+        
+        self.sampler = self.language_model.sampler
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
