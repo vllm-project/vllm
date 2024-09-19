@@ -1,6 +1,8 @@
 from dataclasses import dataclass
+
 import torch
-from vllm.wde.core.schema.execute_io import ModelInput, ExecuteInput
+
+from vllm.wde.core.schema.execute_io import ExecuteInput, ModelInput
 from vllm.wde.encode_only.layers.attention import EncodeOnlyAttentionMetadata
 
 

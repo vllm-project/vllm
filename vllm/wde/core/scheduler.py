@@ -1,13 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import Deque, Union, Iterable, List
 from collections import deque
-from vllm.wde.core.llm_engine import LLMEngine
-from vllm.wde.core.config import SchedulerConfig
-from vllm.wde.core.schema.engine_io import (Request, SchedulerOutput,
-                                            RequestOutput)
-from vllm.wde.core.processor.input_processor import RequestProcessor
+from typing import Deque, Iterable, List, Union
 
 from vllm.logger import init_logger
+from vllm.wde.core.config import SchedulerConfig
+from vllm.wde.core.llm_engine import LLMEngine
+from vllm.wde.core.processor.input_processor import RequestProcessor
+from vllm.wde.core.schema.engine_io import (Request, RequestOutput,
+                                            SchedulerOutput)
 
 logger = init_logger(__name__)
 

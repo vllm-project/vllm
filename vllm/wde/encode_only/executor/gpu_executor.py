@@ -1,14 +1,16 @@
 import queue
-from typing import Optional
-import torch
 from queue import Queue
 from threading import Thread
-from vllm.wde.core.config import EngineConfig
-from vllm.wde.core.workflow import Workflow
+from typing import Optional
+
+import torch
+
 from vllm.logger import init_logger
+from vllm.wde.core.config import EngineConfig
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.schema.execute_io import ExecuteInput, ExecuteOutput
 from vllm.wde.core.worker import WorkerWrapperBase
+from vllm.wde.core.workflow import Workflow
 from vllm.wde.encode_only.layers.attention.backends.abstract import (
     EncodeOnlyAttentionBackend)
 
@@ -111,6 +113,7 @@ class GPUAsyncExecutor(GPUExecutor):
 
     def double_buffer_execute_loop(self):
         from dataclasses import dataclass
+
         from vllm.wde.core.schema.engine_io import SchedulerOutput
 
         @dataclass

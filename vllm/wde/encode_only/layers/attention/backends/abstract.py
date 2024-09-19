@@ -1,12 +1,14 @@
 from abc import ABC
 from dataclasses import dataclass
-from typing import Optional, TypeVar, Generic, List
+from typing import Generic, List, Optional, TypeVar
+
 import torch
-from vllm.wde.core.layers.attention.abstract import (AttentionMetadata,
-                                                     AttentionBackend,
-                                                     AttentionImpl,
-                                                     AttentionMetadataBuilder)
+
 from vllm.utils import is_pin_memory_available
+from vllm.wde.core.layers.attention.abstract import (AttentionBackend,
+                                                     AttentionImpl,
+                                                     AttentionMetadata,
+                                                     AttentionMetadataBuilder)
 
 pin_memory = is_pin_memory_available()
 

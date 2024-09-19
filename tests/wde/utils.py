@@ -1,17 +1,15 @@
-from typing import TypeVar, List, Optional, Dict, Any
-import os
 import gc
+import os
+from typing import Any, Dict, List, Optional, TypeVar
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.wde.entrypoints.llm import LLM
+from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
+                          BatchFeature)
+
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_cpu
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    BatchFeature,
-)
+from vllm.wde.entrypoints.llm import LLM
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 

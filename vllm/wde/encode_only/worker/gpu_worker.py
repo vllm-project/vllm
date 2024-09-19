@@ -1,20 +1,20 @@
+import os
 from typing import Optional
 
-import os
 import torch
-from vllm.platforms import current_platform
-from vllm.model_executor.utils import set_random_seed
 
-from vllm.wde.core.worker import WorkerBase
+from vllm.config import ParallelConfig
+from vllm.model_executor.utils import set_random_seed
+from vllm.platforms import current_platform
 from vllm.wde.core.config import DeviceConfig, LoadConfig
-from vllm.wde.encode_only.config import (ModelConfig,
+from vllm.wde.core.worker import WorkerBase
+from vllm.wde.encode_only.config import (EncodeOnlyEngineConfig,
                                          EncodeOnlySchedulerConfig,
-                                         EncodeOnlyEngineConfig)
-from vllm.wde.encode_only.runner.model_runner import ModelRunner
-from vllm.wde.encode_only.schema.execute_io import EncodeOnlyExecuteInput
+                                         ModelConfig)
 from vllm.wde.encode_only.layers.attention.backends.abstract import (
     EncodeOnlyAttentionBackend)
-from vllm.config import ParallelConfig
+from vllm.wde.encode_only.runner.model_runner import ModelRunner
+from vllm.wde.encode_only.schema.execute_io import EncodeOnlyExecuteInput
 
 
 class Worker(WorkerBase):

@@ -1,18 +1,15 @@
+import random
+from typing import List, TypeVar
+
 import numpy as np
 import pytest
-import random
-from typing import (
-    List,
-    TypeVar,
-)
-
-from transformers import BatchEncoding, BatchFeature
 import torch
 import torch.nn as nn
-from vllm.wde.reranker.schema.engine_io import RerankerInputs
-from transformers import AutoModelForSequenceClassification
+from transformers import (AutoModelForSequenceClassification, BatchEncoding,
+                          BatchFeature)
 
-from tests.wde.utils import VllmRunner, HfRunner, cleanup
+from tests.wde.utils import HfRunner, VllmRunner, cleanup
+from vllm.wde.reranker.schema.engine_io import RerankerInputs
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 

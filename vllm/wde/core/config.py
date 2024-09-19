@@ -1,17 +1,17 @@
 import enum
 import json
-import torch
-import vllm.envs as envs
 from dataclasses import dataclass, field, fields
-
 from typing import List, Optional, Union
-from vllm.utils import (is_cpu, is_hip, is_neuron, is_openvino, is_xpu,
-                        print_warning_once)
 
+import torch
+from transformers import PretrainedConfig
+
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from transformers import PretrainedConfig
-from vllm.logger import init_logger
+from vllm.utils import (is_cpu, is_hip, is_neuron, is_openvino, is_xpu,
+                        print_warning_once)
 
 logger = init_logger(__name__)
 

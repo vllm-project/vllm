@@ -4,11 +4,11 @@ from typing import Any, Dict, List, Optional, Type
 import torch
 from torch.nn.functional import scaled_dot_product_attention
 
+from vllm.utils import is_pin_memory_available
 from vllm.wde.core.layers.attention.abstract import AttentionType
 from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionBackend,
-    EncodeOnlyAttentionMetadataBuilder, EncodeOnlyAttentionImpl)
-from vllm.utils import is_pin_memory_available
+    EncodeOnlyAttentionBackend, EncodeOnlyAttentionImpl,
+    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionMetadataBuilder)
 
 pin_memory = is_pin_memory_available()
 

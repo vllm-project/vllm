@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
-from vllm.logger import init_logger
-from vllm.utils import (CudaMemoryProfiler, is_pin_memory_available)
 
+from vllm.logger import init_logger
+from vllm.utils import CudaMemoryProfiler, is_pin_memory_available
 from vllm.wde.core.config import DeviceConfig, LoadConfig
-from vllm.wde.encode_only.config import ModelConfig, EncodeOnlySchedulerConfig
-from vllm.wde.encode_only.schema.execute_io import ModelInputForGPU
+from vllm.wde.encode_only.config import EncodeOnlySchedulerConfig, ModelConfig
 from vllm.wde.encode_only.layers.attention.backends.abstract import (
     EncodeOnlyAttentionBackend)
+from vllm.wde.encode_only.schema.execute_io import ModelInputForGPU
 
 logger = init_logger(__name__)
 

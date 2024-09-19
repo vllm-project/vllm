@@ -1,7 +1,7 @@
 from dataclasses import dataclass
-from typing import Sequence, Union, List
-from vllm.wde.core.schema.engine_io import Request
-from vllm.wde.core.schema.engine_io import Inputs, RequestOutput
+from typing import List, Sequence, Union
+
+from vllm.wde.core.schema.engine_io import Inputs, Request, RequestOutput
 
 
 @dataclass

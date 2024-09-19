@@ -3,15 +3,17 @@
 # FlagEmbedding is licensed under the MIT License.
 
 from typing import Optional
+
 import torch
 from torch import nn
-from vllm.wde.encode_only.modelzoo.xlm_roberta import (XLMRobertaModel,
-                                                       XLMRobertaConfig,
-                                                       LoadWeightsMixin)
-from vllm.wde.encode_only.layers.attention import (EncodeOnlyAttentionMetadata,
-                                                   EncodeOnlyAttentionBackend)
+
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.wde.encode_only.layers.attention import (EncodeOnlyAttentionBackend,
+                                                   EncodeOnlyAttentionMetadata)
+from vllm.wde.encode_only.modelzoo.xlm_roberta import (LoadWeightsMixin,
+                                                       XLMRobertaConfig,
+                                                       XLMRobertaModel)
 
 
 class BGEM3Model(nn.Module, LoadWeightsMixin):

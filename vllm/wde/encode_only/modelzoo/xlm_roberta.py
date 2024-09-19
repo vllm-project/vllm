@@ -17,23 +17,25 @@
 """PyTorch XLM-RoBERTa model."""
 
 from typing import Iterable, Optional, Tuple
+
 import torch
 from torch import nn
 from transformers import XLMRobertaConfig
 from transformers.utils import logging
+
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.utils import is_pp_missing_parameter
 from vllm.wde.encode_only.layers.attention import (EncodeOnlyAttention,
                                                    EncodeOnlyAttentionMetadata)
 from vllm.wde.encode_only.layers.attention.backends.abstract import (
     EncodeOnlyAttentionBackend)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.utils import is_pp_missing_parameter
 
 logger = logging.get_logger(__name__)
 

@@ -1,8 +1,8 @@
 import importlib
 import os
 from typing import Callable, Dict, Optional, Type
-from vllm.logger import init_logger
 
+from vllm.logger import init_logger
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 

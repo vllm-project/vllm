@@ -1,16 +1,15 @@
+import time
 from typing import Optional, Sequence
 
-import time
 from vllm.wde.core.inputs.tokenizer import Tokenizer
 from vllm.wde.core.llm_engine import LLMEngine
-from vllm.wde.core.schema.engine_io import ValidationError, Params
-from vllm.wde.reranker.schema.engine_io import (RerankerInputs, Pairs,
-                                                RerankerRequest)
-from vllm.wde.encode_only.schema.engine_io import (EncodeOnlyInput,
-                                                   EncodeOnlySchedulableRequest
-                                                   )
 from vllm.wde.core.processor.input_processor import (InputProcessor,
                                                      RequestProcessor)
+from vllm.wde.core.schema.engine_io import Params, ValidationError
+from vllm.wde.encode_only.schema.engine_io import (
+    EncodeOnlyInput, EncodeOnlySchedulableRequest)
+from vllm.wde.reranker.schema.engine_io import (Pairs, RerankerInputs,
+                                                RerankerRequest)
 
 
 class RerankerInputProcessor(InputProcessor):

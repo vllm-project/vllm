@@ -1,13 +1,13 @@
-from typing import List, Dict, Optional, Type
-import torch.nn as nn
-
 import functools
 import importlib
-from vllm.wde.encode_only.modelzoo import ENCODE_ONLY_MODELS
-from vllm.wde.retriever.modelzoo import RETRIEVER_MODELS
-from vllm.wde.reranker.modelzoo import RERANKER_MODELS
+from typing import Dict, List, Optional, Type
+
+import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.wde.encode_only.modelzoo import ENCODE_ONLY_MODELS
+from vllm.wde.reranker.modelzoo import RERANKER_MODELS
+from vllm.wde.retriever.modelzoo import RETRIEVER_MODELS
 
 logger = init_logger(__name__)
 

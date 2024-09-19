@@ -1,5 +1,5 @@
-import time
 import random
+import time
 
 
 def benchmark_hf(args):
@@ -35,10 +35,12 @@ def benchmark_vllm(args):
     random.seed(args.seed)
 
     import gc
+
     import torch
+
+    from vllm.wde.encode_only.arg_utils import (
+        EncodeOnlyEngineArgs as EngineArgs)
     from vllm.wde.entrypoints.llm import LLMEngine
-    from vllm.wde.encode_only.arg_utils import (EncodeOnlyEngineArgs as
-                                                EngineArgs)
 
     prompt = "if" * args.input_len
     requests = [prompt for _ in range(args.num_prompts)]

@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Optional, Union
+
 from vllm.wde.core.llm_engine import LLMEngine
-from vllm.wde.core.schema.engine_io import (Params, Inputs, Request,
+from vllm.wde.core.schema.engine_io import (Inputs, Params, Request,
                                             SchedulableRequest)
 
 

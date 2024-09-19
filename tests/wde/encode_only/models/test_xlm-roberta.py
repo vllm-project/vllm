@@ -1,9 +1,11 @@
-import pytest
 import random
 from typing import TypeVar
-from transformers import BatchEncoding, BatchFeature
+
+import pytest
 import torch
 import torch.nn as nn
+from transformers import BatchEncoding, BatchFeature
+
 from tests.wde.utils import HfRunner, VllmRunner, compare_embeddings
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)

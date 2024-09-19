@@ -1,14 +1,13 @@
 import torch
 
+from vllm.utils import is_pin_memory_available
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.processor.model_input_builder import ModelInputBuilder
+from vllm.wde.core.schema.execute_io import ExecuteInput
 from vllm.wde.encode_only.layers.attention.backends.abstract import (
     EncodeOnlyAttentionMetadataBuilder)
 from vllm.wde.encode_only.schema.engine_io import EncodeOnlySchedulerOutput
 from vllm.wde.encode_only.schema.execute_io import ModelInputForGPU
-from vllm.wde.core.schema.execute_io import ExecuteInput
-
-from vllm.utils import is_pin_memory_available
 
 pin_memory = is_pin_memory_available()
 

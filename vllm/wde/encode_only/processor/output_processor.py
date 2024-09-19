@@ -1,10 +1,12 @@
-from typing import List, Union, Sequence
+from typing import List, Sequence, Union
+
 import torch
+
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.processor.output_processor import OutputProcessor
+from vllm.wde.core.schema.engine_io import ValidationError
 from vllm.wde.encode_only.schema.engine_io import (EncodeOnlyRequestOutput,
                                                    EncodeOnlySchedulerOutput)
-from vllm.wde.core.schema.engine_io import ValidationError
 
 
 class EncodeOnlyModelOutputProcessor(OutputProcessor):

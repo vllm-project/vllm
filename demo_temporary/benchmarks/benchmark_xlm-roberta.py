@@ -1,12 +1,13 @@
-import time
 import random
+import time
 
 
 def benchmark_hf(args):
     random.seed(args.seed)
 
     import torch
-    from transformers import AutoTokenizer, AutoModelForMaskedLM
+    from transformers import AutoModelForMaskedLM, AutoTokenizer
+
     from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[args.dtype]
 
@@ -42,10 +43,12 @@ def benchmark_vllm(args):
     random.seed(args.seed)
 
     import gc
+
     import torch
+
+    from vllm.wde.encode_only.arg_utils import (
+        EncodeOnlyEngineArgs as EngineArgs)
     from vllm.wde.entrypoints.llm import LLMEngine
-    from vllm.wde.encode_only.arg_utils import (EncodeOnlyEngineArgs as
-                                                EngineArgs)
 
     prompt = "if" * args.input_len
     requests = [prompt for _ in range(args.num_prompts)]

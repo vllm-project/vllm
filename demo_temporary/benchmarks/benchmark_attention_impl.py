@@ -1,6 +1,6 @@
-import time
-import random
 import os
+import random
+import time
 
 
 def benchmark_vllm(args):
@@ -8,10 +8,12 @@ def benchmark_vllm(args):
     os.environ["VLLM_ATTENTION_BACKEND"] = args.attention_impl
 
     import gc
+
     import torch
+
+    from vllm.wde.encode_only.arg_utils import (
+        EncodeOnlyEngineArgs as EngineArgs)
     from vllm.wde.entrypoints.llm import LLMEngine
-    from vllm.wde.encode_only.arg_utils import (EncodeOnlyEngineArgs as
-                                                EngineArgs)
 
     prompt = "if" * args.input_len
     requests = [prompt for _ in range(args.num_prompts)]

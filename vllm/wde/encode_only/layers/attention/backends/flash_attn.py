@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
 import torch
+
 from vllm.wde.core.layers.attention.abstract import AttentionType
 from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionBackend,
-    EncodeOnlyAttentionMetadataBuilder, EncodeOnlyAttentionImpl)
+    EncodeOnlyAttentionBackend, EncodeOnlyAttentionImpl,
+    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionMetadataBuilder)
 
 
 class EncodeOnlyFlashAttentionBackend(EncodeOnlyAttentionBackend):

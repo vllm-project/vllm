@@ -13,18 +13,13 @@ import numpy as np
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-
-from vllm.wde.core.config import DeviceConfig, LoadConfig, LoadFormat
-from vllm.wde.core.layers.attention.abstract import AttentionBackend
-from vllm.wde.core.loader.utils import (get_model_architecture,
-                                        set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
@@ -32,6 +27,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_pin_memory_available
+from vllm.wde.core.config import DeviceConfig, LoadConfig, LoadFormat
+from vllm.wde.core.layers.attention.abstract import AttentionBackend
+from vllm.wde.core.loader.utils import (get_model_architecture,
+                                        set_default_torch_dtype)
 
 
 @contextmanager

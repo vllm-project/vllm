@@ -1,9 +1,10 @@
 import functools
 from dataclasses import dataclass
-from typing import (Callable, Dict, Any, Type, TypeVar)
+from typing import Any, Callable, Dict, Type, TypeVar
 
 from torch import nn
 from transformers import PretrainedConfig
+
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.wde.core.schema.engine_io import TextOnlyInputs

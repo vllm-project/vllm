@@ -1,8 +1,10 @@
 from typing import Dict, List, Optional, Tuple, Union
-from vllm.envs import VLLM_USE_MODELSCOPE
-from vllm.logger import init_logger
+
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
+
+from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm.logger import init_logger
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 
 logger = init_logger(__name__)
@@ -241,6 +243,7 @@ def get_tokenizer(
         # lazy import so that modelscope is not required for normal use.
         # pylint: disable=C.
         import os
+
         import huggingface_hub
         from modelscope.hub.snapshot_download import snapshot_download
 

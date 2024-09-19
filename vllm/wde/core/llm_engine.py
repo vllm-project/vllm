@@ -1,14 +1,15 @@
 from contextlib import contextmanager
-from typing import (TYPE_CHECKING, Type, Union, ClassVar, Dict, Iterable, List,
-                    Optional)
+from queue import Empty, Queue
+from typing import TYPE_CHECKING, ClassVar, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
-from queue import Queue, Empty
-from vllm.wde.core.schema.engine_io import (Params, Inputs, RequestOutput,
-                                            ValidationError)
-from vllm.wde.core.workflow import Workflow
+from typing import Type, Union
+
+from vllm.logger import init_logger
 from vllm.wde.core.arg_utils import EngineArgs
 from vllm.wde.core.config import EngineConfig
-from vllm.logger import init_logger
+from vllm.wde.core.schema.engine_io import (Inputs, Params, RequestOutput,
+                                            ValidationError)
+from vllm.wde.core.workflow import Workflow
 
 logger = init_logger(__name__)
 _O = RequestOutput

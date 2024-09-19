@@ -1,12 +1,13 @@
-import numpy as np
-import pytest
 import random
 from typing import List, TypeVar
 
-from transformers import BatchEncoding, BatchFeature
+import numpy as np
+import pytest
 import torch
 import torch.nn as nn
-from tests.wde.utils import VllmRunner, cleanup, is_cpu, compare_embeddings_np
+from transformers import BatchEncoding, BatchFeature
+
+from tests.wde.utils import VllmRunner, cleanup, compare_embeddings_np, is_cpu
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
