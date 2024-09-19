@@ -7,10 +7,8 @@ from vllm.wde.core.processor.input_processor import (InputProcessor,
                                                      RequestProcessor)
 from vllm.wde.core.schema.engine_io import (Params, PromptInput, TextPrompt,
                                             TokensPrompt)
-from vllm.wde.encode_only.schema.engine_io import (EncodeOnlyInput,
-                                                   EncodeOnlyRequest,
-                                                   EncodeOnlySchedulableRequest
-                                                   )
+from vllm.wde.encode_only.schema.engine_io import (
+    EncodeOnlyInput, EncodeOnlyRequest, EncodeOnlySchedulableRequest)
 
 
 class EncodeOnlyModelInputProcessor(InputProcessor):

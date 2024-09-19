@@ -6,9 +6,8 @@ from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.processor.input_processor import (InputProcessor,
                                                      RequestProcessor)
 from vllm.wde.core.schema.engine_io import Params, ValidationError
-from vllm.wde.encode_only.schema.engine_io import (EncodeOnlyInput,
-                                                   EncodeOnlySchedulableRequest
-                                                   )
+from vllm.wde.encode_only.schema.engine_io import (
+    EncodeOnlyInput, EncodeOnlySchedulableRequest)
 from vllm.wde.reranker.schema.engine_io import (Pairs, RerankerInputs,
                                                 RerankerRequest)
 
