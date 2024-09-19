@@ -64,6 +64,7 @@ def run_phi3v(question):
         model="microsoft/Phi-3-vision-128k-instruct",
         trust_remote_code=True,
         max_num_seqs=5,
+        processor_kwargs={"num_crops": 16},
     )
     stop_token_ids = None
     return llm, prompt, stop_token_ids
