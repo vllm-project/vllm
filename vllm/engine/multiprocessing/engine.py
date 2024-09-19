@@ -96,10 +96,9 @@ class MQLLMEngine:
         # Error state.
         self._errored_with: Optional[BaseException] = None
 
-        # Health checking thread
-        self.health_check_thread = threading.Thread(
-            target=self._heartbeat_loop)
-        self._health_check_stop_event = threading.Event()
+        # Heartbeat thread
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop)
+        self._heartbeat_stop_event = threading.Event()
 
         self._last_alive_time = time.time()
 
@@ -133,8 +132,8 @@ class MQLLMEngine:
             try:
                 logger.debug("Starting Startup Loop.")
                 self.run_startup_loop()
-                logger.debug("Starting health check thread")
-                self.health_check_thread.start()
+                logger.debug("Starting heartbeat thread")
+                self.heartbeat_thread.start()
                 logger.debug("Starting Engine Loop.")
                 self.run_engine_loop()
             except Exception as e:
@@ -148,7 +147,7 @@ class MQLLMEngine:
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
         # Closes all sockets and destroys context.
-        self._health_check_stop_event.set()
+        self._heartbeat_stop_event.set()
         self.ctx.destroy(linger=0)
         del self.engine
 
@@ -285,12 +284,12 @@ class MQLLMEngine:
             logger.info("Aborted request %s.", request.request_id)
 
     def _heartbeat_loop(self):
-        while not self._health_check_stop_event.wait(
+        while not self._heartbeat_stop_event.wait(
                 timeout=HEARTBEAT_INTERVAL_MS):
             # Loops every `HEARTBEAT_INTERVAL_MS` until the stop event is set
             self._heartbeat()
 
-        logger.debug("Exiting MQLLMEngine health check thread")
+        logger.debug("Exiting MQLLMEngine heartbeat thread")
 
     def _heartbeat(self):
         # Send unhealthy if engine has already errored
