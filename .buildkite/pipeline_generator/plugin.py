@@ -12,46 +12,76 @@ class DockerPluginConfig(BaseModel):
     gpus: Optional[str] = "all"
     mount_buildkite_agent: Optional[bool] = Field(default=False, alias="mount-buildkite-agent")
     command: List[str] = Field(default_factory=list)
-    environment: List[str] = [f"HF_HOME={HF_HOME}", "VLLM_USAGE_SOURCE=ci-test", "HF_TOKEN", "BUILDKITE_ANALYTICS_TOKEN"]
-    volumes: List[str] = ["/dev/shm:/dev/shm", f"{HF_HOME}:{HF_HOME}"]
+    environment: List[str] = [
+        f"HF_HOME={HF_HOME}", 
+        "VLLM_USAGE_SOURCE=ci-test", 
+        "HF_TOKEN", 
+        "BUILDKITE_ANALYTICS_TOKEN"
+    ]
+    volumes: List[str] = [
+        "/dev/shm:/dev/shm", 
+        f"{HF_HOME}:{HF_HOME}"
+    ]
+
+class KubernetesPodContainerConfig(BaseModel):
+    image: str
+    command: List[str]
+    resources: Dict[str, Dict[str, int]]
+    volume_mounts: List[Dict[str, str]] = Field(
+        alias="volumeMounts",
+        default=[
+            {"name": "devshm", "mountPath": "/dev/shm"},
+            {"name": "hf-cache", "mountPath": HF_HOME}
+        ]
+    )
+    env: List[Dict[str, str]] = Field(
+        default=[
+            {"name": "HF_HOME", "value": HF_HOME},
+            {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
+            {
+                "name": "HF_TOKEN",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": "hf-token-secret",
+                        "key": "token"
+                    }
+                }
+            },
+        ],
+    )
 
 class KubernetesPodSpec(BaseModel):
-    containers: List[Dict[str, Any]]
+    containers: List[KubernetesPodContainerConfig]
     priority_class_name: str = Field(default="ci", alias="priorityClassName")
-    node_selector: Dict[str, Any] = Field(default={"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}, alias="nodeSelector")
-    volumes: List[Dict[str, Any]] = Field(default=[{"name": "devshm", "emptyDir": {"medium": "Memory"}}, {"name": "hf-cache", "hostPath": {"path": HF_HOME, "type": "Directory"}}])
+    node_selector: Dict[str, Any] = Field(
+        default={"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}, 
+        alias="nodeSelector"
+    )
+    volumes: List[Dict[str, Any]] = Field(
+        default=[
+            {
+                "name": "devshm", 
+                "emptyDir": {"medium": "Memory"}
+            }, 
+            {
+                "name": "hf-cache", 
+                "hostPath": {"path": HF_HOME, "type": "Directory"}
+            }
+        ]
+    )
 
 class KubernetesPluginConfig(BaseModel):
     pod_spec: KubernetesPodSpec = Field(alias="podSpec")
 
 def get_kubernetes_plugin_config(docker_image_path: str, test_bash_command: List[str], num_gpus: int) -> Dict:
     pod_spec = KubernetesPodSpec(
-        containers=[{
-            "image": docker_image_path, 
-            "command": [" ".join(test_bash_command)],
-            "resources": {
-                "limits": {
-                    "nvidia.com/gpu": num_gpus
-                }
-            },
-            "volumeMounts": [
-                {"name": "devshm", "mountPath": "/dev/shm"},
-                {"name": "hf-cache", "mountPath": HF_HOME}
-            ],
-            "env": [
-                {"name": "HF_HOME", "value": HF_HOME},
-                {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
-                {
-                    "name": "HF_TOKEN",
-                    "valueFrom": {
-                        "secretKeyRef": {
-                            "name": "hf-token-secret",
-                            "key": "token"
-                        }
-                    }
-                },
-            ]
-        }]
+        containers=[
+            KubernetesPodContainerConfig(
+                image=docker_image_path, 
+                command=[" ".join(test_bash_command)], 
+                resources={"limits": {"nvidia.com/gpu": num_gpus}}
+            )
+        ]
     )
     return {KUBERNETES_PLUGIN_NAME: KubernetesPluginConfig(podSpec=pod_spec).dict(by_alias=True)}
 
