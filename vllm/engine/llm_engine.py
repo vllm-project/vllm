@@ -625,6 +625,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._validate_model_inputs(processed_inputs)
+
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -677,17 +678,6 @@ class LLMEngine:
 
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
-
-    def _support_prompt_embeds(self) -> Tuple[bool, str]:
-        if self.speculative_config is not None:
-            return False, "Speculative decoding does not support prompt_embeds."
-        driver_worker = self.model_executor.driver_worker
-        model_runner = driver_worker.worker.model_runner if isinstance(
-            driver_worker, WorkerWrapperBase) else driver_worker.model_runner
-        if model_runner.model_supports_input_embeds:
-            return True, ""
-        return False, (f"Model {self.model_config.model} does not support "
-                       "input embeddings, but prompt_embeds was provided.")
 
     def add_request(
         self,
@@ -753,10 +743,6 @@ class LLMEngine:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        if preprocessed_inputs.get("prompt_embeds") is not None:
-            support_prompt_embeds, error_msg = self._support_prompt_embeds()
-            if not support_prompt_embeds:
-                raise ValueError(error_msg)
         processed_inputs = self.input_processor(preprocessed_inputs)
 
         self._add_processed_request(
@@ -1712,16 +1698,40 @@ class LLMEngine:
     def is_embedding_model(self):
         return self.model_config.is_embedding_model
 
+    def _support_prompt_embeds(self) -> Tuple[bool, str]:
+        if self.speculative_config is not None:
+            return False, "Speculative decoding does not support prompt_embeds."
+        driver_worker = self.model_executor.driver_worker
+        model_runner = driver_worker.worker.model_runner if isinstance(
+            driver_worker, WorkerWrapperBase) else driver_worker.model_runner
+        if model_runner.model_supports_input_embeds:
+            return True, ""
+        return False, (f"Model {self.model_config.model} does not support "
+                       "input embeddings, but prompt_embeds was provided.")
+
     def _validate_model_inputs(self, inputs: Union[LLMInputs,
                                                    EncoderDecoderLLMInputs]):
         if self.is_encoder_decoder_model():
             prompt_ids = inputs.get("encoder_prompt_token_ids")
         else:
             prompt_ids = inputs.get("prompt_token_ids")
-            prompt_embeds = inputs.get("prompt_embeds")
 
-        if (prompt_ids is None
-                or len(prompt_ids) == 0) and prompt_embeds is None:
+        prompt_embeds = inputs.get("prompt_embeds")
+
+        if prompt_ids is None:
+            if prompt_embeds is None:
+                raise ValueError("You must provide a prompt")
+
+            self._validate_prompt_embeds(prompt_embeds)
+        else:
+            if prompt_embeds is None:
+                self._validate_prompt_ids(prompt_ids)
+            else:
+                raise ValueError("You can only provide either tokens or "
+                                 "embeddings, not both")
+
+    def _validate_prompt_ids(self, prompt_ids: List[int]):
+        if len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
 
         if self.model_config.is_multimodal_model:
@@ -1739,3 +1749,11 @@ class LLMEngine:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def _validate_prompt_embeds(self, prompt_embeds: torch.Tensor):
+        if len(prompt_embeds) == 0:
+            raise ValueError("Prompt cannot be empty")
+
+        support_prompt_embeds, error_msg = self._support_prompt_embeds()
+        if not support_prompt_embeds:
+            raise ValueError(error_msg)
