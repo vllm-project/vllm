@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Any, Dict
 
 import torch
 from PIL import Image
@@ -22,10 +23,12 @@ class ImagePlugin(MultiModalPlugin):
     def get_data_key(self) -> str:
         return "image"
 
-    def _get_hf_image_processor(self, model_config: ModelConfig):
+    def _get_hf_image_processor(self, model_config: ModelConfig,
+                                processor_kwargs: Dict[str, Any]):
         return cached_get_image_processor(
             model_config.model,
-            trust_remote_code=model_config.trust_remote_code)
+            trust_remote_code=model_config.trust_remote_code,
+            **processor_kwargs)
 
     def _default_input_mapper(
         self,
@@ -36,7 +39,13 @@ class ImagePlugin(MultiModalPlugin):
 
         # PIL image
         if isinstance(data, Image.Image) or is_list_of(data, Image.Image):
-            image_processor = self._get_hf_image_processor(model_config)
+            processor_kwargs = ({} if model_config.processor_kwargs is None
+                                else model_config.processor_kwargs)
+
+            image_processor = self._get_hf_image_processor(
+                model_config,
+                processor_kwargs,
+            )
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "
                                    "to process the image object")
