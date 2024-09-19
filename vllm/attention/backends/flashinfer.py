@@ -578,7 +578,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_last_page_len.append(last_page_len)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
+              cuda_graph_pad_size: int, batch_size: int,
+              use_graph_block_tables: bool):
         """Build attention metadata with on-device tensors.
 
         Args:
@@ -604,6 +605,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size
 
+            assert use_graph_block_tables, \
+                ("Must use graph block tables from the runner when using "
+                 "the captured graph")
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.runner.graph_block_tables[:batch_size]
@@ -628,6 +632,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                         cuda_graph_pad_size)
             self.paged_kv_last_page_len.extend([0] * cuda_graph_pad_size)
         else:
+            assert not use_graph_block_tables
             block_tables = make_tensor_with_pad(
                 self.block_tables,
                 pad=0,

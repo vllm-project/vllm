@@ -188,7 +188,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                  self.block_size, inter_data.block_tables)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
+              cuda_graph_pad_size: int, batch_size: int,
+              use_graph_block_tables: bool):
         """Build attention metadata with on-device tensors.
 
         Args:
@@ -215,6 +216,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size
 
+            assert use_graph_block_tables
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.runner.graph_block_tables[:batch_size]
@@ -224,6 +226,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             block_tables = torch.from_numpy(input_block_tables).to(
                 device, non_blocking=True)
         else:
+            assert not use_graph_block_tables
             block_tables = make_tensor_with_pad(
                 self.block_tables,
                 pad=0,

@@ -729,13 +729,36 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
     def _use_captured_graph(self,
                             batch_size: int,
+                            decode_only: bool,
                             max_decode_seq_len: int,
                             max_encoder_seq_len: int = 0) -> bool:
-        return (self.decode_only and not self.runner.model_config.enforce_eager
+        return (decode_only and not self.runner.model_config.enforce_eager
                 and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
                 and max_decode_seq_len <= self.runner.max_seq_len_to_capture
                 and max_encoder_seq_len <= self.runner.max_seq_len_to_capture
                 and batch_size <= self.runner.max_batchsize_to_capture)
+
+    def _cuda_graph_pad_size(self,
+                             batch_size: int,
+                             num_seqs: int,
+                             max_decode_seq_len: int,
+                             max_encoder_seq_len: int = 0) -> int:
+        is_mscp: bool = self.runner.scheduler_config.is_multi_step and \
+                    self.runner.scheduler_config.chunked_prefill_enabled
+        # In multi-step chunked-prefill, starting from the second step
+        # all the sequences are guaranteed to be decodes. So, we may
+        # run the first-step in eager mode and the rest of the steps
+        # in graph mode.
+        batch_size = batch_size if not is_mscp else num_seqs
+        decode_only = self.decode_only or is_mscp
+        if not self._use_captured_graph(batch_size, decode_only,
+                                        max_decode_seq_len,
+                                        max_encoder_seq_len):
+            return -1
+
+        graph_batch_size = _get_graph_batch_size(batch_size)
+        assert graph_batch_size >= batch_size
+        return graph_batch_size - batch_size
 
     def build(self) -> ModelInputForGPU:
         """Finalize the builder intermediate data and
@@ -796,20 +819,18 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         }
 
         batch_size = len(input_tokens)
-        use_captured_graph = self._use_captured_graph(
+
+        cuda_graph_pad_size = self._cuda_graph_pad_size(
             batch_size,
-            max_decode_seq_len,
+            num_seqs=len(seq_lens),
+            max_decode_seq_len=max_encoder_seq_len,
             max_encoder_seq_len=max_encoder_seq_len)
 
-        # If cuda graph can be used, pad tensors accordingly.
-        # See `capture_model` API for more details.
-        # vLLM uses cuda graph only for decoding requests.
-        cuda_graph_pad_size = -1
-        if use_captured_graph:
-            graph_batch_size = _get_graph_batch_size(batch_size)
-            assert graph_batch_size >= batch_size
-            cuda_graph_pad_size = graph_batch_size - batch_size
-            batch_size = graph_batch_size
+        if cuda_graph_pad_size != -1:
+            # If cuda graph can be used, pad tensors accordingly.
+            # See `capture_model` API for more details.
+            # vLLM uses cuda graph only for decoding requests.
+            batch_size += cuda_graph_pad_size
 
         # Tokens and positions.
         if cuda_graph_pad_size:
@@ -837,8 +858,17 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
 
         # Attention metadata.
+        # TODO (varun) : Handle flashinfer unsupported
+        is_mscp: bool = self.scheduler_config.is_multi_step and \
+                        self.scheduler_config.chunked_prefill_enabled
+        use_graph_block_tables = cuda_graph_pad_size != -1 or \
+            (is_mscp and len(seq_lens) in _BATCH_SIZES_TO_CAPTURE)
         attn_metadata = self.attn_metadata_builder.build(
-            seq_lens, query_lens, cuda_graph_pad_size, batch_size)
+            seq_lens,
+            query_lens,
+            cuda_graph_pad_size,
+            batch_size,
+            use_graph_block_tables=use_graph_block_tables)
 
         # LoRA data.
         lora_requests = set()
