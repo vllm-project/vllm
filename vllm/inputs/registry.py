@@ -28,6 +28,55 @@ C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
 
+def get_allowed_kwarg_overrides(
+    callable: Callable,
+    overrides: Optional[Dict[str, Any]],
+    immutable_kwargs: Optional[Tuple[str, ...]],
+) -> Dict[str, Any]:
+    """
+    Given a callable processor, determine which kwarg overrides provided
+    via the model config are valid keyword arguments, and drop any that
+    are not.
+
+    Args:
+        processor: Callable processor which takes 0 or more kwargs.
+        model_config: Config which may contain init time processor kwargs.
+        immutable_kwargs: Reserved kwarg keys that can't be overridden.
+
+    Returns:
+        Dictionary containing the processor kwargs to be wrapped when
+        creating the callable processor partial.
+    """
+    if not isinstance(overrides, dict):
+        return {}
+
+    if immutable_kwargs:
+        for name in immutable_kwargs:
+            if name in overrides:
+                logger.warning(
+                    "%s is a reserved kwarg and will be dropped "
+                    "from the input processor overrides", name)
+                del overrides[name]
+
+    allowed_kwargs = list(inspect.signature(callable).parameters.keys())
+    # Drop any processor_kwargs provided by the user that are
+    # not kwarg names accepted by the provided input processor.
+    filtered_overrides = {
+        kwarg_name: val
+        for kwarg_name, val in overrides.items()
+        if kwarg_name in allowed_kwargs
+    }
+
+    # If anything is dropped, log a warning
+    dropped_keys = set(overrides) - set(filtered_overrides)
+    if dropped_keys:
+        logger.warning(
+            "The following kwarg overrides are not implemented "
+            "by the input processor and will be dropped: %s", dropped_keys)
+
+    return filtered_overrides
+
+
 @dataclass(frozen=True)
 class InputContext:
     """
@@ -228,7 +277,7 @@ class InputRegistry:
             return {}
         # Otherwise we may have overrides; filter them in the
         # same way we filter the input processor overrides
-        return self._get_allowed_kwarg_overrides(
+        return get_allowed_kwarg_overrides(
             callable=dummy_factory,
             overrides=model_config.processor_kwargs,
             immutable_kwargs=("ctx", "seq_len", "mm_counts"))
@@ -287,7 +336,7 @@ class InputRegistry:
         # NOTE: we don't allow override values for ctx/inputs, since doing
         # so can lead to value collisions etc.
         processor = self._get_model_input_processor(model_config)
-        processor_kwargs = self._get_allowed_kwarg_overrides(
+        processor_kwargs = get_allowed_kwarg_overrides(
             callable=processor,
             overrides=model_config.processor_kwargs,
             immutable_kwargs=("ctx", "inputs"))
@@ -316,52 +365,3 @@ class InputRegistry:
         processor = self._input_processors_by_model_type \
             .get(model_cls, self._default_input_processor)
         return processor
-
-    def _get_allowed_kwarg_overrides(
-        self,
-        callable: Callable,
-        overrides: Optional[Dict[str, Any]],
-        immutable_kwargs: Optional[Tuple[str, ...]],
-    ) -> Dict[str, Any]:
-        """
-        Given a callable processor, determine which kwarg overrides provided
-        via the model config are valid keyword arguments, and drop any that
-        are not.
-
-        Args:
-            processor: Callable processor which takes 0 or more kwargs.
-            model_config: Config which may contain init time processor kwargs.
-            immutable_kwargs: Reserved kwarg keys that can't be overridden.
-
-        Returns:
-            Dictionary containing the processor kwargs to be wrapped when
-            creating the callable processor partial.
-        """
-        if not isinstance(overrides, dict):
-            return {}
-
-        if immutable_kwargs:
-            for name in immutable_kwargs:
-                if name in overrides:
-                    logger.warning(
-                        "%s is a reserved kwarg and will be dropped "
-                        "from the input processor overrides", name)
-                    del overrides[name]
-
-        allowed_kwargs = list(inspect.signature(callable).parameters.keys())
-        # Drop any processor_kwargs provided by the user that are
-        # not kwarg names accepted by the provided input processor.
-        filtered_overrides = {
-            kwarg_name: val
-            for kwarg_name, val in overrides.items()
-            if kwarg_name in allowed_kwargs
-        }
-
-        # If anything is dropped, log a warning
-        dropped_keys = set(overrides) - set(filtered_overrides)
-        if dropped_keys:
-            logger.warning(
-                "The following kwarg overrides are not implemented "
-                "by the input processor and will be dropped: %s", dropped_keys)
-
-        return filtered_overrides
