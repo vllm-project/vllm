@@ -52,31 +52,15 @@ benchmark() {
   input_len=2048
   output_len=$2
 
-  # large model
-  # VLLM_RPC_PORT=5570 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
-  #     -m vllm.entrypoints.openai.api_server \
-  #     --model $model \
-  #     --port 8100 \
-  #     -tp 4 \
-  #     --max-model-len 30000 \
-  #     --gpu-memory-utilization 0.8 &
-  # VLLM_RPC_PORT=5580 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
-  #   -m vllm.entrypoints.openai.api_server \
-  #   --model $model \
-  #   --port 8200 \
-  #   -tp 4 \
-  #   --max-model-len 30000 \
-  #   --gpu-memory-utilization 0.8 &
 
-  VLLM_RPC_PORT=5570 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0 python3 \
+  VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.8 &
 
-# decoding instance
-VLLM_RPC_PORT=5580 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=1 python3 \
+  VLLM_DISTRIBUTED_KV_ROLE=consumer CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \

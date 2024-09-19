@@ -992,7 +992,7 @@ def init_distributed_environment(
                 # this is decode instance.
                 # offset global rank by tp * pp (which is world_size)
                 maybe_disagg_rank = rank + world_size
-                logger.debug("rank %d is KV producer, adjust it to %d",
+                logger.debug("rank %d is KV consumer, adjust it to %d",
                              rank,
                              maybe_disagg_rank)
 
