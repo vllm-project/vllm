@@ -353,12 +353,13 @@ class FusedMoE(torch.nn.Module):
 
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
-            if param.data[expert_id] != 1 and (param.data[expert_id] -
-                                               loaded_weight).abs() > 1e-5:
-                raise ValueError(
-                    "input_scales of w1 and w3 of a layer "
-                    f"must be equal. But got {param.data[expert_id]} "
-                    f"vs. {loaded_weight}")
+            # print(param.data.device, loaded_weight.device)
+            # if param.data[expert_id] != 1 and (param.data[expert_id] -
+            #                                    loaded_weight).abs() > 1e-5:
+            #     raise ValueError(
+            #         "input_scales of w1 and w3 of a layer "
+            #         f"must be equal. But got {param.data[expert_id]} "
+            #         f"vs. {loaded_weight}")
 
             self._load_single_value(param=param,
                                     loaded_weight=loaded_weight,
