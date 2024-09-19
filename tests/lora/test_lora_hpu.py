@@ -1,7 +1,7 @@
 import pytest
 import torch
+from vllm_hpu_extension.ops import LoraMask
 
-from vllm.hpu.ops import LoraMask
 from vllm.lora.layers import _apply_lora, _apply_lora_packed_nslice
 
 from .utils import DummyLoRAManager

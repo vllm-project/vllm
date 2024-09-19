@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
+import vllm_hpu_extension.ops as ops
+from vllm_hpu_extension import cache_ops
+from vllm_hpu_extension.utils import Matmul, Softmax, VLLMKVCache
 
-import vllm.hpu.ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
                                                   HabanaPagedAttentionMetadata)
-from vllm.hpu import cache_ops
-from vllm.hpu.utils import Matmul, Softmax, VLLMKVCache
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

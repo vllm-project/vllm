@@ -6,7 +6,7 @@ import torch
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, is_fake_hpu,
                         is_pin_memory_available)
 
 logger = init_logger(__name__)
@@ -78,7 +78,7 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_attention_layers):
-            if device == 'hpu':
+            if device == 'hpu' or is_fake_hpu():
                 key_cache = torch.zeros(kv_cache_shape,
                                         dtype=self.dtype,
                                         device=device)

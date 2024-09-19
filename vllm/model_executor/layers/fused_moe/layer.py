@@ -202,7 +202,7 @@ class FusedMoE(torch.nn.Module):
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
         if is_hpu():
-            from vllm.hpu.ops import StaticFusedMOE
+            from vllm_hpu_extension.ops import StaticFusedMOE
             self.hpu_static_fused_moe = StaticFusedMOE(self.num_experts)
 
         if quant_config is None:

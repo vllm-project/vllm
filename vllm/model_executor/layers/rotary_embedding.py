@@ -31,7 +31,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.utils import is_hpu, is_tpu
 
 if is_hpu():
-    from vllm.hpu.rotary_embed import HpuRotaryEmbedding
+    from vllm_hpu_extension.rotary_embed import HpuRotaryEmbedding
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:

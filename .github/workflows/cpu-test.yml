@@ -1,0 +1,34 @@
+name: cpu-test
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the habana_main branch
+  push:
+    branches:
+      - habana_main
+  pull_request:
+    branches:
+      - habana_main
+
+
+jobs:
+  cputest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
+        pip install -r requirements-hpu.txt
+        VLLM_TARGET_DEVICE=hpu python setup.py develop
+    - name: cpu-test
+      run: |
+        VLLM_SKIP_WARMUP=true VLLM_PROMPT_SEQ_BUCKET_MAX=128 VLLM_USE_FAKE_HPU=1 python examples/offline_inference_fakehpu.py

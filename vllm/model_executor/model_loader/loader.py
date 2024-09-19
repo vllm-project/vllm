@@ -37,7 +37,7 @@ from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_vision)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_hpu, is_tpu
+from vllm.utils import is_fake_hpu, is_hpu, is_tpu
 
 logger = init_logger(__name__)
 
@@ -277,7 +277,10 @@ class DefaultModelLoader(BaseModelLoader):
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(self.load_config.device):
+            _device = torch.device(
+                device_config.device) if is_fake_hpu() else torch.device(
+                    self.load_config.device)
+            with _device:
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, multimodal_config,
                                           cache_config, scheduler_config)
