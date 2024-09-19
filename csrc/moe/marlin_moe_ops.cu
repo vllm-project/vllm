@@ -26,11 +26,10 @@
 #include <iostream>
 
 #include "core/scalar_type.hpp"
-#include "marlin_moe_kernel_ku4b8.cu"
-// #include "marlin_moe_kernel_ku8b128.cu"
-// #include "marlin_moe_kernel_ku4.cu"
-// #include "marlin_moe_kernel_ku8.cu"
-// #include "marlin_moe_kernel.cuh"
+#include "marlin_moe_kernel_ku4b8.h"
+#include "marlin_moe_kernel_ku8b128.h"
+#include "marlin_moe_kernel_ku4.h"
+#include "marlin_moe_kernel_ku8.h"
 
 template <typename T>
 inline std::string str(T x) {
@@ -472,9 +471,9 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
       if (false) {
       }
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4b8)
-      // CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8b128)
-      // CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4)
-      // CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8)
+      CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8b128)
+      CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4)
+      CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8)
       else {
         TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
                                str(prob_n) + ", " + str(prob_k) + "]" +
