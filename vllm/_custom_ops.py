@@ -447,10 +447,10 @@ if hasattr(torch.ops._C, 'gptq_marlin_24_gemm'):
         return torch.empty_like(x)
 
     @torch.library.register_fake("_C::causal_conv1d_update")
-    def causal_conv1d_update_fake(x: torch.Tensor, conv_state: torch.Tensor,
-                                  weight: torch.Tensor,
-                                  bias_: Optional[torch.Tensor],
-                                  silu_activation: bool) -> torch.Tensor:
+    def causal_conv1d_update_fake(
+            x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
+            bias_: Optional[torch.Tensor], silu_activation: bool,
+            conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
         return torch.empty_like(x)
 
     @torch.library.register_fake("_C::selective_scan_fwd")

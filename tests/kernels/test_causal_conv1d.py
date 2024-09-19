@@ -273,8 +273,9 @@ def test_causal_conv1d_update(batch, dim, width, has_bias, silu_activation,
     assert torch.equal(conv_state, conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
-    opcheck(torch.ops._C.causal_conv1d_update,
-            (x, conv_state, weight, bias, activation in ["silu", "swish"]))
+    opcheck(
+        torch.ops._C.causal_conv1d_update,
+        (x, conv_state, weight, bias, activation in ["silu", "swish"], None))
 
 
 @pytest.mark.parametrize("itype",
@@ -329,7 +330,5 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_bias,
                                        bias,
                                        activation=activation)
 
-    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.equal(conv_state[conv_state_indices, :], conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
