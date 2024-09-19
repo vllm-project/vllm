@@ -262,6 +262,8 @@ class SequenceData(msgspec.Struct,
         self._mrope_position_delta = new_mrope_position_delta
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
+        self.last_appended_tokens.append(token_id)
+
         self._output_token_ids.append(token_id)
         self._new_appended_tokens.append(token_id)
         self._cached_all_token_ids.append(token_id)
@@ -499,18 +501,23 @@ class Sequence:
             return self.output_text[last_offset:length]
         return ""
 
-    def get_output_token_ids_to_return(self,
-                                       delta: bool) -> GenericSequence[int]:
+    def get_output_token_ids_to_return(
+            self, delta: bool) -> GenericSequence[int] | int:
         """If delta is True, only new tokens since the last call to
         this method are returned"""
         if not delta:
             return self.get_output_token_ids()
-        length = self.get_output_len()
-        last_offset = self._last_token_ids_offset
-        if last_offset < length:
-            self._last_token_ids_offset = length
-            return self.data._output_token_ids[last_offset:]
-        return ()
+
+        # Optimization for single decode token case
+        # (which is what we have most of the time)
+        if len(self.data.last_appended_tokens) == 1:
+            new_token = self.data.last_appended_tokens[0]
+            self.data.last_appended_tokens.clear()
+            return new_token
+        else:
+            new_tokens = self.data.last_appended_tokens
+            self.data.last_appended_tokens = []
+            return new_tokens
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
@@ -670,6 +677,8 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+
+        self.cached_request_output = None
 
     @property
     def prompt(self) -> Optional[str]:
