@@ -105,6 +105,8 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
     assert hf_config.vision_config.image_size % 14 == 0, "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14) ** 2 + 1
     num_tokens = num_tiles * token_per_chunk
+    llm_inputs["prompt"] = llm_inputs["encoder_prompt"]
+    llm_inputs["prompt_token_ids"] = llm_inputs["encoder_prompt_token_ids"]
     llm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
     llm_inputs["encoder_prompt_token_ids"] = [LLAMA_IMAGE_TOKEN_ID] * num_tokens
 
@@ -1328,6 +1330,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        print("input_ids", input_ids)
         if attn_metadata.num_prefill_tokens > 0 and attn_metadata.num_decode_tokens > 0:
             raise ValueError("Chunk prefill not supported")
         image_inputs = self._parse_and_validate_image_input(**kwargs)

@@ -38,7 +38,7 @@ chat_completion_from_url = client.chat.completions.create(
         "content": [
             {
                 "type": "text",
-                "text": "What’s in this image?"
+                "text": "Describe image in two sentences"
             },
             {
                 "type": "image_url",
