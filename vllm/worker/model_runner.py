@@ -505,8 +505,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             else:
                 tokens = [0] * seq_len
 
-                if context_len != 0 or seq_len < len(seq_data.prompt_embeds):
-                    input_embeds = seq_data.prompt_embeds[context_len:seq_len]
+                input_embeds = seq_data.prompt_embeds
+                if context_len != 0 or seq_len < len(input_embeds):
+                    input_embeds = input_embeds[context_len:seq_len]
 
                 input_embeds_mask = torch.ones(seq_len - context_len,
                                                dtype=torch.bool)
@@ -820,18 +821,23 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         input_embeds_lst = [
             inter_data.input_embeds for inter_data in self.inter_data_list
             if inter_data.input_embeds is not None
-        ] or None
-        input_embeds_masks_lst = [
-            inter_data.input_embeds_mask for inter_data in self.inter_data_list
-            if inter_data.input_embeds_mask is not None
-        ] or None
+        ]
         if input_embeds_lst:
             input_embeds = torch.cat(input_embeds_lst).to(
                 device=self.runner.device,
                 dtype=self.runner.model_config.dtype)
+        else:
+            input_embeds = None
+
+        input_embeds_masks_lst = [
+            inter_data.input_embeds_mask for inter_data in self.inter_data_list
+            if inter_data.input_embeds_mask is not None
+        ]
         if input_embeds_masks_lst:
             input_embeds_masks = torch.cat(input_embeds_masks_lst).to(
                 self.runner.device)
+        else:
+            input_embeds_masks = None
 
         # Mapping from request IDs to sequence IDs. Used for Jamba models
         # that manages the cache by itself.
