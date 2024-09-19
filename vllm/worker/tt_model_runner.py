@@ -191,6 +191,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         else:
             input_tokens = model_input.input_tokens.view(-1, 1)
             input_positions = model_input.input_positions
+            
+            # TODO: Remove once the model can support padded batches or arbitrary batch sizes
+            assert input_tokens.shape[0] == self.scheduler_config.max_num_seqs, "Currently only supporting batch sizes equal to max_num_seqs for decode"
         
         execute_model_kwargs = {
             "tokens": input_tokens,
