@@ -18,8 +18,10 @@ NUM_CROPS_OVERRIDE = 16
 def processor_mock():
     """Patches the internal model input processor with an override callable."""
 
+    # NOTE: processor kwargs must be keyword-only.
     def custom_processor(ctx: InputContext,
                          llm_inputs: LLMInputs,
+                         *,
                          num_crops=DEFAULT_NUM_CROPS):
         # For testing purposes, we don't worry about the llm inputs / return
         # type validation, and just return the value of the kwarg that we

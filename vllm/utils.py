@@ -1241,48 +1241,46 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 def get_allowed_kwarg_only_overrides(
     callable: Callable,
     overrides: Optional[Dict[str, Any]],
-    immutable_kwargs: Optional[Tuple[str, ...]],
 ) -> Dict[str, Any]:
     """
-    Given a callable processor, determine which kwarg overrides provided
-    via the model config are valid keyword arguments, and drop any that
-    are not.
+    Given a callable which has one or more keyword only params and a dict
+    mapping param names to values, drop values that can be not be kwarg
+    expanded to overwrite one or more keyword-only args. This is used in a
+    few places to handle custom processor overrides for multimodal models,
+    e.g., for profiling when processor options provided by the user
+    may affect the number of mm tokens per instance.
 
     Args:
-        processor: Callable processor which takes 0 or more kwargs.
-        model_config: Config which may contain init time processor kwargs.
-        immutable_kwargs: Reserved kwarg keys that can't be overridden.
+        callable: Callable which takes 0 or more keyword only arguments.
+        overrides: Potential overrides to be used when invoking the callable.
 
     Returns:
-        Dictionary containing the processor kwargs to be wrapped when
-        creating the callable processor partial.
+        Dictionary containing the kwargs to be leveraged which may be used
+        to overwrite one or more keyword only arguments when invoking the
+        callable.
     """
     if not isinstance(overrides, dict):
         return {}
 
-    if immutable_kwargs:
-        for name in immutable_kwargs:
-            if name in overrides:
-                logger.warning(
-                    "%s is a reserved kwarg and will be dropped "
-                    "from the input processor overrides", name)
-                del overrides[name]
+    allowed_override_names = [
+        name for name, param in inspect.signature(callable).parameters.items()
+        if param.kind == inspect.Parameter.KEYWORD_ONLY
+    ]
 
-    allowed_kwargs = list(inspect.signature(callable).parameters.keys())
     # Drop any processor_kwargs provided by the user that are
     # not kwarg names accepted by the provided input processor.
     filtered_overrides = {
         kwarg_name: val
         for kwarg_name, val in overrides.items()
-        if kwarg_name in allowed_kwargs
+        if kwarg_name in allowed_override_names
     }
 
     # If anything is dropped, log a warning
     dropped_keys = set(overrides) - set(filtered_overrides)
     if dropped_keys:
         logger.warning(
-            "The following kwarg overrides are not implemented "
-            "by the input processor and will be dropped: %s", dropped_keys)
+            "The following intended overrides are not keyword-only args "
+            "and and will be dropped: %s", dropped_keys)
 
     return filtered_overrides
 

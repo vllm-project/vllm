@@ -336,8 +336,7 @@ class MultiModalPlugin(ABC):
         if callable(max_mm_tokens):
             processor_kwargs = get_allowed_kwarg_only_overrides(
                 callable=max_mm_tokens,
-                overrides=model_config.processor_kwargs,
-                immutable_kwargs=("ctx", ))
+                overrides=model_config.processor_kwargs)
             max_mm_tokens = max_mm_tokens(InputContext(model_config),
                                           **processor_kwargs)
 

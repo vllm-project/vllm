@@ -230,9 +230,7 @@ class InputRegistry:
         # Otherwise we may have overrides; filter them in the
         # same way we filter the input processor overrides
         return get_allowed_kwarg_only_overrides(
-            callable=dummy_factory,
-            overrides=model_config.processor_kwargs,
-            immutable_kwargs=("ctx", "seq_len", "mm_counts"))
+            callable=dummy_factory, overrides=model_config.processor_kwargs)
 
     def _default_input_processor(self, ctx: InputContext,
                                  inputs: LLMInputs) -> LLMInputs:
@@ -289,9 +287,7 @@ class InputRegistry:
         # so can lead to value collisions etc.
         processor = self._get_model_input_processor(model_config)
         processor_kwargs = get_allowed_kwarg_only_overrides(
-            callable=processor,
-            overrides=model_config.processor_kwargs,
-            immutable_kwargs=("ctx", "inputs"))
+            callable=processor, overrides=model_config.processor_kwargs)
         return functools.partial(self._process_input,
                                  model_config=model_config,
                                  processor=processor,
