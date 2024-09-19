@@ -60,6 +60,7 @@ class SampleResultArgsType:
     multinomial_samples: MultinomialSamplesType
     sample_results_dict: SampleResultsDictType
     sampling_metadata: SamplingMetadata
+    forced_samples: Optional[torch.Tensor]
     greedy_samples: Optional[torch.Tensor]
     beam_search_logprobs: Optional[torch.Tensor]
 
@@ -499,6 +500,39 @@ def _greedy_sample(
     return results
 
 
+def _forced_sample(
+    selected_seq_groups: List[SequenceGroupToSample],
+    samples: torch.Tensor,
+) -> List[Tuple[List[int], List[int]]]:
+    """Run forced sampling on a given samples.
+    Args:
+        selected_seq_groups: A list of sequence groups batched.
+        samples: (num_selected_samples,) A tensor of samples. The length of
+            samples could be smaller than selected_seq_groups if
+            seq_group.do_sample is False.
+    Returns:
+        Tuple of (next_token_ids, parent_ids). The length of returned list is
+        same as the length of selected_seq_groups. If the corresponding
+        seq_group has do_sample=False, tuple contains ([], [])
+        
+        The next_token_ids is guided (forced) by the id containing in the 
+        sampling_parameters.future_context property.
+    """
+    samples = samples.tolist()
+    sample_idx = 0
+    results = []
+    for seq_group in selected_seq_groups:
+        seq_ids = seq_group.seq_ids
+        num_parent_seqs = len(seq_ids)
+        assert num_parent_seqs == 1, (
+            "Deterministic sampling should have only one seq.")
+        parent_ids = list(range(num_parent_seqs))
+        next_token_ids = [samples[sample_idx]]
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    return results
+
+
 def _random_sample(
     selected_seq_groups: List[SequenceGroupToSample],
     random_samples: torch.Tensor,
@@ -697,6 +731,7 @@ def get_pythonized_sample_results(
     (
         sample_metadata,
         sampling_metadata,
+        forced_samples,
         greedy_samples,
         multinomial_samples,
         beam_search_logprobs,
@@ -704,6 +739,7 @@ def get_pythonized_sample_results(
     ) = (
         sample_result_args.sample_metadata,
         sample_result_args.sampling_metadata,
+        sample_result_args.forced_samples,
         sample_result_args.greedy_samples,
         sample_result_args.multinomial_samples,
         sample_result_args.beam_search_logprobs,
@@ -714,7 +750,9 @@ def get_pythonized_sample_results(
         if sampling_type not in sample_metadata:
             continue
         (seq_group_id, seq_groups) = sample_metadata[sampling_type]
-        if sampling_type == SamplingType.GREEDY:
+        if sampling_type == SamplingType.FORCED:
+            sample_results = _forced_sample(seq_groups, forced_samples)
+        elif sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups,
@@ -762,6 +800,7 @@ def _sample_with_torch(
     sample_results_dict: SampleResultsDictType = {}
     sample_metadata: SampleMetadataType = {}
     multinomial_samples: MultinomialSamplesType = {}
+    forced_samples: Optional[torch.Tensor] = None
     greedy_samples: Optional[torch.Tensor] = None
     beam_search_logprobs: Optional[torch.Tensor] = None
 
@@ -786,7 +825,19 @@ def _sample_with_torch(
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_id]
         sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
-        if sampling_type == SamplingType.GREEDY:
+        if sampling_type == SamplingType.FORCED:
+            if (seq_groups[0].sampling_params.future_context is not None):
+                forced_samples = torch.tensor([
+                    seq_groups[0].sampling_params.future_context[0][min(
+                        len(sampling_metadata.seq_groups[0].seq_data[
+                            sampling_params.cntr].output_token_ids),
+                        len(seq_groups[0].sampling_params.future_context[0]) -
+                        1)]
+                ])
+            else:
+                forced_samples = torch.argmax(logprobs[long_sample_indices],
+                                              dim=-1)
+        elif sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
 
@@ -843,6 +894,7 @@ def _sample_with_torch(
     maybe_deferred_args = SampleResultArgsType(
         sampling_metadata=sampling_metadata,
         sample_metadata=sample_metadata,
+        forced_samples=forced_samples,
         multinomial_samples=multinomial_samples,
         greedy_samples=greedy_samples,
         beam_search_logprobs=beam_search_logprobs,
