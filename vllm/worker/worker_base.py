@@ -7,8 +7,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
-import vllm.distributed.parallel_state as ps
 from vllm.config import ObservabilityConfig
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
@@ -326,64 +324,14 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 orig_model_execute_time = intermediate_tensors.tensors.get(
                     "model_execute_time", torch.tensor(0)).item()
 
-        # for disaggregated prefilling: allow bypassing model execution
-        bypass_model_exec = False
-
-        # receive KV cache from prefill instance, or from LMCache
-        if self.need_recv_kv(model_input, worker_input):
-            from vllm.worker.model_runner import GPUModelRunnerBase
-            assert isinstance(self.model_runner, GPUModelRunnerBase), \
-                "Distributed KV transfer only support GPU modelrunner"
-            logger.debug("Receiving KV caches")
-            hidden_or_intermediate_states, bypass_model_exec, model_input = \
-                ps.get_disagg_group().recv_kv_caches_and_hidden_states(
-                    # model is used to know which layer the current worker
-                    # is working on, so that we can receive KV for only those
-                    # layers.
-                    self.model_runner.model,
-                    model_input,
-                    kv_caches=self.kv_cache[worker_input.virtual_engine]
-                    if self.kv_cache is not None else None,
-                )
-            #assert bypass_model_exec
-
-        if not bypass_model_exec:
-            hidden_or_intermediate_states = self.model_runner.execute_model(
-                model_input=model_input,
-                kv_caches=self.kv_cache[worker_input.virtual_engine]
-                if self.kv_cache is not None else None,
-                intermediate_tensors=intermediate_tensors,
-                num_steps=num_steps,
-                **kwargs,
-            )
-
-        # sending out KV cache
-        if self.need_send_kv(model_input, worker_input):
-            from vllm.worker.model_runner import GPUModelRunnerBase
-            assert isinstance(self.model_runner, GPUModelRunnerBase), \
-                "Distributed KV transfer only support GPU modelrunner"
-            logger.debug("Sending KV caches")
-            ps.get_disagg_group().send_kv_caches_and_hidden_states(
-                # model is used to know which layer the current worker
-                # is working on, so that we can send KV for only those
-                # layers.
-                self.model_runner.model,
-                model_input,
-                self.kv_cache[worker_input.virtual_engine]
-                if self.kv_cache is not None else None,
-                hidden_or_intermediate_states,
-            )
-
-        # separating postprocessing steps out from execute_model
-        # so that disaggregated prefill can completely bypass model forwarding
-        from vllm.worker.model_runner import ModelRunner
-        if isinstance(self.model_runner, ModelRunner):
-            output = self.model_runner.postprocess_model(
-                model_input,
-                hidden_or_intermediate_states,
-            )
-        else:
-            output = hidden_or_intermediate_states
+        output = self.model_runner.execute_model(
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            num_steps=num_steps,
+            **kwargs,
+        )
 
         model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
@@ -404,46 +352,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         # output is List[SamplerOutput]
         return output
-
-    def need_recv_kv(self, model_input, worker_input) -> bool:
-
-        if self.kv_cache is None:
-            return False
-
-        kv_caches = self.kv_cache[worker_input.virtual_engine]
-        prefill_meta = model_input.attn_metadata.prefill_metadata
-
-        # check if the current run is profiling
-        is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
-        # check if the current run is prefill
-        is_prefill_run = prefill_meta is not None
-        # for disaggregated prefilling: allow bypassing model execution
-
-        return all([
-            is_prefill_run, dist_kv.IS_KV_DECODE_INSTANCE
-            or dist_kv.IS_LMCACHE_INSTANCE, not is_profile_run
-        ])
-
-    def need_send_kv(self, model_input, worker_input) -> bool:
-
-        if self.kv_cache is None:
-            return False
-
-        kv_caches = self.kv_cache[worker_input.virtual_engine]
-        prefill_meta = model_input.attn_metadata.prefill_metadata
-        from vllm.worker.model_runner import GPUModelRunnerBase
-        if not isinstance(self.model_runner, GPUModelRunnerBase):
-            return False
-
-        # check if the current run is profiling
-        is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
-        # check if the current run is prefill
-        is_prefill_run = prefill_meta is not None
-
-        return all([
-            is_prefill_run, dist_kv.IS_KV_PREFILL_INSTANCE
-            or dist_kv.IS_LMCACHE_INSTANCE, not is_profile_run
-        ])
 
     def _execute_model_spmd(
         self,
