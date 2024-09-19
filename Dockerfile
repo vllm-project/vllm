@@ -87,6 +87,7 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
     cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \ 
     -DONEDNN_BUILD_DOC=OFF \ 
     -DONEDNN_BUILD_EXAMPLES=OFF \ 
