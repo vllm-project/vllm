@@ -1248,8 +1248,8 @@ def supports_dynamo() -> bool:
 # Some backends use pytorch version < 2.4.0 which doesn't
 # support `torch.library.custom_op`.
 def supports_custom_op() -> bool:
-    base_torch_version = Version(Version(torch.__version__).base_version)
-    return base_torch_version >= Version("2.4.0")
+    # use Version lib like `supports_dynamo`` will break doc build.
+    return not is_xpu()
 
 
 class AtomicCounter:
