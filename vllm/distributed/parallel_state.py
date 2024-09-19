@@ -986,14 +986,15 @@ def init_distributed_environment(
             logger.debug("Disaggregated prefill enabled.")
             if dist_kv.IS_KV_PRODUCER:
                 # for prefill, the ranks are [0, world_size)
+                logger.debug("rank %d is KV producer.", rank)
                 maybe_disagg_rank = rank
             else:
                 # this is decode instance.
                 # offset global rank by tp * pp (which is world_size)
                 maybe_disagg_rank = rank + world_size
-
-        logger.debug("Before: world size %d, rank %d", maybe_disagg_world_size,
-                     maybe_disagg_rank)
+                logger.debug("rank %d is KV producer, adjust it to %d",
+                             rank,
+                             maybe_disagg_rank)
 
         torch.distributed.init_process_group(
             backend=backend,

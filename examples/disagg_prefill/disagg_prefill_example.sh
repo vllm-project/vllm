@@ -5,7 +5,14 @@
 
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 export VLLM_PORT=12345
-export VLLM_LOGGING_LEVEL=DEBUG
+
+# install quart first -- required for disagg prefill proxy serve
+if python3 -c "import quart" &> /dev/null; then
+    echo "Quart is already installed."
+else
+    echo "Quart is not installed. Installing..."
+    python3 -m pip install quart
+fi 
 
 # a function that waits vLLM server to start
 wait_for_server() {
