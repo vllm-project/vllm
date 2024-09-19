@@ -104,6 +104,10 @@ class MQLLMEngine:
         self.heartbeat_interval_seconds = VLLM_RPC_TIMEOUT / 5000.0
 
         self._last_alive_time = time.time()
+        # The heartbeats can tolerate a long period of the engine chugging
+        # away at a generation request.
+        # The VLLM_RPC_TIMEOUT duration is in ms, and we need one in seconds
+        self.last_alive_threshold = VLLM_RPC_TIMEOUT * 3.0 / 1000.0
 
     @property
     def dead_error(self) -> BaseException:
@@ -301,7 +305,7 @@ class MQLLMEngine:
             self._send_unhealthy(self._errored_with)
 
         # Check for life of the main loop
-        if time.time() - self._last_alive_time > 30:
+        if time.time() - self._last_alive_time > self.last_alive_threshold:
             self._send_unhealthy(RuntimeError("Engine loop has died"))
 
         # Raises error if unhealthy.
