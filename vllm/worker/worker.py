@@ -1,488 +1,485 @@
-"""A GPU worker class."""
-import gc
+import dataclasses
+import importlib
 import os
-from typing import Dict, List, Optional, Set, Tuple, Type, Union
+import time
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
-import torch.distributed
 
-import vllm.envs as envs
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment,
-                              set_custom_all_reduce)
+from vllm.config import ObservabilityConfig
+from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
-from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
-                           SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.embedding_model_runner import EmbeddingModelRunner
-from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
-from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
-from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
+from vllm.utils import (enable_trace_function_call_for_thread,
+                        update_environment_variables)
+from vllm.worker.model_runner_base import (BroadcastableModelInput,
+                                           ModelRunnerBase,
+                                           ModelRunnerInputBase)
 
 logger = init_logger(__name__)
 
 
-class Worker(LocalOrDistributedWorkerBase):
-    """A worker class that executes (a partition of) the model on a GPU.
-
-    Each worker is associated with a single GPU. The worker is responsible for
-    maintaining the KV cache and executing the model on the GPU. In case of
-    distributed inference, each worker is assigned a partition of the model.
+class WorkerBase(ABC):
+    """Worker interface that allows vLLM to cleanly separate implementations for
+    different hardware. Also abstracts control plane communication, e.g., to
+    communicate request metadata to other workers.
     """
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str,
-        lora_config: Optional[LoRAConfig] = None,
-        speculative_config: Optional[SpeculativeConfig] = None,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        is_driver_worker: bool = False,
-        model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
-        observability_config: Optional[ObservabilityConfig] = None,
-    ) -> None:
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.parallel_config.rank = rank
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.local_rank = local_rank
-        self.rank = rank
-        self.distributed_init_method = distributed_init_method
-        self.lora_config = lora_config
-        self.load_config = load_config
-        self.prompt_adapter_config = prompt_adapter_config
-        self.is_driver_worker = is_driver_worker
-        if parallel_config and is_driver_worker:
-            assert rank % parallel_config.tensor_parallel_size == 0, \
-                   "Driver worker should be rank 0 of tensor parallel group."
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
-            init_cached_hf_modules()
-        self.observability_config = observability_config
-
-        # Return hidden states from target model if the draft model is an
-        # mlp_speculator
-        speculative_args = {} if speculative_config is None \
-            or (speculative_config.draft_model_config.model ==
-                model_config.model) \
-            or (speculative_config.draft_model_config.hf_config.model_type
-                not in ["medusa", "mlp_speculator", "eagle"]) \
-                    else {"return_hidden_states": True}
-
-        ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_runner_cls is not None:
-            ModelRunnerClass = model_runner_cls
-        elif self._is_embedding_model():
-            ModelRunnerClass = EmbeddingModelRunner
-        elif self._is_encoder_decoder_model():
-            ModelRunnerClass = EncoderDecoderModelRunner
-        self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config=load_config,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=is_driver_worker,
-            prompt_adapter_config=prompt_adapter_config,
-            observability_config=observability_config,
-            **speculative_args,
-        )
-        # Uninitialized cache engine. Will be initialized by
-        # initialize_cache.
-        self.cache_engine: List[CacheEngine]
-        # Initialize gpu_cache as embedding models don't initialize kv_caches
-        self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
-        self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
-
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        torch_profiler_trace_dir)
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                with_stack=True,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, use_gzip=True))
-        else:
-            self.profiler = None
-
-    def start_profile(self):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        self.profiler.start()
-
-    def stop_profile(self):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        self.profiler.stop()
-
-    def _is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
-
-    def _is_embedding_model(self):
-        return self.model_config.is_embedding_model
-
+    @abstractmethod
     def init_device(self) -> None:
-        if self.device_config.device.type == "cuda":
-            # torch.distributed.all_reduce does not free the input tensor until
-            # the synchronization point. This causes the memory usage to grow
-            # as the number of all_reduce calls increases. This env var disables
-            # this behavior.
-            # Related issue:
-            # https://discuss.pytorch.org/t/cuda-allocation-lifetime-for-inputs-to-distributed-all-reduce/191573
-            os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
-
-            # This env var set by Ray causes exceptions with graph building.
-            os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            self.device = torch.device(f"cuda:{self.local_rank}")
-            torch.cuda.set_device(self.device)
-
-            _check_if_gpu_supports_dtype(self.model_config.dtype)
-            gc.collect()
-            torch.cuda.empty_cache()
-            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
-        else:
-            raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
-        # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
-                                            self.distributed_init_method,
-                                            self.local_rank)
-        # Set random seed.
-        set_random_seed(self.model_config.seed)
-
-    def load_model(self):
-        self.model_runner.load_model()
-
-    def save_sharded_state(
-        self,
-        path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
-    ) -> None:
-        self.model_runner.save_sharded_state(
-            path,
-            pattern=pattern,
-            max_size=max_size,
-        )
-
-    def save_tensorized_model(
-        self,
-        tensorizer_config: TensorizerConfig,
-    ) -> None:
-        self.model_runner.save_tensorized_model(
-            tensorizer_config=tensorizer_config, )
-
-    @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Profiles the peak memory usage of the model to determine how many
-        KV blocks may be allocated without OOMs.
-
-        The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
-        that can be allocated with the remaining free memory.
-
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
+        """Initialize device state, such as loading the model or other on-device
+        memory allocations.
         """
-        # Profile the memory usage of the model and get the maximum number of
-        # cache blocks that can be allocated with the remaining free memory.
-        torch.cuda.empty_cache()
+        raise NotImplementedError
 
-        # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        self.model_runner.profile_run()
+    @abstractmethod
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        """Determine the number of available blocks for the GPU KV cache and
+        swappable CPU KV cache.
 
-        # Calculate the number of blocks that can be allocated with the
-        # profiled peak memory.
-        torch.cuda.synchronize()
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
-        assert peak_memory > 0, (
-            "Error in memory profiling. "
-            f"Initial free memory {self.init_gpu_memory}, current free memory"
-            f" {free_gpu_memory}. This happens when the GPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
+        The implementation may run profiling or other heuristics to determine
+        the size of caches.
 
-        cache_block_size = self.get_cache_block_size_bytes()
-        num_gpu_blocks = int(
-            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                             cache_block_size)
-        num_gpu_blocks = max(num_gpu_blocks, 0)
-        num_cpu_blocks = max(num_cpu_blocks, 0)
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
-        gc.collect()
-        torch.cuda.empty_cache()
-        return num_gpu_blocks, num_cpu_blocks
+        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        are blocks that are "active" on the device and can be appended to.
+        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        appended to.
+        """
+        raise NotImplementedError
 
+    @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
-        """Allocate GPU and CPU KV cache with the specified number of blocks.
-
-        This also warms up the model, which may record CUDA graphs.
+        """Initialize the KV cache with the given size in blocks.
         """
-        raise_if_cache_size_invalid(num_gpu_blocks,
-                                    self.cache_config.block_size,
-                                    self.model_config.max_model_len)
+        raise NotImplementedError
 
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
+    @current_platform.inference_mode()
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop in parallel worker.
 
-        self._init_cache_engine()
-        self._warm_up_model()
+        You can stop the loop by executing a driver worker with an empty output.
+        See `stop_remote_worker_execution_loop` for more details.
+        """
+        while True:
+            output = self.execute_model(execute_model_req=None)
+            if output is None:
+                return None
 
-    def _init_cache_engine(self):
-        assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = [
-            CacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
-        ]
-        self.gpu_cache = [
-            self.cache_engine[ve].gpu_cache
-            for ve in range(self.parallel_config.pipeline_parallel_size)
-        ]
+    @abstractmethod
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        raise NotImplementedError
 
-    def _warm_up_model(self) -> None:
-        if not self.model_config.enforce_eager:
-            self.model_runner.capture_model(self.gpu_cache)
-        # Reset the seed to ensure that the random state is not affected by
-        # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+    @abstractmethod
+    def get_cache_block_size_bytes(self) -> int:
+        """Return the size of a single cache block, in bytes. Used in
+        speculative decoding.
+        """
+        raise NotImplementedError
 
-    @property
-    def do_metadata_broadcast(self) -> bool:
-        return self.parallel_config.tensor_parallel_size > 1
+    @abstractmethod
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
 
-    @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
-        return self.gpu_cache
+    @abstractmethod
+    def remove_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError
 
-    @torch.inference_mode()
-    def prepare_worker_input(
-            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
-        virtual_engine = execute_model_req.virtual_engine
-        num_steps = execute_model_req.num_steps
-        num_seq_groups = len(execute_model_req.seq_group_metadata_list)
-        # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
-        # they contain parameters to launch cudamemcpyasync.
-        blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
-                                         device="cpu",
-                                         dtype=torch.int64).view(-1, 2)
-        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
-                                          device="cpu",
-                                          dtype=torch.int64).view(-1, 2)
-        # `blocks_to_copy` is a gpu tensor. The src and tgt of
-        # blocks to copy are in the same device, and `blocks_to_copy`
-        # can be used directly within cuda kernels.
-        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-                                      device=self.device,
-                                      dtype=torch.int64).view(-1, 2)
+    @abstractmethod
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError
 
-        return WorkerInput(
-            num_seq_groups=num_seq_groups,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
-            virtual_engine=virtual_engine,
-            num_steps=num_steps,
+    @abstractmethod
+    def list_loras(self) -> Set[int]:
+        raise NotImplementedError
+
+
+class LoraNotSupportedWorkerBase(WorkerBase):
+    """Partial implementation of WorkerBase that raises exceptions when LoRA
+    methods are invoked.
+    """
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise ValueError(f"{type(self)} does not support LoRA")
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise ValueError(f"{type(self)} does not support LoRA")
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return ValueError(
+            f"{type(self)} does not support LoRA")  # type: ignore
+
+    def list_loras(self) -> Set[int]:
+        raise ValueError(f"{type(self)} does not support LoRA")
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkerInput:
+    """Local inputs to each worker. May contain device-specific data. These
+    fields should be broadcastable to other workers.
+    """
+
+    num_seq_groups: Optional[int] = None
+    blocks_to_swap_in: Optional[torch.Tensor] = None
+    blocks_to_swap_out: Optional[torch.Tensor] = None
+    blocks_to_copy: Optional[torch.Tensor] = None
+    virtual_engine: int = 0
+    num_steps: int = 1
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+        cls: Type["WorkerInput"],
+        tensor_dict: Dict[str, Any],
+    ) -> "WorkerInput":
+        """
+        Pop fields from the given tensor_dict and populate a new instance of
+        WorkerInput.
+        """
+        return cls(
+            num_seq_groups=tensor_dict.pop("num_seq_groups"),
+            blocks_to_swap_in=tensor_dict.pop("blocks_to_swap_in"),
+            blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
+            blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
+            virtual_engine=tensor_dict["virtual_engine"],
+            num_steps=tensor_dict.pop("num_steps"),
         )
 
-    @torch.inference_mode()
-    def execute_worker(self, worker_input: WorkerInput) -> None:
-        virtual_engine = worker_input.virtual_engine
-        # Issue cache operations.
-        if (worker_input.blocks_to_swap_in is not None
-                and worker_input.blocks_to_swap_in.numel() > 0):
-            self.cache_engine[virtual_engine].swap_in(
-                worker_input.blocks_to_swap_in)
-        if (worker_input.blocks_to_swap_out is not None
-                and worker_input.blocks_to_swap_out.numel() > 0):
-            self.cache_engine[virtual_engine].swap_out(
-                worker_input.blocks_to_swap_out)
-        if (worker_input.blocks_to_copy is not None
-                and worker_input.blocks_to_copy.numel() > 0):
-            self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
-
-    def _get_cached_seq_group_metadata(
-            self,
-            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
-                                                SequenceGroupMetadataDelta]],
-            finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
-        """Return a list of cached Sequence Group Metadata after updating its
-        state.
-
-        It is used because scheduler only sends delta to workers to reduce
-        the data payload size. The function also cleans up cache based on
-        a given `finished_request_ids`.
+    def as_broadcastable_tensor_dict(
+            self) -> Dict[str, Union[int, torch.Tensor]]:
         """
-        new_seq_group_metadata_list = []
-        for metadata_or_delta in seq_group_metadata_list:
-            request_id = metadata_or_delta.request_id
-            if request_id not in self._seq_group_metadata_cache:
-                # The first prefill.
-                assert isinstance(metadata_or_delta, SequenceGroupMetadata)
-                self._seq_group_metadata_cache[request_id] = metadata_or_delta
-            else:
-                # The first prefill is already cached.
-                if isinstance(metadata_or_delta, SequenceGroupMetadataDelta):
-                    self._seq_group_metadata_cache[request_id].apply_delta(
-                        metadata_or_delta)
-                else:
-                    # If metadata snapshot is sent again, it is
-                    # preempted. Reset the cache because we need to start
-                    # from scratch.
-                    assert isinstance(metadata_or_delta, SequenceGroupMetadata)
-                    self._seq_group_metadata_cache[
-                        request_id] = metadata_or_delta
+        Extract broadcastable fields.
+        """
+        tensor_dict = {
+            "num_seq_groups": self.num_seq_groups,
+            "blocks_to_swap_in": self.blocks_to_swap_in,
+            "blocks_to_swap_out": self.blocks_to_swap_out,
+            "blocks_to_copy": self.blocks_to_copy,
+            "virtual_engine": self.virtual_engine,
+            "num_steps": self.num_steps,
+        }
 
-            new_seq_group_metadata_list.append(
-                self._seq_group_metadata_cache[request_id])
+        return tensor_dict
 
-        # Clean up finished ids
-        for finished_id in finished_request_ids:
-            del self._seq_group_metadata_cache[finished_id]
 
-        return new_seq_group_metadata_list
+class LocalOrDistributedWorkerBase(WorkerBase):
+    """
+    Partial implementation of WorkerBase that has a default `execute_model`
+    definition to perform metadata transfer between workers when in distributed
+    mode. Subclasses of this interface should use model runners that inherit
+    from ModelRunnerBase, and should only need to implement worker-local logic.
+    If custom control plane logic is needed to transfer metadata, or if the
+    model runner cannot inherit from ModelRunnerBase, use WorkerBase instead.
+    """
+    is_driver_worker: bool
+    model_runner: ModelRunnerBase
+    observability_config: Optional[ObservabilityConfig] = None
+
+    @property
+    @abstractmethod
+    def do_metadata_broadcast(self) -> bool:
+        """
+        Used by the default `execute_model` to check whether broadcast is
+        needed to transfer request inputs from the driver worker to other
+        workers in the TP group. If WorkerBase subclass only supports
+        single-worker execution, then this method should return False.
+        """
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+        """
+        Gets the list of kv caches to pass to the worker's model runner. Each
+        element in the list is a kv cache corresponding to a particular virtual
+        engine (PP stream). Used by the default `execute_model`. If the worker's
+        model runner does not follow the ModelRunnerBase interface, then inherit
+        from WorkerBase instead.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        """
+        Prepare the inputs to WorkerBase.execute_worker from an execution
+        request. This method may move data to the worker's local device. It is
+        not allowed to communicate with other workers or devices.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        """
+        Process an execution request.
+        """
+        raise NotImplementedError
+
+    def _get_worker_input_from_broadcast(
+        self
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
+        """ Get the worker input from the broadcasted tensor dict. """
+        assert self.do_metadata_broadcast
+        assert not self.is_driver_worker
+        broadcast_data = broadcast_tensor_dict(src=0)
+        if not broadcast_data:
+            return None
+
+        worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
+        model_input = (
+            self.model_runner.make_model_input_from_broadcasted_tensor_dict(
+                broadcast_data))
+
+        kwargs = extract_previous_hidden_states(broadcast_data)
+
+        return model_input, worker_input, kwargs
+
+    def _get_driver_input_and_broadcast(
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
+        """ Get the driver input and broadcast it to other workers.  """
+        assert self.is_driver_worker
+
+        worker_input: WorkerInput = self.prepare_worker_input(
+            execute_model_req=execute_model_req)
+        model_input: ModelRunnerInputBase = (
+            self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list,
+                execute_model_req.virtual_engine,
+                execute_model_req.finished_requests_ids))
+
+        kwargs = extract_previous_hidden_states(execute_model_req)
+
+        if self.do_metadata_broadcast:
+            broadcast_data = worker_input.as_broadcastable_tensor_dict()
+            broadcast_data.update(model_input.as_broadcastable_tensor_dict())
+            broadcast_data.update(kwargs)
+            broadcast_tensor_dict(broadcast_data, src=0)
+
+        if execute_model_req.async_callback:
+            model_input = dataclasses.replace(  # type: ignore
+                model_input,
+                async_callback=execute_model_req.async_callback)
+
+        return model_input, worker_input, kwargs
+
+    def prepare_input(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
+        """
+        Prepare the inputs to ModelRunner and workers.
+        """
+        if self.is_driver_worker:
+            if execute_model_req is None:
+                if self.do_metadata_broadcast:
+                    # This signals that there's no more requests to process for
+                    # now. All workers are running infinite loop with
+                    # broadcast_tensor_dict, and it stops the loop when the
+                    # driver broadcasts an empty input. Send an empty input to
+                    # notify all other workers to stop their execution loop.
+                    broadcast_tensor_dict({}, src=0)
+                return None
+            return self._get_driver_input_and_broadcast(execute_model_req)
+        else:
+            return self._get_worker_input_from_broadcast()
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+    ) -> Optional[List[SamplerOutput]]:
+        """Executes at least one model step on the given sequences, unless no
+        sequences are provided."""
+        start_time = time.perf_counter()
+
+        inputs = self.prepare_input(execute_model_req)
+        if inputs is None:
+            return None
+
+        model_input, worker_input, kwargs = inputs
+        num_steps = worker_input.num_steps
+
+        self.execute_worker(worker_input)
+
+        # If there is no input, we don't need to execute the model.
+        if worker_input.num_seq_groups == 0:
+            return []
+
+        intermediate_tensors = None
+        orig_model_execute_time = 0.0
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict(
+                    all_gather_group=get_tp_group()))
+            if (self.observability_config is not None
+                    and self.observability_config.collect_model_execute_time):
+                orig_model_execute_time = intermediate_tensors.tensors.get(
+                    "model_execute_time", torch.tensor(0)).item()
+
+        output = self.model_runner.execute_model(
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            num_steps=num_steps,
+            **kwargs,
+        )
+
+        model_execute_time = time.perf_counter() - start_time
+        if not get_pp_group().is_last_rank:
+            # output is IntermediateTensors
+            if (self.observability_config is not None
+                    and self.observability_config.collect_model_execute_time):
+                output.tensors["model_execute_time"] = torch.tensor(
+                    model_execute_time + orig_model_execute_time)
+            get_pp_group().send_tensor_dict(output.tensors,
+                                            all_gather_group=get_tp_group())
+            return [None]
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_execute_time
+                and output is not None):
+            for o in output:
+                o.model_execute_time = (orig_model_execute_time +
+                                        model_execute_time)
+
+        # output is List[SamplerOutput]
+        return output
 
     def _execute_model_spmd(
         self,
         execute_model_req: ExecuteModelRequest,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Optional[List[SamplerOutput]]:
-        if execute_model_req is not None:
-            new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
-                execute_model_req.seq_group_metadata_list,
-                execute_model_req.finished_requests_ids)
-
-            execute_model_req.seq_group_metadata_list = (
-                new_seq_group_metadata_list)
-        output = super()._execute_model_spmd(execute_model_req,
-                                             intermediate_tensors)
-        return output
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        return self.model_runner.remove_lora(lora_id)
-
-    def pin_lora(self, lora_id: int) -> bool:
-        return self.model_runner.pin_lora(lora_id)
-
-    def list_loras(self) -> Set[int]:
-        return self.model_runner.list_loras()
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        return self.model_runner.add_prompt_adapter(prompt_adapter_request)
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.model_runner.remove_lora(prompt_adapter_id)
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.model_runner.pin_prompt_adapter(prompt_adapter_id)
-
-    def list_prompt_adapters(self) -> Set[int]:
-        return self.model_runner.list_prompt_adapters()
-
-    @property
-    def max_model_len(self) -> int:
-        return self.model_config.max_model_len
-
-    @property
-    def vocab_size(self) -> int:
-        return self.model_runner.vocab_size
-
-    def get_cache_block_size_bytes(self) -> int:
-        """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(self.cache_config,
-                                                self.model_config,
-                                                self.parallel_config)
+        Execute model in Single Program Multiple Data (SPMD) fashion.
+        All workers take the same request, prepare the input and
+        execute the model.
+        """
+        assert execute_model_req is not None, (
+            "_execute_model_spmd() requires each worker to take in an "
+            "ExecuteModelRequest")
+        worker_input: WorkerInput = self.prepare_worker_input(
+            execute_model_req=execute_model_req)
+        model_input: ModelRunnerInputBase = (
+            self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list))
+
+        self.execute_worker(worker_input)
+
+        # If there is no input, we don't need to execute the model.
+        if worker_input.num_seq_groups == 0:
+            return []
+
+        kwargs = extract_previous_hidden_states(execute_model_req)
+
+        return self.model_runner.execute_model(
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            **kwargs,
+        )
 
 
-def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
-    rank: int,
-    distributed_init_method: Optional[str] = None,
-    local_rank: int = -1,
-) -> None:
-    """Initialize the distributed environment."""
-    set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+class WorkerWrapperBase:
+    """
+    The whole point of this class is to lazily initialize the worker.
+    We first instantiate the WorkerWrapper, which remembers the worker module
+    and class name. Then, when we call `update_environment_variables`, and the
+    real initialization happens in `init_worker`.
 
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+    If worker_class_fn is specified, it will be executed to get the worker
+    class.
+    Otherwise, the worker class will be obtained by dynamically importing it
+    using worker_module_name and worker_class_name.
+    """
 
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    def __init__(
+        self,
+        worker_module_name: str,
+        worker_class_name: str,
+        trust_remote_code: bool = False,
+        worker_class_fn: Optional[Callable[[],
+                                           Type[WorkerBase]]] = None) -> None:
+        self.worker_module_name = worker_module_name
+        self.worker_class_name = worker_class_name
+        self.worker_class_fn = worker_class_fn
+        self.worker: Optional[WorkerBase] = None
+        if trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
+
+    @staticmethod
+    def update_environment_variables(envs: Dict[str, str]) -> None:
+        key = 'CUDA_VISIBLE_DEVICES'
+        if key in envs and key in os.environ:
+            # overwriting CUDA_VISIBLE_DEVICES is desired behavior
+            # suppress the warning in `update_environment_variables`
+            del os.environ[key]
+        update_environment_variables(envs)
+
+    def init_worker(self, *args, **kwargs):
+        """
+        Here we inject some common logic before initializing the worker.
+        Arguments are passed to the worker class constructor.
+        """
+        enable_trace_function_call_for_thread()
+
+        # see https://github.com/NVIDIA/nccl/issues/1234
+        os.environ['NCCL_CUMEM_ENABLE'] = '0'
+
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
+
+        if self.worker_class_fn:
+            worker_class = self.worker_class_fn()
+        else:
+            mod = importlib.import_module(self.worker_module_name)
+            worker_class = getattr(mod, self.worker_class_name)
+
+        self.worker = worker_class(*args, **kwargs)
+        assert self.worker is not None
+
+    def execute_method(self, method, *args, **kwargs):
+        try:
+            target = self if self.worker is None else self.worker
+            executor = getattr(target, method)
+            return executor(*args, **kwargs)
+        except Exception as e:
+            # if the driver worker also execute methods,
+            # exceptions in the rest worker may cause deadlock in rpc like ray
+            # see https://github.com/vllm-project/vllm/issues/3455
+            # print the error and inform the user to solve the error
+            msg = (f"Error executing method {method}. "
+                   "This might cause deadlock in distributed execution.")
+            logger.exception(msg)
+            raise e
 
 
-def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
-    # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:  # noqa: SIM102
-        if not current_platform.has_device_capability(80):
-            capability = current_platform.get_device_capability()
-            gpu_name = current_platform.get_device_name()
+def extract_previous_hidden_states(
+        data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]]) -> \
+            Dict[str, torch.Tensor]:
+    """If data contains previous_hidden_states, extract it. This returns a dict
+    which can be used directly as additional kwargs in any following 
+    execute_model calls. This is used in draft models like EAGLE."""
+    output = {}
 
-            if capability is None:
-                compute_str = "does not have a compute capability"
-            else:
-                version_str = capability.as_version_str()
-                compute_str = f"has compute capability {version_str}"
+    # When called from non-driver worker, data is dict but when called from
+    # driver worker, data is ExecuteModelRequest.
+    if isinstance(data, dict):
+        if "previous_hidden_states" in data:
+            output["previous_hidden_states"] = data["previous_hidden_states"]
+    elif data.previous_hidden_states is not None:
+        output["previous_hidden_states"] = data.previous_hidden_states\
+            .hidden_states
 
-            raise ValueError(
-                "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the"
-                "`dtype` flag in CLI, for example: --dtype=half.")
-
-
-def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
-                                max_model_len) -> None:
-    if num_gpu_blocks <= 0:
-        raise ValueError("No available memory for the cache blocks. "
-                         "Try increasing `gpu_memory_utilization` when "
-                         "initializing the engine.")
-    max_seq_len = block_size * num_gpu_blocks
-    if max_model_len > max_seq_len:
-        raise ValueError(
-            f"The model's max seq len ({max_model_len}) "
-            "is larger than the maximum number of tokens that can be "
-            f"stored in KV cache ({max_seq_len}). Try increasing "
-            "`gpu_memory_utilization` or decreasing `max_model_len` when "
-            "initializing the engine.")
+    return output

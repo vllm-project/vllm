@@ -1,5 +1,5 @@
 """vLLM distributed KV cache transfer API.
-These APIs are used in `vllm/worker/worker_base.py`.
+These APIs are used in `vllm/worker/model_runner.py`.
 
 Currently supporting TP. The TP between prefill and decode instance needs to be 
 the same.
@@ -38,20 +38,22 @@ from vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe import (
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
-assert envs.VLLM_DISAGG_PREFILL_ROLE in [None, "prefill", "decode", "lmcache"],\
-    "VLLM_DISAGG_PREFILL_ROLE can only be prefill, decode or lmcache."
-
-# currently the connections are hard-coded.
-# we only handle 2 cases:
-# - prefill vLLM --> decode vLLM
-# - vLLM --> LMCache
-IS_DISTRIBUTED_KV_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE
-                                    in ["prefill", "decode"])
-IS_KV_PREFILL_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "prefill")
-IS_KV_DECODE_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "decode")
-IS_LMCACHE_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "lmcache")
-
 logger = init_logger(__name__)
+
+# check VLLM_DISTRIBUTERD_KV_ROLE and set corresponding flags
+assert envs.VLLM_DISTRIBUTERD_KV_ROLE in [None, "producer", "consumer", "both"],\
+    "VLLM_DISTRIBUTERD_KV_ROLE can only be producer, consumer or both."
+IS_DISTRIBUTED_KV_INSTANCE: bool = (envs.VLLM_DISTRIBUTERD_KV_ROLE
+                                    in ["producer", "consumer", "both"])
+IS_KV_PRODUCER: bool = (envs.VLLM_DISTRIBUTERD_KV_ROLE in ["producer", "both"])
+IS_KV_CONSUMER: bool = (envs.VLLM_DISTRIBUTERD_KV_ROLE == ["consumer", "both"])
+
+# When the current instance is both KV producer and KV consumer,
+# it is likely connected to a KV storage service on CPU/disk
+# so the communication backend needs to be "gloo" for that case.
+DISTRIBUTED_BACKEND: str = "gloo" if (IS_KV_PRODUCER and IS_KV_CONSUMER) else "nccl"
+DISTRIBUTED_DEVICE: str = "cpu" if (IS_KV_PRODUCER and IS_KV_CONSUMER) else "cuda"
+
 
 
 class KV_transfer_agent:
@@ -67,7 +69,7 @@ class KV_transfer_agent:
         self,
         group_ranks: List[List[int]],
         local_rank: int,
-        torch_distributed_backend: Union[str, Backend],
+        torch_distributed_backend: Union[str, Backend] = DISTRIBUTED_BACKEND,
         # FIXME(Kuntai): remove this hardcoding
         lookup_buffer_size: int = int(1e10)):
 
@@ -78,13 +80,15 @@ class KV_transfer_agent:
 
         SimpleKVLookupBuffer = sklb.SimpleKVLookupBuffer
 
-        if IS_LMCACHE_INSTANCE:
-            # when vLLM is connected with LMCache
-            # it needs to both send and recv KV cache
+        # In disaggregated prefill, the prefill vLLM only uses send pipe
+        # and the decode vLLM only uses recv pipe
+        # In remote KV cache store, vLLM will use both send pipe and recv pipe
+        # So we build both send pipe and recv pipe for simplicity.
+        if IS_KV_PRODUCER:
             self.send_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
-                torch_distributed_backend,
+                DISTRIBUTED_BACKEND,
             )
             self.send_signal_pipe = TorchDistributedPipe(
                 group_ranks,
@@ -94,7 +98,7 @@ class KV_transfer_agent:
             self.recv_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
-                torch_distributed_backend,
+                DISTRIBUTED_BACKEND,
             )
             self.recv_signal_pipe = TorchDistributedPipe(
                 group_ranks,
@@ -107,27 +111,39 @@ class KV_transfer_agent:
             self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe,
                                                     self.recv_pipe,
                                                     self.lookup_buffer_size)
-            self.tensor_device = 'cpu'
+            self.tensor_device = DISTRIBUTED_DEVICE
         else:
-            # when performing disaggregated prefill, only 1 pipe is needed
-            # at prefill instance this pipe is used for send KV cache
-            # at decode instance this pipe is used for recv KV cache
-            self.pipe = TorchDistributedPipe(
+            
+            # the current vLLM instance is KV consumer, so it needs to connect 
+            # its recv pipe to the send pipe of KV producder
+            
+            self.recv_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
-                torch_distributed_backend,
+                DISTRIBUTED_BACKEND,
             )
-            self.signal_pipe = TorchDistributedPipe(
+            self.recv_signal_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 "gloo",
             )
-            buffer = SimpleKVLookupBuffer(self.signal_pipe, self.pipe,
-                                          self.lookup_buffer_size)
-            self.send_buffer = buffer
-            self.recv_buffer = buffer
-            
-            self.tensor_device = 'cuda'
+            self.send_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                DISTRIBUTED_BACKEND,
+            )
+            self.send_signal_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                "gloo",
+            )
+            self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe,
+                                                    self.send_pipe,
+                                                    self.lookup_buffer_size)
+            self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe,
+                                                    self.recv_pipe,
+                                                    self.lookup_buffer_size)
+            self.tensor_device = DISTRIBUTED_DEVICE
 
     def send_kv_caches_and_hidden_states(
         self,

@@ -981,10 +981,10 @@ def init_distributed_environment(
         # this backend is used for WORLD
         maybe_disagg_world_size = world_size
         maybe_disagg_rank = rank
-        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
+        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
             maybe_disagg_world_size = world_size * 2
             logger.debug("Disaggregated prefill enabled.")
-            if dist_kv.IS_KV_PREFILL_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
+            if dist_kv.IS_KV_PRODUCER:
                 # for prefill, the ranks are [0, world_size)
                 maybe_disagg_rank = rank
             else:
@@ -1016,7 +1016,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = [[i for i in range(world_size)]]
         # offset the distributed group
-        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
+        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
             ranks = include_decoding_groups_if_disagg_enabled(
                 ranks, world_size)
 
@@ -1079,9 +1079,9 @@ def initialize_model_parallel(
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
-    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
+    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
         # Disaggregated prefill enabled
-        # The world_size for this vLLM instance is tp * pp, but
+        # This vLLM instance thinks its word size is tp * pp, but
         # torch.distributed contains 2 vLLM instances,
         # its world size is 2 * tp * pp
         # Adjust the world_size to match.
@@ -1135,8 +1135,8 @@ def initialize_model_parallel(
                                     group_name="pp")
     logger.debug("_PP initialized for rank %d", torch.distributed.get_rank())
 
-    # TODO(Jiayi): perhaps we need to separate lmcache and disagg
-    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE or dist_kv.IS_LMCACHE_INSTANCE:
+    
+    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
         global _DISAGG
         logger.debug("Disaggregated prefill enabled, create _DISAGG group")
         group_ranks = []
@@ -1145,22 +1145,12 @@ def initialize_model_parallel(
             # decode global rank: i + world_size
             group_ranks.append([i, i + world_size])
         logger.debug("Distributed group is %s", str(group_ranks))
-        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
-            _DISAGG = dist_kv.KV_transfer_agent(
-                group_ranks=group_ranks,
-                local_rank=get_world_group().local_rank,
-                torch_distributed_backend=backend,
-            )
-            logger.debug("_DISAGG initialized for rank %d",
-                        torch.distributed.get_rank())
-        elif dist_kv.IS_LMCACHE_INSTANCE:
-            _DISAGG = dist_kv.KV_transfer_agent(
-                group_ranks=group_ranks,
-                local_rank=get_world_group().local_rank,
-                torch_distributed_backend="gloo",
-            )
-            logger.debug("_DISAGG (LMC) initialized for rank %d",
-                        torch.distributed.get_rank())
+        _DISAGG = dist_kv.KV_transfer_agent(
+            group_ranks=group_ranks,
+            local_rank=get_world_group().local_rank,
+        )
+        logger.debug("_DISAGG initialized for rank %d",
+                    torch.distributed.get_rank())
             
 
 def ensure_model_parallel_initialized(
