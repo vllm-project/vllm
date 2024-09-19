@@ -101,7 +101,7 @@ class MQLLMEngine:
         self._heartbeat_stop_event = threading.Event()
         # The heartbeat needs to be faster than what the client will wait for
         # The VLLM_RPC_TIMEOUT duration is in ms, and we need one in seconds
-        self.heartbeat_interval_seconds = VLLM_RPC_TIMEOUT / 3000.0
+        self.heartbeat_interval_seconds = VLLM_RPC_TIMEOUT / 5000.0
 
         self._last_alive_time = time.time()
 
