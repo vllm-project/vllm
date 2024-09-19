@@ -1,6 +1,4 @@
 # ruff: noqa: SIM117
-import collections
-import copy
 import fnmatch
 import glob
 import json
@@ -8,7 +6,7 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import huggingface_hub
 import numpy as np
@@ -30,8 +28,8 @@ from vllm.wde.core.loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
+    get_quant_config, np_cache_weights_iterator, pt_weights_iterator,
+    safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_pin_memory_available
 

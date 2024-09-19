@@ -1,5 +1,5 @@
 import enum
-from typing import Optional, Type
+from typing import Optional
 import torch
 from vllm.platforms import current_platform
 import vllm.envs as envs
@@ -49,7 +49,8 @@ class AttnBackend:
 
         if backend == _Backend.FLASH_ATTN:
             logger.info("Using FLASH ATTN backend.")
-            from vllm.wde.encode_only.layers.attention.backends.flash_attn import EncodeOnlyFlashAttentionBackend
+            from vllm.wde.encode_only.layers.attention.backends.flash_attn import (  # noqa: E501
+                EncodeOnlyFlashAttentionBackend)
             return EncodeOnlyFlashAttentionBackend
         if backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
@@ -57,7 +58,8 @@ class AttnBackend:
         elif backend == _Backend.TORCH_SDPA:
 
             logger.info("Using Torch SDPA backend.")
-            from vllm.wde.encode_only.layers.attention.backends.torch_sdpa import EncodeOnlyTorchSDPABackend
+            from vllm.wde.encode_only.layers.attention.backends.torch_sdpa import (  # noqa: E501
+                EncodeOnlyTorchSDPABackend)
             return EncodeOnlyTorchSDPABackend
         else:
             raise ValueError("Invalid attention backend.")

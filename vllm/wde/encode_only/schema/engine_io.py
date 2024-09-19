@@ -1,7 +1,9 @@
 from dataclasses import dataclass
-from typing import List, Iterable, Set
+from typing import List, Iterable
 import torch
-from vllm.wde.core.schema.engine_io import Request, PromptInput, TextOnlyInputs, SchedulableRequest, RequestOutput, SchedulerOutput
+from vllm.wde.core.schema.engine_io import (Request, PromptInput,
+                                            TextOnlyInputs, SchedulableRequest,
+                                            RequestOutput, SchedulerOutput)
 
 
 @dataclass

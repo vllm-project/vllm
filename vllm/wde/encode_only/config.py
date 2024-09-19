@@ -42,7 +42,8 @@ class EncodeOnlySchedulerConfig(SchedulerConfig):
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
-            self.max_num_batched_tokens = self.max_model_len * self.max_num_requests
+            self.max_num_batched_tokens = (self.max_model_len *
+                                           self.max_num_requests)
 
         self._verify_args()
 

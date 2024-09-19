@@ -1,9 +1,12 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
+from typing import List, Optional, Union
 
 from vllm.wde.core.arg_utils import EngineArgs
-from vllm.wde.core.config import DeviceConfig, LoadConfig, filter_unexpected_fields
-from vllm.wde.encode_only.config import EncodeOnlyModelConfig, EncodeOnlySchedulerConfig, EncodeOnlyEngineConfig
+from vllm.wde.core.config import (DeviceConfig, LoadConfig,
+                                  filter_unexpected_fields)
+from vllm.wde.encode_only.config import (EncodeOnlyModelConfig,
+                                         EncodeOnlySchedulerConfig,
+                                         EncodeOnlyEngineConfig)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

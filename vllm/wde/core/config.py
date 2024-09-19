@@ -4,9 +4,8 @@ import torch
 import vllm.envs as envs
 from dataclasses import dataclass, field, fields
 
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
-from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_openvino, is_xpu,
+from typing import List, Optional, Union
+from vllm.utils import (is_cpu, is_hip, is_neuron, is_openvino, is_xpu,
                         print_warning_once)
 
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -86,7 +85,7 @@ class LoadConfig:
 
     """
 
-    load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    load_format: Union[str, LoadFormat] = LoadFormat.AUTO
     download_dir: Optional[str] = None
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
@@ -200,24 +199,6 @@ class CacheConfig:
             raise NotImplementedError(
                 "Prefix caching is not supported for fp8 cache_dtype. "
                 "Run with --kv-cache-dtype auto to use prefix caching.")
-
-    def verify_with_parallel_config(
-        self,
-        parallel_config: "ParallelConfig",
-    ) -> None:
-        total_cpu_memory = get_cpu_memory()
-        # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
-        # group are in the same node. However, the GPUs may span multiple nodes.
-        num_gpus_per_node = parallel_config.tensor_parallel_size
-        cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
-
-        msg = (f"{cpu_memory_usage / _GB:.2f} GiB out of "
-               f"the {total_cpu_memory / _GB:.2f} GiB total CPU memory is "
-               "allocated for the swap space.")
-        if cpu_memory_usage > 0.7 * total_cpu_memory:
-            raise ValueError("Too large swap space. " + msg)
-        elif cpu_memory_usage > 0.4 * total_cpu_memory:
-            logger.warning("Possibly too large swap space. %s", msg)
 
 
 class ModelConfig:

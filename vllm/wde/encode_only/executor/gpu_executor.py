@@ -9,7 +9,8 @@ from vllm.logger import init_logger
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.schema.execute_io import ExecuteInput, ExecuteOutput
 from vllm.wde.core.worker import WorkerWrapperBase
-from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionBackend
+from vllm.wde.encode_only.layers.attention.backends.abstract import (
+    EncodeOnlyAttentionBackend)
 
 logger = init_logger(__name__)
 

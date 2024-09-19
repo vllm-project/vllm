@@ -1,6 +1,6 @@
 import importlib
 import os
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Callable, Dict, Optional, Type
 from vllm.logger import init_logger
 
 from vllm.utils import (enable_trace_function_call_for_thread,

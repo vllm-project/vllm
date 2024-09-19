@@ -3,7 +3,8 @@ from typing import (TYPE_CHECKING, Type, Union, ClassVar, Dict, Iterable, List,
                     Optional)
 from typing import Sequence as GenericSequence
 from queue import Queue, Empty
-from vllm.wde.core.schema.engine_io import Params, Inputs, RequestOutput, ValidationError
+from vllm.wde.core.schema.engine_io import (Params, Inputs, RequestOutput,
+                                            ValidationError)
 from vllm.wde.core.workflow import Workflow
 from vllm.wde.core.arg_utils import EngineArgs
 from vllm.wde.core.config import EngineConfig
@@ -100,24 +101,28 @@ class LLMEngine:
         executor_cls = lazy_import(self.workflow.Executor)
         scheduler_cls = lazy_import(self.workflow.Scheduler)
 
-        if "async_scheduling" in executor_cls.support_scheduling and "async_scheduling" in scheduler_cls.support_scheduling:
+        if ("async_scheduling" in executor_cls.support_scheduling
+                and "async_scheduling" in scheduler_cls.support_scheduling):
             logger.info("Use async scheduling")
             self.use_async_scheduling = True
 
-        elif "sync_scheduling" in executor_cls.support_scheduling and "sync_scheduling" in scheduler_cls.support_scheduling:
+        elif ("sync_scheduling" in executor_cls.support_scheduling
+              and "sync_scheduling" in scheduler_cls.support_scheduling):
             logger.info("Use sync scheduling")
             self.use_async_scheduling = False
 
         else:
-            raise RuntimeError(
-                f"Executor support scheduling: {executor_cls.support_scheduling}."
-                f"Scheduler support scheduling: {executor_cls.support_scheduling}."
-                f"Not compatible")
+            raise RuntimeError(f"Executor support scheduling: "
+                               f"{executor_cls.support_scheduling}."
+                               f"Scheduler support scheduling: "
+                               f"{executor_cls.support_scheduling}."
+                               f"Not compatible")
 
         if self.use_async_scheduling:
             self.executor_in = Queue()
             self.executor_out = Queue()
-            self.max_num_on_the_fly = self.engine_config.scheduler_config.max_num_on_the_fly
+            self.max_num_on_the_fly = (
+                self.engine_config.scheduler_config.max_num_on_the_fly)
             self.num_on_the_fly = 0
             self.step = self.async_step
         else:
@@ -157,7 +162,7 @@ class LLMEngine:
             request = self.input_processor(request_id, inputs, params,
                                            arrival_time)
         except ValidationError:
-            logger.error(f"{request_id} validation error")
+            logger.error("%s validation error", request_id)
             return
         self.scheduler.add_request(request)
 

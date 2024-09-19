@@ -3,7 +3,8 @@ from typing import Set
 from vllm.wde.core.schema.engine_io import SchedulableRequest
 from vllm.wde.core.scheduler import Scheduler
 from vllm.wde.encode_only.schema.engine_io import EncodeOnlySchedulerOutput
-from vllm.wde.encode_only.processor.input_processor import EncodeOnlyModelRequestProcessor
+from vllm.wde.encode_only.processor.input_processor import (
+    EncodeOnlyModelRequestProcessor)
 from vllm.wde.encode_only.config import EncodeOnlySchedulerConfig
 
 from vllm.logger import init_logger

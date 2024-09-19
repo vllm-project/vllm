@@ -1,6 +1,6 @@
 # Derived from Bert implementation posted on HuggingFace; license below:
 # coding=utf-8
-# Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team.
+# Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team. # noqa: E501
 # Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,8 +27,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.wde.encode_only.layers.attention import EncodeOnlyAttention, EncodeOnlyAttentionMetadata
-from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionBackend
+from vllm.wde.encode_only.layers.attention import (EncodeOnlyAttention,
+                                                   EncodeOnlyAttentionMetadata)
+from vllm.wde.encode_only.layers.attention.backends.abstract import (
+    EncodeOnlyAttentionBackend)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.utils import is_pp_missing_parameter
@@ -53,7 +55,8 @@ class LoadWeightsMixin:
                 continue
 
             if name == "bert.embeddings.token_type_embeddings.weight":
-                # token_type_ids is all zero, so we only need token_type_embeddings[0]
+                # token_type_ids is all zero,
+                # so we only need token_type_embeddings[0]
                 self.bert.embeddings.init_token_type_embeddings0()
                 default_weight_loader(
                     self.bert.embeddings.token_type_embeddings0,
@@ -393,7 +396,8 @@ class BertLMPredictionHead(nn.Module):
 
         self.bias = nn.Parameter(torch.zeros(config.vocab_size))
 
-        # Need a link between the two variables so that the bias is correctly resized with `resize_token_embeddings`
+        # Need a link between the two variables so that the bias is
+        # correctly resized with `resize_token_embeddings`
         self.decoder.bias = self.bias
 
     def _tie_weights(self):

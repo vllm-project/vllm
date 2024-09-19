@@ -1,6 +1,7 @@
 from typing import List
 import torch
-from vllm.wde.encode_only.processor.output_processor import EncodeOnlyModelOutputProcessor
+from vllm.wde.encode_only.processor.output_processor import (
+    EncodeOnlyModelOutputProcessor)
 from vllm.wde.encode_only.schema.engine_io import EncodeOnlySchedulerOutput
 from vllm.wde.retriever.schema.engine_io import EmbeddingRequestOutput
 

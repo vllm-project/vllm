@@ -86,8 +86,8 @@ class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
             raise ValueError(
                 "Sliding window is not supported in FlashAttention.")
 
-        support_head_sizes = EncodeOnlyFlashAttentionBackend.get_supported_head_sizes(
-        )
+        support_head_sizes = (
+            EncodeOnlyFlashAttentionBackend.get_supported_head_sizes())
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "

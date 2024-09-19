@@ -6,7 +6,8 @@ from vllm.utils import (CudaMemoryProfiler, is_pin_memory_available)
 from vllm.wde.core.config import DeviceConfig, LoadConfig
 from vllm.wde.encode_only.config import ModelConfig, EncodeOnlySchedulerConfig
 from vllm.wde.encode_only.schema.execute_io import ModelInputForGPU
-from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionBackend
+from vllm.wde.encode_only.layers.attention.backends.abstract import (
+    EncodeOnlyAttentionBackend)
 
 logger = init_logger(__name__)
 
@@ -33,7 +34,8 @@ class ModelRunner:
         self.model: nn.Module  # Set after load_model
 
     def load_model(self) -> None:
-        from vllm.wde.core.loader.loader import get_model_loader, initialize_model
+        from vllm.wde.core.loader.loader import (get_model_loader,
+                                                 initialize_model)
 
         logger.info("Starting to load model %s...", self.model_config.model)
         with CudaMemoryProfiler() as m:

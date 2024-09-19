@@ -2,16 +2,16 @@
 # https://github.com/FlagOpen/FlagEmbedding/blob/master/FlagEmbedding/BGE_M3/modeling.py
 # FlagEmbedding is licensed under the MIT License.
 
-from typing import Iterable, Optional, Tuple
+from typing import Optional
 import torch
 from torch import nn
-from vllm.wde.encode_only.modelzoo.xlm_roberta import XLMRobertaModel, XLMRobertaConfig, LoadWeightsMixin
-from vllm.wde.encode_only.layers.attention import EncodeOnlyAttentionMetadata, EncodeOnlyAttentionBackend
+from vllm.wde.encode_only.modelzoo.xlm_roberta import (XLMRobertaModel,
+                                                       XLMRobertaConfig,
+                                                       LoadWeightsMixin)
+from vllm.wde.encode_only.layers.attention import (EncodeOnlyAttentionMetadata,
+                                                   EncodeOnlyAttentionBackend)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.utils import is_pp_missing_parameter
 
 
 class BGEM3Model(nn.Module, LoadWeightsMixin):

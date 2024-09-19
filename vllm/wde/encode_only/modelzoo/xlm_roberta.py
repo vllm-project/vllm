@@ -27,8 +27,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.wde.encode_only.layers.attention import EncodeOnlyAttention, EncodeOnlyAttentionMetadata
-from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionBackend
+from vllm.wde.encode_only.layers.attention import (EncodeOnlyAttention,
+                                                   EncodeOnlyAttentionMetadata)
+from vllm.wde.encode_only.layers.attention.backends.abstract import (
+    EncodeOnlyAttentionBackend)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.utils import is_pp_missing_parameter
@@ -56,7 +58,8 @@ class LoadWeightsMixin:
                 continue
 
             if name == "roberta.embeddings.token_type_embeddings.weight":
-                # token_type_ids is all zero, so we only need token_type_embeddings[0]
+                # token_type_ids is all zero,
+                # so we only need token_type_embeddings[0]
                 self.roberta.embeddings.init_token_type_embeddings0()
                 default_weight_loader(
                     self.roberta.embeddings.token_type_embeddings0,
@@ -129,8 +132,10 @@ class XLMRobertaEmbeddings(nn.Module):
     def forward(self, input_ids, positions):
         embeddings = self.word_embeddings(input_ids)
 
-        # token_type_embeddings is all zero in FacebookAI/xlm-roberta, so we don't need it.
-        # token_type_ids is all zero in BGEM3, so we only need token_type_embeddings[0]
+        # token_type_embeddings is all zero in FacebookAI/xlm-roberta,
+        # so we don't need it.
+        # token_type_ids is all zero in BGEM3,
+        # so we only need token_type_embeddings[0]
         if self.token_type_embeddings0 is not None:
             token_type_embeddings = self.token_type_embeddings0
             embeddings += token_type_embeddings
@@ -398,7 +403,8 @@ class XLMRobertaForMaskedLM(nn.Module, LoadWeightsMixin):
         return logits
 
     def tie_weights(self):
-        self.lm_head.decoder.weight = self.roberta.embeddings.word_embeddings.weight
+        self.lm_head.decoder.weight = (
+            self.roberta.embeddings.word_embeddings.weight)
         self.lm_head.decoder.bias.zero_()
 
 

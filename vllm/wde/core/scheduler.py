@@ -3,7 +3,8 @@ from typing import Deque, Union, Iterable, List
 from collections import deque
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.config import SchedulerConfig
-from vllm.wde.core.schema.engine_io import Request, SchedulerOutput, RequestOutput
+from vllm.wde.core.schema.engine_io import (Request, SchedulerOutput,
+                                            RequestOutput)
 from vllm.wde.core.processor.input_processor import RequestProcessor
 
 from vllm.logger import init_logger
@@ -32,7 +33,8 @@ class Scheduler(ABC):
         raise NotImplementedError
 
     def add_request(self, request: Request) -> None:
-        if request.request_id in self.requests or request.request_id in self.aborted_requests:
+        if (request.request_id in self.requests
+                or request.request_id in self.aborted_requests):
             logger.warning("[%s] request_id conflict")
             return
 

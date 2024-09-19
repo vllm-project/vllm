@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 
 from vllm.wde.core.layers.attention.abstract import AttentionType
-from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionBackend, EncodeOnlyAttentionMetadata
+from vllm.wde.encode_only.layers.attention.backends.abstract import (
+    EncodeOnlyAttentionBackend, EncodeOnlyAttentionMetadata)
 from vllm.wde.core.config import CacheConfig
 from vllm.model_executor.layers.quantization import (QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -29,11 +30,11 @@ class EncodeOnlyAttention(nn.Module):
         super().__init__()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
+            #block_size = cache_config.block_size
             sliding_window = cache_config.sliding_window
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
+            #block_size = 16
             sliding_window = None
         if num_kv_heads is None:
             num_kv_heads = num_heads

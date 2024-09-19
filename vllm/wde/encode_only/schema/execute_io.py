@@ -11,7 +11,7 @@ class ModelInputForGPU(ModelInput):
     attn_metadata: EncodeOnlyAttentionMetadata
 
     def to(self, target_device, non_blocking=False):
-        for k in self.__dict__.keys():
+        for k in self.__dict__:
             self.__dict__[k] = self.__dict__[k].to(device=target_device,
                                                    non_blocking=non_blocking)
 

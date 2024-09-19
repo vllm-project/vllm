@@ -1,10 +1,10 @@
 import functools
 from dataclasses import dataclass
-from typing import (Callable, Dict, Optional, Tuple, Type, TypeVar)
+from typing import (Callable, Dict, Any, Type, TypeVar)
 
 from torch import nn
 from transformers import PretrainedConfig
-
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.wde.core.schema.engine_io import TextOnlyInputs
 
@@ -44,16 +44,6 @@ class InputContext:
 
 N = TypeVar("N", bound=Type[nn.Module])
 
-DummyDataFactory = Callable[[InputContext, int],
-                            Tuple["SequenceData",
-                                  Optional["MultiModalDataDict"]]]
-"""
-Create dummy data to be inputted into the model.
-
-Note:
-    :data:`InputProcessor` is not applied to the dummy data.
-"""
-
 InputProcessor = Callable[[InputContext, TextOnlyInputs], TextOnlyInputs]
 """Preprocess the inputs to the model."""
 
@@ -65,8 +55,7 @@ class InputRegistry:
     """
 
     def __init__(self) -> None:
-        self._dummy_factories_by_model_type: Dict[Type[nn.Module],
-                                                  DummyDataFactory] = {}
+        self._dummy_factories_by_model_type: Dict[Type[nn.Module], Any] = {}
         self._input_processors_by_model_type: Dict[Type[nn.Module],
                                                    InputProcessor] = {}
 
@@ -74,7 +63,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         seq_len: int,
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ):
         """
         The default dummy data factory represents the longest possible text
         that can be inputted to the model.
@@ -90,7 +79,7 @@ class InputRegistry:
 
         return dummy_seq_data, dummy_multi_modal_data
 
-    def register_dummy_data(self, factory: DummyDataFactory):
+    def register_dummy_data(self, factory):
         """
         Register a dummy data factory to a model class.
 
@@ -112,8 +101,7 @@ class InputRegistry:
 
         return wrapper
 
-    def dummy_data_for_profiling(self, model_config: "ModelConfig",
-                                 seq_len: int):
+    def dummy_data_for_profiling(self, model_config, seq_len: int):
         """
         Create dummy data for profiling the memory usage of a model.
 
@@ -160,7 +148,7 @@ class InputRegistry:
 
         return wrapper
 
-    def process_input(self, model_config: "ModelConfig",
+    def process_input(self, model_config,
                       inputs: TextOnlyInputs) -> TextOnlyInputs:
         """
         Apply an input processor to an instance of model inputs.
@@ -180,7 +168,7 @@ class InputRegistry:
 
         return processor(InputContext(model_config), inputs)
 
-    def create_input_processor(self, model_config: "ModelConfig"):
+    def create_input_processor(self, model_config):
         """
         Create an input processor (see :meth:`process_input`) for a
         specific model.

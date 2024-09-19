@@ -7,10 +7,13 @@ from vllm.model_executor.utils import set_random_seed
 
 from vllm.wde.core.worker import WorkerBase
 from vllm.wde.core.config import DeviceConfig, LoadConfig
-from vllm.wde.encode_only.config import ModelConfig, EncodeOnlySchedulerConfig, EncodeOnlyEngineConfig
+from vllm.wde.encode_only.config import (ModelConfig,
+                                         EncodeOnlySchedulerConfig,
+                                         EncodeOnlyEngineConfig)
 from vllm.wde.encode_only.runner.model_runner import ModelRunner
 from vllm.wde.encode_only.schema.execute_io import EncodeOnlyExecuteInput
-from vllm.wde.encode_only.layers.attention.backends.abstract import EncodeOnlyAttentionBackend
+from vllm.wde.encode_only.layers.attention.backends.abstract import (
+    EncodeOnlyAttentionBackend)
 from vllm.config import ParallelConfig
 
 
@@ -22,7 +25,8 @@ class Worker(WorkerBase):
         attn_backend: EncodeOnlyAttentionBackend,
     ) -> None:
         self.model_config: ModelConfig = engine_config.model_config
-        self.scheduler_config: EncodeOnlySchedulerConfig = engine_config.scheduler_config
+        self.scheduler_config: EncodeOnlySchedulerConfig = (
+            engine_config.scheduler_config)
         self.device_config: DeviceConfig = engine_config.device_config
         self.load_config: LoadConfig = engine_config.load_config
         self.device = self.device_config.device
@@ -48,7 +52,7 @@ class Worker(WorkerBase):
 
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            self.device = torch.device(f"cuda:0")
+            self.device = torch.device("cuda:0")
             torch.cuda.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)

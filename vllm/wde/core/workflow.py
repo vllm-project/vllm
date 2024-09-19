@@ -11,5 +11,5 @@ class Workflow:
     Worker: str
 
     @classmethod
-    def from_engine(cls, engine: "LLMEngine"):
+    def from_engine(cls, engine):
         return cls()
