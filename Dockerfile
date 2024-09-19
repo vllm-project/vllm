@@ -41,20 +41,6 @@ COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
 
-# install oneDNN
-RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
-
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \ 
-    -DONEDNN_BUILD_DOC=OFF \ 
-    -DONEDNN_BUILD_EXAMPLES=OFF \ 
-    -DONEDNN_BUILD_TESTS=OFF \ 
-    -DONEDNN_BUILD_GRAPH=OFF \ 
-    -DONEDNN_ENABLE_WORKLOAD=INFERENCE \ 
-    -DONEDNN_ENABLE_PRIMITIVE=MATMUL && \
-    cmake --build ./oneDNN/build --target install --config Release
-
-
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2
@@ -96,6 +82,20 @@ ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
+
+# install oneDNN
+RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \ 
+    -DONEDNN_BUILD_DOC=OFF \ 
+    -DONEDNN_BUILD_EXAMPLES=OFF \ 
+    -DONEDNN_BUILD_TESTS=OFF \ 
+    -DONEDNN_BUILD_GRAPH=OFF \ 
+    -DONEDNN_ENABLE_WORKLOAD=INFERENCE \ 
+    -DONEDNN_ENABLE_PRIMITIVE=MATMUL && \
+    cmake --build ./oneDNN/build --target install --config Release
+
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" = "1" ]; then \
