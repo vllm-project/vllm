@@ -107,6 +107,7 @@ Documentation
    quantization/supported_hardware
    quantization/auto_awq
    quantization/bnb
+   quantization/gguf
    quantization/int8
    quantization/fp8
    quantization/fp8_e5m2_kvcache
