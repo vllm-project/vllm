@@ -1,6 +1,6 @@
 import itertools as it
 import random
-from typing import TypeVar
+from typing import TypeVar, List
 
 import pytest
 import torch
@@ -50,7 +50,7 @@ def test_basic_correctness(
     dtype: str,
     max_num_seqs: int,
     scheduling: str,
-    attention_impls: list[str],
+    attention_impls: List[str],
 ) -> None:
     impl_outputs_list = []
 
