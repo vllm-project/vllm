@@ -16,7 +16,6 @@
 # limitations under the License.
 """PyTorch BERT model."""
 
-
 from typing import Iterable, Optional, Tuple
 import torch
 from torch import nn
@@ -38,6 +37,7 @@ logger = logging.get_logger(__name__)
 
 
 class LoadWeightsMixin:
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -100,6 +100,7 @@ class LoadWeightsMixin:
 
 
 class BertEmbeddings(nn.Module):
+
     def __init__(self, config: BertConfig):
         super().__init__()
         self.config = config
@@ -268,8 +269,7 @@ class BertLayer(nn.Module):
                  attn_backend: EncodeOnlyAttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.attention = BertAttention(config, attn_backend,
-                                       quant_config)
+        self.attention = BertAttention(config, attn_backend, quant_config)
         self.intermediate = BertIntermediate(config, quant_config)
         self.output = BertOutput(config, quant_config)
 
@@ -307,6 +307,7 @@ class BertEncoder(nn.Module):
 
 
 class BertPooler(nn.Module):
+
     def __init__(self,
                  config: BertConfig,
                  quant_config: Optional[QuantizationConfig] = None):
@@ -317,9 +318,11 @@ class BertPooler(nn.Module):
                                        quant_config=quant_config)
         self.activation = nn.Tanh()
 
-    def forward(self,
-                hidden_states: torch.Tensor,
-                attn_metadata: EncodeOnlyAttentionMetadata,) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: EncodeOnlyAttentionMetadata,
+    ) -> torch.Tensor:
         seq_start_loc = attn_metadata.seq_start_loc
         first_token_tensor = hidden_states[seq_start_loc[:-1]]
         pooled_output, _ = self.dense(first_token_tensor)
@@ -351,11 +354,14 @@ class BertModel(nn.Module):
             positions=positions,
         )
         sequence_output = self.encoder(embedding_output, attn_metadata)
-        pooled_output = self.pooler(sequence_output, attn_metadata) if self.pooler is not None else None
+        pooled_output = self.pooler(
+            sequence_output,
+            attn_metadata) if self.pooler is not None else None
         return sequence_output, pooled_output
 
 
 class BertPredictionHeadTransform(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -363,7 +369,8 @@ class BertPredictionHeadTransform(nn.Module):
             self.transform_act_fn = get_act_fn(config.hidden_act)
         else:
             self.transform_act_fn = config.hidden_act
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
@@ -373,13 +380,16 @@ class BertPredictionHeadTransform(nn.Module):
 
 
 class BertLMPredictionHead(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.transform = BertPredictionHeadTransform(config)
 
         # The output weights are the same as the input embeddings, but there is
         # an output-only bias for each token.
-        self.decoder = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.decoder = nn.Linear(config.hidden_size,
+                                 config.vocab_size,
+                                 bias=False)
 
         self.bias = nn.Parameter(torch.zeros(config.vocab_size))
 
@@ -396,6 +406,7 @@ class BertLMPredictionHead(nn.Module):
 
 
 class BertOnlyMLMHead(nn.Module):
+
     def __init__(self, config: BertConfig):
         super().__init__()
         self.predictions = BertLMPredictionHead(config)
@@ -422,7 +433,8 @@ class BertForMaskedLM(nn.Module, LoadWeightsMixin):
         self.config = config
         self.quant_config = quant_config
 
-        self.bert = BertModel(config, attn_backend,
+        self.bert = BertModel(config,
+                              attn_backend,
                               quant_config=quant_config,
                               add_pooling_layer=True)
 

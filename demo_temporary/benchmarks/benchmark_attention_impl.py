@@ -10,7 +10,8 @@ def benchmark_vllm(args):
     import gc
     import torch
     from vllm.wde.entrypoints.llm import LLMEngine
-    from vllm.wde.encode_only.arg_utils import EncodeOnlyEngineArgs as EngineArgs
+    from vllm.wde.encode_only.arg_utils import (EncodeOnlyEngineArgs as
+                                                EngineArgs)
 
     prompt = "if" * args.input_len
     requests = [prompt for _ in range(args.num_prompts)]
@@ -43,9 +44,9 @@ def benchmark_vllm(args):
         elapsed_time = end - start
         delay = elapsed_time / n_step
 
-        print(
-            f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
-            f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
+        print(f"Batchsize {batchsize}, Throughput: "
+              f"{len(requests) / elapsed_time:.4f} requests/s, "
+              f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
 
         engine.executor.shutdown_execute_loop()
         gc.collect()

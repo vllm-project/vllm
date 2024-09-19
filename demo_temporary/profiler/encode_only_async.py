@@ -15,7 +15,7 @@ def patch():
         ]) as prof:
             simple_execute_loop(self, *args, **kwargs)
 
-        prof.export_chrome_trace(f"simple_execute_loop.json")
+        prof.export_chrome_trace("simple_execute_loop.json")
 
     GPUAsyncExecutor.simple_execute_loop = p_execute_loop
 
@@ -28,7 +28,7 @@ def patch():
                 torch.profiler.ProfilerActivity.CUDA,
         ]) as prof:
             double_buffer_execute_loop(self, *args, **kwargs)
-        prof.export_chrome_trace(f"double_buffer_execute_loop.json")
+        prof.export_chrome_trace("double_buffer_execute_loop.json")
 
     GPUAsyncExecutor.double_buffer_execute_loop = p_execute_loop
 
@@ -38,7 +38,8 @@ def benchmark_vllm(args):
     patch()
 
     from vllm.wde.entrypoints.llm import LLMEngine
-    from vllm.wde.encode_only.arg_utils import EncodeOnlyEngineArgs as EngineArgs
+    from vllm.wde.encode_only.arg_utils import (EncodeOnlyEngineArgs as
+                                                EngineArgs)
 
     prompt = "if" * args.input_len
     requests = [prompt for _ in range(args.num_prompts)]
@@ -74,9 +75,9 @@ def benchmark_vllm(args):
         elapsed_time = end - start
         delay = elapsed_time / n_step
 
-        print(
-            f"Batchsize {batchsize}, Throughput: {len(requests) / elapsed_time:.4f} requests/s, "
-            f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
+        print(f"Batchsize {batchsize}, Throughput: "
+              f"{len(requests) / elapsed_time:.4f} requests/s, "
+              f"Delay {delay * 1000:0.2f} ms, n_step {n_step}")
 
         engine.executor.shutdown_execute_loop()
 

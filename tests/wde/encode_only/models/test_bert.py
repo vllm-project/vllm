@@ -11,12 +11,13 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class BertHfRunner(HfRunner):
+
     @torch.inference_mode
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         encoded_input = self.tokenizer(prompts,
                                        padding=True,
                                        truncation=True,
-                                       return_tensors='pt').to("cuda")
+                                       return_tensors="pt").to("cuda")
 
         outputs = self.model(**encoded_input).pooler_output
         return outputs
@@ -44,7 +45,7 @@ def example_prompts():
     return prompts
 
 
-MODELS = ['google-bert/bert-base-uncased']
+MODELS = ["google-bert/bert-base-uncased"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -52,8 +53,15 @@ MODELS = ['google-bert/bert-base-uncased']
 @pytest.mark.parametrize("max_num_seqs", [2, 3, 5, 7])
 @pytest.mark.parametrize("scheduling", ["sync", "async", "double_buffer"])
 @torch.inference_mode
-def test_models(hf_runner, vllm_runner, example_prompts, model: str,
-                dtype: str, max_num_seqs: int, scheduling: str) -> None:
+def test_models(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_num_seqs: int,
+    scheduling: str,
+) -> None:
     with hf_runner(model, dtype=dtype, auto_cls=BertModel) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 

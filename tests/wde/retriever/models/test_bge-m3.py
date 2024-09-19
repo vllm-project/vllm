@@ -16,12 +16,12 @@ class FlagEmbeddingRunner:
     def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
             # Check if the input is already on the GPU
-            if hasattr(input, 'device') and input.device.type == "cuda":
+            if hasattr(input, "device") and input.device.type == "cuda":
                 return input  # Already on GPU, no need to move
             return input.to("cuda")
         else:
             # Check if the input is already on the CPU
-            if hasattr(input, 'device') and input.device.type == "cpu":
+            if hasattr(input, "device") and input.device.type == "cpu":
                 return input  # Already on CPU, no need to move
             return input.to("cpu")
 
@@ -32,6 +32,7 @@ class FlagEmbeddingRunner:
     ) -> None:
         # depend on FlagEmbedding peft
         from FlagEmbedding import BGEM3FlagModel
+
         self.model_name = model_name
         model = BGEM3FlagModel(self.model_name, use_fp16=dtype == "half")
         self.model = model
@@ -39,7 +40,7 @@ class FlagEmbeddingRunner:
     @torch.inference_mode
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         output = self.model.encode(prompts)
-        return output['dense_vecs']
+        return output["dense_vecs"]
 
     def __enter__(self):
         return self
@@ -71,7 +72,7 @@ def example_prompts():
     return prompts
 
 
-MODELS = ['BAAI/bge-m3']
+MODELS = ["BAAI/bge-m3"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -79,8 +80,15 @@ MODELS = ['BAAI/bge-m3']
 @pytest.mark.parametrize("max_num_seqs", [2, 3, 5, 7])
 @pytest.mark.parametrize("scheduling", ["sync", "async", "double_buffer"])
 @torch.inference_mode
-def test_models(hf_runner, vllm_runner, example_prompts, model: str,
-                dtype: str, max_num_seqs: int, scheduling: str) -> None:
+def test_models(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_num_seqs: int,
+    scheduling: str,
+) -> None:
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 

@@ -16,8 +16,9 @@ class EncodeOnlyModelOutputProcessor(OutputProcessor):
         return cls()
 
     def __call__(
-            self, scheduler_output: EncodeOnlySchedulerOutput,
-            execute_output: Union[torch.Tensor, Sequence[torch.Tensor]]) -> List[EncodeOnlyRequestOutput]:
+        self, scheduler_output: EncodeOnlySchedulerOutput,
+        execute_output: Union[torch.Tensor, Sequence[torch.Tensor]]
+    ) -> List[EncodeOnlyRequestOutput]:
         if isinstance(execute_output, torch.Tensor):
             request_outputs = []
             offset = 0
@@ -25,17 +26,18 @@ class EncodeOnlyModelOutputProcessor(OutputProcessor):
                 prompt_token_ids = request.inputs.prompt_token_ids
                 n_tokens = len(prompt_token_ids)
                 request_outputs.append(
-                    EncodeOnlyRequestOutput(request_id=request.request_id,
-                                            prompt_token_ids=prompt_token_ids,
-                                            finished=True,
-                                            outputs=execute_output[offset:offset +
-                                                                   n_tokens]))
+                    EncodeOnlyRequestOutput(
+                        request_id=request.request_id,
+                        prompt_token_ids=prompt_token_ids,
+                        finished=True,
+                        outputs=execute_output[offset:offset + n_tokens]))
                 offset += n_tokens
             return request_outputs
         elif isinstance(execute_output, (list, tuple)):
             sequence_output, pooled_output = execute_output
             request_outputs = []
-            for request, outputs in zip(scheduler_output.requests, pooled_output):
+            for request, outputs in zip(scheduler_output.requests,
+                                        pooled_output):
                 prompt_token_ids = request.inputs.prompt_token_ids
                 request_outputs.append(
                     EncodeOnlyRequestOutput(request_id=request.request_id,
@@ -45,4 +47,3 @@ class EncodeOnlyModelOutputProcessor(OutputProcessor):
             return request_outputs
         else:
             raise ValidationError("Output format not supported")
-

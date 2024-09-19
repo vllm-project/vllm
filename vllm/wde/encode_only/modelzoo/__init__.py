@@ -5,6 +5,5 @@ WORKFLOW = "vllm.wde.encode_only.workflow:EncodeOnlyWorkflow"
 ENCODE_ONLY_MODELS = {
     "XLMRobertaForMaskedLM":
     (TASK, "xlm_roberta", "XLMRobertaForMaskedLM", WORKFLOW),
-    "BertForMaskedLM":
-    (TASK, "bert", "BertForMaskedLM", WORKFLOW),
+    "BertForMaskedLM": (TASK, "bert", "BertForMaskedLM", WORKFLOW),
 }

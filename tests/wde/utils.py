@@ -6,33 +6,42 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.wde.entrypoints.llm import LLM
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_cpu
-from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding, BatchFeature
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    BatchFeature,
+)
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class VllmRunner:
 
-    def __init__(self,
-                 model_name: str,
-                 max_num_seqs: int = 4,
-                 tokenizer_name: Optional[str] = None,
-                 dtype: str = "half",
-                 scheduling: str = "sync",
-                 attention_impl: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        max_num_seqs: int = 4,
+        tokenizer_name: Optional[str] = None,
+        dtype: str = "half",
+        scheduling: str = "sync",
+        attention_impl: Optional[str] = None,
+    ) -> None:
         if attention_impl is not None:
             os.environ["VLLM_ATTENTION_BACKEND"] = attention_impl
 
-        self.model = LLM(model=model_name,
-                         tokenizer=tokenizer_name,
-                         trust_remote_code=True,
-                         max_num_seqs=max_num_seqs,
-                         dtype=dtype,
-                         scheduling=scheduling)
+        self.model = LLM(
+            model=model_name,
+            tokenizer=tokenizer_name,
+            trust_remote_code=True,
+            max_num_seqs=max_num_seqs,
+            dtype=dtype,
+            scheduling=scheduling,
+        )
 
         if attention_impl is not None:
-            assert self.model.llm_engine.attn_backend.get_name().lower(
-            ) == attention_impl.lower()
+            assert (self.model.llm_engine.attn_backend.get_name().lower() ==
+                    attention_impl.lower())
 
     def encode(self, prompts: List[str]) -> List[List[float]]:
         req_outputs = self.model.encode(prompts)
@@ -55,21 +64,23 @@ class HfRunner:
     def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
             # Check if the input is already on the GPU
-            if hasattr(input, 'device') and input.device.type == "cuda":
+            if hasattr(input, "device") and input.device.type == "cuda":
                 return input  # Already on GPU, no need to move
             return input.to("cuda")
         else:
             # Check if the input is already on the CPU
-            if hasattr(input, 'device') and input.device.type == "cpu":
+            if hasattr(input, "device") and input.device.type == "cpu":
                 return input  # Already on CPU, no need to move
             return input.to("cpu")
 
-    def __init__(self,
-                 model_name: str,
-                 dtype: str = "half",
-                 *,
-                 model_kwargs: Optional[Dict[str, Any]] = None,
-                 auto_cls=AutoModelForCausalLM) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        dtype: str = "half",
+        *,
+        model_kwargs: Optional[Dict[str, Any]] = None,
+        auto_cls=AutoModelForCausalLM,
+    ) -> None:
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
@@ -95,7 +106,7 @@ class HfRunner:
         encoded_input = self.tokenizer(prompts,
                                        padding=True,
                                        truncation=True,
-                                       return_tensors='pt').to("cuda")
+                                       return_tensors="pt").to("cuda")
 
         logits = self.model(**encoded_input).logits
         seq_len = encoded_input.attention_mask.sum(axis=1)

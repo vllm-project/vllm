@@ -1,10 +1,11 @@
 import numpy as np
 import pytest
 import random
-from typing import (Any, Callable, Dict, List, Optional, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import (
+    List,
+    TypeVar,
+)
 
-import gc
 from transformers import BatchEncoding, BatchFeature
 import torch
 import torch.nn as nn
@@ -40,7 +41,7 @@ class HfRerankerRunner(HfRunner):
         encoded_input = self.tokenizer(inputs,
                                        padding=True,
                                        truncation=True,
-                                       return_tensors='pt').to("cuda")
+                                       return_tensors="pt").to("cuda")
 
         scores = self.model(**encoded_input).logits.view(-1, )
         return scores.cpu().numpy().tolist()
@@ -58,17 +59,21 @@ def vllm_runner():
 
 @pytest.fixture(scope="session")
 def example_prompts():
-    pairs = [['query', 'passage'], ['what is panda?', 'hi'],
-             [
-                 'what is panda?', 'The giant panda (Ailuropoda melanoleuca), '
-                 'sometimes called a panda bear or simply panda, '
-                 'is a bear species endemic to China.'
-             ]] * 11
+    pairs = [
+        ["query", "passage"],
+        ["what is panda?", "hi"],
+        [
+            "what is panda?",
+            "The giant panda (Ailuropoda melanoleuca), "
+            "sometimes called a panda bear or simply panda, "
+            "is a bear species endemic to China.",
+        ],
+    ] * 11
     random.shuffle(pairs)
     return pairs
 
 
-MODELS = ['BAAI/bge-reranker-v2-m3']
+MODELS = ["BAAI/bge-reranker-v2-m3"]
 
 
 def sigmoid(x):
@@ -80,8 +85,15 @@ def sigmoid(x):
 @pytest.mark.parametrize("max_num_seqs", [2, 3, 5, 7])
 @pytest.mark.parametrize("scheduling", ["sync", "async", "double_buffer"])
 @torch.inference_mode
-def test_models(hf_runner, vllm_runner, example_prompts, model: str,
-                dtype: str, max_num_seqs: int, scheduling: str) -> None:
+def test_models(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_num_seqs: int,
+    scheduling: str,
+) -> None:
     with hf_runner(model,
                    dtype=dtype,
                    auto_cls=AutoModelForSequenceClassification) as hf_model:

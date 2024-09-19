@@ -32,7 +32,7 @@ def attention_impls():
     return ["FLASH_ATTN", "TORCH_SDPA"]
 
 
-MODELS = ['BAAI/bge-m3']
+MODELS = ["BAAI/bge-m3"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -40,17 +40,26 @@ MODELS = ['BAAI/bge-m3']
 @pytest.mark.parametrize("max_num_seqs", [2, 3, 5, 7])
 @pytest.mark.parametrize("scheduling", ["sync"])
 @torch.inference_mode
-def test_basic_correctness(hf_runner, vllm_runner, example_prompts, model: str,
-                           dtype: str, max_num_seqs: int, scheduling: str,
-                           attention_impls: list[str]) -> None:
+def test_basic_correctness(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_num_seqs: int,
+    scheduling: str,
+    attention_impls: list[str],
+) -> None:
     impl_outputs_list = []
 
     for attention_impl in attention_impls:
-        with vllm_runner(model,
-                         dtype=dtype,
-                         max_num_seqs=max_num_seqs,
-                         scheduling=scheduling,
-                         attention_impl=attention_impl) as vllm_model:
+        with vllm_runner(
+                model,
+                dtype=dtype,
+                max_num_seqs=max_num_seqs,
+                scheduling=scheduling,
+                attention_impl=attention_impl,
+        ) as vllm_model:
             vllm_outputs = vllm_model.encode(example_prompts)
             impl_outputs_list.append((attention_impl, vllm_outputs))
 
@@ -59,6 +68,7 @@ def test_basic_correctness(hf_runner, vllm_runner, example_prompts, model: str,
         similarities = compare_embeddings(a[1], b[1])
         all_similarities = torch.stack(similarities)
 
-        assert torch.all((all_similarities <= 1.0 + tolerance)
-                         & (all_similarities >= 1.0 - tolerance)), \
-            f"{a[0]} vs {b[0]}, not all values are within {tolerance} of 1.0"
+        assert torch.all(
+            (all_similarities <= 1.0 + tolerance)
+            & (all_similarities >= 1.0 - tolerance)
+        ), f"{a[0]} vs {b[0]}, not all values are within {tolerance} of 1.0"
