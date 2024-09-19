@@ -38,7 +38,7 @@ wait_for_server() {
 launch_chunked_prefill() {
   model="meta-llama/Meta-Llama-3.1-70B-Instruct"
   # disagg prefill
-  VLLM_RPC_PORT=5570 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+  CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
       -m vllm.entrypoints.openai.api_server \
       --model $model \
       --port 8100 \
@@ -48,7 +48,7 @@ launch_chunked_prefill() {
       --disable-log-requests \
       --enable-chunked-prefill \
       --gpu-memory-utilization 0.8 &
-  VLLM_RPC_PORT=5580 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+  CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8200 \
@@ -68,7 +68,7 @@ launch_chunked_prefill() {
 launch_disagg_prefill() {
   model="meta-llama/Meta-Llama-3.1-70B-Instruct" 
   # disagg prefill
-  VLLM_PORT=12345 VLLM_RPC_PORT=5570 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+  VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
       -m vllm.entrypoints.openai.api_server \
       --model $model \
       --port 8100 \
@@ -77,7 +77,7 @@ launch_disagg_prefill() {
       --disable-log-stats \
       --disable-log-requests \
       --gpu-memory-utilization 0.8 &
-  VLLM_PORT=12345 VLLM_RPC_PORT=5580 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+  VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=consumer CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8200 \
