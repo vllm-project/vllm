@@ -105,7 +105,7 @@ add_dependencies(default _core_C)
 #
 # The CUDA device extensions need CPU CMake scripts to support Heterogeneous Speculative Decoding.
 #
-if (VLLM_TARGET_DEVICE STREQUAL "cuda")
+if (NOT HIP_FOUND AND CUDA_FOUND)
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
 endif()
 
