@@ -350,9 +350,12 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, inputs_embeds,
-                                   inputs_embeds_masks)
+        hidden_states = self.model(input_ids,
+                                   positions,
+                                   kv_caches,
+                                   attn_metadata,
+                                   inputs_embeds=inputs_embeds,
+                                   inputs_embeds_masks=inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(
