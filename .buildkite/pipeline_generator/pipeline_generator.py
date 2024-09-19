@@ -65,7 +65,7 @@ class PipelineGenerator:
             key=get_step_key(step.label), 
             parallelism=step.parallelism, 
             soft_fail=step.soft_fail, 
-            plugins=[self._get_plugin_config(step)]
+            plugins=[self.get_plugin_config(step)]
         )
         current_step.agents["queue"] = get_agent_queue(step.no_gpu, step.gpu, step.num_gpus).value
 
@@ -155,10 +155,11 @@ class PipelineGenerator:
         # Mirror test steps for AMD
         for test_step in test_steps:
             if "amd" in test_step.mirror_hardwares:
+                test_commands = [test_step.command] if test_step.command else test_step.commands
                 amd_test_command = [
                     "bash", 
                     ".buildkite/run-amd-test.sh", 
-                    f"'{get_full_test_command(test_step.commands, test_step.working_dir)}'",
+                    f"'{get_full_test_command(test_commands, test_step.working_dir)}'",
                 ]
                 mirrored_buildkite_step = BuildkiteStep(
                     label = f"AMD: {test_step.label}",
@@ -172,16 +173,17 @@ class PipelineGenerator:
                 buildkite_steps.append(mirrored_buildkite_step)
         return buildkite_steps
 
-    def _get_plugin_config(self, step: TestStep) -> Dict:
+    def get_plugin_config(self, step: TestStep) -> Dict:
         """
         Returns the plugin configuration for the step.
         If the step is run on A100 GPU, use k8s plugin since A100 node is on k8s.
         Otherwise, use Docker plugin.
         """
+        test_commands = [step.command] if step.command else step.commands
         test_bash_command = [
             "bash", 
-            "-c", 
-            get_full_test_command(step.commands, step.working_dir)
+            "-c",
+            get_full_test_command(test_commands, step.working_dir)
         ]
         docker_image_path = f"{VLLM_ECR_REPO}:{self.commit}"
 
