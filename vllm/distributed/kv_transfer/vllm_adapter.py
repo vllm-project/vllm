@@ -52,6 +52,7 @@ IS_KV_CONSUMER: bool = (envs.VLLM_DISTRIBUTED_KV_ROLE in ["consumer", "both"])
 # it is likely connected to a KV storage service on CPU/disk
 # so the communication backend needs to be "gloo" for that case.
 DISTRIBUTED_BACKEND: str = "gloo" if (IS_KV_PRODUCER and IS_KV_CONSUMER) else "nccl"
+# corresponding device
 DISTRIBUTED_DEVICE: str = "cpu" if (IS_KV_PRODUCER and IS_KV_CONSUMER) else "cuda"
 
 
@@ -288,7 +289,7 @@ class KV_transfer_agent:
             return None, bypass_model_exec, model_input
 
         if not is_complete:
-            rebuilt_model_input = self.build_partial_prefill_input(
+            rebuilt_model_input = build_partial_prefill_input(
                 model_input,
                 input_tokens_list,
                 num_computed_tokens_list,
@@ -307,117 +308,125 @@ class KV_transfer_agent:
         logger.debug("[rank%d]: KV recv DONE.", torch.distributed.get_rank())
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
-    def build_partial_prefill_input(
-        self,
-        model_input: "ModelInputForGPUWithSamplingMetadata",
-        input_tokens_list: List[torch.Tensor],
-        num_computed_tokens_list: List[int],
-        start_pos_list: List[int],
-        slot_mapping_flat: torch.Tensor,
-        device: torch.device,
-    ) -> "ModelInputForGPUWithSamplingMetadata":
-        rebuilt_input_tokens = []
-        rebuilt_input_positions = []
-        rebuilt_query_lens = []
 
-        rebuilt_num_prefills = 0
-        rebuilt_num_prefill_tokens = 0
-        rebuilt_slot_mapping = []
-        rebuilt_max_query_len = 0
 
-        rebuilt_block_tables = []
 
-        rebuilt_query_start_loc = [0]
-        rebuilt_context_lens_tensor = []
-        rebuilt_selected_token_indices = []
+def build_partial_prefill_input(
+    model_input: "ModelInputForGPUWithSamplingMetadata",
+    input_tokens_list: List[torch.Tensor],
+    num_computed_tokens_list: List[int],
+    start_pos_list: List[int],
+    slot_mapping_flat: torch.Tensor,
+    device: torch.device,
+) -> "ModelInputForGPUWithSamplingMetadata":
+    """
+    Helper function to rebuild the model input for the current request.
+    Goal: avoid running redundant prefill on those tokens that already has KV 
+    caches received.
+    """
+    rebuilt_input_tokens = []
+    rebuilt_input_positions = []
+    rebuilt_query_lens = []
 
-        # recounting query and context lengths
-        for idx in range(len(input_tokens_list)):
-            token_tensor = input_tokens_list[idx]
-            num_token = len(token_tensor)
-            num_computed_token = num_computed_tokens_list[idx]
-            start_pos = start_pos_list[idx]
+    rebuilt_num_prefills = 0
+    rebuilt_num_prefill_tokens = 0
+    rebuilt_slot_mapping = []
+    rebuilt_max_query_len = 0
 
-            rebuilt_input_tokens.append(token_tensor[num_computed_token:])
-            # TODO(Jiayi): please check the correctness of next line
-            rebuilt_input_positions.append(
-                model_input.input_positions[start_pos +
-                                            num_computed_token:start_pos +
-                                            num_token])
-            q_len = num_token - num_computed_token
-            rebuilt_query_lens.append(q_len)
+    rebuilt_block_tables = []
 
-            # Attn metadata-related
-            rebuilt_num_prefills += 1
-            rebuilt_num_prefill_tokens += q_len
-            rebuilt_slot_mapping.append(
-                slot_mapping_flat[start_pos + num_computed_token:start_pos +
-                                  num_token])
-            rebuilt_max_query_len = max(q_len, rebuilt_max_query_len)
-            # TODO(Jiayi): remove hard-code (block_size=16)
-            blk_size = 16
-            temp_block_table = [
-                i // blk_size
-                for i in range(start_pos, start_pos + num_token, blk_size)
-            ]
-            rebuilt_block_tables.append(temp_block_table)
-            rebuilt_query_start_loc.append(q_len)  #start with 0
-            rebuilt_context_lens_tensor.append(num_computed_token)
+    rebuilt_query_start_loc = [0]
+    rebuilt_context_lens_tensor = []
+    rebuilt_selected_token_indices = []
 
-            # Sampling metadata related
-            #seq_groups (use rebuilt query lens)
-            rebuilt_selected_token_indices.append(start_pos + q_len - 1)
+    # recounting query and context lengths
+    for idx in range(len(input_tokens_list)):
+        token_tensor = input_tokens_list[idx]
+        num_token = len(token_tensor)
+        num_computed_token = num_computed_tokens_list[idx]
+        start_pos = start_pos_list[idx]
 
-        # rebuilt attn_metadata
-        rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
-        rebuilt_attn_metadata.num_prefills = rebuilt_num_prefills
-        rebuilt_attn_metadata.num_prefill_tokens = rebuilt_num_prefill_tokens
-        rebuilt_attn_metadata.slot_mapping = torch.cat(
-            rebuilt_slot_mapping).to(device)
-        rebuilt_attn_metadata.max_query_len = rebuilt_max_query_len
+        rebuilt_input_tokens.append(token_tensor[num_computed_token:])
+        # TODO(Jiayi): please check the correctness of next line
+        rebuilt_input_positions.append(
+            model_input.input_positions[start_pos +
+                                        num_computed_token : start_pos +
+                                        num_token])
+        q_len = num_token - num_computed_token
+        rebuilt_query_lens.append(q_len)
 
-        rebuilt_attn_metadata.block_tables = torch.tensor(
-            rebuilt_block_tables,
-            dtype=model_input.attn_metadata.block_tables.dtype).to(device)
+        # Attn metadata-related
+        rebuilt_num_prefills += 1
+        rebuilt_num_prefill_tokens += q_len
+        new_slot_mapping = slot_mapping_flat[start_pos + num_computed_token : start_pos + num_token]
+        rebuilt_slot_mapping.append(new_slot_mapping)
+        rebuilt_max_query_len = max(q_len, rebuilt_max_query_len)
+        # TODO(Jiayi): remove hard-code (block_size=16)
+        blk_size = 16
+        temp_block_table = [
+            slot_mapping_flat[i] // blk_size
+            for i in range(start_pos, start_pos + num_token, blk_size)
+        ]
+        rebuilt_block_tables.append(temp_block_table)
+        rebuilt_query_start_loc.append(rebuilt_num_prefill_tokens)  #start with 0
+        rebuilt_context_lens_tensor.append(num_computed_token)
 
-        rebuilt_attn_metadata.query_start_loc = torch.tensor(
-            rebuilt_query_start_loc,
-            dtype=model_input.attn_metadata.query_start_loc.dtype).to(device)
-        rebuilt_attn_metadata.context_lens_tensor = torch.tensor(
-            rebuilt_context_lens_tensor,
-            dtype=model_input.attn_metadata.context_lens_tensor.dtype,
-        ).to(device)
+        # Sampling metadata related
+        #seq_groups (use rebuilt query lens)
+        rebuilt_selected_token_indices.append(rebuilt_num_prefill_tokens - 1)
 
-        rebuilt_attn_metadata._cached_prefill_metadata = None
+    # rebuilt attn_metadata
+    rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
+    rebuilt_attn_metadata.num_prefills = rebuilt_num_prefills
+    rebuilt_attn_metadata.num_prefill_tokens = rebuilt_num_prefill_tokens
+    rebuilt_attn_metadata.slot_mapping = torch.cat(
+        rebuilt_slot_mapping).to(device)
+    rebuilt_attn_metadata.max_query_len = rebuilt_max_query_len
 
-        # rebuilt sampling_metadata
-        rebuilt_sampling_metadata = deepcopy(model_input.sampling_metadata)
-        for idx, q_len in enumerate(rebuilt_query_lens):
+    rebuilt_attn_metadata.block_tables = torch.tensor(
+        rebuilt_block_tables,
+        dtype=model_input.attn_metadata.block_tables.dtype).to(device)
+
+    rebuilt_attn_metadata.query_start_loc = torch.tensor(
+        rebuilt_query_start_loc,
+        dtype=model_input.attn_metadata.query_start_loc.dtype).to(device)
+    rebuilt_attn_metadata.context_lens_tensor = torch.tensor(
+        rebuilt_context_lens_tensor,
+        dtype=model_input.attn_metadata.context_lens_tensor.dtype,
+    ).to(device)
+
+    rebuilt_attn_metadata._cached_prefill_metadata = None
+
+    # rebuilt sampling_metadata
+    rebuilt_sampling_metadata = deepcopy(model_input.sampling_metadata)
+    for idx, q_len in enumerate(rebuilt_query_lens):
+        if rebuilt_sampling_metadata.seq_groups is not None:
             rebuilt_sampling_metadata.seq_groups[idx].query_len = q_len
-        rebuilt_sampling_metadata.selected_token_indices = torch.tensor(
-            rebuilt_selected_token_indices,
-            dtype=model_input.sampling_metadata.selected_token_indices.dtype,
-        ).to(device)
 
-        # import here to avoid circular import.
-        from vllm.worker.model_runner import (
-            ModelInputForGPUWithSamplingMetadata)
-        rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
-            input_tokens=torch.cat(rebuilt_input_tokens).to(device),
-            input_positions=torch.cat(rebuilt_input_positions).to(device),
-            seq_lens=model_input.seq_lens,
-            query_lens=rebuilt_query_lens,
-            lora_mapping=model_input.lora_mapping,
-            lora_requests=model_input.lora_requests,
-            attn_metadata=rebuilt_attn_metadata,
-            prompt_adapter_mapping=model_input.prompt_adapter_mapping,
-            prompt_adapter_requests=model_input.prompt_adapter_requests,
-            multi_modal_kwargs=model_input.multi_modal_kwargs,
-            request_ids_to_seq_ids=model_input.request_ids_to_seq_ids,
-            finished_requests_ids=model_input.finished_requests_ids,
-            virtual_engine=model_input.virtual_engine,
-            sampling_metadata=rebuilt_sampling_metadata,
-            is_prompt=model_input.is_prompt,
-        )
+    rebuilt_sampling_metadata.selected_token_indices = torch.tensor(
+        rebuilt_selected_token_indices,
+        dtype=model_input.sampling_metadata.selected_token_indices.dtype,
+    ).to(device)
 
-        return rebuilt_model_input
+    # import here to avoid circular import.
+    from vllm.worker.model_runner import (
+        ModelInputForGPUWithSamplingMetadata)
+    rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
+        input_tokens=torch.cat(rebuilt_input_tokens).to(device),
+        input_positions=torch.cat(rebuilt_input_positions).to(device),
+        seq_lens=model_input.seq_lens,
+        query_lens=rebuilt_query_lens,
+        lora_mapping=model_input.lora_mapping,
+        lora_requests=model_input.lora_requests,
+        attn_metadata=rebuilt_attn_metadata,
+        prompt_adapter_mapping=model_input.prompt_adapter_mapping,
+        prompt_adapter_requests=model_input.prompt_adapter_requests,
+        multi_modal_kwargs=model_input.multi_modal_kwargs,
+        request_ids_to_seq_ids=model_input.request_ids_to_seq_ids,
+        finished_requests_ids=model_input.finished_requests_ids,
+        virtual_engine=model_input.virtual_engine,
+        sampling_metadata=rebuilt_sampling_metadata,
+        is_prompt=model_input.is_prompt,
+    )
+
+    return rebuilt_model_input
