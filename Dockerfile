@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo wget numactl gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev \
+    && apt-get install -y ccache software-properties-common git curl sudo wget numactl gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev libc6 \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
