@@ -41,12 +41,12 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 # check VLLM_DISTRIBUTERD_KV_ROLE and set corresponding flags
-assert envs.VLLM_DISTRIBUTERD_KV_ROLE in [None, "producer", "consumer", "both"],\
+assert envs.VLLM_DISTRIBUTED_KV_ROLE in [None, "producer", "consumer", "both"],\
     "VLLM_DISTRIBUTERD_KV_ROLE can only be producer, consumer or both."
-IS_DISTRIBUTED_KV_INSTANCE: bool = (envs.VLLM_DISTRIBUTERD_KV_ROLE
+IS_DISTRIBUTED_KV_INSTANCE: bool = (envs.VLLM_DISTRIBUTED_KV_ROLE
                                     in ["producer", "consumer", "both"])
-IS_KV_PRODUCER: bool = (envs.VLLM_DISTRIBUTERD_KV_ROLE in ["producer", "both"])
-IS_KV_CONSUMER: bool = (envs.VLLM_DISTRIBUTERD_KV_ROLE == ["consumer", "both"])
+IS_KV_PRODUCER: bool = (envs.VLLM_DISTRIBUTED_KV_ROLE in ["producer", "both"])
+IS_KV_CONSUMER: bool = (envs.VLLM_DISTRIBUTED_KV_ROLE in ["consumer", "both"])
 
 # When the current instance is both KV producer and KV consumer,
 # it is likely connected to a KV storage service on CPU/disk

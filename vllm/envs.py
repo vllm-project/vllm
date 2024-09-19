@@ -368,8 +368,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # Specify the role of current vllm instance
     # Value can be "producer", "consumer" or "both".
-    "VLLM_DISTRIBUTERD_KV_ROLE":
-    lambda: os.getenv("VLLM_DISTRIBUTERD_KV_ROLE", None),
+    "VLLM_DISTRIBUTED_KV_ROLE":
+    lambda: os.getenv("VLLM_DISTRIBUTED_KV_ROLE", None),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":

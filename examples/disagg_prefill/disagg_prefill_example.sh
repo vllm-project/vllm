@@ -5,6 +5,7 @@
 
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 export VLLM_PORT=12345
+export VLLM_LOGGING_LEVEL=DEBUG
 
 # a function that waits vLLM server to start
 wait_for_server() {
@@ -15,16 +16,16 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
-# prefilling instance
-VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0 python3 \
+# prefilling instance, which is the KV producer
+VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.8 &
 
-# decoding instance
-VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=1 python3 \
+# decoding instance, which is the KV consumer
+VLLM_DISTRIBUTED_KV_ROLE=consumer CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \
