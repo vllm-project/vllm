@@ -13,11 +13,10 @@ from tt_metal.models.demos.t3000.llama2_70b.tt.llama_generation import TtLlamaMo
 
 def run_inference(prompts_json, default_max_tokens=128, max_seqs_in_batch=32, num_repeat_prompts=2, measure_perf=False):
     # Generation args
-    # ignore_eos = True if measure_perf else False
-    ignore_eos = True
+    ignore_eos = True if measure_perf else False
     
     # Load prompts from a JSON file
-    with open(args.prompts_json, 'r') as file:
+    with open(prompts_json, 'r') as file:
         prompts = json.load(file)
     assert isinstance(prompts, list), "Prompts must be a list of strings"
     if num_repeat_prompts is not None:

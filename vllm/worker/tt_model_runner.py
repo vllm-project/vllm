@@ -147,6 +147,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             pad=0
         )
         
+        input_positions = torch.tensor(input_positions, dtype=torch.int32, device="cpu")
         if is_prompt:
             input_tokens = make_tensor_with_pad(
                 input_tokens, 
@@ -154,14 +155,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 device="cpu", 
                 pad=0
             )
+            prompt_lens = torch.tensor(
+                prompt_lens,
+                dtype=torch.int32,
+                device="cpu"
+            )
         else:
             input_tokens = torch.tensor(input_tokens, dtype=torch.int32, device="cpu")
-        input_positions = torch.tensor(input_positions, dtype=torch.int32, device="cpu")
-        if is_prompt:
-            prompt_lens = torch.tensor(prompt_lens,
-                                    dtype=torch.int32,
-                                    device="cpu")
-        else:
             prompt_lens = None
             
         seq_groups = [
@@ -185,6 +185,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             
         is_prompt = model_input.prompt_lens is not None  # prefill if True, otherwise decode
 
+        block_tables = model_input.block_tables
         if is_prompt:
             input_tokens = model_input.input_tokens
             input_positions = 0
@@ -192,13 +193,27 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             input_tokens = model_input.input_tokens.view(-1, 1)
             input_positions = model_input.input_positions
             
-            # TODO: Remove once the model can support padded batches or arbitrary batch sizes
-            assert input_tokens.shape[0] == self.scheduler_config.max_num_seqs, "Currently only supporting batch sizes equal to max_num_seqs for decode"
+            # TODO: Remove once the model can support arbitrary batch sizes
+            # Pad batch to max_num_seqs
+            if input_tokens.shape[0] < self.scheduler_config.max_num_seqs:
+                batch_pad_len = self.scheduler_config.max_num_seqs - input_tokens.shape[0]
+                input_tokens = torch.cat([
+                    input_tokens,
+                    torch.zeros(batch_pad_len, 1, dtype=torch.int32, device="cpu")
+                ])
+                input_positions = torch.cat([
+                    input_positions,
+                    torch.ones(batch_pad_len, dtype=torch.int32, device="cpu") * -1  # Pad with -1 to indicate no position
+                ])
+                block_tables = torch.cat([
+                    block_tables,
+                    torch.zeros(batch_pad_len, block_tables.shape[1], dtype=torch.int32, device="cpu")
+                ])
         
         execute_model_kwargs = {
             "tokens": input_tokens,
             "start_pos": input_positions,
-            "page_table": model_input.block_tables,
+            "page_table": block_tables,
             "kv_cache": kv_caches,
             "prompt_lens": model_input.prompt_lens,
         }
