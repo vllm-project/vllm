@@ -377,7 +377,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # for each sequence, we can append.
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
-        return num_seqs < num_free_gpu_blocks
+        return num_seqs <= num_free_gpu_blocks
 
     def _promote_last_block(
         self,

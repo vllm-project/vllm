@@ -223,7 +223,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             Device.GPU)
-        return num_touched_blocks < num_free_gpu_blocks
+        return num_touched_blocks <= num_free_gpu_blocks
 
     def append_slots(
         self,
