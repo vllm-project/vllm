@@ -300,15 +300,9 @@ class LLMEngine:
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
-<<<<<<< HEAD
-        # Input processor
-        self.input_processor = INPUT_REGISTRY.create_input_processor(
-            self.model_config)
-=======
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
->>>>>>> 32e7db25365415841ebc7c4215851743fbb1bad1
 
         # engine has a executor class
         # program for a specific interface rather than an implementation
@@ -510,18 +504,12 @@ class LLMEngine:
                 from vllm.executor.ray_xpu_executor import RayXPUExecutor
                 executor_class = RayXPUExecutor
             elif distributed_executor_backend == "mp":
-<<<<<<< HEAD
-                from vllm.executor.multiproc_xpu_executor import (
-                    MultiprocessingXPUExecutor)
-                executor_class = MultiprocessingXPUExecutor
-=======
                 # FIXME(kunshang):
                 # spawn needs calling `if __name__ == '__main__':``
                 # fork is not supported for xpu start new process.
                 logger.error(
                     "Both start methods (spawn and fork) have issue "
                     "on XPU if you use mp backend, Please try ray instead.")
->>>>>>> 32e7db25365415841ebc7c4215851743fbb1bad1
             else:
                 from vllm.executor.xpu_executor import XPUExecutor
                 executor_class = XPUExecutor
@@ -1495,11 +1483,6 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
-<<<<<<< HEAD
-        # First step: schedule the sequences that need to be executed
-        seq_group_metadata_list, scheduler_outputs = self.scheduler[
-            0].schedule()
-=======
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
@@ -1543,7 +1526,6 @@ class LLMEngine:
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
->>>>>>> 32e7db25365415841ebc7c4215851743fbb1bad1
 
         # Second step: execute model
         if not scheduler_outputs.is_empty():
@@ -1588,17 +1570,10 @@ class LLMEngine:
             # No outputs in this case
             output = []
 
-<<<<<<< HEAD
-        # Last step: execute end
-        request_outputs = self._process_model_outputs(
-            output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
-=======
         # Finish the current step for all the sequence groups.
         if self.scheduler_config.is_multi_step:
             for seq_group in seq_group_metadata_list:
                 seq_group.finish_step()
->>>>>>> 32e7db25365415841ebc7c4215851743fbb1bad1
 
         if not self._has_remaining_steps(seq_group_metadata_list):
             # clear the cache if we have finished all the steps.
