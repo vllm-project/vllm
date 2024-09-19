@@ -5,7 +5,7 @@ GGUF
 
 .. warning::
 
-   Please note that GGUF support in vLLM is highly experimental. Currently, you can use GGUF as a way to reduce memory footprint. If you encounter any issues, please report them to the vLLM team.
+   Please note that GGUF support in vLLM is highly experimental and under-optimized at the moment. Currently, you can use GGUF as a way to reduce memory footprint. If you encounter any issues, please report them to the vLLM team.
 
 .. warning::
 
