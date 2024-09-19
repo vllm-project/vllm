@@ -7,7 +7,8 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.backends.utils import CommonMetadataBuilder
+from vllm.attention.backends.utils import (CommonAttentionState,
+                                           CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -32,6 +33,10 @@ class ROCmFlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> Type["ROCmFlashAttentionMetadataBuilder"]:
         return ROCmFlashAttentionMetadataBuilder
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -459,6 +464,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     query,
                     key,
                     value,
+                    self.kv_cache_dtype,
                     key_cache,
                     value_cache,
                     prefill_meta.block_tables,
@@ -468,6 +474,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window[0],
+                    k_scale,
+                    v_scale,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:

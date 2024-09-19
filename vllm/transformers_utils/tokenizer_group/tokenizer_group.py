@@ -2,12 +2,13 @@ from typing import List, Optional
 
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer import (get_lora_tokenizer,
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               get_lora_tokenizer,
                                                get_lora_tokenizer_async,
                                                get_tokenizer)
 from vllm.utils import LRUCache
 
-from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
+from .base_tokenizer_group import BaseTokenizerGroup
 
 
 class TokenizerGroup(BaseTokenizerGroup):

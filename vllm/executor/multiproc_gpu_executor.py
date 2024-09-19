@@ -14,7 +14,8 @@ from vllm.executor.gpu_executor import create_worker
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.triton_utils import maybe_set_triton_cache_manager
 from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
                         get_distributed_init_method, get_open_port,
@@ -126,7 +127,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                           max_parallel_loading_workers)
 
     def _check_executor_parameters(self):
-        world_size = self.parallel_config.tensor_parallel_size
+        world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
@@ -136,7 +137,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             })
 
         cuda_device_count = cuda_device_count_stateless()
-
+        # Use confusing message for more common TP-only case.
         assert tensor_parallel_size <= cuda_device_count, (
             f"please set tensor_parallel_size ({tensor_parallel_size}) "
             f"to less than max local gpu count ({cuda_device_count})")
@@ -144,8 +145,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         assert world_size <= cuda_device_count, (
             f"please ensure that world_size ({world_size}) "
             f"is less than than max local gpu count ({cuda_device_count})")
-
-        error_on_invalid_device_count_status()
 
     def shutdown(self):
         if (worker_monitor := getattr(self, "worker_monitor",

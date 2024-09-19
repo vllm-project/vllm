@@ -1,10 +1,10 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import Any, Callable, Dict, List, Optional
-from typing import Sequence as GenericSequence
-from typing import Type, TypedDict, TypeVar, Union, cast
+from typing import (Callable, Dict, List, Mapping, Optional, Tuple, Type,
+                    TypedDict, TypeVar, Union, cast, final)
 
+import numpy as np
 import torch
 import torch.types
 from PIL import Image
@@ -14,23 +14,16 @@ from typing_extensions import TypeAlias
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import JSONTree, json_map_leaves
+from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
 logger = init_logger(__name__)
 
-NestedTensors = Union[GenericSequence[torch.Tensor], torch.Tensor]
+NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
 """
-Use a list instead of a tensor if the dimensions of each element do not match.
-Currently only supports up to singly nested list of tensors.
-"""
-
-BatchedTensors: TypeAlias = JSONTree[torch.Tensor]
-"""
-A nested JSON structure of tensors which have been batched via
-:meth:`MultiModalInputs.batch`.
+Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
-BatchedTensorInputs: TypeAlias = Dict[str, JSONTree[torch.Tensor]]
+BatchedTensorInputs: TypeAlias = Dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
 :meth:`MultiModalInputs.batch`.
@@ -53,26 +46,24 @@ class MultiModalInputs(_MultiModalInputsBase):
     """
 
     @staticmethod
-    def _try_concat(tensors: List[NestedTensors]) -> BatchedTensors:
+    def _try_stack(nested_tensors: NestedTensors) -> NestedTensors:
         """
-        If each input tensor in the batch has the same shape, return a single
-        batched tensor; otherwise, return a list of :class:`NestedTensors` with
-        one element per item in the batch.
+        Recursively stacks lists of tensors when they all have the same shape.
         """
-        # may be list rather than tensors
-        if isinstance(tensors[0], list):
-            return [[t for t in tensor[0]]
-                    for tensor in cast(List[List[torch.Tensor]], tensors)]
+        if isinstance(nested_tensors, torch.Tensor):
+            return nested_tensors
 
-        tensors_ = cast(List[torch.Tensor], tensors)
+        stacked = [MultiModalInputs._try_stack(t) for t in nested_tensors]
+        if not is_list_of(stacked, torch.Tensor, check="all"):
+            # Only tensors (not lists) can be stacked.
+            return stacked
 
-        unbatched_shape = tensors_[0].shape[1:]
+        tensors_ = cast(List[torch.Tensor], stacked)
+        if any(t.shape != tensors_[0].shape for t in tensors_):
+            # The tensors have incompatible shapes and can't be stacked.
+            return tensors_
 
-        for tensor in tensors_:
-            if tensor.shape[1:] != unbatched_shape:
-                return [tensor.squeeze(0) for tensor in tensors_]
-
-        return torch.cat(tensors_, dim=0)
+        return torch.stack(tensors_)
 
     @staticmethod
     def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:
@@ -101,7 +92,7 @@ class MultiModalInputs(_MultiModalInputsBase):
                 item_lists[k].append(v)
 
         return {
-            k: MultiModalInputs._try_concat(item_list)
+            k: MultiModalInputs._try_stack(item_list)
             for k, item_list in item_lists.items()
         }
 
@@ -111,18 +102,40 @@ class MultiModalInputs(_MultiModalInputsBase):
         *,
         device: torch.types.Device,
     ) -> BatchedTensorInputs:
-        return json_map_leaves(lambda x: x.to(device, non_blocking=True),
-                               batched_inputs)
+        json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
+
+        json_mapped = json_map_leaves(
+            lambda x: x.to(device, non_blocking=True),
+            json_inputs,
+        )
+
+        return cast(BatchedTensorInputs, json_mapped)
 
 
+_T = TypeVar("_T")
+
+MultiModalData: TypeAlias = Union[_T, List[_T]]
+"""
+Either a single data instance, or a list of data instances.
+
+The number of data instances allowed per modality is restricted by
+`--limit-mm-per-prompt`.
+"""
+
+
+@final
 class MultiModalDataBuiltins(TypedDict, total=False):
     """Modality types that are predefined by vLLM."""
 
-    image: Image.Image
-    """The input image."""
+    image: MultiModalData[Image.Image]
+    """The input image(s)."""
+
+    audio: MultiModalData[Tuple[np.ndarray, Union[int, float]]]
+    """The input audio item(s) and corresponding sampling rate(s)."""
 
 
-MultiModalDataDict = Union[MultiModalDataBuiltins, Dict[str, Any]]
+MultiModalDataDict = Union[MultiModalDataBuiltins,
+                           Mapping[str, MultiModalData[object]]]
 """
 A dictionary containing an item for each modality type to input.
 
@@ -133,7 +146,8 @@ Note:
     Read more on that :ref:`here <adding_multimodal_plugin>`.
 """
 
-MultiModalInputMapper = Callable[[InputContext, object], MultiModalInputs]
+MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
+                                 MultiModalInputs]
 """
 Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
@@ -177,8 +191,11 @@ class MultiModalPlugin(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
+    def _default_input_mapper(
+        self,
+        ctx: InputContext,
+        data: MultiModalData[object],
+    ) -> MultiModalInputs:
         """
         Return a dictionary to be passed as keyword arguments to
         :meth:`~torch.nn.Module.forward`. This is similar in concept to
@@ -221,7 +238,7 @@ class MultiModalPlugin(ABC):
         return wrapper
 
     def map_input(self, model_config: ModelConfig,
-                  data: object) -> MultiModalInputs:
+                  data: MultiModalData[object]) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.
@@ -250,8 +267,8 @@ class MultiModalPlugin(ABC):
     @abstractmethod
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         """
-        Calculate the maximum number of multimodal tokens input to the language
-        model. This does not include tokens that correspond to the input text.
+        Calculate the maximum number of tokens, corresponding to a single
+        instance of multimodal data, that are passed to the language model.
         """
         raise NotImplementedError
 
@@ -265,8 +282,9 @@ class MultiModalPlugin(ABC):
         max_mm_tokens: Optional[MultiModalTokensCalc] = None,
     ):
         """
-        Register the maximum number of multi-modal tokens input to the
-        language model for a model class.
+        Register the maximum number of tokens, corresponding to a single
+        instance of multimodal data, that are passed to the language model
+        for a model class.
 
         If `None` is provided, then the default calculation is used instead.
 

@@ -1067,16 +1067,20 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def include_gpu_probs_tensor(self):
         return self.base_layer.include_gpu_probs_tensor
 
+    @property
+    def should_modify_greedy_probs_inplace(self):
+        return self.base_layer.should_modify_greedy_probs_inplace
+
     def create_lora_weights(
         self,
         max_loras: int,
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
-        # TODO: Verify if this condition can be relaxed
-        if 32000 < self.base_layer.vocab_size > 128512:
+        # TODO: Verify if this condition can be further relaxed
+        if 32000 < self.base_layer.vocab_size > 257024:
             raise ValueError("When using LoRA, vocab size must be "
-                             "32000 >= vocab_size <= 128512")
+                             "32000 >= vocab_size <= 257024")
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,

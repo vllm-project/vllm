@@ -22,8 +22,8 @@ def run_llava(question):
     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf")
-
-    return llm, prompt
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
 
 
 # LLaVA-1.6/LLaVA-NeXT
@@ -31,8 +31,8 @@ def run_llava_next(question):
 
     prompt = f"[INST] <image>\n{question} [/INST]"
     llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf")
-
-    return llm, prompt
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
 
 
 # Fuyu
@@ -40,8 +40,8 @@ def run_fuyu(question):
 
     prompt = f"{question}\n"
     llm = LLM(model="adept/fuyu-8b")
-
-    return llm, prompt
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
 
 
 # Phi-3-Vision
@@ -59,7 +59,8 @@ def run_phi3v(question):
         trust_remote_code=True,
         max_num_seqs=5,
     )
-    return llm, prompt
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
 
 
 # PaliGemma
@@ -68,8 +69,8 @@ def run_paligemma(question):
     # PaliGemma has special prompt format for VQA
     prompt = "caption en"
     llm = LLM(model="google/paligemma-3b-mix-224")
-
-    return llm, prompt
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
 
 
 # Chameleon
@@ -77,7 +78,8 @@ def run_chameleon(question):
 
     prompt = f"{question}<image>"
     llm = LLM(model="facebook/chameleon-7b")
-    return llm, prompt
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
 
 
 # MiniCPM-V
@@ -89,13 +91,26 @@ def run_minicpmv(question):
     # model_name = "HwwwH/MiniCPM-V-2"
 
     # 2.5
-    model_name = "openbmb/MiniCPM-Llama3-V-2_5"
+    # model_name = "openbmb/MiniCPM-Llama3-V-2_5"
+
+    #2.6
+    model_name = "openbmb/MiniCPM-V-2_6"
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
     )
+    # NOTE The stop_token_ids are different for various versions of MiniCPM-V
+    # 2.0
+    # stop_token_ids = [tokenizer.eos_id]
+
+    # 2.5
+    # stop_token_ids = [tokenizer.eos_id, tokenizer.eot_id]
+
+    # 2.6
+    stop_tokens = ['<|im_end|>', '<|endoftext|>']
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
     messages = [{
         'role': 'user',
@@ -104,21 +119,33 @@ def run_minicpmv(question):
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
-    return llm, prompt
+    return llm, prompt, stop_token_ids
 
 
 # InternVL
 def run_internvl(question):
-    # Generally, InternVL can use chatml template for conversation
-    TEMPLATE = "<|im_start|>User\n{prompt}<|im_end|>\n<|im_start|>Assistant\n"
-    prompt = f"<image>\n{question}\n"
-    prompt = TEMPLATE.format(prompt=prompt)
+    model_name = "OpenGVLab/InternVL2-2B"
+
     llm = LLM(
-        model="OpenGVLab/InternVL2-4B",
+        model=model_name,
         trust_remote_code=True,
         max_num_seqs=5,
     )
-    return llm, prompt
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [{'role': 'user', 'content': f"<image>\n{question}"}]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for InternVL
+    # models variants may have different stop tokens
+    # please refer to the model card for the correct "stop words":
+    # https://huggingface.co/OpenGVLab/InternVL2-2B#service
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    return llm, prompt, stop_token_ids
 
 
 # BLIP-2
@@ -128,7 +155,8 @@ def run_blip2(question):
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompt = f"Question: {question} Answer:"
     llm = LLM(model="Salesforce/blip2-opt-2.7b")
-    return llm, prompt
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
 
 
 model_example_map = {
@@ -149,11 +177,13 @@ def main(args):
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
 
-    llm, prompt = model_example_map[model](question)
+    llm, prompt, stop_token_ids = model_example_map[model](question)
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(temperature=0.2, max_tokens=64)
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=64,
+                                     stop_token_ids=stop_token_ids)
 
     assert args.num_prompts > 0
     if args.num_prompts == 1:

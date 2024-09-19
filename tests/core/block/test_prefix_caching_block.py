@@ -316,6 +316,60 @@ class TestPrefixCachingBlockAllocator:
             allocator.free(block)
 
     @staticmethod
+    @pytest.mark.parametrize("num_blocks", [4])
+    @pytest.mark.parametrize("block_size", [8])
+    def test_prefix_caching_block_get_num_blocks_touched(
+            num_blocks, block_size):
+        """ Verify the allocator can correctly return the number of
+        blocks touched, when there are cached prefixes and different
+        lookahead slots.
+        """
+        allocator_src = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                    block_size=block_size)
+        allocator_dst = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                    block_size=block_size)
+
+        # Create token ids that will exhaust all blocks except the last
+        token_ids = list(range((num_blocks - 1) * block_size))
+
+        # Create a chain of cacheable blocks in the dst
+        cached_blocks = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator_dst,
+        )
+
+        # Create a chain of the same blocks in the src
+        blocks_to_swap_in = \
+            TestPrefixCachingBlockAllocator.create_immutable_chain(
+                block_size=block_size,
+                token_ids=token_ids,
+                allocator=allocator_src,
+            )
+
+        # All blocks are cached
+        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in) == 0
+
+        # Free the first block in the dst
+        allocator_dst.free(cached_blocks[0])
+
+        # Now the first block becomes dangling, the swapped blocks need
+        # to reclaim the first block in the dst
+        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in) == 1
+
+        # Insert one non-full block in the src
+        non_full_block = allocator_src.allocate_mutable_block(
+            blocks_to_swap_in[-1])
+        non_full_block.append_token_ids([0])
+        blocks_to_swap_in.append(non_full_block)
+        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in,
+                                                    num_lookahead_slots=1) == 2
+        assert allocator_dst.get_num_blocks_touched(
+            blocks_to_swap_in, num_lookahead_slots=block_size - 1) == 2
+        assert allocator_dst.get_num_blocks_touched(
+            blocks_to_swap_in, num_lookahead_slots=block_size) == 3
+
+    @staticmethod
     @pytest.mark.parametrize("num_blocks", [1024])
     @pytest.mark.parametrize("block_size", [16])
     @pytest.mark.parametrize("seed", list(range(20)))
@@ -627,6 +681,63 @@ class TestPrefixCachingBlockAllocator:
         )
 
         assert new_block[0].block_id == last_block_id
+
+    # Test case for cache mertics
+    @staticmethod
+    def test_metric():
+        block_size = 16
+        allocator = PrefixCachingBlockAllocator(num_blocks=4,
+                                                block_size=block_size)
+        # Test when no query (0/0)
+        assert allocator.get_prefix_cache_hit_rate() == 0.0
+
+        token_ids = list(range(block_size))
+        allocator.allocate_immutable_block(prev_block=None,
+                                           token_ids=token_ids)
+        # Test 0/1 hit rate
+        assert allocator.get_prefix_cache_hit_rate() == 0.0
+
+        allocator.allocate_immutable_block(prev_block=None,
+                                           token_ids=token_ids)
+        # Test 1/2 hit rate
+        assert allocator.get_prefix_cache_hit_rate() == 0.5
+
+        # Test more than one block
+        for _ in range(2, 1005):
+            allocator.allocate_immutable_block(prev_block=None,
+                                               token_ids=token_ids)
+        assert allocator.get_prefix_cache_hit_rate() > 0.99
+
+    # Test case for marking cache hit blocks as computed right after
+    # a batch of prefill sequences are scheduled.
+    @staticmethod
+    def test_touch_block():
+        block_size = 16
+        common_blocks = 4
+        allocator = PrefixCachingBlockAllocator(num_blocks=8,
+                                                block_size=block_size)
+
+        common_token_ids = list(range(block_size * common_blocks))
+
+        # Mimic the behavior of allocating the same block chain
+        # (i.e., common prefix) for a batch of 3 different prefill sequences.
+        for _ in range(3):
+            blocks = TestPrefixCachingBlockAllocator.create_immutable_chain(
+                block_size=block_size,
+                token_ids=common_token_ids,
+                allocator=allocator,
+            )
+            block_ids = [block.block_id for block in blocks]
+            # The allocated blocks should  be marked as touched
+            # but not computed.
+            computed_block_ids = allocator.get_computed_block_ids(
+                [], block_ids, skip_last_block_id=False)
+            assert len(computed_block_ids) == 0
+
+        allocator.mark_blocks_as_computed([])
+        computed_block_ids = allocator.get_computed_block_ids(
+            [], block_ids, skip_last_block_id=False)
+        assert len(computed_block_ids) == common_blocks
 
     @staticmethod
     def create_immutable_chain(

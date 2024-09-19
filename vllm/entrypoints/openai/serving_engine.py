@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeRequest)
 # yapf: enable
-from vllm.inputs import parse_and_batch_prompt
+from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
@@ -31,7 +31,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer_group import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 

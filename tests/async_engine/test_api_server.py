@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import time
@@ -35,11 +36,17 @@ def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
         "127.0.0.1", "--tokenizer-pool-size",
         str(tokenizer_pool_size)
     ]
+
+    # Copy the environment variables and append `VLLM_ALLOW_ENGINE_USE_RAY=1`
+    # to prevent `--engine-use-ray` raises an exception due to it deprecation
+    env_vars = os.environ.copy()
+    env_vars["VLLM_ALLOW_ENGINE_USE_RAY"] = "1"
+
     if engine_use_ray:
         commands.append("--engine-use-ray")
     if worker_use_ray:
         commands.append("--worker-use-ray")
-    uvicorn_process = subprocess.Popen(commands)
+    uvicorn_process = subprocess.Popen(commands, env=env_vars)
     yield
     uvicorn_process.terminate()
 

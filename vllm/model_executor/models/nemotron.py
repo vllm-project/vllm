@@ -37,13 +37,13 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronConfig
 
 from .interfaces import SupportsLoRA
@@ -53,7 +53,7 @@ from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 # - There is no gate_proj, just up_proj
 # - Normal LayerNorm (with a +1 to the weights) instead of RMSNorm
 # - Squared ReLU instead of SwiGLU
-# - Adds a rotary_percent to RoPE
+# - Adds a partial_rotary_factor to RoPE
 
 
 def _cast_if_autocast_enabled(*args):
@@ -161,7 +161,7 @@ class NemotronAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        self.rotary_percent = config.rope_percent
+        self.partial_rotary_factor = config.partial_rotary_factor
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -187,7 +187,7 @@ class NemotronAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             rope_scaling=rope_scaling,
-            rotary_percent=self.rotary_percent,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -453,8 +453,11 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA):
                                   attn_metadata, intermediate_tensors)
         return model_output
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

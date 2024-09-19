@@ -33,5 +33,5 @@ class RayXPUExecutorAsync(RayXPUExecutor, RayGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # self.driver_exec_method = make_async(self.driver_worker.execute_method)
-        # self.pp_locks: Optional[List[asyncio.Lock]] = None
+        self.driver_exec_method = make_async(self.driver_worker.execute_method)
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
