@@ -283,21 +283,23 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
 
 
 def get_inputs_embeds(
-    input_ids: torch.Tensor,
+    input_ids: Optional[torch.Tensor],
     embeddings_module: Callable[[torch.Tensor], torch.Tensor],
     inputs_embeds: Optional[torch.Tensor] = None,
     inputs_embeds_masks: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Get the input embeddings from either `input_ids` and `inputs_embeds`."""
     if inputs_embeds is not None:
-        assert inputs_embeds_masks is not None
-
-        if inputs_embeds_masks.all().item():
+        if inputs_embeds_masks is None or inputs_embeds_masks.all().item():
             hidden_states = inputs_embeds
         else:
+            assert input_ids is not None, "inputs_embeds should not be masked out for multimodal models"
+
             hidden_states = embeddings_module(input_ids)
             hidden_states[inputs_embeds_masks] = inputs_embeds
     else:
+        assert input_ids is not None, "inputs_embeds should be set for multimodal models"
+
         hidden_states = embeddings_module(input_ids)
 
     return hidden_states

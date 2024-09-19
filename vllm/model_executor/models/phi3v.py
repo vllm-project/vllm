@@ -44,7 +44,7 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal
-from .utils import flatten_bn, get_inputs_embeds, merge_multimodal_embeddings
+from .utils import flatten_bn, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -621,25 +621,23 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
                 inputs_embeds_masks: Optional[torch.Tensor] = None,
                 **kwargs: object):
         image_input = self._parse_and_validate_image_input(**kwargs)
+
         if image_input is not None:
-            inputs_embeds = get_inputs_embeds(input_ids,
-                                              self.model.get_input_embeddings,
-                                              inputs_embeds,
-                                              inputs_embeds_masks)
             vision_embeddings = self._process_image_input(image_input)
+            inputs_embeds = self.model.get_input_embeddings(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.image_token_id)
-            inputs_embeds_masks = torch.ones_like(input_ids, dtype=torch.bool)
             input_ids = None
+        else:
+            inputs_embeds = None
 
         hidden_states = self.model(input_ids,
                                    positions,
                                    kv_caches,
                                    attn_metadata,
                                    intermediate_tensors,
-                                   inputs_embeds=inputs_embeds,
-                                   inputs_embeds_masks=inputs_embeds_masks)
+                                   inputs_embeds=inputs_embeds)
 
         return hidden_states
 

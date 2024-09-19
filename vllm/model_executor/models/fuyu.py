@@ -43,7 +43,7 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 
 from .interfaces import SupportsMultiModal
-from .utils import get_inputs_embeds, merge_multimodal_embeddings
+from .utils import merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -278,19 +278,19 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        inputs_embeds_masks: Optional[torch.Tensor] = None,
         **kwargs: object,
     ):
         image_input = self._parse_and_validate_image_input(**kwargs)
-        inputs_embeds = get_inputs_embeds(
-            input_ids, self.language_model.model.embed_tokens, inputs_embeds,
-            inputs_embeds_masks)
+
         if image_input is not None:
             vision_embeddings = self._process_image_input(image_input)
+            inputs_embeds = self.language_model.model.embed_tokens(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.image_token_id)
+
+        else:
+            inputs_embeds = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,
@@ -298,7 +298,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
-            inputs_embeds_masks=inputs_embeds_masks)
+        )
         return hidden_states
 
     def compute_logits(
