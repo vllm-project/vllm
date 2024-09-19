@@ -1,5 +1,5 @@
-from typing import (Callable, Dict, Iterable, List, Literal, Optional, Protocol,
-                    Tuple, Union, overload)
+from typing import (Callable, Dict, Iterable, List, Literal, Optional,
+                    Protocol, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -293,12 +293,14 @@ def get_inputs_embeds(
         if inputs_embeds_masks is None or inputs_embeds_masks.all().item():
             hidden_states = inputs_embeds
         else:
-            assert input_ids is not None, "inputs_embeds should not be masked out for multimodal models"
+            msg = "inputs_embeds should not be masked out for multimodal models"
+            assert input_ids is not None, msg
 
             hidden_states = embeddings_module(input_ids)
             hidden_states[inputs_embeds_masks] = inputs_embeds
     else:
-        assert input_ids is not None, "inputs_embeds should be set for multimodal models"
+        msg = "inputs_embeds should be set for multimodal models"
+        assert input_ids is not None, msg
 
         hidden_states = embeddings_module(input_ids)
 

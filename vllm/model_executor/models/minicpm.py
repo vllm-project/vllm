@@ -489,8 +489,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,
-                                   inputs_embeds=inputs_embeds,
-                                   inputs_embeds_masks=inputs_embeds_masks)
+                                   inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(
