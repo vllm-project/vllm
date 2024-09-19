@@ -48,7 +48,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available,
-                        supports_dynamo)
+                        maybe_slice, supports_dynamo)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -491,30 +491,27 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_len - 1
         seq_len = min(seq_len, context_len + token_chunk_size)
 
-        input_embeds = None
-        input_embeds_mask = None
         # Compute tokens.
         if inter_data.is_prompt:
             if seq_data.prompt_embeds is None:
-                tokens = seq_data.get_token_ids()
-                if context_len != 0 or seq_len < len(tokens):
-                    tokens = tokens[context_len:seq_len]
-
+                tokens = maybe_slice(seq_data.get_token_ids(), context_len,
+                                     seq_len)
+                input_embeds = None
                 input_embeds_mask = torch.zeros(seq_len - context_len,
                                                 dtype=torch.bool)
             else:
                 tokens = [0] * seq_len
-
-                input_embeds = seq_data.prompt_embeds
-                if context_len != 0 or seq_len < len(input_embeds):
-                    input_embeds = input_embeds[context_len:seq_len]
-
+                input_embeds = maybe_slice(seq_data.prompt_embeds, context_len,
+                                           seq_len)
                 input_embeds_mask = torch.ones(seq_len - context_len,
                                                dtype=torch.bool)
         else:
             # Optimization. get_token_ids requires the entire copy of
             # tokens.
             tokens = seq_data.get_last_token_id()
+
+            input_embeds = None
+            input_embeds_mask = None
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
