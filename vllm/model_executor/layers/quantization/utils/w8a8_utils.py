@@ -127,19 +127,24 @@ def apply_fp8_linear(
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
 
+        # fix for CUDA error: HIPBLAS_STATUS_NOT_SUPPORTED when 
+        # calling `HIPBLAS_STATUS_NOT_SUPPORTED`
+        out_dtype = torch.float32 if is_hip() else input.dtype
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
             output = torch._scaled_mm(qinput,
                                       weight,
-                                      out_dtype=input.dtype,
+                                      out_dtype=out_dtype,
                                       scale_a=x_scale,
                                       scale_b=weight_scale,
                                       bias=bias)
             # A fix for discrepancy in scaled_mm which returns tuple
             # for torch < 2.5 and a single value in torch >= 2.5
             if type(output) is tuple and len(output) == 2:
-                return torch.narrow(output[0], 0, 0, input.shape[0])
-            return torch.narrow(output, 0, 0, input.shape[0])
+                output = output[0]
+            # Unpad (undo num_token_padding)
+            output = torch.narrow(output, 0, 0, input.shape[0])
+            return output.to(dtype=input.dtype)
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
