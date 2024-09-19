@@ -52,7 +52,6 @@ class EncodeOnlyTorchSDPABackendImpl(EncodeOnlyAttentionImpl):
         num_kv_heads: int,
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
-        kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
@@ -70,17 +69,11 @@ class EncodeOnlyTorchSDPABackendImpl(EncodeOnlyAttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         self.sliding_window = sliding_window
-        self.kv_cache_dtype = kv_cache_dtype
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.need_mask = (self.alibi_slopes is not None
                           or self.sliding_window is not None)
-
-        if kv_cache_dtype != "auto":
-            raise NotImplementedError(
-                "Torch SDPA backend does not support FP8 KV cache. "
-                "Please use xFormers backend instead.")
 
     def forward(
         self,
@@ -92,17 +85,6 @@ class EncodeOnlyTorchSDPABackendImpl(EncodeOnlyAttentionImpl):
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
-        """Forward pass with torch SDPA and PagedAttention.
-
-        Args:
-            query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
-            attn_metadata: Metadata for attention.
-        Returns:
-            shape = [num_tokens, num_heads * head_size]
-        """
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in TorchSDPA.")
 

@@ -52,7 +52,6 @@ class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
         num_kv_heads: int,
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
-        kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
@@ -72,7 +71,6 @@ class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = ((sliding_window, sliding_window)
                                if sliding_window is not None else (-1, -1))
-        self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0

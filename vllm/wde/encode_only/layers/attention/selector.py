@@ -56,7 +56,9 @@ class AttnBackend:
             return EncodeOnlyFlashAttentionBackend
         if backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
-            pass
+            from vllm.wde.encode_only.layers.attention.backends.xformers import (  # noqa: E501
+                EncodeOnlyXFormersBackend)
+            return EncodeOnlyXFormersBackend
         elif backend == _Backend.TORCH_SDPA:
 
             logger.info("Using Torch SDPA backend.")

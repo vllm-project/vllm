@@ -83,7 +83,6 @@ class AttentionImpl(ABC, Generic[T]):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
