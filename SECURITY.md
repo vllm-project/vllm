@@ -7,3 +7,6 @@ We will investigate all legitimate reports and do our best to quickly fix the pr
 
 Please report security issues using https://github.com/vllm-project/vllm/security/advisories/new
 
+---
+Please see PyTorch Security for more information how to securely interact with models: https://github.com/pytorch/pytorch/blob/main/SECURITY.md
+This document mostly references the recommendation from PyTorch, thank you! 
