@@ -20,6 +20,7 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    TORCH_NAIVE = enum.auto()
 
     @staticmethod
     def backend_name_to_enum(backend_name: str) -> "_Backend":
@@ -60,11 +61,17 @@ class AttnBackend:
                 EncodeOnlyXFormersBackend)
             return EncodeOnlyXFormersBackend
         elif backend == _Backend.TORCH_SDPA:
-
             logger.info("Using Torch SDPA backend.")
             from vllm.wde.encode_only.layers.attention.backends.torch_sdpa import (  # noqa: E501
                 EncodeOnlyTorchSDPABackend)
             return EncodeOnlyTorchSDPABackend
+        elif backend == _Backend.FLASHINFER:
+            logger.info("Using Flashinfer backend.")
+            logger.info("When using Flashinfer backend in encode only models, "
+                        "you are actually using FLASH ATTN backend")
+            from vllm.wde.encode_only.layers.attention.backends.flashinfer import (  # noqa: E501
+                EncodeOnlyFlashInferBackend)
+            return EncodeOnlyFlashInferBackend
         else:
             raise ValueError("Invalid attention backend.")
 

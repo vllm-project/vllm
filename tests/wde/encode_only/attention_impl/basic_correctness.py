@@ -31,7 +31,7 @@ def example_prompts():
 
 @pytest.fixture(scope="session")
 def attention_impls():
-    return ["FLASH_ATTN", "TORCH_SDPA", "XFORMERS"]
+    return ["FLASH_ATTN", "TORCH_SDPA", "XFORMERS", "FLASHINFER"]
 
 
 MODELS = ["BAAI/bge-m3"]
