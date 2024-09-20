@@ -68,7 +68,6 @@ if __name__ == '__main__':
     args.tokenizer = args.model
     args.seed = 0
     args.max_model_len = None
-    args.dtype = "half"
     args.device = "cuda"
     args.batchsize = [1, 2, 4, 8, 16, 32, 64]
     args.scheduling = "double_buffer"
@@ -80,7 +79,24 @@ if __name__ == '__main__':
             f = executor.submit(benchmark_vllm, args)
             f.result()
 
-    for attention_impl in ["FLASH_ATTN", "TORCH_SDPA"]:
-        print(attention_impl)
-        args.attention_impl = attention_impl
-        run_vllm(args)
+    AttentionImpls_fp32 = ["TORCH_SDPA", "XFORMERS", "TORCH_NAIVE"]
+    AttentionImpls_fp16 = [
+        "FLASH_ATTN", "TORCH_SDPA", "XFORMERS", "FLASHINFER", "TORCH_NAIVE"
+    ]
+    AttentionImpls_bf16 = [
+        "FLASH_ATTN", "TORCH_SDPA", "XFORMERS", "FLASHINFER", "TORCH_NAIVE"
+    ]
+
+    AttentionImpls = {
+        "float": AttentionImpls_fp32,
+        "half": AttentionImpls_fp16,
+        "bfloat16": AttentionImpls_bf16,
+    }
+
+    for dtype, attention_impls in AttentionImpls.items():
+        print("dtype:", dtype)
+        for attention_impl in attention_impls:
+            print("attention_impl:", attention_impl)
+            args.attention_impl = attention_impl
+            args.dtype = dtype
+            run_vllm(args)

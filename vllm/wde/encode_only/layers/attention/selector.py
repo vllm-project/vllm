@@ -72,6 +72,11 @@ class AttnBackend:
             from vllm.wde.encode_only.layers.attention.backends.flashinfer import (  # noqa: E501
                 EncodeOnlyFlashInferBackend)
             return EncodeOnlyFlashInferBackend
+        elif backend == _Backend.TORCH_NAIVE:
+            logger.info("Using Torch naive backend.")
+            from vllm.wde.encode_only.layers.attention.backends.torch_naive import (  # noqa: E501
+                EncodeOnlyTorchNAIVEBackend)
+            return EncodeOnlyTorchNAIVEBackend
         else:
             raise ValueError("Invalid attention backend.")
 

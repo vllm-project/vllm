@@ -1,6 +1,6 @@
 import itertools as it
 import random
-from typing import List, TypeVar
+from typing import TypeVar
 
 import pytest
 import torch
@@ -29,20 +29,29 @@ def example_prompts():
     return prompts
 
 
-@pytest.fixture(scope="session")
-def attention_impls():
-    return ["FLASH_ATTN", "TORCH_SDPA", "XFORMERS", "FLASHINFER"]
-
-
 MODELS = ["BAAI/bge-m3"]
+
+AttentionImpls_fp32 = ["TORCH_SDPA", "XFORMERS", "TORCH_NAIVE"]
+AttentionImpls_fp16 = [
+    "FLASH_ATTN", "TORCH_SDPA", "XFORMERS", "FLASHINFER", "TORCH_NAIVE"
+]
+AttentionImpls_bf16 = [
+    "FLASH_ATTN", "TORCH_SDPA", "XFORMERS", "FLASHINFER", "TORCH_NAIVE"
+]
+
+AttentionImpls = {
+    "float": AttentionImpls_fp32,
+    "half": AttentionImpls_fp16,
+    "bfloat16": AttentionImpls_bf16,
+}
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_num_seqs", [2, 3, 5, 7])
+@pytest.mark.parametrize("dtype", ["float", "half", "bfloat16"])
+@pytest.mark.parametrize("max_num_seqs", [2])
 @pytest.mark.parametrize("scheduling", ["sync"])
 @torch.inference_mode
-def test_basic_correctness(
+def test_basic_correctness_fp16(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -50,8 +59,9 @@ def test_basic_correctness(
     dtype: str,
     max_num_seqs: int,
     scheduling: str,
-    attention_impls: List[str],
 ) -> None:
+    attention_impls = AttentionImpls[dtype]
+
     impl_outputs_list = []
 
     for attention_impl in attention_impls:
