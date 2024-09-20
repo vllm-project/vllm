@@ -50,6 +50,7 @@ chat_completion_from_url = client.chat.completions.create(
     }],
     model=model,
     max_tokens=64,
+    temperature=0.0,
 )
 
 result = chat_completion_from_url.choices[0].message.content

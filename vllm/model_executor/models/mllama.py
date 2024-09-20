@@ -1334,7 +1334,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        print("input_ids", input_ids)
         if attn_metadata.num_prefill_tokens > 0 and attn_metadata.num_decode_tokens > 0:
             raise ValueError("Chunk prefill not supported")
         image_inputs = self._parse_and_validate_image_input(**kwargs)
