@@ -3,13 +3,14 @@ from typing import Mapping
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext, LLMInputs
 from vllm.inputs.registry import InputRegistry
+from vllm.model_executor.models.phi3v import Phi3VForCausalLM
 from vllm.multimodal import MultiModalRegistry
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
-from vllm.model_executor.models.phi3v import Phi3VForCausalLM
 
 # Used for fast tests where the model doesn't matter
 DUMMY_MODEL_ID = "facebook/opt-125m"
@@ -78,6 +79,9 @@ def use_dummy_data_mock():
 
 # lambda whose signature matches max token calcs + extra kwargs
 get_num_crops = lambda ctx, *, num_crops=DEFAULT_NUM_CROPS: num_crops
+custom_mapper = lambda ctx, data, *, num_crops=DEFAULT_NUM_CROPS: {
+    "num_pixels": torch.zeros(size=(1, num_crops + 1, 3, 336, 336))
+}
 
 
 ### Test for default processor logic & processor_kwargs wrapping
@@ -242,3 +246,110 @@ def test_max_tokens_with_sad_kwarg_overrides(processor_kwargs):
             model_config)
 
     assert max_multimodal_tokens == DEFAULT_NUM_CROPS
+
+
+### Test overrides for the mapper
+@pytest.mark.parametrize("num_crops", [DEFAULT_NUM_CROPS, NUM_CROPS_OVERRIDE])
+def test_default_mapper_with_processer_kwargs(image_assets, num_crops):
+    """Ensure that the mapper processor kwargs can fall back to HF models."""
+    # NOTE - we don't validate bad inputs for the default mapper, because it's
+    # through the automodel interface in transformers, so we can't easily
+    # inspect what kwargs are or are not allowed.
+    model_config = ModelConfig(
+        MULTIMODAL_MODEL_ID,
+        MULTIMODAL_MODEL_ID,
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=0,
+        processor_kwargs={"num_crops": num_crops},
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    mm_registry = MultiModalRegistry()
+    mm_registry.init_mm_limits_per_prompt(model_config)
+
+    image = image_assets[0].pil_image
+    mm_inputs = {"image": image}
+
+    mapped_inputs = mm_registry.map_input(model_config, mm_inputs)
+    # Phi3v pixel vals should have shape: [batch, num_crops+1, 3, 336, 336]
+    assert mapped_inputs["pixel_values"].shape[1] == num_crops + 1
+
+
+@pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
+def test_custom_mapper_kwarg_overrides(image_assets, num_crops):
+    """Ensure that custom mappers can consume processor_kwargs."""
+    processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
+    expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
+
+    model_config = ModelConfig(
+        MULTIMODAL_MODEL_ID,
+        MULTIMODAL_MODEL_ID,
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=0,
+        processor_kwargs=processor_kwargs,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    mm_registry = MultiModalRegistry()
+    mm_registry.init_mm_limits_per_prompt(model_config)
+    # Patch the image registry for phi3v with our lambda that is compatible
+    # with overrides, then ensure that calling the method correctly echos
+    # our num_crops value back from the processor_kwargs.
+    image = image_assets[0].pil_image
+    mm_inputs = {"image": image}
+
+    with patch.object(
+            mm_registry._get_plugin("image"),
+            "_default_input_mapper",
+        {Phi3VForCausalLM: custom_mapper},
+    ):
+        mapped_inputs = mm_registry.map_input(model_config, mm_inputs)
+
+    assert mapped_inputs["pixel_values"].shape[1] == expected_seq_count + 1
+
+
+@pytest.mark.parametrize(
+    "processor_kwargs",
+    [
+        {
+            "does_not_exist": 100
+        },  # Not part of the signature
+        {
+            "ctx": "something bad"
+        }  # Part of the signature, not keyword only
+    ])
+def test_custom_mapper_with_sad_kwarg_overrides(image_assets,
+                                                processor_kwargs):
+    """Ensure that custom mappers can filter out invalid processor_kwargs."""
+
+    model_config = ModelConfig(
+        MULTIMODAL_MODEL_ID,
+        MULTIMODAL_MODEL_ID,
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=0,
+        processor_kwargs=processor_kwargs,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    mm_registry = MultiModalRegistry()
+    mm_registry.init_mm_limits_per_prompt(model_config)
+    # Patch the image registry for phi3v with our lambda that is compatible
+    # with overrides, then ensure that calling the method correctly echos
+    # our num_crops value back from the processor_kwargs.
+    image = image_assets[0].pil_image
+    mm_inputs = {"image": image}
+
+    with patch.object(
+            mm_registry._get_plugin("image"),
+            "_default_input_mapper",
+        {Phi3VForCausalLM: custom_mapper},
+    ):
+        mapped_inputs = mm_registry.map_input(model_config, mm_inputs)
+
+    assert mapped_inputs["pixel_values"].shape[1] == DEFAULT_NUM_CROPS + 1
