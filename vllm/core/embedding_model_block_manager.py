@@ -61,7 +61,9 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return True
 
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_out(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int, int]]]:
         return None  # type: ignore
 
     def adjust_swap(
@@ -79,6 +81,9 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         return
 
     def free_evict(self, seq: Sequence) -> None:
+        return
+
+    def make_swappable(self, seq: Sequence) -> None:
         return
 
     def get_block_table(self, seq: Sequence) -> List[int]:

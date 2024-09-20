@@ -1,6 +1,6 @@
 import enum
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -99,11 +99,41 @@ class SwapDeviceManager(SwapDeviceBase):
         pass
 
     @abstractmethod
+    def get_num_free_blocks(self) -> int:
+        pass
+
+    @abstractmethod
     def contains_block(self, block_hash: int, num_hashed_tokens: int):
         pass
 
     @abstractmethod
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
+        pass
+
+    @abstractmethod
+    def add_rmap(self, block: PhysicalTokenBlock, seq_id: int, block_id: int):
+        pass
+
+    @abstractmethod
+    def remove_rmap(self, block: PhysicalTokenBlock, seq_id: int,
+                    block_id: int):
+        pass
+
+    @abstractmethod
+    def remove_rmap_all(self, block: PhysicalTokenBlock) -> None:
+        pass
+
+    @abstractmethod
+    def get_rmap(self,
+                 block: PhysicalTokenBlock) -> Optional[Set[Tuple[int, int]]]:
+        pass
+
+    @abstractmethod
+    def n_rmap(self, block: PhysicalTokenBlock):
+        pass
+
+    @abstractmethod
+    def move_swappable(self, block: PhysicalTokenBlock):
         pass
 
 
@@ -127,6 +157,10 @@ class SwapSpaceManagerBase(ABC):
     @abstractmethod
     def remove_swap_device(self,
                            swap_device: SwapDeviceManager) -> DeviceStatus:
+        pass
+
+    @abstractmethod
+    def get_num_free_blocks_for_all(self) -> int:
         pass
 
     @abstractmethod
@@ -163,6 +197,32 @@ class SwapSpaceManagerBase(ABC):
 
     @abstractmethod
     def free_block_tables(self):
+        pass
+
+    @abstractmethod
+    def add_rmap(self, block: PhysicalTokenBlock, seq_id: int, block_id: int):
+        pass
+
+    @abstractmethod
+    def remove_rmap(self, block: PhysicalTokenBlock, seq_id: int,
+                    block_id: int):
+        pass
+
+    @abstractmethod
+    def remove_rmap_all(self, block: PhysicalTokenBlock) -> None:
+        pass
+
+    @abstractmethod
+    def get_rmap(self,
+                 block: PhysicalTokenBlock) -> Optional[Set[Tuple[int, int]]]:
+        pass
+
+    @abstractmethod
+    def n_rmap(self, block: PhysicalTokenBlock):
+        pass
+
+    @abstractmethod
+    def move_swappable(self, block: PhysicalTokenBlock):
         pass
 
 

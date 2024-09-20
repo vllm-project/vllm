@@ -1,6 +1,6 @@
 import time
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
@@ -80,6 +80,12 @@ class SwapSpaceManager(SwapSpaceManagerBase):
             del self.device_table[dev_id]
         return status
 
+    def get_num_free_blocks_for_all(self) -> int:
+        num_free_blocks = 0
+        for id, dev in self.device_table.items():
+            num_free_blocks += dev.get_num_free_blocks()
+        return num_free_blocks
+
     def _find_allocate(self,
                        block_hash: int,
                        num_hashed_tokens: int = 0) -> int:
@@ -146,7 +152,7 @@ class SwapSpaceManager(SwapSpaceManagerBase):
         for dev_id, block_tables in self.disk_block_tables.items():
             assert dev_id in self.device_table
             swap_device = self.device_table[dev_id]
-            for seq_id, block_table in block_tables.items():
+            for _, block_table in block_tables.items():
                 access_time = time.time()
                 for block in block_table:
                     block.last_accessed = access_time
@@ -154,6 +160,50 @@ class SwapSpaceManager(SwapSpaceManagerBase):
                     swap_device.free(block)
             block_table.clear()
         self.disk_block_tables.clear()
+
+    def add_rmap(self, block: PhysicalTokenBlock, seq_id: int, block_id: int):
+        dev_id = block.device_id - Device.SWAP
+        assert dev_id in self.device_table, \
+            "Update a block from detached device"
+        swap_device = self.device_table[dev_id]
+        swap_device.add_rmap(block, seq_id, block_id)
+
+    def remove_rmap(self, block: PhysicalTokenBlock, seq_id: int,
+                    block_id: int):
+        dev_id = block.device_id - Device.SWAP
+        assert dev_id in self.device_table, \
+            "Update a block from detached device"
+        swap_device = self.device_table[dev_id]
+        swap_device.remove_rmap(block, seq_id, block_id)
+
+    def remove_rmap_all(self, block: PhysicalTokenBlock) -> None:
+        dev_id = block.device_id - Device.SWAP
+        assert dev_id in self.device_table, \
+            "Update a block from detached device"
+        swap_device = self.device_table[dev_id]
+        swap_device.remove_rmap_all(block)
+
+    def get_rmap(self,
+                 block: PhysicalTokenBlock) -> Optional[Set[Tuple[int, int]]]:
+        dev_id = block.device_id - Device.SWAP
+        assert dev_id in self.device_table, \
+            "Update a block from detached device"
+        swap_device = self.device_table[dev_id]
+        return swap_device.get_rmap(block)
+
+    def n_rmap(self, block: PhysicalTokenBlock):
+        dev_id = block.device_id - Device.SWAP
+        assert dev_id in self.device_table, \
+            "Update a block from detached device"
+        swap_device = self.device_table[dev_id]
+        return swap_device.n_rmap(block)
+
+    def move_swappable(self, block: PhysicalTokenBlock):
+        dev_id = block.device_id - Device.SWAP
+        assert dev_id in self.device_table, \
+            "Update a block from detached device"
+        swap_device = self.device_table[dev_id]
+        return swap_device.move_swappable(block)
 
 
 class SwapClientManager(SwapClientManagerBase):

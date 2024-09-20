@@ -654,7 +654,8 @@ class Scheduler:
                 # Do preemption
                 if do_preempt:
                     preempted_mode = self._preempt(victim_seq_group,
-                                                   blocks_to_swap_out)
+                                                   blocks_to_swap_out,
+                                                   blocks_to_swap_out_to_disk)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(victim_seq_group)
                     else:
@@ -1059,8 +1060,8 @@ class Scheduler:
                     running_scheduled.swapped_out) == 0:
                 swapped_in = self._schedule_swapped(budget, curr_loras)
 
-        assert (budget.num_batched_tokens <=
-                self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens
+                <= self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -1204,8 +1205,8 @@ class Scheduler:
             blocks_to_swap_out_to_disk.extend(
                 prefills.blocks_to_swap_out_to_disk)
 
-        assert (budget.num_batched_tokens <=
-                self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens
+                <= self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -1501,6 +1502,8 @@ class Scheduler:
         for seq_group in self.running:
             if seq_group.is_fixed():
                 self.fixed.append(seq_group)
+                for seq in seq_group.seqs:
+                    self.block_manager.make_swappable(seq)
             else:
                 remaining.append(seq_group)
         self.running = remaining
@@ -1513,7 +1516,14 @@ class Scheduler:
         for seq_group in self.fixed:
             if seq_group.is_expired():
                 assert len(seq_group.seqs) == 1
-                self.free_seq(seq_group[0])
+                # CC SG can only have one sequence
+                seqs = seq_group.get_seqs()
+                assert len(seqs) == 1
+                from vllm.core.block_manager_v1 import BlockSpaceManagerV1
+                assert isinstance(
+                    self.block_manager, BlockSpaceManagerV1
+                ), "Context Caching only implemented with block manager v1 now"
+                self.block_manager.free_context_cache(seqs[0])
             else:
                 remaining.append(seq_group)
         self.fixed = remaining
@@ -1566,6 +1576,7 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
@@ -1590,20 +1601,21 @@ class Scheduler:
         else:
             preemption_mode = PreemptionMode.RECOMPUTE
 
-        if self.num_cumulative_preemption % 50 == 0:
-            logger.warning(
-                "Sequence group %s is preempted by %s mode because there is "
-                "not enough KV cache space. This can affect the end-to-end "
-                "performance. Increase gpu_memory_utilization or "
-                "tensor_parallel_size to provide more KV cache memory. "
-                "total_num_cumulative_preemption=%d", seq_group.request_id,
-                preemption_mode, self.num_cumulative_preemption + 1)
+        #if self.num_cumulative_preemption % 50 == 0:
+        logger.warning(
+            "Sequence group %s is preempted by %s mode because there is "
+            "not enough KV cache space. This can affect the end-to-end "
+            "performance. Increase gpu_memory_utilization or "
+            "tensor_parallel_size to provide more KV cache memory. "
+            "total_num_cumulative_preemption=%d", seq_group.request_id,
+            preemption_mode, self.num_cumulative_preemption + 1)
         self.num_cumulative_preemption += 1
 
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
-            self._preempt_by_swap(seq_group, blocks_to_swap_out)
+            self._preempt_by_swap(seq_group, blocks_to_swap_out,
+                                  blocks_to_swap_out_to_disk)
         else:
             raise AssertionError("Invalid preemption mode.")
         return preemption_mode
@@ -1623,8 +1635,10 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]],
     ) -> None:
-        self._swap_out(seq_group, blocks_to_swap_out)
+        self._swap_out(seq_group, blocks_to_swap_out,
+                       blocks_to_swap_out_to_disk)
 
     def _swap_in(
             self, seq_group: SequenceGroup,
@@ -1644,18 +1658,20 @@ class Scheduler:
             seq.status = SequenceStatus.RUNNING
 
     def _swap_out(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
-    ) -> None:
+            self, seq_group: SequenceGroup,
+            blocks_to_swap_out: List[Tuple[int, int]],
+            blocks_to_swap_out_to_disk: List[Tuple[int, int, int,
+                                                   int]]) -> None:
+        # TODO: Make a better decision here for better utilization.
         if not self.block_manager.can_swap_out(seq_group):
             # FIXME(woosuk): Abort the sequence group instead of aborting the
             # entire engine.
             raise RuntimeError(
                 "Aborted due to the lack of CPU swap space. Please increase "
                 "the swap space to avoid this error.")
-        mapping = self.block_manager.swap_out(seq_group)
+        mapping, blocks_to_disk = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.extend(mapping)
+        blocks_to_swap_out_to_disk.extend(blocks_to_disk)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
 
@@ -1667,10 +1683,9 @@ class Scheduler:
         if self.scheduler_config.delay_factor > 0 and self.waiting:
             earliest_arrival_time = min(
                 [e.metrics.arrival_time for e in self.waiting])
-            passed_delay = (
-                (now - earliest_arrival_time) >
-                (self.scheduler_config.delay_factor * self.last_prompt_latency)
-                or not self.running)
+            passed_delay = ((now - earliest_arrival_time)
+                            > (self.scheduler_config.delay_factor *
+                               self.last_prompt_latency) or not self.running)
         else:
             passed_delay = True
         return passed_delay

@@ -226,6 +226,7 @@ class ModelRunnerBase(ABC, Generic[T]):
     def add_kv_cache_for_layered_transfer(
             self,
             model_input: T,
+            cuda_stream: Optional[torch.cuda.Stream] = None,
             blocks_to_swap_in: Optional[torch.Tensor] = None,
             blocks_to_swap_out: Optional[torch.Tensor] = None,
             blocks_to_copy: Optional[torch.Tensor] = None,

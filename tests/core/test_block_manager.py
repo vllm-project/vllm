@@ -320,7 +320,7 @@ def test_swap():
     assert block_manager.can_swap_out(seq_group)
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    mapping = block_manager.swap_out(seq_group)
+    mapping, _ = block_manager.swap_out(seq_group)
     assert [x[0] for x in mapping] == gpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
@@ -373,7 +373,7 @@ def test_swap_encoder_decoder():
     assert block_manager.can_swap_out(seq_group)
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    mapping = block_manager.swap_out(seq_group)
+    mapping, _ = block_manager.swap_out(seq_group)
     assert [x[0] for x in mapping] == gpu_blocks
     #assert list(mapping.keys()) == gpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()

@@ -1493,6 +1493,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     def add_kv_cache_for_layered_transfer(
             self,
             model_input: ModelInputForGPUWithSamplingMetadata,
+            cuda_stream: Optional[torch.cuda.Stream] = None,
             blocks_to_swap_in: Optional[torch.Tensor] = None,
             blocks_to_swap_out: Optional[torch.Tensor] = None,
             blocks_to_copy: Optional[torch.Tensor] = None,
@@ -1508,7 +1509,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_input.attn_metadata.add_kv_cache_for_layered_transfer(
                 self.model_config.get_num_attention_layers(
                     self.parallel_config), blocks_to_swap_in,
-                blocks_to_swap_out, blocks_to_copy, gpu_caches, cpu_caches)
+                blocks_to_swap_out, blocks_to_copy, gpu_caches, cpu_caches,
+                cuda_stream)
 
     @torch.inference_mode()
     @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
@@ -1572,7 +1574,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                          device=self.device),
             **seqlen_agnostic_kwargs)
-        #model_forward_end.record()
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):

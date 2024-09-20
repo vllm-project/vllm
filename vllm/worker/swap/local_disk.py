@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 from safetensors.torch import safe_open, save_file
@@ -84,6 +84,31 @@ class LocalDiskClient(LocalDisk, SwapDeviceClient):
                                                blocks_to_swap_in, layer,
                                                head_range)
 
+    def _read_block_content_layers(self, cache: torch.Tensor,
+                                   blocks_to_swap_in: List[Tuple[int, int]],
+                                   layer_range: Tuple[int, int],
+                                   head_range: Tuple[int, int]) -> None:
+        # TODO: Support generic target device
+        device = cache.get_device()
+
+        for swap_in in blocks_to_swap_in:
+            disk_block_number = swap_in[0]
+            kv_path_name: str = (
+                self.path +
+                f"{layer_range[0]}_{layer_range[1]}_{disk_block_number}_{head_range[0]}_{head_range[1]}.pt"
+            )
+            device_str = f"cuda:{device}" if device >= 0 else "cpu"
+            #logger.debug("Local disk read from %s", kv_path_name)
+            with safe_open(
+                    kv_path_name,
+                    framework="pt",
+                    device=device_str,
+            ) as f:
+                k: torch.Tensor = f.get_tensor('k')
+                v: torch.Tensor = f.get_tensor('v')
+                cache[0][swap_in[1]] = k
+                cache[1][swap_in[1]] = v
+
     def read_block_content_one_layer(self, cache: torch.Tensor,
                                      blocks_to_swap_in: List[Tuple[int, int]],
                                      layer: int,
@@ -108,6 +133,25 @@ class LocalDiskClient(LocalDisk, SwapDeviceClient):
                 v: torch.Tensor = f.get_tensor('v')
                 cache[0][swap_in[1]] = k
                 cache[1][swap_in[1]] = v
+
+    def _write_block_content_layers(self, cache: torch.Tensor,
+                                    blocks_to_swap_out: List[Tuple[int, int]],
+                                    layer_range: Tuple[int, int],
+                                    head_range: Tuple[int, int]) -> None:
+        # TODO: Support generic target device
+
+        for swap_out in blocks_to_swap_out:
+            disk_block_number = swap_out[1]
+            kv_path_name: str = (
+                self.path +
+                f"{layer_range[0]}_{layer_range[1]}_{disk_block_number}_{head_range[0]}_{head_range[1]}.pt"
+            )
+            #logger.debug("Local disk write to %s", kv_path_name)
+            save_file(
+                {
+                    'k': cache[0][swap_out[0]].contiguous(),
+                    'v': cache[1][swap_out[0]].contiguous(),
+                }, kv_path_name)
 
     def write_block_content_one_layer(self, cache: torch.Tensor,
                                       blocks_to_swap_out: List[Tuple[int,
@@ -147,6 +191,10 @@ class LocalDiskManager(LocalDisk, SwapDeviceManager):
         self.cached_blocks: Dict[int, PhysicalTokenBlock] = {}
 
         self.evictor: Evictor = make_evictor(eviction_policy)
+
+        self.swapper: Evictor = make_evictor(eviction_policy)
+        # Reverse mapping: Block -> Seq ID and nth block in the sequence
+        self.rmap: Dict[PhysicalTokenBlock, Set[Tuple[int, int]]] = {}
 
     def can_allocate_block(self) -> bool:
         return self.get_num_free_blocks() > 0
@@ -220,3 +268,50 @@ class LocalDiskManager(LocalDisk, SwapDeviceManager):
         block.block_hash = block_hash
         del self.cached_blocks[old_hash]
         self.cached_blocks[block_hash] = block
+
+    def add_rmap(self, block: PhysicalTokenBlock, seq_id: int,
+                 block_id: int) -> None:
+        # This rmap will be used when we swap out a mapped CC (only CC)
+        self.rmap.setdefault(block, set()).add((seq_id, block_id))
+
+    def remove_rmap(self, block: PhysicalTokenBlock, seq_id: int,
+                    block_id: int) -> None:
+        assert block in self.rmap
+        self.rmap[block].remove((seq_id, block_id))
+        if self.rmap[block] == set():
+            del self.rmap[block]
+
+    def remove_rmap_all(self, block: PhysicalTokenBlock) -> None:
+        assert block in self.rmap
+        del self.rmap[block]
+
+    def get_rmap(self,
+                 block: PhysicalTokenBlock) -> Optional[Set[Tuple[int, int]]]:
+        # Return a ref
+        return self.rmap[block] if block in self.rmap else None
+
+    def n_rmap(self, block: PhysicalTokenBlock) -> int:
+        return len(self.rmap[block]) if block in self.rmap else 0
+
+    def move_swappable(self, block: PhysicalTokenBlock) -> None:
+        # Do nothing for the ref count since the seq still owns it
+        if block.ref_count == 0:
+            raise ValueError(
+                f"Cannot move free block {block} to swappable list."
+                "They should go to the evictor!")
+        # Block should not reside in the evictor
+        assert block.block_hash not in self.evictor
+        n_rmaps: int = len(self.rmap)
+        # Can only have CC requests and Normal requests. Both of which
+        # takes refs
+        # TODO: Unify them in a general block manager system
+        # TODO: take linux mm and implement based on it
+        assert n_rmaps <= block.ref_count
+        if n_rmaps == block.ref_count and block.block_hash not in self.swapper:
+            # Only First time CCed request
+            self.swapper.add(block)
+
+        # They should still reside in cached_blocks
+        # When they are popped out from the swapper they will be removed
+        # from the HT
+        assert block.block_hash in self.cached_blocks
