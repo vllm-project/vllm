@@ -2,7 +2,7 @@
 
 #include "marlin_moe_kernel.h"
 
-namespace marlin_moe {                                     
+namespace marlin_moe {
 
 // We return bool so we can create these different kernel calls as a sequence
 // of if-elseif's.

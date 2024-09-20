@@ -2,32 +2,6 @@
 
 namespace marlin_moe {
 
-#define __CALL_IF_MOE_4(W_TYPE, THREAD_N_BLOCKS, THREAD_K_BLOCKS,             \
-                        HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS, NUM_THREADS)     \
-  else if (q_type == W_TYPE && thread_n_blocks == THREAD_N_BLOCKS &&          \
-           thread_k_blocks == THREAD_K_BLOCKS &&                              \
-           has_act_order == HAS_ACT_ORDER && has_zp == HAS_ZP &&              \
-           group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS) {      \
-    cudaFuncSetAttribute(                                                     \
-        MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, \
-                  STAGES, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS>,               \
-        cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);         \
-    MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,     \
-              STAGES, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS>                    \
-        <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                    \
-            A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,     \
-            zp_ptr, g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx,    \
-            num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,          \
-            replicate_input, apply_weights, m_block, max_par,                 \
-            cfg_max_m_blocks);                                                \
-  }
-
-#define AWQ_CALL_IF_MOE_4(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)          \
-  __CALL_IF_MOE_4(W_TYPE, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
-  __CALL_IF_MOE_4(W_TYPE, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
-  __CALL_IF_MOE_4(W_TYPE, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
-  __CALL_IF_MOE_4(W_TYPE, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)
-
 // We return bool so we can create these different kernel calls as a sequence
 // of if-elseif's.
 bool call_marlin_moe_kernel_ku4(
@@ -42,10 +16,10 @@ bool call_marlin_moe_kernel_ku4(
     bool apply_weights, int m_block, int max_par, int cfg_max_m_blocks) {
   if (false) {
   }
-  AWQ_CALL_IF_MOE_4(vllm::kU4, 16, 4, 256)
-  AWQ_CALL_IF_MOE_4(vllm::kU4, 8, 8, 256)
-  AWQ_CALL_IF_MOE_4(vllm::kU4, 8, 4, 128)
-  AWQ_CALL_IF_MOE_4(vllm::kU4, 4, 8, 128)
+  AWQ_CALL_IF_MOE(vllm::kU4, 16, 4, 256)
+  AWQ_CALL_IF_MOE(vllm::kU4, 8, 8, 256)
+  AWQ_CALL_IF_MOE(vllm::kU4, 8, 4, 128)
+  AWQ_CALL_IF_MOE(vllm::kU4, 4, 8, 128)
   else {
     return false;
   }
