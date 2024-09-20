@@ -409,8 +409,7 @@ class Sequence:
             data = SequenceData.from_seqs(self.prompt_token_ids)
         else:
             assert self.prompt_embeds is not None
-            data = SequenceData.from_seqs([],
-                                          prompt_embeds=self.prompt_embeds)
+            data = SequenceData.from_seqs([], prompt_embeds=self.prompt_embeds)
 
         self.data = data
 

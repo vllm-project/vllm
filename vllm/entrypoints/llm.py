@@ -320,12 +320,13 @@ class LLM:
                 "models (XForCausalLM, XForConditionalGeneration).")
 
         if prompt_token_ids is not None:
-            inputs = self._convert_v1_inputs(
+            parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
             )
         else:
-            inputs = cast(Union[PromptType, Sequence[PromptType]], prompts)
+            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
+                                  prompts)
 
         if isinstance(guided_options_request, dict):
             if len(guided_options_request) > 1:
@@ -340,7 +341,7 @@ class LLM:
             sampling_params = SamplingParams()
 
         self._validate_and_add_requests(
-            inputs=inputs,
+            prompts=parsed_prompts,
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
@@ -494,7 +495,7 @@ class LLM:
     @overload
     def encode(
         self,
-        inputs: Union[PromptType, Sequence[PromptType]],
+        prompts: Union[PromptType, Sequence[PromptType]],
         /,  # We may enable `inputs` keyword after removing the old API
         *,
         pooling_params: Optional[Union[PoolingParams,
@@ -553,19 +554,20 @@ class LLM:
             )
 
         if prompt_token_ids is not None:
-            inputs = self._convert_v1_inputs(
+            parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
             )
         else:
-            inputs = cast(Union[PromptType, Sequence[PromptType]], prompts)
+            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
+                                  prompts)
 
         if pooling_params is None:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
         self._validate_and_add_requests(
-            inputs=inputs,
+            prompts=parsed_prompts,
             params=pooling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
@@ -609,7 +611,7 @@ class LLM:
             raise ValueError("Either prompts or prompt_token_ids must be "
                              "provided.")
 
-        inputs: List[PromptType] = []
+        parsed_prompts: List[PromptType] = []
         for i in range(num_requests):
             item: PromptType
 
@@ -620,24 +622,24 @@ class LLM:
             else:
                 raise AssertionError
 
-            inputs.append(item)
+            parsed_prompts.append(item)
 
-        return inputs
+        return parsed_prompts
 
     def _validate_and_add_requests(
         self,
-        inputs: Union[PromptType, Sequence[PromptType]],
+        prompts: Union[PromptType, Sequence[PromptType]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
     ) -> None:
-        if isinstance(inputs, (str, dict)):
+        if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
-            inputs = [inputs]
+            prompts = [prompts]
 
-        num_requests = len(inputs)
+        num_requests = len(prompts)
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
@@ -654,7 +656,7 @@ class LLM:
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
-        for i, request_inputs in enumerate(inputs):
+        for i, request_inputs in enumerate(prompts):
             self._add_request(
                 request_inputs,
                 params[i] if isinstance(params, Sequence) else params,
