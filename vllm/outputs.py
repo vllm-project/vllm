@@ -194,7 +194,7 @@ class RequestOutput:
                 output = cached_outputs[i]
 
                 # Init cached output object
-                output.index = i
+                assert output.index == i
                 output.text = output_text
 
                 if isinstance(output_token_ids, int):
@@ -237,32 +237,17 @@ class RequestOutput:
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
 
+        init_args = (seq_group.request_id, prompt, prompt_token_ids,
+                     prompt_logprobs, outputs, finished, seq_group.metrics,
+                     seq_group.lora_request, encoder_prompt,
+                     encoder_prompt_token_ids)
+
         if use_cache:
             request_output = seq_group.cached_request_output
-            request_output.__init__(  # type: ignore
-                seq_group.request_id,
-                prompt,
-                prompt_token_ids,
-                prompt_logprobs,
-                outputs,
-                finished,
-                seq_group.metrics,
-                lora_request=seq_group.lora_request,
-                encoder_prompt=encoder_prompt,
-                encoder_prompt_token_ids=encoder_prompt_token_ids)
+            request_output.__init__(*init_args)  # type: ignore
 
         else:
-            request_output = cls(
-                seq_group.request_id,
-                prompt,
-                prompt_token_ids,
-                prompt_logprobs,
-                outputs,
-                finished,
-                seq_group.metrics,
-                lora_request=seq_group.lora_request,
-                encoder_prompt=encoder_prompt,
-                encoder_prompt_token_ids=encoder_prompt_token_ids)
+            request_output = cls(*init_args)
 
         return request_output
 
