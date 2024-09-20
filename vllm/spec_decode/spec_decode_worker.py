@@ -24,8 +24,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
 from vllm.spec_decode.medusa_worker import MedusaWorker
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
-from vllm.spec_decode.multi_step_worker import (CPUMultiStepWorker,
-                                                MultiStepWorker)
+from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
@@ -161,7 +160,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     "cpu")
                 cpu_draft_worker_kwargs["device_config"].device_type = "cpu"
                 cpu_draft_worker_kwargs.pop("observability_config")
-                proposer_worker = CPUMultiStepWorker(**cpu_draft_worker_kwargs)
+                proposer_worker = MultiStepWorker(**cpu_draft_worker_kwargs)
             elif draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
