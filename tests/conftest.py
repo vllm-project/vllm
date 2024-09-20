@@ -791,7 +791,9 @@ class VllmRunner:
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        outputs = self.model.beam_search(prompts[0], beam_width, max_tokens)
+        outputs = []
+        for prompt in prompts:
+            outputs.append(self.model.beam_search(prompt, beam_width, max_tokens))
         return outputs
 
     def encode(self, prompts: List[str]) -> List[List[float]]:
