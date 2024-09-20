@@ -141,16 +141,15 @@ def test_mistral_format(
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("prompt", SYMBOLIC_LANG_PROMPTS)
 def test_mistral_symbolic_languages(
-    vllm_runner,
     model: str,
     dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
     prompt: str,
 ) -> None:
     prompt = "hi"
     msg = {"role": "user", "content": prompt}
     llm = LLM(model=model,
+              dtype=dtype,
+              max_model_len=8192,
               tokenizer_mode="mistral",
               config_format="mistral",
               load_format="mistral")
