@@ -12,8 +12,6 @@ MAIN_MODEL = "JackFram/llama-68m"
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        # Required for spec decode.
-        "use_v2_block_manager": True,
 
         # Verify equality when cuda graphs allowed.
         "enforce_eager": False,
@@ -58,8 +56,6 @@ def test_spec_decode_cuda_graph(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
