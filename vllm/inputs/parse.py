@@ -109,7 +109,7 @@ def is_explicit_encoder_decoder_prompt(
     return isinstance(prompt, dict) and "encoder_prompt" in prompt
 
 
-def is_valid_encoder_decoder_llm_inputs(
+def is_valid_encoder_decoder_inputs(
     inputs: Union[LLMInputs, EncoderDecoderInputs],
 ) -> TypeIs[EncoderDecoderInputs]:
     return "encoder_prompt_token_ids" in inputs

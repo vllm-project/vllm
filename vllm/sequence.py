@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import cached_property
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping,
                     Optional)
 from typing import Sequence as GenericSequence
@@ -13,7 +14,7 @@ from typing import Set, Tuple, Union, cast
 import msgspec
 import torch
 
-from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
+from vllm.inputs.parse import is_valid_encoder_decoder_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -21,7 +22,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
-    from vllm.inputs import LLMInputs
+    from vllm.inputs import EncoderDecoderInputs, LLMInputs
     from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
@@ -166,6 +167,7 @@ class SequenceDataMixin(msgspec.Struct,
 
     def __post_init__(self) -> None:
         assert self._output_token_ids.typecode == "l"
+
         self._update_cached_all_tokens()
 
     def _update_cached_all_tokens(self) -> None:
@@ -224,6 +226,14 @@ class SequenceDataMixin(msgspec.Struct,
     def get_token_ids(self) -> List[int]:
         return self._cached_all_token_ids
 
+    @abstractmethod
+    def get_prefix_token_ids(
+        self,
+        num_tokens: int,
+    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
+        """Get prefix tokens, and make the return value hashable"""
+        raise NotImplementedError
+
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
         return self._num_computed_tokens
@@ -252,6 +262,14 @@ class SequenceDataMixin(msgspec.Struct,
         # of prompt_len here. This is because during recompute we need to
         # prefill for both prompt and output.
         return self.get_len() - self.get_num_computed_tokens()
+
+    @abstractmethod
+    def get_last_token_id(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
+        raise NotImplementedError
 
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
@@ -298,12 +316,12 @@ class SequenceTokenData(SequenceDataMixin, _TokenBase,
         cumulative_logprob: The cumulative log probability of the output.
     """
 
+    # For tagged union
+    type: Literal["tokens"] = "tokens"
+
     ### The below fields should not be passed as an argument ###
     _prompt_token_ids_tuple: Tuple[int,
                                    ...] = msgspec.field(default_factory=tuple)
-
-    # For tagged union
-    type: Literal["tokens"] = "tokens"
 
     @staticmethod
     def from_seq(
@@ -355,6 +373,7 @@ class SequenceTokenData(SequenceDataMixin, _TokenBase,
     def get_last_token_id(self) -> int:
         if not self._output_token_ids:
             return self._prompt_token_ids[-1]
+
         return self._output_token_ids[-1]
 
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
@@ -364,13 +383,12 @@ class SequenceTokenData(SequenceDataMixin, _TokenBase,
         self,
         num_tokens: int,
     ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
-        """Get prefix tokens, and make the return value hashable"""
         prompt_length = self.get_prompt_len()
         if num_tokens > prompt_length:
             return (self._prompt_token_ids_tuple,
                     tuple(self._output_token_ids[:num_tokens - prompt_length]))
-        else:
-            return (self._prompt_token_ids_tuple[:num_tokens], None)
+
+        return (self._prompt_token_ids_tuple[:num_tokens], None)
 
     def __repr__(self) -> str:
         return (f"SequenceTokenData("
@@ -400,8 +418,21 @@ class SequenceEmbedData(SequenceDataMixin, _EmbedBase,
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
+
     # For tagged union
     type: Literal["embeds"] = "embeds"
+
+    ### The below fields should not be passed as an argument ###
+    _dummy_token_ids_tuple: Tuple[int,
+                                  ...] = msgspec.field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        assert self._output_token_ids.typecode == "l"
+
+        # Dummy value
+        self._dummy_token_ids_tuple = tuple([0] * self._prompt_embeds)
+
+        self._update_cached_all_tokens()
 
     @property
     def prompt_embeds(self) -> torch.Tensor:
@@ -409,6 +440,26 @@ class SequenceEmbedData(SequenceDataMixin, _EmbedBase,
 
     def get_prompt_len(self) -> int:
         return len(self._prompt_embeds)
+
+    def get_last_token_id(self) -> int:
+        if not self._output_token_ids:
+            return self._dummy_token_ids_tuple[-1]
+
+        return self._output_token_ids[-1]
+
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
+        return self._dummy_token_ids_tuple
+
+    def get_prefix_token_ids(
+        self,
+        num_tokens: int,
+    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
+        prompt_length = self.get_prompt_len()
+        if num_tokens > prompt_length:
+            return (self._dummy_token_ids_tuple,
+                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
+
+        return (self._dummy_token_ids_tuple[:num_tokens], None)
 
     def __repr__(self) -> str:
         return (f"SequenceEmbedData("
@@ -424,14 +475,9 @@ SequenceData = Union[SequenceTokenData, SequenceEmbedData]
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
-    The sequence is constructed from the LLMInputs instance passed
+    The sequence is constructed from the LLMInputs (for decoder-only) or
+    EncoderDecoderInputs (for encoder-decoder) instance passed
     in through the `inputs` constructor argument.
-
-    For encoder/decoder models, LLMInputs encapsulates both a
-    decoder and encoder prompt, creating an ambiguity about which
-    prompt to construct the sequence from. The `from_decoder_prompt`
-    constructor argument signals whether to construct the Sequence
-    from the LLMInputs decoder prompt, or encoder prompt.
 
     Args:
         seq_id: The ID of the sequence.
@@ -441,21 +487,17 @@ class Sequence:
         eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
         lora_request: LoRA request.
         prompt_adapter_request: Prompt Adapter request.
-        from_decoder_prompt: Construct Sequence from LLMInputs decoder prompt
-                             (True) or encoder prompt (False.) Must be True
-                             for decoder-only model.
 
     """
 
     def __init__(
         self,
         seq_id: int,
-        inputs: "LLMInputs",
+        inputs: Union["LLMInputs", "EncoderDecoderInputs"],
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        from_decoder_prompt: bool = True,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
@@ -463,41 +505,12 @@ class Sequence:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
-        self.from_decoder_prompt = from_decoder_prompt
-        self._prompt: Optional[str] = None
-        self._prompt_token_ids: Optional[List[int]] = None
-
-        # For decoder-only models, a Sequence is constructed
-        # from an LLMInputs instance (the `inputs` arg.)
-        #
-        # For encoder/decoder models the same `inputs`
-        # instance could be utilized to construct either an
-        # encoder sequence or a decoder sequence, because
-        # `LLMInputs` has both decoder- and encoder-oriented
-        # member variables (i.e. it encapsulates both an encoder
-        # and a decoder prompt.) The decision of which type of sequence
-        # to generate is determined by the `from_decoder_prompt` argument.
-        #
-        # When constructing a encoder sequence
-        # (`from_decoder_prompt` False) it matters that
-        # the `LLMInputs` instance stored in `inputs` is valid
-        # in the sense that its encoder-related member variables are
-        # populated; below, an exception is raised if this is
-        # not the case.
-        #
-        # When constructing a decoder sequence (`from_decoder_prompt` True)
-        # it does not matter whether `inputs` has its encoder-related
-        # member variables populated.
-        if not (from_decoder_prompt
-                or is_valid_encoder_decoder_llm_inputs(inputs)):
-            raise ValueError("Cannot extract encoder input prompt from "
-                             f"invalid input {inputs}; did you forget the "
-                             "encoder input prompt fields?")
 
         data: SequenceData
         if self.prompt_token_ids:
             data = SequenceTokenData.from_seq(self.prompt_token_ids)
         else:
+            assert self.prompt_embeds is not None
             data = SequenceEmbedData(self.prompt_embeds)
 
         self.data = data
@@ -522,45 +535,51 @@ class Sequence:
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
 
-    @property
+    @cached_property
     def prompt(self) -> Optional[str]:
-        if self._prompt is not None:
-            # Reuse precomputed prompt string
-            return self._prompt
+        # Select decoder or encoder input prompt str, as appropriate
+        inputs = self.inputs
+        if is_valid_encoder_decoder_inputs(inputs):
+            prompt = inputs["encoder"].get("prompt")
+        else:
+            prompt = cast(Optional[str], inputs.get("prompt"))
 
-        # Select decoder or encoder input prompt str,
-        # as appropriate
-        prompt_key: str = ("prompt"
-                           if self.from_decoder_prompt else "encoder_prompt")
+        return prompt
 
-        # Cache prompt
-        self._prompt = cast(Optional[str], self.inputs.get(prompt_key))
-        return self._prompt
-
-    @property
+    @cached_property
     def prompt_token_ids(self) -> List[int]:
-        if self._prompt_token_ids is not None:
-            # Reuse precomputed prompt token ids
-            return self._prompt_token_ids
+        # Select decoder or encoder input prompt token ids, as appropriate
+        inputs = self.inputs
+        if is_valid_encoder_decoder_inputs(inputs):
+            prompt_token_ids = inputs["encoder"].get("prompt_token_ids")
+        else:
+            prompt_token_ids = cast(Optional[List[int]],
+                                    inputs.get("prompt_token_ids"))
 
-        # Select decoder or encoder input prompt
-        # token ids, as appropriate
-        prompt_token_ids_key: str = ("prompt_token_ids"
-                                     if self.from_decoder_prompt else
-                                     "encoder_prompt_token_ids")
+        return prompt_token_ids or []
 
-        # Cache computed prompt token ids
-        self._prompt_token_ids = cast(List[int],
-                                      self.inputs.get(prompt_token_ids_key))
-        return self._prompt_token_ids
-
-    @property
+    @cached_property
     def prompt_embeds(self) -> Optional[torch.Tensor]:
-        return self.inputs.get("prompt_embeds")
+        # Select decoder or encoder input prompt embeds, as appropriate
+        inputs = self.inputs
+        if is_valid_encoder_decoder_inputs(inputs):
+            prompt_embeds = inputs["encoder"].get("prompt_embeds")
+        else:
+            prompt_embeds = cast(Optional[torch.Tensor],
+                                 inputs.get("prompt_embeds"))
 
-    @property
+        return prompt_embeds
+
+    @cached_property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        return self.inputs.get("multi_modal_data") or {}
+        inputs = self.inputs
+        if is_valid_encoder_decoder_inputs(inputs):
+            multi_modal_data = inputs["encoder"].get("multi_modal_data")
+        else:
+            multi_modal_data = cast(Optional["MultiModalDataDict"],
+                                    inputs.get("multi_modal_data"))
+
+        return multi_modal_data or {}
 
     @property
     def lora_int_id(self) -> int:

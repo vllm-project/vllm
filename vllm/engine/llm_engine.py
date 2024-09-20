@@ -30,6 +30,7 @@ from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderInputs, InputRegistry,
                          LLMInputs, PromptType)
+from vllm.inputs.parse import is_valid_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -635,14 +636,10 @@ class LLMEngine:
                        lora_request, prompt_adapter_request)
 
         encoder_seq = None
-        if 'encoder_prompt_token_ids' in processed_inputs:
-            encoder_seq = Sequence(seq_id,
-                                   processed_inputs,
-                                   block_size,
-                                   eos_token_id,
-                                   lora_request,
-                                   prompt_adapter_request,
-                                   from_decoder_prompt=False)
+        if is_valid_encoder_decoder_inputs(processed_inputs):
+            encoder_seq = Sequence(seq_id, processed_inputs, block_size,
+                                   eos_token_id, lora_request,
+                                   prompt_adapter_request)
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
