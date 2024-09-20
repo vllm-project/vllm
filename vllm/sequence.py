@@ -294,7 +294,7 @@ class SequenceDataMixin(msgspec.Struct,
         return self._stage
 
 
-class _TokenBase(msgspec.Struct, omit_defaults=True):  # type: ignore[call-arg]
+class _TokenBase:
     # NOTE: we cannot use Union[List, array] because msgspec cannot support
     # union of 2 list types.
     _prompt_token_ids: array
@@ -410,7 +410,7 @@ class SequenceTokenData(SequenceDataMixin, _TokenBase,
                 f"get_num_computed_tokens={self.get_num_computed_tokens()}")
 
 
-class _EmbedBase(msgspec.Struct, omit_defaults=True):  # type: ignore[call-arg]
+class _EmbedBase:
     _prompt_embeds: torch.Tensor
 
 
