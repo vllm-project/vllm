@@ -1,5 +1,4 @@
 import functools
-import inspect
 from array import array
 from collections import UserDict
 from dataclasses import dataclass
@@ -191,9 +190,7 @@ class InputRegistry:
         mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
 
         processor_kwargs = get_allowed_kwarg_only_overrides(
-            callable=dummy_factory,
-            overrides=model_config.processor_kwargs
-        )
+            callable=dummy_factory, overrides=model_config.processor_kwargs)
 
         seq_data, mm_data = dummy_factory(InputContext(model_config), seq_len,
                                           _MultiModalCounts(mm_counts),
@@ -214,7 +211,6 @@ class InputRegistry:
                     f"for profiling, but found {num_items} instances instead.")
 
         return seq_data, mm_data
-
 
     def _default_input_processor(self, ctx: InputContext,
                                  inputs: LLMInputs) -> LLMInputs:
