@@ -790,7 +790,7 @@ class VllmRunner:
         prompts: List[str], # or a List of List[int]
         beam_width: int,
         max_tokens: int,
-    ) -> List[Tuple(List[int], str)]:
+    ) -> List[Tuple[List[List[int]], List[str]]]:
         outputs = []
         for prompt in prompts:
             outputs.append(self.model.beam_search(prompt, beam_width, max_tokens))
