@@ -138,14 +138,15 @@ class MultiModalRegistry:
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
-        # TODO - there is a bit of weirdness here in the way mapper handles
-        # the args, because for the HF one, we pass processor_kwargs at init
-        # time and don't need them at func time, for the function's we are
-        # wrapping in processor like interfaces, we pass them at the time
-        # of invocation.
+        # NOTE - we currently make the assumption that if a model has multiple
+        # supported modalities, they take the same kwargs. For the default,
+        # this could be an issue in the future if it falls back to two HF
+        # resources and we can't inspect the signature easily since it's
+        # getting initialized through the autoclass.
         #
-        # Currently it works, but warns when the default processor is used,
-        # which is bad.
+        # If this is a problem in the future, we should revisit it, but since
+        # it potentially introduces a lot of complexity for a currently
+        # uncommon case, we do not for simplicity of both use & implementation
         return functools.partial(self.map_input, model_config)
 
     def register_max_multimodal_tokens(
