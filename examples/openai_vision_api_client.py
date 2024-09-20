@@ -28,7 +28,7 @@ models = client.models.list()
 model = models.data[0].id
 
 # Single-image input inference
-image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+image_url = "https://llava-vl.github.io/static/images/view.jpg"
 
 ## Use image url in the payload
 chat_completion_from_url = client.chat.completions.create(
