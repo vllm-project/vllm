@@ -371,11 +371,10 @@ endif()
 if(VLLM_FLASH_ATTN_SRC_DIR)
   FetchContent_Declare(vllm-flash-attn SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
 else()
-  # TODO(luka) use vllm-project version
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
-          GIT_TAG 2b29222280edc4d48fcadecffa0223840ea6de83
+          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
+          GIT_TAG 013f0c4fc47e6574060879d9734c1df8c5c273bd
           GIT_PROGRESS TRUE
   )
 endif()
