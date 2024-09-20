@@ -5,6 +5,7 @@ Run `pytest tests/models/test_mistral.py`.
 import pytest
 
 from vllm import SamplingParams
+from vllm import LLM
 
 from ...utils import check_logprobs_close
 
@@ -16,6 +17,10 @@ MODELS = [
 ]
 
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
+SYMBOLIC_LANG_PROMPTS = [
+    "勇敢な船乗りについての詩を書く",  # japanese
+    "寫一首關於勇敢的水手的詩",  # chinese
+]
 
 # for function calling
 TOOLS = [{
@@ -60,7 +65,7 @@ EXPECTED_FUNC_CALL = (
     '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]')
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", MODELS[2:])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -74,13 +79,13 @@ def test_models(
     num_logprobs: int,
 ) -> None:
     # TODO(sang): Sliding window should be tested separately.
-    with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
-
     with vllm_runner(model, dtype=dtype,
                      tokenizer_mode="mistral") as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
     check_logprobs_close(
@@ -130,6 +135,27 @@ def test_mistral_format(
         name_1="mistral",
     )
 
+@pytest.mark.parametrize("model", MODELS[1:])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("prompt", SYMBOLIC_LANG_PROMPTS)
+def test_mistral_symbolic_languages(
+    vllm_runner,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    prompt: str,
+) -> None:
+    prompt = "hi"
+    msg = {
+        "role": "user",
+        "content": prompt
+    }
+    llm = LLM(model=model, tokenizer_mode="mistral", config_format="mistral", load_format="mistral")
+    outputs = llm.chat([msg], sampling_params=SAMPLING_PARAMS)
+    assert "�" not in outputs[0].outputs[0].text.strip()
 
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("model", MODELS[1:])  # v1 can't do func calling
