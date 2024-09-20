@@ -444,7 +444,7 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
     const int4* zp_ptr =
         (const int4*)zp +
         (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) *
-         prob_n / 8) *
+         prob_n / 4) *
             expert_idx;
     const int* g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
     const int* perm_ptr = (const int*)perm + prob_k * expert_idx;
@@ -565,12 +565,12 @@ torch::Tensor marlin_gemm_moe(
   // Verify b_zeros
   if (has_zp) {
     int rank = b_zeros.sizes().size();
-    TORCH_CHECK(rank == 2, "b_zeros rank = ", rank, " is not 2");
-    TORCH_CHECK(b_zeros.size(0) == num_groups,
-                "b_zeros dim 0 = ", b_zeros.size(0),
+    TORCH_CHECK(rank == 3, "b_zeros rank = ", rank, " is not 3");
+    TORCH_CHECK(b_zeros.size(1) == num_groups,
+                "b_zeros dim 1 = ", b_zeros.size(1),
                 " is not num_groups = ", num_groups);
-    TORCH_CHECK(b_zeros.size(1) == size_n / pack_factor,
-                "b_zeros dim 1 = ", b_scales.size(1),
+    TORCH_CHECK(b_zeros.size(2) == size_n / pack_factor,
+                "b_zeros dim 2 = ", b_scales.size(2),
                 " is not size_n / pack_factor = ", size_n / pack_factor);
   }
 

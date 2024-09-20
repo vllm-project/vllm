@@ -232,15 +232,15 @@ def test_fused_marlin_moe(
         a,
         qweight1,
         qweight2,
+        scales1,
+        scales2,
         score,
-        g_idx1,
-        g_idx2,
-        sort_indices1,
-        sort_indices2,
         topk_weights,
         topk_ids,
-        w1_scale=scales1,
-        w2_scale=scales2,
+        g_idx1=g_idx1,
+        g_idx2=g_idx2,
+        sort_indices1=sort_indices1,
+        sort_indices2=sort_indices2,
         num_bits=num_bits,
     )
 
@@ -310,10 +310,10 @@ def test_single_marlin_moe_multiply(
                                       qweight,
                                       scales,
                                       score,
-                                      g_idx,
-                                      sort_indices,
                                       topk,
                                       renormalize=False,
+                                      g_idx=g_idx,
+                                      sort_indices=sort_indices,
                                       num_bits=num_bits)
     torch_output = torch_moe_single(a, w_ref.transpose(1, 2), score, topk)
 
