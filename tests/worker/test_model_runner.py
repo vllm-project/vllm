@@ -8,8 +8,8 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import (SamplingParams, SequenceTokenData,
-                           SequenceGroupMetadata)
+from vllm.sequence import (SamplingParams, SequenceGroupMetadata,
+                           SequenceTokenData)
 from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 

@@ -11,8 +11,8 @@ import vllm.envs as envs
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import (SamplingParams, SequenceTokenData,
-                           SequenceGroupMetadata)
+from vllm.sequence import (SamplingParams, SequenceGroupMetadata,
+                           SequenceTokenData)
 from vllm.utils import Counter, is_pin_memory_available
 
 

@@ -10,8 +10,8 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
-from .data import (TokenInputs, EmbedInputs, EncoderDecoderInputs, EmptyInputs,
-                   LLMInputs, PromptType, SingletonPrompt)
+from .data import (EmbedInputs, EmptyInputs, EncoderDecoderInputs, LLMInputs,
+                   PromptType, SingletonPrompt, TokenInputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 if TYPE_CHECKING:

@@ -11,8 +11,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
-                           SequenceTokenData, SequenceGroupMetadata,
-                           SequenceOutput)
+                           SequenceGroupMetadata, SequenceOutput,
+                           SequenceTokenData)
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner

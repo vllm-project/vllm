@@ -5,8 +5,8 @@ import pytest
 import torch
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.sequence import (SamplingParams, SequenceTokenData,
-                           SequenceGroupMetadata)
+from vllm.sequence import (SamplingParams, SequenceGroupMetadata,
+                           SequenceTokenData)
 from vllm.utils import is_cpu, make_tensor_with_pad
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import _get_graph_batch_size

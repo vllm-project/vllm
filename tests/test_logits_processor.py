@@ -8,8 +8,8 @@ import torch
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import (SamplingParams, SequenceTokenData,
-                           SequenceGroupMetadata)
+from vllm.sequence import (SamplingParams, SequenceGroupMetadata,
+                           SequenceTokenData)
 from vllm.utils import is_pin_memory_available
 
 
