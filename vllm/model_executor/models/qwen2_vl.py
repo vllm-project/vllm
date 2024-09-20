@@ -66,7 +66,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors, SequenceTokenData
+from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import get_processor
 
 logger = init_logger(__name__)
@@ -655,7 +655,7 @@ get_max_qwen2_vl_video_tokens = partial(get_max_qwen2_vl_mm_tokens,
 
 def dummy_data_for_qwen2_vl(
     ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
-) -> Tuple[SequenceTokenData, Optional[MultiModalDataDict]]:
+) -> Tuple[SequenceData, Optional[MultiModalDataDict]]:
     image_processor = cached_get_image_processor(ctx.model_config.model)
 
     num_images = mm_counts["image"]
@@ -681,7 +681,7 @@ def dummy_data_for_qwen2_vl(
 
     hf_config = ctx.get_hf_config(Qwen2VLConfig)
 
-    dummy_seqdata = SequenceTokenData.from_counts({
+    dummy_seqdata = SequenceData.from_counts({
         hf_config.vision_start_token_id:
         1,
         hf_config.image_token_id:

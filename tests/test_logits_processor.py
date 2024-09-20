@@ -8,8 +8,7 @@ import torch
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import (SamplingParams, SequenceGroupMetadata,
-                           SequenceTokenData)
+from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available
 
 
@@ -70,7 +69,7 @@ def test_logits_processors(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceTokenData.from_seqs([1, 2, 3])},
+                seq_data={0: SequenceData.from_seqs([1, 2, 3])},
                 sampling_params=SamplingParams(temperature=0,
                                                logits_processors=[pick_ith]),
                 block_tables={0: [1]},

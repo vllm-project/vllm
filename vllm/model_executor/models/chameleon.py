@@ -32,7 +32,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import IntermediateTensors, SequenceTokenData
+from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsMultiModal
@@ -71,7 +71,7 @@ def dummy_seq_data_for_chameleon(
     else:
         image_feature_size = image_feature_size_override
 
-    return SequenceTokenData.from_counts({
+    return SequenceData.from_counts({
         image_token_id:
         image_feature_size * num_images,
         0:

@@ -6,8 +6,7 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property, reduce
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping,
-                    Optional)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union, cast
 
@@ -135,49 +134,110 @@ class SequenceDataDelta(
     new_stage: SequenceStage
 
 
-class SequenceDataMixin(msgspec.Struct,
-                        omit_defaults=True):  # type: ignore[call-arg]
+class SequenceData(msgspec.Struct,
+                   omit_defaults=True):  # type: ignore[call-arg]
     """Data associated with a sequence.
-
     Args:
+        prompt_token_ids: The token IDs of the prompt.
+        prompt_embeds: The embeddings of the prompt.
         output_token_ids: The token IDs of the output. Set to an empty list if
             None.
-
     Attributes:
+        prompt_token_ids: The token IDs of the prompt.
+        prompt_embeds: The embeddings of the prompt.
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
+    # NOTE: we cannot use Union[List, array] because msgspec cannot support
+    # union of 2 list types.
+    _prompt_token_ids: array
+    _prompt_embeds: Optional[List[torch.Tensor]] = None
     _output_token_ids: array = msgspec.field(
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
-
+    _prompt_token_ids_tuple: Tuple[int,
+                                   ...] = msgspec.field(default_factory=tuple)
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
-
     # It is used to get delta input. It is reset when `get_delta_and_reset`
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
-
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
 
-    def __post_init__(self) -> None:
-        assert self._output_token_ids.typecode == "l"
+    @staticmethod
+    def from_counts(counts_by_token: Mapping[int, int]) -> "SequenceData":
+        if len(counts_by_token) == 0:
+            return SequenceData.from_seqs([])
 
+        arrs = [
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
+            for token_id, count in counts_by_token.items()
+        ]
+
+        return SequenceData(reduce(lambda a, b: a + b, arrs))
+
+    @staticmethod
+    def from_seqs(
+        prompt_token_ids: GenericSequence[int],
+        output_token_ids: Optional[GenericSequence[int]] = None,
+    ) -> "SequenceData":
+        prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                     prompt_token_ids)
+
+        if output_token_ids is None:
+            return SequenceData(prompt_token_ids_arr)
+
+        output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                     output_token_ids)
+
+        return SequenceData(prompt_token_ids_arr,
+                            _output_token_ids=output_token_ids_arr)
+
+    def __post_init__(self) -> None:
+        assert self._prompt_token_ids.typecode == "l"
+        assert self._output_token_ids.typecode == "l"
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
+            self._prompt_token_ids)
         self._update_cached_all_tokens()
 
-    def _update_cached_all_tokens(self) -> None:
+    def _update_cached_all_tokens(self):
+        assert isinstance(self._prompt_token_ids, array)
         assert isinstance(self._output_token_ids, array)
-
-        self._cached_all_token_ids = list(self._output_token_ids)
+        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids +
+                                                     self._output_token_ids)
 
     @property
     def cumulative_logprob(self) -> float:
         return self._cumulative_logprob
+
+    @property
+    def prompt_token_ids(self) -> Tuple[int, ...]:
+        return self._prompt_token_ids_tuple
+
+    @prompt_token_ids.setter
+    def prompt_token_ids(self, new_prompt_token_ids) -> None:
+        raise NotImplementedError
+
+    @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        return self._prompt_embeds
+
+    @prompt_embeds.setter
+    def prompt_embeds(self, new_prompt_embeds: Optional[torch.Tensor]) -> None:
+        self._prompt_embeds = new_prompt_embeds
+
+    @property
+    def prompt_token_ids_array(self) -> array:
+        """Return the prompt token ids in array type.
+        Note that the array is in "I" type, and it is not compatible
+        with torch.long (2 bytes vs 4 bytes). So beware of the usage.
+        """
+        return self._prompt_token_ids
 
     @property
     def output_token_ids(self) -> Tuple[int, ...]:
@@ -214,11 +274,13 @@ class SequenceDataMixin(msgspec.Struct,
         self._cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        return self.get_prompt_len() + len(self._output_token_ids)
+        if self._prompt_embeds is None:
+            return len(self._output_token_ids) + len(self._prompt_token_ids)
+        else:
+            return len(self._output_token_ids) + len(self._prompt_embeds)
 
-    @abstractmethod
     def get_prompt_len(self) -> int:
-        raise NotImplementedError
+        return len(self._prompt_token_ids)
 
     def get_output_len(self) -> int:
         return len(self._output_token_ids)
@@ -226,13 +288,16 @@ class SequenceDataMixin(msgspec.Struct,
     def get_token_ids(self) -> List[int]:
         return self._cached_all_token_ids
 
-    @abstractmethod
     def get_prefix_token_ids(
-        self,
-        num_tokens: int,
+            self, num_tokens: int
     ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
         """Get prefix tokens, and make the return value hashable"""
-        raise NotImplementedError
+        prompt_length = self.get_prompt_len()
+        if num_tokens > prompt_length:
+            return (self._prompt_token_ids_tuple,
+                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
+        else:
+            return (self._prompt_token_ids_tuple[:num_tokens], None)
 
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
@@ -263,13 +328,13 @@ class SequenceDataMixin(msgspec.Struct,
         # prefill for both prompt and output.
         return self.get_len() - self.get_num_computed_tokens()
 
-    @abstractmethod
     def get_last_token_id(self) -> int:
-        raise NotImplementedError
+        if not self._output_token_ids:
+            return self._prompt_token_ids[-1]
+        return self._output_token_ids[-1]
 
-    @abstractmethod
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
-        raise NotImplementedError
+        return self.prompt_token_ids
 
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
@@ -293,195 +358,12 @@ class SequenceDataMixin(msgspec.Struct,
     def stage(self) -> SequenceStage:
         return self._stage
 
-
-class _TokenBase:
-    # NOTE: we cannot use Union[List, array] because msgspec cannot support
-    # union of 2 list types.
-    _prompt_token_ids: array
-
-
-# Note the ordering here so `_prompt_token_ids` is the first __init__ argument
-class SequenceTokenData(SequenceDataMixin, _TokenBase,
-                        omit_defaults=True):  # type: ignore[call-arg]
-    """Data associated with a sequence.
-
-    Args:
-        prompt_token_ids: The token IDs of the prompt.
-        output_token_ids: The token IDs of the output. Set to an empty list if
-            None.
-
-    Attributes:
-        prompt_token_ids: The token IDs of the prompt.
-        output_token_ids: The token IDs of the output.
-        cumulative_logprob: The cumulative log probability of the output.
-    """
-
-    # For tagged union
-    type: Literal["tokens"] = "tokens"
-
-    ### The below fields should not be passed as an argument ###
-    _prompt_token_ids_tuple: Tuple[int,
-                                   ...] = msgspec.field(default_factory=tuple)
-
-    @staticmethod
-    def from_counts(counts_by_token: Mapping[int, int]) -> "SequenceTokenData":
-        if len(counts_by_token) == 0:
-            return SequenceTokenData.from_seqs([])
-
-        arrs = [
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
-            for token_id, count in counts_by_token.items()
-        ]
-
-        return SequenceTokenData(reduce(lambda a, b: a + b, arrs))
-
-    @staticmethod
-    def from_seqs(
-        prompt_token_ids: GenericSequence[int],
-        output_token_ids: Optional[GenericSequence[int]] = None,
-    ) -> "SequenceTokenData":
-        prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                     prompt_token_ids)
-
-        if output_token_ids is None:
-            return SequenceTokenData(prompt_token_ids_arr)
-
-        output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                     output_token_ids)
-
-        return SequenceTokenData(prompt_token_ids_arr, output_token_ids_arr)
-
-    def __post_init__(self) -> None:
-        assert self._prompt_token_ids.typecode == "l"
-        assert self._output_token_ids.typecode == "l"
-
-        self._prompt_token_ids_tuple = tuple(self._prompt_token_ids)
-
-        self._update_cached_all_tokens()
-
-    def _update_cached_all_tokens(self) -> None:
-        assert isinstance(self._prompt_token_ids, array)
-        assert isinstance(self._output_token_ids, array)
-
-        self._cached_all_token_ids = list(self._prompt_token_ids +
-                                          self._output_token_ids)
-
-    @property
-    def prompt_token_ids(self) -> Tuple[int, ...]:
-        return self._prompt_token_ids_tuple
-
-    @property
-    def prompt_token_ids_array(self) -> array:
-        """Return the prompt token ids in array type.
-
-        Note that the array is in "I" type, and it is not compatible
-        with torch.long (2 bytes vs 4 bytes). So beware of the usage.
-        """
-        return self._prompt_token_ids
-
-    def get_prompt_len(self) -> int:
-        return len(self._prompt_token_ids)
-
-    def get_last_token_id(self) -> int:
-        if not self._output_token_ids:
-            return self._prompt_token_ids[-1]
-
-        return self._output_token_ids[-1]
-
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
-        return self.prompt_token_ids
-
-    def get_prefix_token_ids(
-        self,
-        num_tokens: int,
-    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
-        prompt_length = self.get_prompt_len()
-        if num_tokens > prompt_length:
-            return (self._prompt_token_ids_tuple,
-                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
-
-        return (self._prompt_token_ids_tuple[:num_tokens], None)
-
     def __repr__(self) -> str:
-        return (f"SequenceTokenData("
+        return (f"SequenceData("
                 f"prompt_token_ids={self._prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()}")
-
-
-class _EmbedBase:
-    _prompt_embeds: torch.Tensor
-
-
-# Note the ordering here so `_prompt_embeds` is the first __init__ argument
-class SequenceEmbedData(SequenceDataMixin, _EmbedBase,
-                        omit_defaults=True):  # type: ignore[call-arg]
-    """Data associated with a sequence.
-
-    Args:
-        prompt_embeds: The embeddings of the prompt.
-        output_token_ids: The token IDs of the output. Set to an empty list if
-            None.
-        cumulative_logprob: The cumulative log probability of the output.
-
-    Attributes:
-        prompt_embeds: The embeddings of the prompt.
-        output_token_ids: The token IDs of the output.
-        cumulative_logprob: The cumulative log probability of the output.
-    """
-
-    # For tagged union
-    type: Literal["embeds"] = "embeds"
-
-    ### The below fields should not be passed as an argument ###
-    _dummy_token_ids_tuple: Tuple[int,
-                                  ...] = msgspec.field(default_factory=tuple)
-
-    def __post_init__(self) -> None:
-        assert self._output_token_ids.typecode == "l"
-
-        # Dummy value
-        self._dummy_token_ids_tuple = tuple([0] * self._prompt_embeds)
-
-        self._update_cached_all_tokens()
-
-    @property
-    def prompt_embeds(self) -> torch.Tensor:
-        return self._prompt_embeds
-
-    def get_prompt_len(self) -> int:
-        return len(self._prompt_embeds)
-
-    def get_last_token_id(self) -> int:
-        if not self._output_token_ids:
-            return self._dummy_token_ids_tuple[-1]
-
-        return self._output_token_ids[-1]
-
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
-        return self._dummy_token_ids_tuple
-
-    def get_prefix_token_ids(
-        self,
-        num_tokens: int,
-    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
-        prompt_length = self.get_prompt_len()
-        if num_tokens > prompt_length:
-            return (self._dummy_token_ids_tuple,
-                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
-
-        return (self._dummy_token_ids_tuple[:num_tokens], None)
-
-    def __repr__(self) -> str:
-        return (f"SequenceEmbedData("
-                f"prompt_embeds={self._prompt_embeds}, "
-                f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob}, "
-                f"get_num_computed_tokens={self.get_num_computed_tokens()}")
-
-
-SequenceData = Union[SequenceTokenData, SequenceEmbedData]
 
 
 class Sequence:
@@ -520,10 +402,10 @@ class Sequence:
 
         data: SequenceData
         if self.prompt_token_ids:
-            data = SequenceTokenData.from_seqs(self.prompt_token_ids)
+            data = SequenceData.from_seqs(self.prompt_token_ids)
         else:
             assert self.prompt_embeds is not None
-            data = SequenceEmbedData(self.prompt_embeds)
+            data = SequenceData(self.prompt_embeds)
 
         self.data = data
 

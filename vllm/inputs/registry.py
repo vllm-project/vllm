@@ -15,7 +15,7 @@ from .data import DecoderOnlyInputs
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.multimodal import MultiModalDataDict, MultiModalRegistry
-    from vllm.sequence import SequenceTokenData
+    from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
 
@@ -72,7 +72,7 @@ class DummyDataFactory(Protocol):
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Tuple["SequenceTokenData", Optional["MultiModalDataDict"]]:
+    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data to be inputted into the model.
 
@@ -118,7 +118,7 @@ class InputRegistry:
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Tuple["SequenceTokenData", Optional["MultiModalDataDict"]]:
+    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         The default dummy data factory represents the longest possible text
         that can be inputted to the model.
@@ -127,9 +127,9 @@ class InputRegistry:
             :data:`InputProcessor` is not applied to the dummy data.
         """
         # Avoid circular import
-        from vllm.sequence import SequenceTokenData
+        from vllm.sequence import SequenceData
 
-        dummy_seq_data = SequenceTokenData.from_seqs([0] * seq_len)
+        dummy_seq_data = SequenceData.from_seqs([0] * seq_len)
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data
@@ -161,7 +161,7 @@ class InputRegistry:
         model_config: "ModelConfig",
         seq_len: int,
         mm_registry: "MultiModalRegistry",
-    ) -> Tuple["SequenceTokenData", Optional["MultiModalDataDict"]]:
+    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data for profiling the memory usage of a model.
 

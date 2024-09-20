@@ -37,7 +37,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs, NestedTensors
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceTokenData
+from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
@@ -96,7 +96,7 @@ def dummy_data_for_ultravox(
     other_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                             [0]) * (seq_len - len(audio_token_ids))
 
-    seq_data = SequenceTokenData.from_seqs(audio_token_ids + other_token_ids)
+    seq_data = SequenceData.from_seqs(audio_token_ids + other_token_ids)
 
     audio_and_sr = (np.array([0.0] * feature_extractor.chunk_length), 1)
     mm_dict = {"audio": [audio_and_sr] * audio_count}

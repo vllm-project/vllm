@@ -41,7 +41,7 @@ from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceTokenData)
+                           SequenceData)
 
 from .interfaces import SupportsMultiModal
 from .utils import merge_multimodal_embeddings
@@ -107,7 +107,7 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int, num_images: int):
     token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, image_token_ids) * num_images
     token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
                        [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceTokenData.from_seqs(token_ids)
+    return SequenceData.from_seqs(token_ids)
 
 
 def dummy_image_for_fuyu(

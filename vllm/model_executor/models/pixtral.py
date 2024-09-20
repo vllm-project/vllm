@@ -23,7 +23,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SequenceTokenData
+from vllm.sequence import IntermediateTensors, SequenceData
 
 from .interfaces import SupportsMultiModal
 from .utils import init_vllm_registered_model
@@ -61,7 +61,7 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     image_feature_size = (size**2) // (patch_size**2)
 
     num_image_tokens = image_feature_size * num_images
-    seq_data = SequenceTokenData.from_counts({
+    seq_data = SequenceData.from_counts({
         image_token_id: num_image_tokens,
         0: seq_len - num_image_tokens,
     })

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import SequenceTokenData
+from vllm.sequence import SequenceData
 
 try:
     from xformers import ops as xops
@@ -61,7 +61,7 @@ def dummy_seq_data_for_clip(
     else:
         image_feature_size = image_feature_size_override
 
-    return SequenceTokenData.from_counts({
+    return SequenceData.from_counts({
         image_token_id:
         image_feature_size * num_images,
         0:

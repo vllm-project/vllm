@@ -8,8 +8,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import (SamplingParams, SequenceGroupMetadata,
-                           SequenceTokenData)
+from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
@@ -51,13 +50,13 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
         if random.random() < prompt_embeds_ratio:
-            seq_data = SequenceTokenData.from_seqs(
+            seq_data = SequenceData.from_seqs(
                 range(seq_len),
                 torch.rand(seq_len, 10).tolist(),
             )
             input_embeds_len += seq_len
         else:
-            seq_data = SequenceTokenData.from_seqs(range(seq_len))
+            seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -184,13 +183,13 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
         if random.random() < prompt_embeds_ratio:
-            seq_data = SequenceTokenData.from_seqs(
+            seq_data = SequenceData.from_seqs(
                 [],
                 torch.rand(context_len, 10).tolist(),
             )
             input_embeds_len += context_len
         else:
-            seq_data = SequenceTokenData.from_seqs(range(context_len))
+            seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -364,13 +363,13 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
         if random.random() < prompt_embeds_ratio:
-            seq_data = SequenceTokenData.from_seqs(
+            seq_data = SequenceData.from_seqs(
                 [],
                 torch.rand(seq_len, 10).tolist(),
             )
             input_embeds_len += seq_len
         else:
-            seq_data = SequenceTokenData.from_seqs(range(seq_len))
+            seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -387,12 +386,12 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         if random.random() < prompt_embeds_ratio:
-            seq_data = SequenceTokenData.from_seqs(
+            seq_data = SequenceData.from_seqs(
                 [],
                 torch.rand(context_len, 10).tolist(),
             ),
         else:
-            seq_data = SequenceTokenData.from_seqs(range(context_len))
+            seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.append_token_id(1, 0)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(

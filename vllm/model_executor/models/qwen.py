@@ -45,7 +45,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SequenceTokenData
+from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import is_list_of
 
 from .utils import flatten_bn, is_pp_missing_parameter, make_layers
@@ -801,7 +801,7 @@ def dummy_data_for_qwen(
     ctx: InputContext,
     seq_len: int,
     mm_counts: Mapping[str, int],
-) -> Tuple[SequenceTokenData, Optional[Dict]]:
+) -> Tuple[SequenceData, Optional[Dict]]:
     """Build dummy data for warming up Qwen models; this will only contain text
     matching the defaults for VLLM unless the model has a visual config.
 
@@ -818,7 +818,7 @@ def dummy_data_for_qwen(
     # The presence of a visual config indicates this is a multimodal model.
     # If we don't have it, the model is considered an LLM for warmup purposes.
     if not hasattr(hf_config, "visual"):
-        seq_data = SequenceTokenData.from_counts({0: seq_len})
+        seq_data = SequenceData.from_counts({0: seq_len})
         mm_data = None
         return seq_data, mm_data
 
@@ -845,7 +845,7 @@ def dummy_data_for_qwen(
     if len(toks) < seq_len:
         toks += [0] * (seq_len - len(toks))
 
-    seq_data = SequenceTokenData.from_seqs(toks)
+    seq_data = SequenceData.from_seqs(toks)
 
     # Build the input images; width/height doesn't actually matter here since
     # the data will get resized and the # of tokens per image is constant
