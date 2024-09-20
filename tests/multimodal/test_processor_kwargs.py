@@ -24,17 +24,18 @@ DEFAULT_NUM_CROPS = 4
 NUM_CROPS_OVERRIDE = 16
 
 
-def get_model_config(processor_kwargs=None):
+def get_model_config(model_name, trust_remote_code=False, processor_kwargs=None, limit_mm_per_prompt=None):
     """Creates a handle to a model config, which may have processor kwargs."""
     # NOTE - values / architecture don't matter too much here since we patch
     # the return values for stuff like the input processor anyway.
-    return ModelConfig(DUMMY_MODEL_ID,
-                       DUMMY_MODEL_ID,
+    return ModelConfig(model_name,
+                       model_name,
                        tokenizer_mode="auto",
-                       trust_remote_code=False,
+                       trust_remote_code=trust_remote_code,
                        dtype="float16",
                        seed=0,
-                       processor_kwargs=processor_kwargs)
+                       processor_kwargs=processor_kwargs,
+                       limit_mm_per_prompt=limit_mm_per_prompt)
 
 
 # Mocks for all of the places that we use the processor_kwargs
@@ -77,7 +78,7 @@ def use_dummy_data_mock():
         yield
 
 
-# lambda whose signature matches max token calcs + extra kwargs
+# lambda whose signature matches max token calcs + extra kwargs & mapper respectively
 get_num_crops = lambda ctx, *, num_crops=DEFAULT_NUM_CROPS: num_crops
 custom_mapper = lambda ctx, data, *, num_crops=DEFAULT_NUM_CROPS: {
     "num_pixels": torch.zeros(size=(1, num_crops + 1, 3, 336, 336))
@@ -88,7 +89,7 @@ custom_mapper = lambda ctx, data, *, num_crops=DEFAULT_NUM_CROPS: {
 def test_default_processor_is_a_noop():
     """Ensure that by default, there is no processor override."""
     dummy_registry = InputRegistry()
-    model_config = get_model_config()
+    model_config = get_model_config(DUMMY_MODEL_ID)
     processor = dummy_registry.create_input_processor(model_config)
     proc_inputs = LLMInputs(prompt_token_ids=[], prompt="")
     proc_outputs = processor(inputs=proc_inputs)
@@ -97,14 +98,15 @@ def test_default_processor_is_a_noop():
 
 @pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
 def test_processor_default_kwargs(use_processor_mock, num_crops):
-    """Ensure that we can override processor kwargs."""
+    """Ensure input processors can use processor kwargs."""
     dummy_registry = InputRegistry()
     # If we have a value for num_crops, pass the override value and make
     # sure we get that value as a return-value from out mock processor,
     # otherwise fall back to the default value
     processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
     expected_num_crops = DEFAULT_NUM_CROPS if num_crops is None else num_crops
-    model_config = get_model_config(processor_kwargs=processor_kwargs)
+    model_config = get_model_config(DUMMY_MODEL_ID,
+                                    processor_kwargs=processor_kwargs)
     processor = dummy_registry.create_input_processor(model_config)
 
     num_crops_val = processor(LLMInputs(prompt_token_ids=[], prompt=""))
@@ -114,19 +116,18 @@ def test_processor_default_kwargs(use_processor_mock, num_crops):
 @pytest.mark.parametrize(
     "processor_kwargs",
     [
-        {
-            "does_not_exist": 100
-        },  # Not part of the signature
-        {
-            "ctx": "something bad"
-        }  # Part of the signature, not keyword only
+        # Not part of the signature
+        {"does_not_exist": 100},
+        # Part of the signature, not keyword only
+        {"ctx": "something bad"} 
     ])
 def test_processor_with_sad_kwarg_overrides(use_processor_mock,
                                             processor_kwargs):
-    """Ensure invalid processor_kwargs can't be used in the input processor."""
+    """Ensure that input processors filter out invalid processor_kwargs."""
     dummy_registry = InputRegistry()
 
-    model_config = get_model_config(processor_kwargs=processor_kwargs)
+    model_config = get_model_config(DUMMY_MODEL_ID,
+                                    processor_kwargs=processor_kwargs)
 
     processor = dummy_registry.create_input_processor(model_config)
     num_crops_val = processor(LLMInputs(prompt_token_ids=[], prompt=""))
@@ -136,10 +137,12 @@ def test_processor_with_sad_kwarg_overrides(use_processor_mock,
 ### Test overrides for the dummy data
 @pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
 def test_dummy_data_kwarg_overrides(use_dummy_data_mock, num_crops):
+    """Ensure dummy data factories can use processor kwargs."""
     processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
     expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
     dummy_registry = InputRegistry()
-    model_config = get_model_config(processor_kwargs=processor_kwargs, )
+    model_config = get_model_config(DUMMY_MODEL_ID,
+                                    processor_kwargs=processor_kwargs)
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(model_config)
 
@@ -154,18 +157,17 @@ def test_dummy_data_kwarg_overrides(use_dummy_data_mock, num_crops):
 @pytest.mark.parametrize(
     "processor_kwargs",
     [
-        {
-            "does_not_exist": 100
-        },  # Not part of the signature
-        {
-            "ctx": "something bad"
-        }  # Part of the signature, not keyword only
+        # Not part of the signature
+        {"does_not_exist": 100},
+        # Part of the signature, not keyword only
+        {"ctx": "something bad"} 
     ])
 def test_dummy_data_with_sad_kwarg_overrides(use_dummy_data_mock,
                                              processor_kwargs):
-    """Ensure that dummy_data kwargs that are unused do not fail."""
+    """Ensure that dummy data factory filters out invalid processor_kwargs."""
     dummy_registry = InputRegistry()
-    model_config = get_model_config(processor_kwargs=processor_kwargs, )
+    model_config = get_model_config(DUMMY_MODEL_ID,
+                                    processor_kwargs=processor_kwargs)
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(model_config)
 
@@ -180,19 +182,14 @@ def test_dummy_data_with_sad_kwarg_overrides(use_dummy_data_mock,
 ### Test overrides for the max token count per multimodal instance
 @pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
 def test_max_tokens_kwarg_overrides(num_crops):
+    """Ensure max token calcs can use processor kwargs."""
     processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
     expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
 
-    model_config = ModelConfig(
-        MULTIMODAL_MODEL_ID,
-        MULTIMODAL_MODEL_ID,
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=0,
-        processor_kwargs=processor_kwargs,
-        limit_mm_per_prompt={"image": 1},
-    )
+    model_config = get_model_config(MULTIMODAL_MODEL_ID,
+                                    trust_remote_code=True,
+                                    processor_kwargs=processor_kwargs,
+                                    limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(model_config)
@@ -213,24 +210,17 @@ def test_max_tokens_kwarg_overrides(num_crops):
 @pytest.mark.parametrize(
     "processor_kwargs",
     [
-        {
-            "does_not_exist": 100
-        },  # Not part of the signature
-        {
-            "ctx": "something bad"
-        }  # Part of the signature, not keyword only
+        # Not part of the signature
+        {"does_not_exist": 100},
+        # Part of the signature, not keyword only
+        {"ctx": "something bad"} 
     ])
 def test_max_tokens_with_sad_kwarg_overrides(processor_kwargs):
-    model_config = ModelConfig(
-        MULTIMODAL_MODEL_ID,
-        MULTIMODAL_MODEL_ID,
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=0,
-        processor_kwargs=processor_kwargs,
-        limit_mm_per_prompt={"image": 1},
-    )
+    """Ensure that max token calcs filters out invalid processor_kwargs."""
+    model_config = get_model_config(MULTIMODAL_MODEL_ID,
+                                    trust_remote_code=True,
+                                    processor_kwargs=processor_kwargs,
+                                    limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(model_config)
@@ -255,16 +245,10 @@ def test_default_mapper_with_processer_kwargs(image_assets, num_crops):
     # NOTE - we don't validate bad inputs for the default mapper, because it's
     # through the automodel interface in transformers, so we can't easily
     # inspect what kwargs are or are not allowed.
-    model_config = ModelConfig(
-        MULTIMODAL_MODEL_ID,
-        MULTIMODAL_MODEL_ID,
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=0,
-        processor_kwargs={"num_crops": num_crops},
-        limit_mm_per_prompt={"image": 1},
-    )
+    model_config = get_model_config(MULTIMODAL_MODEL_ID,
+                                    trust_remote_code=True,
+                                    processor_kwargs={"num_crops": num_crops},
+                                    limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(model_config)
@@ -279,20 +263,13 @@ def test_default_mapper_with_processer_kwargs(image_assets, num_crops):
 
 @pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
 def test_custom_mapper_kwarg_overrides(image_assets, num_crops):
-    """Ensure that custom mappers can consume processor_kwargs."""
+    """Ensure custom mappers can use processor kwargs."""
     processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
     expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
-
-    model_config = ModelConfig(
-        MULTIMODAL_MODEL_ID,
-        MULTIMODAL_MODEL_ID,
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=0,
-        processor_kwargs=processor_kwargs,
-        limit_mm_per_prompt={"image": 1},
-    )
+    model_config = get_model_config(MULTIMODAL_MODEL_ID,
+                                    trust_remote_code=True,
+                                    processor_kwargs=processor_kwargs,
+                                    limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(model_config)
@@ -315,27 +292,18 @@ def test_custom_mapper_kwarg_overrides(image_assets, num_crops):
 @pytest.mark.parametrize(
     "processor_kwargs",
     [
-        {
-            "does_not_exist": 100
-        },  # Not part of the signature
-        {
-            "ctx": "something bad"
-        }  # Part of the signature, not keyword only
+        # Not part of the signature
+        {"does_not_exist": 100},
+        # Part of the signature, not keyword only
+        {"ctx": "something bad"} 
     ])
 def test_custom_mapper_with_sad_kwarg_overrides(image_assets,
                                                 processor_kwargs):
-    """Ensure that custom mappers can filter out invalid processor_kwargs."""
-
-    model_config = ModelConfig(
-        MULTIMODAL_MODEL_ID,
-        MULTIMODAL_MODEL_ID,
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=0,
-        processor_kwargs=processor_kwargs,
-        limit_mm_per_prompt={"image": 1},
-    )
+    """Ensure that custom mappers filters out invalid processor_kwargs."""
+    model_config = get_model_config(MULTIMODAL_MODEL_ID,
+                                    trust_remote_code=True,
+                                    processor_kwargs=processor_kwargs,
+                                    limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(model_config)
