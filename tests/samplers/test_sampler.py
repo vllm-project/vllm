@@ -1,6 +1,5 @@
 import itertools
 import random
-from array import array
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock, patch
 
@@ -12,8 +11,8 @@ import vllm.envs as envs
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
-                           SequenceData, SequenceGroupMetadata)
+from vllm.sequence import (SamplingParams, SequenceTokenData,
+                           SequenceGroupMetadata)
 from vllm.utils import Counter, is_pin_memory_available
 
 
@@ -59,9 +58,7 @@ def _do_sample(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={
-                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
-                },
+                seq_data={0: SequenceTokenData.from_seq([1, 2, 3])},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
@@ -205,9 +202,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         return sampling_params
 
     def create_sequence_data(num_input=3, num_generated=0):
-        seq_data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                  random.choices(range(0, VOCAB_SIZE), k=num_input)))
+        seq_data = SequenceTokenData.from_seq(
+            random.choices(range(0, VOCAB_SIZE), k=num_input))
         if num_generated > 0:
             seq_data.output_token_ids = random.choices(range(0, VOCAB_SIZE),
                                                        k=num_generated)
@@ -238,7 +234,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 eos_token_id=eos_token_id,
                 stop_token_ids=stop_token_ids)
 
-            seq_data: Dict[int, SequenceData] = {}
+            seq_data: Dict[int, SequenceTokenData] = {}
             seq_group_penalization: List[bool] = []
             for _ in range(num_seqs):
                 num_input = random.randint(1, 100)
@@ -511,9 +507,7 @@ def test_sampler_mixed(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={
-                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
-                },
+                seq_data={0: SequenceTokenData.from_seq([1, 2, 3])},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
@@ -613,9 +607,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={
-                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
-                },
+                seq_data={0: SequenceTokenData.from_seq([1, 2, 3])},
                 sampling_params=SamplingParams(
                     temperature=1,
                     top_k=top_k,
@@ -699,11 +691,7 @@ def test_sampler_repetition_penalty_mixed(device: str):
                 SequenceGroupMetadata(
                     request_id=f"test_{i}",
                     is_prompt=True,
-                    seq_data={
-                        0:
-                        SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                           [1, 2, 3]))
-                    },
+                    seq_data={0: SequenceTokenData.from_seq([1, 2, 3])},
                     sampling_params=sampling_params[i],
                     block_tables={0: [1]},
                 ))

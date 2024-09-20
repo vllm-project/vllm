@@ -1,5 +1,4 @@
 import functools
-from array import array
 from collections import UserDict
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
@@ -16,7 +15,7 @@ from .data import LLMInputs
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.multimodal import MultiModalDataDict, MultiModalRegistry
-    from vllm.sequence import SequenceData
+    from vllm.sequence import SequenceTokenData
 
 logger = init_logger(__name__)
 
@@ -73,7 +72,7 @@ class DummyDataFactory(Protocol):
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> Tuple["SequenceTokenData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data to be inputted into the model.
 
@@ -119,7 +118,7 @@ class InputRegistry:
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> Tuple["SequenceTokenData", Optional["MultiModalDataDict"]]:
         """
         The default dummy data factory represents the longest possible text
         that can be inputted to the model.
@@ -128,10 +127,9 @@ class InputRegistry:
             :data:`InputProcessor` is not applied to the dummy data.
         """
         # Avoid circular import
-        from vllm.sequence import SequenceData
+        from vllm.sequence import SequenceTokenData
 
-        dummy_seq_data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * seq_len)
+        dummy_seq_data = SequenceTokenData.from_seq([0] * seq_len)
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data
@@ -163,7 +161,7 @@ class InputRegistry:
         model_config: "ModelConfig",
         seq_len: int,
         mm_registry: "MultiModalRegistry",
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> Tuple["SequenceTokenData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data for profiling the memory usage of a model.
 

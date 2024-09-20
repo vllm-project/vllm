@@ -123,7 +123,7 @@ class LLMInputs(TypedDict):
 
     This specifies the data required for decoder-only models.
     """
-    prompt_token_ids: List[int]
+    prompt_token_ids: Optional[List[int]]
     """The token IDs of the prompt."""
 
     prompt: NotRequired[Optional[str]]
@@ -150,7 +150,7 @@ class EncoderDecoderLLMInputs(LLMInputs):
 
     This specifies the required data for encoder-decoder models.
     """
-    encoder_prompt_token_ids: List[int]
+    encoder_prompt_token_ids: Optional[List[int]]
     """The token IDs of the encoder prompt."""
 
     encoder_prompt: NotRequired[Optional[str]]
