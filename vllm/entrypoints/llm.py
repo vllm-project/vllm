@@ -351,7 +351,8 @@ class LLM:
 
     def chat(
         self,
-        messages: List[ChatCompletionMessageParam],
+        conversations: Union[List[ChatCompletionMessageParam],
+                             List[List[ChatCompletionMessageParam]]],
         sampling_params: Optional[Union[SamplingParams,
                                         List[SamplingParams]]] = None,
         use_tqdm: bool = True,
@@ -359,7 +360,7 @@ class LLM:
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
         tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> List[RequestOutput]:
+    ) -> Union[List[List[RequestOutput]], List[RequestOutput]]:
         """
         Generate responses for a chat conversation.
 
@@ -371,8 +372,9 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            messages: A single conversation represented as a list of messages.
-                Each message is a dictionary with 'role' and 'content' keys.
+            conversations: A list or a single conversation represented as a list
+                of messages. Each message is a dictionary with 'role' and
+                'content' keys.
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
@@ -386,49 +388,66 @@ class LLM:
                 to each message.
 
         Returns:
-            A list of ``RequestOutput`` objects containing the generated
-            responses in the same order as the input messages.
+            A list of lists or single list of ``RequestOutput`` objects
+            containing the generated responses in the same order as the input
+            conversations and messages.
         """
+        list_of_conversations: List[List[ChatCompletionMessageParam]]
 
-        tokenizer = self.get_tokenizer()
-        model_config = self.llm_engine.get_model_config()
-
-        conversation, mm_data = parse_chat_messages(messages, model_config,
-                                                    tokenizer)
-
-        prompt: Union[str, List[int]]
-        if isinstance(tokenizer, MistralTokenizer):
-            prompt = apply_mistral_chat_template(
-                tokenizer,
-                messages=messages,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                tools=tools,
-            )
+        # Handle multi and single conversations
+        if is_list_of(conversations, list):
+            # conversations is List[List[...]]
+            list_of_conversations = conversations
         else:
-            prompt = apply_hf_chat_template(
-                tokenizer,
-                conversation=conversation,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                tools=tools,
+            # conversations is List[...]
+            list_of_conversations = [conversations]
+
+        outputs = []
+
+        for messages in list_of_conversations:
+            tokenizer = self.get_tokenizer()
+            model_config = self.llm_engine.get_model_config()
+
+            conversation, mm_data = parse_chat_messages(
+                messages, model_config, tokenizer)
+
+            prompt: Union[str, List[int]]
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt = apply_mistral_chat_template(
+                    tokenizer,
+                    messages=messages,
+                    chat_template=chat_template,
+                    add_generation_prompt=add_generation_prompt,
+                    tools=tools,
+                )
+            else:
+                prompt = apply_hf_chat_template(
+                    tokenizer,
+                    conversation=conversation,
+                    chat_template=chat_template,
+                    add_generation_prompt=add_generation_prompt,
+                    tools=tools,
+                )
+
+            inputs: PromptInputs
+            if is_list_of(prompt, int):
+                inputs = TokensPrompt(prompt_token_ids=prompt)
+            else:
+                inputs = TextPrompt(prompt=prompt)
+
+            if mm_data is not None:
+                inputs["multi_modal_data"] = mm_data
+
+            out = self.generate(
+                inputs,
+                sampling_params=sampling_params,
+                use_tqdm=use_tqdm,
+                lora_request=lora_request,
             )
+            outputs.append(out)
 
-        inputs: PromptInputs
-        if is_list_of(prompt, int):
-            inputs = TokensPrompt(prompt_token_ids=prompt)
-        else:
-            inputs = TextPrompt(prompt=prompt)
-
-        if mm_data is not None:
-            inputs["multi_modal_data"] = mm_data
-
-        return self.generate(
-            inputs,
-            sampling_params=sampling_params,
-            use_tqdm=use_tqdm,
-            lora_request=lora_request,
-        )
+        # When conversations is List[...], return a single list.
+        return outputs if len(outputs) > 1 else outputs[0]
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
