@@ -98,7 +98,7 @@ def initialize_ray_cluster(
     if is_tpu():
         device_str = "TPU"
     elif is_hpu():
-        device_str = hpu_device_string()
+        device_str = hpu_device_string().upper()
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
