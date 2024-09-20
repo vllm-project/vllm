@@ -17,6 +17,9 @@ if not current_platform.is_tpu():
     except ImportError as e:
         logger.warning("Failed to import from vllm._C with %r", e)
 
+if current_platform.is_rocm():
+    import vllm._rocm_C  # noqa: F401
+
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
 
@@ -127,6 +130,32 @@ def paged_attention_v2(
         blocksparse_block_size, blocksparse_head_sliding_step)
 
 
+def paged_attention_rocm(
+    out: torch.Tensor,
+    exp_sum: torch.Tensor,
+    max_logits: torch.Tensor,
+    tmp_out: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_kv_heads: int,
+    scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+    alibi_slopes: Optional[torch.Tensor],
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+) -> None:
+    torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
+                                      key_cache, value_cache, num_kv_heads,
+                                      scale, block_tables, seq_lens,
+                                      block_size, max_seq_len, alibi_slopes,
+                                      kv_cache_dtype, k_scale, v_scale)
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,
@@ -161,16 +190,36 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
-def advance_step(num_seqs: int, num_queries: int, block_size: int,
-                 input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
-                 input_positions: torch.Tensor, seq_lens: torch.Tensor,
-                 slot_mapping: torch.Tensor,
-                 block_tables: torch.Tensor) -> None:
+def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
+                           input_tokens: torch.Tensor,
+                           sampled_token_ids: torch.Tensor,
+                           input_positions: torch.Tensor,
+                           seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
+                           block_tables: torch.Tensor) -> None:
     """Advance a step on GPU for existing inputs for a multi-step runner"""
-    return torch.ops._C.advance_step(num_seqs, num_queries, block_size,
-                                     input_tokens, sampled_token_ids,
-                                     input_positions, seq_lens, slot_mapping,
-                                     block_tables)
+    return torch.ops._C.advance_step_flashattn(num_seqs, num_queries,
+                                               block_size, input_tokens,
+                                               sampled_token_ids,
+                                               input_positions, seq_lens,
+                                               slot_mapping, block_tables)
+
+
+def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
+                            input_tokens: torch.Tensor,
+                            sampled_token_ids: torch.Tensor,
+                            input_positions: torch.Tensor,
+                            seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
+                            block_tables: torch.Tensor,
+                            paged_kv_indices: torch.Tensor,
+                            paged_kv_indptr: torch.Tensor,
+                            paged_kv_last_page_len: torch.Tensor,
+                            block_table_bound: torch.Tensor) -> None:
+
+    return torch.ops._C.advance_step_flashinfer(
+        num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
+        input_positions, seq_lens, slot_mapping, block_tables,
+        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
+        block_table_bound)
 
 
 # quantization ops
@@ -513,7 +562,7 @@ def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                            num_bits: int) -> torch.Tensor:
     num_experts = b_q_weight.shape[0]
     assert size_k % 16 == 0
-    output = torch.empty((num_experts, size_k // 16, size_n * 2),
+    output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
                          device=b_q_weight.device,
                          dtype=b_q_weight.dtype)
     for e in range(num_experts):
@@ -654,32 +703,43 @@ def scaled_fp8_quant(
 
 # int8
 def scaled_int8_quant(
-        input: torch.Tensor,
-        scale: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    input: torch.Tensor,
+    scale: Optional[torch.Tensor] = None,
+    azp: Optional[torch.Tensor] = None,
+    symmetric: bool = True
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
-    Quantize the input tensor to int8 and return the quantized tensor and scale.
+    Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
 
     Args:
         input: The input tensor to be quantized to int8.
         scale: Optional scaling factor for the int8 quantization.
             When not provided, we invoke dynamic-per-token quantization.
+        azp: Optional zero-point for the int8 quantization.
+            Must be provided for asymmetric quantization if `scale` is provided.
+        symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      Tuple[Torch.Tensor, Torch.Tensor] : Output int8 tensor and scales.
+      Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
     """
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
-        torch.ops._C.static_scaled_int8_quant(output, input, scale)
-        return output, scale
+        assert symmetric == (
+            azp is
+            None), "azp must only be provided for asymmetric quantization."
+        torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
+        return output, scale, None
 
     # dynamic-per-token quantization.
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),
                                device=input.device,
                                dtype=torch.float32)
-    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales)
-    return output, input_scales
+    input_azp = None if symmetric else torch.empty_like(input_scales,
+                                                        dtype=torch.int32)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
+                                           input_azp)
+    return output, input_scales, input_azp
 
 
 # qqq ops
@@ -727,11 +787,17 @@ def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                                           silu_activation)
 
 
-def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
-                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
-                         silu_activation: bool) -> torch.Tensor:
+def causal_conv1d_update(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias_: Optional[torch.Tensor],
+    silu_activation: bool,
+    conv_state_indices: Optional[torch.Tensor],
+) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                             silu_activation)
+                                             silu_activation,
+                                             conv_state_indices)
 
 
 def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
@@ -827,12 +893,6 @@ def init_custom_ar(meta: torch.Tensor, rank_data: torch.Tensor,
                    full_nvlink: bool) -> int:
     return torch.ops._C_custom_ar.init_custom_ar(meta, rank_data, handles,
                                                  offsets, rank, full_nvlink)
-
-
-def should_custom_ar(inp: torch.Tensor, max_size: int, world_size: int,
-                     full_nvlink: bool) -> bool:
-    return torch.ops._C_custom_ar.should_custom_ar(inp, max_size, world_size,
-                                                   full_nvlink)
 
 
 def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:

@@ -131,10 +131,10 @@ class GPTQMarlinConfig(QuantizationConfig):
     def is_gptq_marlin_compatible(cls, quant_config: Dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
-        num_bits = quant_config.get("bits", None)
-        group_size = quant_config.get("group_size", None)
-        sym = quant_config.get("sym", None)
-        desc_act = quant_config.get("desc_act", None)
+        num_bits = quant_config.get("bits")
+        group_size = quant_config.get("group_size")
+        sym = quant_config.get("sym")
+        desc_act = quant_config.get("desc_act")
 
         if quant_method != "gptq":
             return False
@@ -566,4 +566,5 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             topk_ids,
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
+            num_bits=self.quant_config.quant_type.size_bits,
         ).to(orig_dtype)

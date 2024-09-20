@@ -207,7 +207,7 @@ class Qwen2VisionAttention(nn.Module):
                 selected_backend = backend_name_to_enum(backend_by_env_var)
         if selected_backend is None:
             # For Volta and Turing GPUs, use xformers instead.
-            device_available = current_platform.get_device_capability()[0] >= 8
+            device_available = current_platform.has_device_capability(80)
             if device_available:
                 from transformers.utils import is_flash_attn_2_available
 
@@ -1055,6 +1055,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -1078,6 +1081,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1)
                 try:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
                     param = params_dict[name]
                 except KeyError:
                     print(params_dict.keys())
