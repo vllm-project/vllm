@@ -82,6 +82,7 @@ ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
+ENV VLLM_CPU_DISABLE_AVX512="true"
 
 # install oneDNN
 RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
