@@ -42,13 +42,10 @@ class Platform:
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
 
-<<<<<<< HEAD
     def is_hpu(self) -> bool:
         return self._enum == PlatformEnum.HPU
 
     @staticmethod
-    def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
-=======
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
@@ -89,7 +86,6 @@ class Platform:
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
->>>>>>> upstream/main
         raise NotImplementedError
 
     @classmethod
