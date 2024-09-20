@@ -11,7 +11,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set
+from typing import AsyncIterator, Set
 
 import uvloop
 from fastapi import APIRouter, FastAPI, Request
@@ -50,6 +50,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.serving_engine import BaseModelPath
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
@@ -95,7 +96,7 @@ async def lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def build_async_engine_client(
-        args: Namespace) -> AsyncIterator[Optional[EngineClient]]:
+        args: Namespace) -> AsyncIterator[EngineClient]:
 
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
@@ -110,7 +111,7 @@ async def build_async_engine_client(
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
-) -> AsyncIterator[Optional[EngineClient]]:
+) -> AsyncIterator[EngineClient]:
     """
     Create EngineClient, either:
         - in-process using the AsyncLLMEngine Directly
@@ -188,10 +189,8 @@ async def build_async_engine_client_from_engine_args(
                     break
                 except TimeoutError:
                     if not engine_process.is_alive():
-                        logger.error("Engine process died before responding "
-                                     "to readiness probe")
-                        yield None
-                        return
+                        raise RuntimeError(
+                            "Engine process failed to start") from None
 
             yield mp_engine_client  # type: ignore[misc]
         finally:
@@ -478,13 +477,18 @@ def init_app_state(
     else:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model)
+        for name in served_model_names
+    ]
+
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
 
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
-        served_model_names,
+        base_model_paths,
         args.response_role,
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
@@ -496,7 +500,7 @@ def init_app_state(
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
-        served_model_names,
+        base_model_paths,
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
@@ -505,13 +509,13 @@ def init_app_state(
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
-        served_model_names,
+        base_model_paths,
         request_logger=request_logger,
     )
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
-        served_model_names,
+        base_model_paths,
         lora_modules=args.lora_modules,
         request_logger=request_logger,
         chat_template=args.chat_template,
@@ -532,10 +536,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     signal.signal(signal.SIGTERM, signal_handler)
 
     async with build_async_engine_client(args) as engine_client:
-        # If None, creation of the client failed and we exit.
-        if engine_client is None:
-            return
-
         app = build_app(args)
 
         model_config = await engine_client.get_model_config()
