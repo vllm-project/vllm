@@ -427,20 +427,20 @@ class InputPreprocessor:
 
     async def _process_encoder_decoder_prompt_async(
         self,
-        inputs: PromptType,
+        prompt: PromptType,
         request_id: str,
     ) -> EncoderDecoderInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
         encoder_inputs: DecoderOnlyInputs
         decoder_inputs: Union[EmptyInputs, DecoderOnlyInputs]
 
-        if is_explicit_encoder_decoder_prompt(inputs):
+        if is_explicit_encoder_decoder_prompt(prompt):
             encoder_task = self._prompt_to_llm_inputs_async(
-                inputs["encoder_prompt"],
+                prompt["encoder_prompt"],
                 request_id=request_id,
             )
 
-            if (decoder_input := inputs["decoder_prompt"]) is None:
+            if (decoder_input := prompt["decoder_prompt"]) is None:
                 encoder_inputs = await encoder_task
                 decoder_inputs = empty_inputs()
             else:
@@ -453,7 +453,7 @@ class InputPreprocessor:
                     encoder_task, decoder_task)
         else:
             encoder_inputs = await self._prompt_to_llm_inputs_async(
-                inputs,
+                prompt,
                 request_id=request_id,
             )
 
@@ -534,7 +534,7 @@ class InputPreprocessor:
 
     def preprocess(
         self,
-        inputs: PromptType,
+        prompt: PromptType,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -544,17 +544,17 @@ class InputPreprocessor:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return self._process_encoder_decoder_prompt(
-                inputs,
+                prompt,
                 request_id=request_id,
             )
 
-        if is_explicit_encoder_decoder_prompt(inputs):
+        if is_explicit_encoder_decoder_prompt(prompt):
             raise ValueError("Cannot pass encoder-decoder prompt "
                              "to decoder-only models")
 
         # Decoder-only operation
         return self._process_decoder_only_prompt(
-            inputs,
+            prompt,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
@@ -562,7 +562,7 @@ class InputPreprocessor:
 
     async def preprocess_async(
         self,
-        inputs: PromptType,
+        prompt: PromptType,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -572,17 +572,17 @@ class InputPreprocessor:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return await self._process_encoder_decoder_prompt_async(
-                inputs,
+                prompt,
                 request_id=request_id,
             )
 
-        if is_explicit_encoder_decoder_prompt(inputs):
+        if is_explicit_encoder_decoder_prompt(prompt):
             raise ValueError("Cannot pass encoder-decoder prompt "
                              "to decoder-only models")
 
         # Decoder-only operation
         return await self._process_decoder_only_prompt_async(
-            inputs,
+            prompt,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
