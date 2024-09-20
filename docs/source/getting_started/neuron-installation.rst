@@ -3,8 +3,8 @@
 Installation with Neuron
 ========================
 
-vLLM 0.3.3 onwards supports model inferencing and serving on AWS Trainium/Inferentia with Neuron SDK.
-At the moment Paged Attention is not supported in Neuron SDK, but naive continuous batching is supported in transformers-neuronx.
+vLLM 0.3.3 onwards supports model inferencing and serving on AWS Trainium/Inferentia with Neuron SDK with continuous batching.
+Paged Attention and Chunked Prefill are currently in development and will be available soon.
 Data types currently supported in Neuron SDK are FP16 and BF16.
 
 Requirements
