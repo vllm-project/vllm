@@ -179,7 +179,7 @@ class SequenceData(msgspec.Struct,
             for token_id, count in counts_by_token.items()
         ]
 
-        return SequenceData(reduce(lambda a, b: a + b, arrs))
+        return SequenceData(reduce(array.__add__, arrs))
 
     @staticmethod
     def from_seqs(
