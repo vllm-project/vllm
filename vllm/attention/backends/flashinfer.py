@@ -115,7 +115,7 @@ class FlashInferState(AttentionState):
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), "NHD"
+                1, self._get_workspace_buffer(), "NHD"
             )
         return self._prefill_wrapper
 
@@ -382,7 +382,7 @@ class FlashInferMetadata(AttentionMetadata):
                 self.num_kv_heads,
                 self.head_dim,
                 self.page_size,
-                causal=False,
+                causal=True
             )
 
     def asdict_zerocopy(self,
@@ -498,7 +498,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.second_layer_kv_indices: List[int] = []
         self.second_layer_kv_indptr: List[int] = []
         self.second_layer_kv_last_page_len: List[int] = []
-        
+
         self.total_blocks = 0
         self.is_profile_run: bool = False
 
