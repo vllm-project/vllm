@@ -323,18 +323,17 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
                max_par, exec_cfg.max_m_blocks)) {                              \
   }
 
-void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
-                         const void* sorted_ids, const void* topk_weights,
-                         const void* topk_ids, const void* s, void* zp,
-                         const void* g_idx, const void* perm, void* a_tmp,
-                         void* expert_offsets, int prob_m, int prob_n,
-                         int prob_k, void* workspace,
-                         vllm::ScalarType const& q_type, bool has_act_order,
-                         bool is_k_full, bool has_zp, int num_groups,
-                         int group_size, int num_experts, int topk,
-                         int moe_block_size, int dev, cudaStream_t stream,
-                         int thread_k, int thread_n, int sms, int max_par,
-                         bool replicate_input, bool apply_weights) {
+void marlin_mm_moe(const void* A, const void* B, void* C,
+                   const void* sorted_ids, const void* topk_weights,
+                   const void* topk_ids, const void* s, void* zp,
+                   const void* g_idx, const void* perm, void* a_tmp,
+                   void* expert_offsets, int prob_m, int prob_n, int prob_k,
+                   void* workspace, vllm::ScalarType const& q_type,
+                   bool has_act_order, bool is_k_full, bool has_zp,
+                   int num_groups, int group_size, int num_experts, int topk,
+                   int moe_block_size, int dev, cudaStream_t stream,
+                   int thread_k, int thread_n, int sms, int max_par,
+                   bool replicate_input, bool apply_weights) {
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
               ", ", prob_n, ", ", prob_k, "]");
 
@@ -579,7 +578,7 @@ torch::Tensor marlin_gemm_moe(
                 " is not size_n / pack_factor = ", size_n / pack_factor);
   }
 
-  marlin_moe::marlin_mm_moe_f16i4(
+  marlin_moe::marlin_mm_moe(
       a.data_ptr(), b_q_weights.data_ptr(), c.data_ptr(), sorted_ids.data_ptr(),
       topk_weights.data_ptr(), topk_ids.data_ptr(), b_scales.data_ptr(),
       b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr(),
