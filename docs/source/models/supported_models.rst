@@ -179,6 +179,10 @@ Decoder-only Language Models
     - Starcoder2
     - :code:`bigcode/starcoder2-3b`, :code:`bigcode/starcoder2-7b`, :code:`bigcode/starcoder2-15b`, etc.
     -
+  * - :code:`SolarForCausalLM`
+    - EXAONE-3
+    - :code:`upstage/solar-pro-preview-instruct`, etc.
+    -
   * - :code:`XverseForCausalLM`
     - Xverse
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.

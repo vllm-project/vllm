@@ -371,7 +371,9 @@ def get_vllm_version() -> str:
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
-            version += f"+cu{cuda_version_str}"
+            # skip this for source tarball, required for pypi
+            if "sdist" not in sys.argv:
+                version += f"+cu{cuda_version_str}"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
