@@ -11,9 +11,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat)
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hip, print_warning_once
 
 
@@ -22,7 +22,11 @@ class GPTQMarlinState(Enum):
     READY = enum.auto()
 
 
-__all__ = ["CompressedTensorsMoEMethod", "CompressedTensorsW8A8Fp8MoEMethod", "CompressedTensorsWNA16MoEMethod"]
+__all__ = [
+    "CompressedTensorsMoEMethod", "CompressedTensorsW8A8Fp8MoEMethod",
+    "CompressedTensorsWNA16MoEMethod"
+]
+
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
     pass
@@ -37,21 +41,23 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.quant_config = quant_config
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get("input_activations")
+        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
+            "weights")
+        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
+            "input_activations")
 
         assert self.weight_quant.symmetric and self.input_quant.symmetric, (
             "Only symmetric quantization is supported for MoE")
         assert self.weight_quant.strategy.value == "tensor"
         assert self.input_quant.strategy.value == "tensor"
-        assert self.weight_quant.dynamic == False
+        assert not self.weight_quant.dynamic
 
         self.static_input_scales = not self.input_quant.dynamic
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-        
+
         params_dtype = torch.float8_e4m3fn
 
         # WEIGHTS
@@ -109,14 +115,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data,
-                                          requires_grad=False)
-
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
         if self.static_input_scales:
-            if (layer.w13_input_scale is None
-                    or layer.w2_input_scale is None):
+            if (layer.w13_input_scale is None or layer.w2_input_scale is None):
                 raise ValueError(
                     "QuantConfig has static quantization, but found "
                     "activation scales are None.")
@@ -130,7 +132,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 layer.w13_input_scale.max(), requires_grad=False)
             layer.w2_input_scale = torch.nn.Parameter(
                 layer.w2_input_scale.max(), requires_grad=False)
-            
+
         # If rocm, normalize the weights and scales to e4m3fnuz
         if is_hip():
             # Normalize the weights and scales
@@ -144,19 +146,19 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     layer.w2_input_scale)
             # Reset the parameter
             layer.w13_weight = torch.nn.Parameter(w13_weight,
-                                                    requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(
-                w13_weight_scale, requires_grad=False)
-            if w13_input_scale is not None:
-                layer.w13_input_scale = torch.nn.Parameter(
-                    w13_input_scale, requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(w2_weight,
-                                                    requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
+                                                  requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(w13_weight_scale,
                                                         requires_grad=False)
+            if w13_input_scale is not None:
+                layer.w13_input_scale = torch.nn.Parameter(w13_input_scale,
+                                                           requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_weight,
+                                                 requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
+                                                       requires_grad=False)
             if w2_input_scale is not None:
-                layer.w2_input_scale = torch.nn.Parameter(
-                    w2_input_scale, requires_grad=False)
+                layer.w2_input_scale = torch.nn.Parameter(w2_input_scale,
+                                                          requires_grad=False)
 
         # Fp8 moe kernel needs single weight scale for w13 per expert.
         # We take the max then dequant and requant each expert.
@@ -167,8 +169,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             start = 0
             for shard_id in range(2):
                 dq_weight = per_tensor_dequantize(
-                    layer.w13_weight[expert_id][start:start +
-                                                shard_size, :],
+                    layer.w13_weight[expert_id][start:start + shard_size, :],
                     layer.w13_weight_scale[expert_id][shard_id])
                 layer.w13_weight[expert_id][
                     start:start + shard_size, :], _ = ops.scaled_fp8_quant(

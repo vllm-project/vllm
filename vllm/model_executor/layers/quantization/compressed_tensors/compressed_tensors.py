@@ -74,7 +74,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
             weight_quant = self.target_scheme_map["Linear"].get("weights")
-            input_quant = self.target_scheme_map["Linear"].get("input_activations")
+            input_quant = self.target_scheme_map["Linear"].get(
+                "input_activations")
             if self._is_wNa16_group_channel(weight_quant, input_quant):
                 return CompressedTensorsWNA16MoEMethod(self)
             elif self._is_fp8_w8a8(weight_quant, input_quant):
