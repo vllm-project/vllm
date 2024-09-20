@@ -29,8 +29,6 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
-if current_platform.is_hpu():
-    from vllm.hpu.ops import dispatch_bgmv_embedding, dispatch_bgmv_linear
 
 if TYPE_CHECKING:
     pass
@@ -65,87 +63,6 @@ def _not_fully_sharded_can_replace(can_replace):
         return can_replace(*args, **kwargs) and condition
 
     return dec
-
-
-def _apply_lora(
-    x: torch.Tensor,
-    lora_a_stacked: torch.Tensor,
-    lora_b_stacked: torch.Tensor,
-    indices: torch.Tensor,
-    output: torch.Tensor,
-):
-    """Applies lora to each input.
-
-    This method applies all loras to each input. It uses the
-    indices vector to determine which lora yields the
-    correct output. An index of -1 means no lora should be
-    applied. This method adds the final lora results to the
-    output.
-
-    Input shapes:
-        x:               (batch_size, hidden_dim)
-        lora_a_stacked:  (num_loras, lora_rank, hidden_dim)
-        lora_b_stacked:  (num_loras, output_dim, lora_rank)
-        indices:         (batch_size)
-        output:          (batch_size, output_dim)
-    """
-    org_output = output
-    x = x.view(-1, x.shape[-1])
-    output = output.view(-1, output.shape[-1])
-    indices = indices.view(-1)
-    if current_platform.is_hpu():
-        dispatch_bgmv_linear(output, x, lora_a_stacked, lora_b_stacked,
-                             indices, 0, 1.0)
-    else:
-        add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
-    return output.view_as(org_output)
-
-
-def _apply_lora_packed_nslice(
-    x: torch.Tensor,
-    lora_a_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    lora_b_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    indices: torch.Tensor,
-    output: torch.Tensor,
-    output_slices: Tuple[int, ...],
-):
-    """Applies lora to each input.
-
-    This method applies all loras to each input. It uses the
-    indices vector to determine which lora yields the
-    correct output. An index of -1 means no lora should be
-    applied. This method adds the final lora results to the
-    output.
-
-    This method is used for layers that are composed of multiple sublayers
-    (slices) packed together.
-
-    Input shapes:
-        x:                 (batch_size, hidden_dim)
-        lora_a_stacked:    3 element tuple of (num_loras, lora_rank, hidden_dim)
-        lora_b_stacked:    3 element tuple of (num_loras, output_dim, lora_rank)
-        indices:           (batch_size)
-        output:            (batch_size, q_slice_size + 2*kv_slice_size)
-        output_slices:     n-1 element tuple of (slice_size...),
-                           where n is number of slices
-    """
-    org_output = output
-    x = x.view(-1, x.shape[-1])
-    output = output.view(-1, output.shape[-1])
-    indices = indices.view(-1)
-    offset_left = 0
-    for slice_idx in range(len(output_slices)):
-        if is_hpu():
-            dispatch_bgmv_linear(
-                output[:, offset_left:offset_left + output_slices[slice_idx]],
-                x, lora_a_stacked[slice_idx], lora_b_stacked[slice_idx],
-                indices, 0, 1.0)
-        else:
-            add_lora_slice(output, x, lora_a_stacked[slice_idx],
-                           lora_b_stacked[slice_idx], indices, 0, 1.0,
-                           offset_left, output_slices[slice_idx])
-        offset_left += output_slices[slice_idx]
-    return output.view_as(org_output)
 
 
 @dataclass
@@ -309,22 +226,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
         embeddings_indices = None
-        if current_platform.is_hpu():
-            embedding_len = self.indices_len[3]
-            # NOTE(vgoel): These asserts can be skipped when upstreaming.
-            # Can be removed from vllm-fork also once lora functionality
-            # on Gaudi stabilizes.
-            if current_platform.is_hpu():
-                emb_len = embedding_len
-                x_shape = x.shape
-                ind_shape = self.embeddings_indices[1].shape
-                assert embedding_len == x.shape[0] * x.shape[1], \
-                    f"Extra Info: {emb_len}, {x_shape}, {ind_shape}"
-                assert embedding_len <= self.embeddings_indices[1].shape[0], \
-                    f"Extra Info: {emb_len}, {x.shape}, {ind_shape}"
-            indices = self.embeddings_indices[1][:embedding_len].view_as(x)
-        else:
-            embeddings_indices = self.punica_wrapper.embeddings_indices
+        embeddings_indices = self.punica_wrapper.embeddings_indices
         indices = embeddings_indices[1].view_as(x)
         full_lora_a_embeddings = F.embedding(
             x + indices,
@@ -342,12 +244,13 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             full_lora_a_embeddings = full_lora_a_embeddings.view(
                 full_lora_a_embeddings.shape[0] *
                 full_lora_a_embeddings.shape[1], -1)
+        # Embedding layer only need expand op
         if current_platform.is_hpu():
-            dispatch_bgmv_embedding(full_output, full_lora_a_embeddings,
-                                    self.lora_b_stacked,
-                                    self.indices[:self.indices_len[0]], 0, 1.0)
+            self.punica_wrapper.add_lora_embedding(full_output,
+                                                   full_lora_a_embeddings,
+                                                   self.lora_b_stacked,
+                                                    add_input=True)
         else:
-            # Embedding layer only need expand op
             self.punica_wrapper.add_expand(full_output,
                                            full_lora_a_embeddings,
                                            self.lora_b_stacked,

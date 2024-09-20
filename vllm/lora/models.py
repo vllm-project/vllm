@@ -26,8 +26,11 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.utils import is_pin_memory_available
+from vllm.utils import is_pin_memory_available, get_device
 from vllm.platforms import current_platform
+
+if current_platform.is_hpu():
+    from vllm.hpu.punica_hpu import GaudiPunicaWrapper
 
 logger = init_logger(__name__)
 
@@ -428,23 +431,9 @@ class LoRAModelManager(AdapterModelManager):
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
         if current_platform.is_hpu():
-            self.base_indices = torch.empty(self.max_num_batched_tokens,
-                                            dtype=torch.long,
-                                            device=get_device())
-            self.sampler_indices = torch.empty(self.max_num_batched_tokens,
-                                               dtype=torch.long,
-                                               device=get_device())
-            self.sampler_indices_padded = torch.empty(
-                self.max_num_batched_tokens,
-                dtype=torch.long,
-                device=get_device())
-            self.embeddings_indices = torch.empty(2,
-                                                  self.max_num_batched_tokens,
-                                                  dtype=torch.long,
-                                                  device=get_device())
-            self.long_lora_indices = torch.empty(self.max_num_batched_tokens,
-                                                 dtype=torch.long,
-                                                 device=get_device())
+            self.punica_wrapper = GaudiPunicaWrapper(max_num_batched_tokens,
+                                            max_batches=self.max_num_seqs,
+                                            device="hpu")
         else:
             self.punica_wrapper = PunicaWrapper(max_num_batched_tokens,
                                                 max_batches=self.max_num_seqs,

@@ -741,6 +741,11 @@ def is_hpu() -> bool:
     from importlib import util
     return util.find_spec('habana_frameworks') is not None
 
+def get_device() -> str:
+    if is_hpu():
+        return "hpu"
+    return "cuda"
+
 
 class HabanaMemoryProfiler:
 
