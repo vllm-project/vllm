@@ -151,7 +151,7 @@ class SequenceData(msgspec.Struct,
     # NOTE: we cannot use Union[List, array] because msgspec cannot support
     # union of 2 list types.
     _prompt_token_ids: array
-    _prompt_embeds: Optional[List[torch.Tensor]] = None
+    _prompt_embeds: Optional[torch.Tensor] = None
     _output_token_ids: array = msgspec.field(
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
@@ -185,18 +185,22 @@ class SequenceData(msgspec.Struct,
     def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
+        *,
+        prompt_embeds: Optional[torch.Tensor] = None,
     ) -> "SequenceData":
         prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      prompt_token_ids)
 
         if output_token_ids is None:
-            return SequenceData(prompt_token_ids_arr)
+            return SequenceData(prompt_token_ids_arr,
+                                _prompt_embeds=prompt_embeds)
 
         output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      output_token_ids)
 
         return SequenceData(prompt_token_ids_arr,
-                            _output_token_ids=output_token_ids_arr)
+                            _output_token_ids=output_token_ids_arr,
+                            _prompt_embeds=prompt_embeds)
 
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
@@ -405,7 +409,8 @@ class Sequence:
             data = SequenceData.from_seqs(self.prompt_token_ids)
         else:
             assert self.prompt_embeds is not None
-            data = SequenceData(self.prompt_embeds)
+            data = SequenceData.from_seqs([],
+                                          prompt_embeds=self.prompt_embeds)
 
         self.data = data
 
