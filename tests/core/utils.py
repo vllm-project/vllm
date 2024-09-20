@@ -4,6 +4,7 @@ from typing import Sequence as GenericSequence
 from typing import Tuple
 
 from vllm import SamplingParams
+from vllm.inputs import EncoderDecoderInputs
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, Sequence, SequenceGroup
 
@@ -62,23 +63,27 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_tokens = list(reversed(list(range(encoder_prompt_length))))
     encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
 
-    inputs = {
-        "prompt": decoder_prompt_str,
-        "prompt_token_ids": decoder_prompt_tokens,
-        "encoder_prompt": encoder_prompt_str,
-        "encoder_prompt_token_ids": encoder_prompt_tokens,
-        "multi_modal_data": None,
+    inputs: EncoderDecoderInputs = {
+        "decoder": {
+            "type": "token",
+            "prompt": decoder_prompt_str,
+            "prompt_token_ids": decoder_prompt_tokens,
+        },
+        "encoder": {
+            "type": "token",
+            "prompt": encoder_prompt_str,
+            "prompt_token_ids": encoder_prompt_tokens,
+        },
     }
 
     decoder_prompt = Sequence(int(request_id),
                               inputs=inputs,
-                              block_size=block_size,
-                              from_decoder_prompt=True)
+                              block_size=block_size)
 
     encoder_prompt = Sequence(int(request_id),
                               inputs=inputs,
-                              block_size=block_size,
-                              from_decoder_prompt=False)
+                              block_size=block_size)
+
     seq_group = SequenceGroup(request_id=request_id,
                               seqs=[decoder_prompt],
                               sampling_params=SamplingParams(
