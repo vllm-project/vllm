@@ -1396,30 +1396,30 @@ static constexpr int min_thread_n = 64;
 static constexpr int min_thread_k = 64;
 
 #define __CALL_IF_MOE(W_TYPE, THREAD_N_BLOCKS, THREAD_K_BLOCKS, HAS_ACT_ORDER, \
-                      GROUP_BLOCKS, NUM_THREADS)                       \
+                      GROUP_BLOCKS, NUM_THREADS)                               \
   else if (q_type == W_TYPE && thread_n_blocks == THREAD_N_BLOCKS &&           \
            thread_k_blocks == THREAD_K_BLOCKS &&                               \
-           has_act_order == HAS_ACT_ORDER &&                \
-           group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS) {       \
+           has_act_order == HAS_ACT_ORDER && group_blocks == GROUP_BLOCKS &&   \
+           num_threads == NUM_THREADS) {                                       \
     cudaFuncSetAttribute(                                                      \
         MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,  \
-                  STAGES, HAS_ACT_ORDER, GROUP_BLOCKS>,                \
+                  STAGES, HAS_ACT_ORDER, GROUP_BLOCKS>,                        \
         cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);          \
     MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,      \
-              STAGES, HAS_ACT_ORDER, GROUP_BLOCKS>                     \
+              STAGES, HAS_ACT_ORDER, GROUP_BLOCKS>                             \
         <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                     \
             A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,      \
-            g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx,     \
+            g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx,             \
             num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,           \
             replicate_input, apply_weights, m_block, max_par,                  \
             cfg_max_m_blocks);                                                 \
   }
 
-#define GPTQ_CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)          \
+#define GPTQ_CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)   \
   __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
   __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
   __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
   __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
   __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)
 
-}
+}  // namespace marlin_moe
