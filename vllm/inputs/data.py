@@ -137,6 +137,22 @@ class TokenInputs(TypedDict):
     """
 
 
+def token_inputs(
+    prompt_token_ids: List[int],
+    prompt: Optional[str] = None,
+    multi_modal_data: Optional["MultiModalDataDict"] = None,
+) -> TokenInputs:
+    """Construct :class:`TokenInputs` from optional values."""
+    inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
+
+    if prompt is not None:
+        inputs["prompt"] = prompt
+    if multi_modal_data is not None:
+        inputs["multi_modal_data"] = multi_modal_data
+
+    return inputs
+
+
 class EmbedInputs(TypedDict):
     """Represents embedding-based inputs."""
 
@@ -153,7 +169,20 @@ class EmbedInputs(TypedDict):
     """
 
 
-LLMInputs = Union[TokenInputs, EmbedInputs]
+def embed_inputs(
+    prompt_embeds: torch.Tensor,
+    multi_modal_data: Optional["MultiModalDataDict"] = None,
+) -> EmbedInputs:
+    """Construct :class:`EmbedInputs` from optional values."""
+    inputs = EmbedInputs(type="embed", prompt_embeds=prompt_embeds)
+
+    if multi_modal_data is not None:
+        inputs["multi_modal_data"] = multi_modal_data
+
+    return inputs
+
+
+DecoderOnlyInputs = Union[TokenInputs, EmbedInputs]
 """
 The inputs in :class:`~vllm.LLMEngine` before they are
 passed to the model executor.
@@ -167,6 +196,11 @@ class EmptyInputs(TypedDict):
 
     type: Literal["empty"]
     """The type of inputs."""
+
+
+def empty_inputs() -> EmptyInputs:
+    """Construct :class:`EmptyInputs` from optional values."""
+    return EmptyInputs(type="empty")
 
 
 class EncoderDecoderInputs(TypedDict):

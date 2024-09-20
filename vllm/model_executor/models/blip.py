@@ -1,6 +1,5 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from array import array
 from typing import Optional, Union
 
 import torch
@@ -11,7 +10,7 @@ from transformers.models.blip.modeling_blip import BlipAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.inputs import LLMInputs
+from vllm.inputs import DecoderOnlyInputs, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -19,7 +18,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.sequence import SequenceTokenData
 
 try:
     from xformers import ops as xops
@@ -62,11 +61,10 @@ def dummy_seq_data_for_blip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * image_feature_size
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceTokenData.from_counts({
+        image_token_id: image_feature_size,
+        0: (seq_len - image_feature_size),
+    })
 
 
 def dummy_image_for_blip(
@@ -89,7 +87,7 @@ def dummy_image_for_blip(
 def input_processor_for_blip(
     model_config: ModelConfig,
     hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
-    llm_inputs: LLMInputs,
+    llm_inputs: DecoderOnlyInputs,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
@@ -114,9 +112,9 @@ def input_processor_for_blip(
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa

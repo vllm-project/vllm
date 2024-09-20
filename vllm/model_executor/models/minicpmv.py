@@ -23,7 +23,6 @@
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
-from array import array
 from functools import partial
 from typing import (Any, Callable, Iterable, List, Mapping, Optional, Tuple,
                     TypedDict)
@@ -37,7 +36,8 @@ from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -56,8 +56,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceTokenData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 
@@ -259,8 +258,9 @@ def get_max_minicpmv_image_tokens(ctx: InputContext):
 
 
 def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * seq_len
-    return SequenceData(token_ids)
+    return SequenceTokenData.from_counts({
+        0: seq_len,
+    })
 
 
 def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
@@ -280,7 +280,8 @@ def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
     return seq_data, mm_data
 
 
-def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_minicpmv(ctx: InputContext,
+                                 llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -323,7 +324,7 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
 
-    llm_inputs = LLMInputs(
+    llm_inputs = token_inputs(
         prompt_token_ids=new_token_ids,
         prompt=new_prompt,
         multi_modal_data=multi_modal_data,

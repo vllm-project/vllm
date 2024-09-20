@@ -27,7 +27,8 @@ from transformers import FuyuConfig, FuyuImageProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -40,7 +41,7 @@ from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+                           SequenceTokenData)
 
 from .interfaces import SupportsMultiModal
 from .utils import merge_multimodal_embeddings
@@ -106,7 +107,7 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int, num_images: int):
     token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, image_token_ids) * num_images
     token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
                        [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceTokenData.from_seqs(token_ids)
 
 
 def dummy_image_for_fuyu(
@@ -153,7 +154,7 @@ def _fuyu_image_preprocess(image_processor: FuyuImageProcessor,
     return model_image_input
 
 
-def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_fuyu(ctx: InputContext, llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -194,9 +195,9 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
     new_prompt_token_ids = image_input_ids + bos_token + prompt_token_ids[
         1:] + boa_token
 
-    return LLMInputs(prompt=new_prompt,
-                     prompt_token_ids=new_prompt_token_ids,
-                     multi_modal_data=new_multi_modal_data)
+    return token_inputs(prompt=new_prompt,
+                        prompt_token_ids=new_prompt_token_ids,
+                        multi_modal_data=new_multi_modal_data)
 
 
 def input_mapper_for_fuyu(ctx: InputContext, data: object):

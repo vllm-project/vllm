@@ -22,7 +22,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
-from array import array
 from functools import lru_cache, partial
 from typing import (Iterable, List, Mapping, Optional, Tuple, Type, TypedDict,
                     Union)
@@ -48,7 +47,8 @@ from vllm.attention.selector import (_Backend, backend_name_to_enum,
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
@@ -66,8 +66,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.platforms import current_platform
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceTokenData
 from vllm.transformers_utils.processor import get_processor
 
 logger = init_logger(__name__)
@@ -656,7 +655,7 @@ get_max_qwen2_vl_video_tokens = partial(get_max_qwen2_vl_mm_tokens,
 
 def dummy_data_for_qwen2_vl(
     ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
-) -> Tuple[SequenceData, Optional[MultiModalDataDict]]:
+) -> Tuple[SequenceTokenData, Optional[MultiModalDataDict]]:
     image_processor = cached_get_image_processor(ctx.model_config.model)
 
     num_images = mm_counts["image"]
@@ -681,15 +680,17 @@ def dummy_data_for_qwen2_vl(
             "--limit-mm-per-prompt.")
 
     hf_config = ctx.get_hf_config(Qwen2VLConfig)
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [hf_config.vision_start_token_id])
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [hf_config.image_token_id]) * max_llm_image_tokens
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [hf_config.vision_end_token_id])
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - max_llm_image_tokens - 2)
-    dummy_seqdata = SequenceData(token_ids)
+
+    dummy_seqdata = SequenceTokenData.from_counts({
+        hf_config.vision_start_token_id:
+        1,
+        hf_config.image_token_id:
+        max_llm_image_tokens,
+        hf_config.vision_end_token_id:
+        1,
+        0:
+        seq_len - max_llm_image_tokens - 2,
+    })
     dummy_image = Image.new("RGB", (max_resized_width, max_resized_height),
                             color=0)
 
@@ -724,8 +725,8 @@ def _get_llm_num_vision_tokens(
     return llm_num_vision_tokens
 
 
-def input_processor_for_qwen2_vl(ctx: InputContext,
-                                 llm_inputs: LLMInputs) -> LLMInputs:
+def input_processor_for_qwen2_vl(
+        ctx: InputContext, llm_inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
     multi_modal_data = llm_inputs.get("multi_modal_data", None)
     if multi_modal_data is None:
         return llm_inputs
@@ -817,7 +818,7 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
                                                             1:])
         prompt_token_ids = prompt_token_ids_with_video
 
-    return LLMInputs(
+    return token_inputs(
         prompt_token_ids=prompt_token_ids,
         prompt=llm_inputs["prompt"],
         multi_modal_data=multi_modal_data,

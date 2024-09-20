@@ -9,7 +9,7 @@ from transformers import CLIPVisionConfig, LlavaConfig, SiglipVisionConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -126,7 +126,8 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int,
     raise NotImplementedError(msg)
 
 
-def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_llava(ctx: InputContext,
+                              llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs

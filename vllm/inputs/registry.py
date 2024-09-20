@@ -10,7 +10,7 @@ from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
 
-from .data import LLMInputs
+from .data import DecoderOnlyInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -97,7 +97,7 @@ class _MultiModalCounts(UserDict):
             raise KeyError(msg) from exc
 
 
-InputProcessor = Callable[[InputContext, LLMInputs], LLMInputs]
+InputProcessor = Callable[[InputContext, DecoderOnlyInputs], DecoderOnlyInputs]
 """Preprocess the inputs to the model."""
 
 
@@ -129,7 +129,7 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceTokenData
 
-        dummy_seq_data = SequenceTokenData.from_seq([0] * seq_len)
+        dummy_seq_data = SequenceTokenData.from_seqs([0] * seq_len)
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data
@@ -204,8 +204,9 @@ class InputRegistry:
 
         return seq_data, mm_data
 
-    def _default_input_processor(self, ctx: InputContext,
-                                 inputs: LLMInputs) -> LLMInputs:
+    def _default_input_processor(
+            self, ctx: InputContext,
+            inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
         """The default input processor is a no-op."""
         return inputs
 
@@ -234,7 +235,7 @@ class InputRegistry:
         return wrapper
 
     def process_input(self, model_config: "ModelConfig",
-                      inputs: LLMInputs) -> LLMInputs:
+                      inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
         """
         Apply an input processor to an instance of model inputs.
 

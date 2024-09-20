@@ -70,7 +70,7 @@ def test_logits_processors(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceTokenData.from_seq([1, 2, 3])},
+                seq_data={0: SequenceTokenData.from_seqs([1, 2, 3])},
                 sampling_params=SamplingParams(temperature=0,
                                                logits_processors=[pick_ith]),
                 block_tables={0: [1]},

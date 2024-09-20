@@ -18,7 +18,8 @@ from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -193,7 +194,8 @@ def get_max_internvl_image_tokens(ctx: InputContext):
     return num_patches * max_dynamic_patch
 
 
-def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_internvl(ctx: InputContext,
+                                 llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -248,9 +250,9 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         new_prompt = new_prompt.replace('<image>', image_prompt, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
-    return LLMInputs(prompt=prompt,
-                     prompt_token_ids=new_prompt_token_ids,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt=prompt,
+                        prompt_token_ids=new_prompt_token_ids,
+                        multi_modal_data=multi_modal_data)
 
 
 def input_mapper_for_internvl(ctx: InputContext, data: object):

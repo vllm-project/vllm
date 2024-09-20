@@ -19,7 +19,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY
-from vllm.inputs.data import LLMInputs
+from vllm.inputs.data import DecoderOnlyInputs, token_inputs
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
@@ -37,7 +37,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs, NestedTensors
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceTokenData
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
@@ -96,10 +96,12 @@ def dummy_data_for_ultravox(
     other_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                             [0]) * (seq_len - len(audio_token_ids))
 
+    seq_data = SequenceTokenData.from_seqs(audio_token_ids + other_token_ids)
+
     audio_and_sr = (np.array([0.0] * feature_extractor.chunk_length), 1)
     mm_dict = {"audio": [audio_and_sr] * audio_count}
 
-    return (SequenceData(audio_token_ids + other_token_ids), mm_dict)
+    return (seq_data, mm_dict)
 
 
 def input_mapper_for_ultravox(ctx: InputContext, data: object):
@@ -141,7 +143,8 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
     return MultiModalInputs({"audio_features": audio_features})
 
 
-def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_ultravox(ctx: InputContext,
+                                 llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "audio" not in multi_modal_data:
         return llm_inputs
@@ -183,9 +186,9 @@ def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 class StackAudioFrames(nn.Module):

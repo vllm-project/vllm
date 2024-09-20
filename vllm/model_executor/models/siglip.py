@@ -2,7 +2,6 @@
 within a vision language model."""
 
 import math
-from array import array
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -13,7 +12,7 @@ from transformers.models.siglip.modeling_siglip import SiglipSdpaAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.inputs import LLMInputs
+from vllm.inputs import DecoderOnlyInputs, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -24,7 +23,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.sequence import SequenceTokenData
 
 try:
     from xformers import ops as xops
@@ -67,11 +66,10 @@ def dummy_seq_data_for_siglip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * image_feature_size
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceTokenData.from_counts({
+        image_token_id: image_feature_size,
+        0: (seq_len - image_feature_size),
+    })
 
 
 def dummy_image_for_siglip(
@@ -94,7 +92,7 @@ def dummy_image_for_siglip(
 def input_processor_for_siglip(
     model_config: ModelConfig,
     hf_config: SiglipVisionConfig,
-    llm_inputs: LLMInputs,
+    llm_inputs: DecoderOnlyInputs,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[Union[int, List[int]]] = None,
@@ -125,7 +123,7 @@ def input_processor_for_siglip(
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(
+    return token_inputs(
         prompt_token_ids=new_token_ids,
         prompt=new_prompt,
         multi_modal_data=multi_modal_data,

@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, reduce
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping,
                     Optional)
 from typing import Sequence as GenericSequence
@@ -22,7 +22,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
-    from vllm.inputs import EncoderDecoderInputs, LLMInputs
+    from vllm.inputs import DecoderOnlyInputs, EncoderDecoderInputs
     from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
@@ -324,7 +324,19 @@ class SequenceTokenData(SequenceDataMixin, _TokenBase,
                                    ...] = msgspec.field(default_factory=tuple)
 
     @staticmethod
-    def from_seq(
+    def from_counts(counts_by_token: Mapping[int, int]) -> "SequenceTokenData":
+        if len(counts_by_token) == 0:
+            return SequenceTokenData.from_seqs([])
+
+        arrs = [
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
+            for token_id, count in counts_by_token.items()
+        ]
+
+        return SequenceTokenData(reduce(lambda a, b: a + b, arrs))
+
+    @staticmethod
+    def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
     ) -> "SequenceTokenData":
@@ -475,7 +487,7 @@ SequenceData = Union[SequenceTokenData, SequenceEmbedData]
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
-    The sequence is constructed from the LLMInputs (for decoder-only) or
+    The sequence is constructed from the DecoderOnlyInputs (for decoder-only) or
     EncoderDecoderInputs (for encoder-decoder) instance passed
     in through the `inputs` constructor argument.
 
@@ -493,7 +505,7 @@ class Sequence:
     def __init__(
         self,
         seq_id: int,
-        inputs: Union["LLMInputs", "EncoderDecoderInputs"],
+        inputs: Union["DecoderOnlyInputs", "EncoderDecoderInputs"],
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -508,7 +520,7 @@ class Sequence:
 
         data: SequenceData
         if self.prompt_token_ids:
-            data = SequenceTokenData.from_seq(self.prompt_token_ids)
+            data = SequenceTokenData.from_seqs(self.prompt_token_ids)
         else:
             assert self.prompt_embeds is not None
             data = SequenceEmbedData(self.prompt_embeds)

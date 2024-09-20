@@ -28,8 +28,8 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderInputs, InputRegistry,
-                         LLMInputs, PromptType)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
+                         EncoderDecoderInputs, InputRegistry, PromptType)
 from vllm.inputs.parse import is_valid_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -618,7 +618,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: Union[LLMInputs, EncoderDecoderInputs],
+        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -1705,7 +1705,7 @@ class LLMEngine:
         return False, (f"Model {self.model_config.model} does not support "
                        "input embeddings, but prompt_embeds was provided.")
 
-    def _validate_model_inputs(self, inputs: Union[LLMInputs,
+    def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
                                                    EncoderDecoderInputs]):
         if self.is_encoder_decoder_model():
             prompt_ids = inputs.get("encoder_prompt_token_ids")

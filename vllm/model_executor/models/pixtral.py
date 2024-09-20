@@ -1,4 +1,3 @@
-from array import array
 from dataclasses import dataclass, fields
 from itertools import tee
 from typing import Iterable, List, Mapping, Optional, Tuple, Union
@@ -14,7 +13,7 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -24,8 +23,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceTokenData
 
 from .interfaces import SupportsMultiModal
 from .utils import init_vllm_registered_model
@@ -63,13 +61,11 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     image_feature_size = (size**2) // (patch_size**2)
 
     num_image_tokens = image_feature_size * num_images
+    seq_data = SequenceTokenData.from_counts({
+        image_token_id: num_image_tokens,
+        0: seq_len - num_image_tokens,
+    })
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * num_image_tokens
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - num_image_tokens)
-
-    seq_data = SequenceData(token_ids)
     mm_data = {"image": num_images * [image]}
     return seq_data, mm_data
 
@@ -105,7 +101,8 @@ def input_mapper_for_pixtral(ctx: InputContext,
     return MultiModalInputs({"images": images})
 
 
-def input_processor_for_pixtral(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_pixtral(ctx: InputContext,
+                                llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is not None and "image" in multi_modal_data:
         tokenizer = cached_get_tokenizer(

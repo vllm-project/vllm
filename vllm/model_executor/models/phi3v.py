@@ -27,7 +27,7 @@ from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -398,7 +398,8 @@ def _get_image_placeholder_token_ids(model_config: ModelConfig,
     return image_placeholder_token_ids
 
 
-def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_phi3v(ctx: InputContext,
+                              llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -485,9 +486,9 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
             new_token_ids.append(token_id)
 
     # NOTE: Create a defensive copy of the original inputs
-    llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
-                           prompt=new_prompt,
-                           multi_modal_data=multi_modal_data)
+    llm_inputs = DecoderOnlyInputs(prompt_token_ids=new_token_ids,
+                                   prompt=new_prompt,
+                                   multi_modal_data=multi_modal_data)
     return llm_inputs
 
 

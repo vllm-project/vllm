@@ -4,9 +4,9 @@ from typing_extensions import TypeIs
 
 from vllm.utils import is_list_of
 
-from .data import (EmbedsPrompt, EncoderDecoderInputs,
-                   ExplicitEncoderDecoderPrompt, LLMInputs, PromptType,
-                   SingletonPrompt, TextPrompt, TokensPrompt)
+from .data import (DecoderOnlyInputs, EmbedsPrompt, EncoderDecoderInputs,
+                   ExplicitEncoderDecoderPrompt, PromptType, SingletonPrompt,
+                   TextPrompt, TokensPrompt)
 
 
 class ParsedText(TypedDict):
@@ -110,6 +110,6 @@ def is_explicit_encoder_decoder_prompt(
 
 
 def is_valid_encoder_decoder_inputs(
-    inputs: Union[LLMInputs, EncoderDecoderInputs],
+    inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
 ) -> TypeIs[EncoderDecoderInputs]:
     return "encoder_prompt_token_ids" in inputs
