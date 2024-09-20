@@ -337,6 +337,9 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
+        if not supports_custom_op():
+            return self._all_reduce(input_)
+
         if self.tpu_communicator is not None and \
             not self.tpu_communicator.disabled:
             # TPU handles Dynamo with its own logic.
@@ -345,8 +348,6 @@ class GroupCoordinator:
         if self.ca_comm is not None and self.ca_comm.should_custom_ar(input_):
             return torch.ops.vllm.outplace_all_reduce(
                 input_, group_name=self.unique_name)
-        elif not supports_custom_op():
-            return self._all_reduce(input_)
         else:
             torch.ops.vllm.inplace_all_reduce(input_,
                                               group_name=self.unique_name)
