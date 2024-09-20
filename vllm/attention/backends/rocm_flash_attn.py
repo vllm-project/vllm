@@ -517,7 +517,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
                 # common code for prefill
                 assert output[:num_prefill_tokens].shape == out.shape
-                output[:num_prefill_tokens] = out
+                if output.shape[0] > num_prefill_tokens:
+                    output[:num_prefill_tokens] = out
+                else:
+                    output = out
             else:
                 # prefix-enabled attention
                 output[:num_prefill_tokens] = PagedAttention.forward_prefix(
@@ -564,12 +567,16 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     device=output.device,
                 )
                 max_logits = torch.empty_like(exp_sums)
+                if num_prefill_tokens > 0:
+                    out = output[num_prefill_tokens:]
+                else:
+                    out = output
                 ops.paged_attention_rocm(
-                    output[num_prefill_tokens:], exp_sums, max_logits,
-                    tmp_output, decode_query, key_cache, value_cache,
-                    self.num_kv_heads, self.scale, decode_meta.block_tables,
-                    decode_meta.seq_lens_tensor, block_size, max_seq_len,
-                    self.alibi_slopes, self.kv_cache_dtype, k_scale, v_scale)
+                    out, exp_sums, max_logits, tmp_output, decode_query,
+                    key_cache, value_cache, self.num_kv_heads, self.scale,
+                    decode_meta.block_tables, decode_meta.seq_lens_tensor,
+                    block_size, max_seq_len, self.alibi_slopes,
+                    self.kv_cache_dtype, k_scale, v_scale)
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
                     decode_query,
