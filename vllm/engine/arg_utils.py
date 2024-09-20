@@ -107,7 +107,7 @@ class EngineArgs:
     block_size: int = 16
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
-    use_v2_block_manager: bool = False
+    use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
@@ -367,7 +367,10 @@ class EngineArgs:
                             'capping to sliding window size')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
-                            help='Use BlockSpaceMangerV2.')
+                            help='[DEPRECATED] block manager v1 has been '
+                            'removed and block manager v2 is now the default '
+                            'block manager. Setting this flag to True or False'
+                            ' has no effect on vLLM behavior.')
         parser.add_argument(
             '--num-lookahead-slots',
             type=int,
@@ -929,12 +932,6 @@ class EngineArgs:
                 "errors during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
-
-        if self.num_scheduler_steps > 1 and not self.use_v2_block_manager:
-            self.use_v2_block_manager = True
-            logger.warning(
-                "Enabled BlockSpaceManagerV2 because it is "
-                "required for multi-step (--num-scheduler-steps > 1)")
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
