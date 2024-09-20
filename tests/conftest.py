@@ -787,13 +787,26 @@ class VllmRunner:
 
     def generate_beam_search(
         self,
+        prompts: List[str], # or a List of List[int]
+        beam_width: int,
+        max_tokens: int,
+    ) -> List[Tuple(List[int], str)]:
+        outputs = []
+        for prompt in prompts:
+            outputs.append(self.model.beam_search(prompt, beam_width, max_tokens))
+        return outputs
+    
+    def generate_beam_search_old(
+        self,
         prompts: List[str],
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        outputs = []
-        for prompt in prompts:
-            outputs.append(self.model.beam_search(prompt, beam_width, max_tokens))
+        beam_search_params = SamplingParams(n=beam_width,
+                                            use_beam_search=True,
+                                            temperature=0.0,
+                                            max_tokens=max_tokens)
+        outputs = self.generate(prompts, beam_search_params)
         return outputs
 
     def encode(self, prompts: List[str]) -> List[List[float]]:

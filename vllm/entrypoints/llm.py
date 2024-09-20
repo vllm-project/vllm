@@ -349,6 +349,7 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
+    # take either a str or List[int]
     def beam_search(
         self,
         prompt: str,
