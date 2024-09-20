@@ -16,6 +16,7 @@ from vllm.model_executor.layers.multi_head_sampler import MultiheadSampler
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding
+from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -45,11 +46,43 @@ def get_max_speech_tokens(ctx: InputContext):
 @MULTIMODAL_REGISTRY.register_speech_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_ttsllm)
 @MULTIMODAL_REGISTRY.register_max_speech_tokens(get_max_speech_tokens)
-class FishTtsLlm(nn.Module):
+class FishTtsLlm(nn.Module, SupportsLoRA):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
+        "lm_head"
+    ]
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+    embedding_padding_modules = ["lm_head"]
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
     def __init__(self,
                  config: LlamaConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None,) -> None:
         super().__init__()
         
         self.config = config
@@ -60,7 +93,7 @@ class FishTtsLlm(nn.Module):
         self.num_output_head = config.num_output_head
         self.audio_start_token_id = config.audio_start_token_id
 
-        self.gpt = LlamaModel(config)
+        self.gpt = LlamaModel(config, lora_config=lora_config)
         self.model_dim = self.gpt.config.hidden_size
         self.emb_text = VocabParallelEmbedding(self.num_text_tokens, self.model_dim) 
         self.emb_code = nn.ModuleList([
@@ -68,7 +101,16 @@ class FishTtsLlm(nn.Module):
         ])
         
         self.lm_head = nn.ModuleList([
-            nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_output_head)
+            ParallelLMHead(
+                self.num_audio_tokens,
+                self.model_dim,
+                org_num_embeddings=self.num_audio_tokens,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size,
+                quant_config=quant_config,
+            ) for _ in range(self.num_output_head)
         ])
         self.logits_processor = LogitsProcessor(self.num_audio_tokens)
         self.sampler = MultiheadSampler()

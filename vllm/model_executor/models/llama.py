@@ -68,15 +68,29 @@ class LlamaMLPNonFused(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.gate_proj = RowParallelLinear(input_size=hidden_size,
+                                           output_size=intermediate_size,
+                                           bias=bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
+        self.up_proj = RowParallelLinear(input_size=hidden_size,
+                                           output_size=intermediate_size,
+                                           bias=bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
+        self.down_proj = RowParallelLinear(input_size=intermediate_size,
+                                           output_size=hidden_size,
+                                           bias=bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
 
     def forward(self, x):
-        y1 = F.silu(self.gate_proj(x))
-        y2 = self.up_proj(x)
+        y1, _ = self.gate_proj(x)
+        y1 = F.silu(y1)
+        y2, _ = self.up_proj(x)
         y = y1 * y2
-        return self.down_proj(y)
+        y, _ = self.down_proj(y)
+        return y
 
 class LlamaMLP(nn.Module):
 

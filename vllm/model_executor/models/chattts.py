@@ -49,7 +49,8 @@ class ChatTtsLlm(nn.Module):
     def __init__(self,
                  config: LlamaConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None,) -> None:
         super().__init__()
         
         # static parameters, put them in config later
@@ -65,8 +66,27 @@ class ChatTtsLlm(nn.Module):
             VocabParallelEmbedding(self.num_audio_tokens, self.model_dim) for _ in range(self.num_output_head)
         ])
         
+        ParallelLMHead(
+                self.num_audio_tokens,
+                self.model_dim,
+                org_num_embeddings=self.num_audio_tokens,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size,
+                quant_config=quant_config,
+            )
         self.lm_head = nn.ModuleList([
-            nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_output_head)
+            ParallelLMHead(
+                self.num_audio_tokens,
+                self.model_dim,
+                org_num_embeddings=self.num_audio_tokens,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size,
+                quant_config=quant_config,
+            ) for _ in range(self.num_output_head)
         ])
         self.logits_processor = LogitsProcessor(self.num_audio_tokens)
         self.sampler = MultiheadSampler()
