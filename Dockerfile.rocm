@@ -1,5 +1,5 @@
 # Default ROCm 6.1 base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0"
 
 # Default ROCm ARCHes to build vLLM for.
 ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
@@ -51,6 +51,7 @@ RUN python3 -m pip install --upgrade pip
 # TODO: implement sccache support across components
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 # Install torch == 2.5.0 on ROCm
+
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-6.1"*) \
             python3 -m pip uninstall -y torch torchvision \
@@ -58,6 +59,12 @@ RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
                 torch==2.5.0.dev20240726 \
                 torchvision==0.20.0.dev20240726 \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
+        *"rocm-6.2"*) \
+            python3 -m pip uninstall -y torch torchvision \
+            && python3 -m pip install --no-cache-dir --pre \
+                torch==2.5.0 \
+                torchvision \
+               --index-url https://download.pytorch.org/whl/test/rocm6.2;; \
         *) ;; esac
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
