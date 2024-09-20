@@ -1096,7 +1096,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if batch_size_padding > 0:
             dummy_seq_group_metadata = self.create_dummy_seq_group_metadata(
                 0, 0, is_prompt)
-            seq_group_metadata_list.extend(dummy_seq_group_metadata
+            seq_group_metadata_list.extend(seq_group_metadata_list[0]
                                            for _ in range(batch_size_padding))
 
         prefill_reqs = []

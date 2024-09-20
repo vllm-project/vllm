@@ -146,8 +146,9 @@ def convert_mapping(
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
     sampler_indices_padded = torch.arange(
-        0, len(sampler_indices_padded), device=get_device(), dtype=torch.long) + (
-            sampler_indices_padded * len(sampler_indices_padded))
+        0, len(sampler_indices_padded), device=get_device(),
+        dtype=torch.long) + (sampler_indices_padded *
+                             len(sampler_indices_padded))
     long_lora_indices = None
     long_lora_indices_len: Optional[int] = None
     if long_lora_context:

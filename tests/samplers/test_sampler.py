@@ -782,6 +782,7 @@ def test_sampler_include_gpu_probs_tensor(device: str):
     assert sampler_output.logprobs is not None
     assert sampler_output.sampled_token_ids is not None
 
+
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_topk_topk_scalar():
     obj1 = ApplyToppTopkScalar(2)

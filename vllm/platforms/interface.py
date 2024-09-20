@@ -45,7 +45,6 @@ class Platform:
     def is_hpu(self) -> bool:
         return self._enum == PlatformEnum.HPU
 
-    @staticmethod
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 

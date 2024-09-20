@@ -87,6 +87,7 @@ def device_loading_context(module: torch.nn.Module,
                     p.data = p.data.to(original_device)
         # New parameters or parameters already on target device are untouched
 
+
 from vllm.utils import is_fake_hpu
 
 logger = init_logger(__name__)

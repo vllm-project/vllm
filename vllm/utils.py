@@ -796,11 +796,6 @@ def format_bytes(size):
     return f'{size:.4g} {power_labels[n]+"B"}'
 
 
-@lru_cache(maxsize=None)
-def is_hpu() -> bool:
-    from importlib import util
-    return util.find_spec('habana_frameworks') is not None
-
 def get_device() -> str:
     if is_hpu():
         return "hpu"
@@ -1424,6 +1419,7 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
 
 def migrate_to_cpu():
     import importlib

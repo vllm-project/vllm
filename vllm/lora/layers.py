@@ -253,7 +253,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.punica_wrapper.add_lora_embedding(full_output,
                                                    full_lora_a_embeddings,
                                                    self.lora_b_stacked,
-                                                    add_input=True)
+                                                   add_input=True)
         else:
             self.punica_wrapper.add_expand(full_output,
                                            full_lora_a_embeddings,

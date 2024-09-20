@@ -11,7 +11,9 @@ import torch
 from vllm.lora.punica import PunicaWrapper
 from vllm_hpu_extension.ops import dispatch_bgmv_linear, dispatch_bgmv_embedding
 
+
 class GaudiPunicaWrapper(PunicaWrapper):
+
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
                  device: str):
         super().__init__(max_num_batched_tokens, max_batches, device)
@@ -48,8 +50,8 @@ class GaudiPunicaWrapper(PunicaWrapper):
 
         for slice_idx in range(len(output_slices)):
             dispatch_bgmv_linear(
-                y[:, offset_left:offset_left + output_slices[slice_idx]],
-                x, lora_a_stacked[slice_idx], lora_b_stacked[slice_idx], 0, 1.0)
+                y[:, offset_left:offset_left + output_slices[slice_idx]], x,
+                lora_a_stacked[slice_idx], lora_b_stacked[slice_idx], 0, 1.0)
             offset_left += output_slices[slice_idx]
         y = y.view_as(y_org)
 
