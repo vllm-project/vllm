@@ -983,7 +983,7 @@ def init_distributed_environment(
         maybe_disagg_rank = rank
         if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
             maybe_disagg_world_size = world_size * 2
-            logger.debug("Disaggregated prefill enabled.")
+            logger.debug("Distributed KV transfer enabled.")
             if dist_kv.IS_KV_PRODUCER:
                 # for prefill, the ranks are [0, world_size)
                 logger.debug("rank %d is KV producer.", rank)
@@ -995,6 +995,7 @@ def init_distributed_environment(
                 logger.debug("rank %d is KV consumer, adjust it to %d",
                              rank,
                              maybe_disagg_rank)
+
 
         torch.distributed.init_process_group(
             backend=backend,

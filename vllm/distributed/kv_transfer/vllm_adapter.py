@@ -86,6 +86,7 @@ class KV_transfer_agent:
         # In remote KV cache store, vLLM will use both send pipe and recv pipe
         # So we build both send pipe and recv pipe for simplicity.
         if IS_KV_PRODUCER:
+ 
             self.send_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
@@ -207,11 +208,12 @@ class KV_transfer_agent:
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
-        # When this flag is set to False, it means that
+        # When this flag is set to False, it means that at least for one 
+        # request its corresponding KV cache or hidden state is missing.
+        # In this case we need to do prefilling to recompute missing KV cache 
+        # and hidden states. 
         bypass_model_exec = True
 
-        # This is disagg decode instance, during prefill state
-        # Need to receive KV from the prefill instance
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
@@ -231,6 +233,7 @@ class KV_transfer_agent:
             current_tokens = input_tokens_tensor[start_pos:end_pos]
             num_tokens = slen
 
+            # collecting data for rebuilding the input
             input_tokens_list.append(current_tokens)
             start_pos_list.append(start_pos)
 
@@ -246,19 +249,26 @@ class KV_transfer_agent:
                 num_computed_tokens_list.append(0)
                 continue
 
-            # TODO(Jiayi): change the logic here (need roi)
             roi: torch.Tensor = ret[1]
             keys: torch.Tensor = ret[2]
             values: torch.Tensor = ret[3]
             hidden: torch.Tensor = ret[4]
 
-            # Jiayi: currently assume roi is a prefix
             num_computed_tokens = roi.shape[0]
             num_computed_tokens_list.append(num_computed_tokens)
-            is_complete = (num_computed_tokens == num_tokens)
+
+            # check if both KV cache and the hidden states are received
+            # If not, need to redo the forwarding to compute missing states
+            if not all([
+                (num_computed_tokens == num_tokens),
+                hidden is not None
+            ]):
+                bypass_model_exec = False
+                
+            # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens
 
-            # receive KV cache from disaggregated prefill instance
+            # put received KV caches into paged memory
             for i in range(model_executable.model.start_layer,
                            model_executable.model.end_layer):
 
@@ -279,33 +289,30 @@ class KV_transfer_agent:
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
-        # FIXME(Jiayi): we need to support only skip m out of n reqs in a batch
-        # same for prefix caching
-        if not bypass_model_exec:
+        if bypass_model_exec == False:
             # Some of the KV cache is not retrieved
-            # so we need to recompute the hidden state
-            logger.debug("[rank%d]: KV EMPTY recv DONE.",
+            # so we need to adjust model_input and redo the forwarding.
+            logger.debug("[rank%d]: Failed to receive all KVs and hidden "
+                         "states, redo model forwarding.",
                          torch.distributed.get_rank())
-            return None, bypass_model_exec, model_input
-
-        if not is_complete:
             rebuilt_model_input = build_partial_prefill_input(
                 model_input,
                 input_tokens_list,
                 num_computed_tokens_list,
                 start_pos_list,
                 slot_mapping,
-                device=kv_cache[0].device,
+                device=input_tokens_tensor.device,
             )
-            logger.debug("[rank%d]: KV PARTIAL recv DONE.",
-                         torch.distributed.get_rank())
-            return None, False, rebuilt_model_input
+            model_input = rebuilt_model_input
+            hidden_or_intermediate_states = None
 
-        # concatenate hidden states from different requests
-        hidden_or_intermediate_states = torch.cat(
+        else:
+            logger.debug("[rank%d]: Successfully received all KVs and hidden "
+                         "states, skip model forwarding.",
+                         torch.distributed.get_rank())
+            hidden_or_intermediate_states = torch.cat(
             hidden_or_intermediate_states_for_one_req, dim=0)
 
-        logger.debug("[rank%d]: KV recv DONE.", torch.distributed.get_rank())
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
 
@@ -344,6 +351,10 @@ def build_partial_prefill_input(
         token_tensor = input_tokens_list[idx]
         num_token = len(token_tensor)
         num_computed_token = num_computed_tokens_list[idx]
+        # currently attention kernel cannot handle the case where there is 0 
+        # query token.
+        if num_computed_token == num_token:
+            num_computed_token -= 1
         start_pos = start_pos_list[idx]
 
         rebuilt_input_tokens.append(token_tensor[num_computed_token:])
