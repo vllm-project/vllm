@@ -259,7 +259,7 @@ class LLM:
     def generate(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,  # We may enable `inputs` keyword after removing the old API
+        /,
         *,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
@@ -498,7 +498,7 @@ class LLM:
     def encode(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,  # We may enable `inputs` keyword after removing the old API
+        /,
         *,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
