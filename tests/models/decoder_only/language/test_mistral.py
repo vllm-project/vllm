@@ -4,8 +4,7 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
-from vllm import SamplingParams
-from vllm import LLM
+from vllm import LLM, SamplingParams
 
 from ...utils import check_logprobs_close
 
