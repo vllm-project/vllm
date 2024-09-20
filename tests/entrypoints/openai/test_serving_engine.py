@@ -8,9 +8,10 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               UnloadLoraAdapterRequest)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 
 MODEL_NAME = "meta-llama/Llama-2-7b"
+BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 LORA_LOADING_SUCCESS_MESSAGE = (
     "Success: LoRA adapter '{lora_name}' added successfully.")
 LORA_UNLOADING_SUCCESS_MESSAGE = (
@@ -25,7 +26,7 @@ async def _async_serving_engine_init():
 
     serving_engine = OpenAIServing(mock_engine_client,
                                    mock_model_config,
-                                   served_model_names=[MODEL_NAME],
+                                   BASE_MODEL_PATHS,
                                    lora_modules=None,
                                    prompt_adapters=None,
                                    request_logger=None)
