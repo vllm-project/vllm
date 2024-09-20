@@ -133,14 +133,14 @@ class LLM:
         disable_async_output_proc: bool = False,
         **kwargs,
     ) -> None:
-        '''
+        """
         LLM constructor.
 
         Note: if enforce_eager is unset (enforce_eager is None)
         it defaults to False for decoder-only models and True
         for encoder/decoder models, since encoder/decoder models
         do not currently support CUDAGraph.
-        '''
+        """
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
@@ -276,7 +276,7 @@ class LLM:
     def generate(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
-                       Optional[Union[str, List[str]]]] = None,
+                       Optional[Union[str, List[str]]], ] = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
@@ -284,7 +284,7 @@ class LLM:
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None
+                                               GuidedDecodingRequest]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -343,21 +343,22 @@ class LLM:
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
-            guided_options=guided_options_request)
+            guided_options=guided_options_request,
+        )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
     def chat(
         self,
-        messages: List[ChatCompletionMessageParam],
+        conversations: List[List[ChatCompletionMessageParam]],
         sampling_params: Optional[Union[SamplingParams,
                                         List[SamplingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
-    ) -> List[RequestOutput]:
+    ) -> List[List[RequestOutput]]:
         """
         Generate responses for a chat conversation.
 
@@ -369,8 +370,9 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            messages: A single conversation represented as a list of messages.
-                Each message is a dictionary with 'role' and 'content' keys.
+            conversations: A list of conversations each represented as a list of
+                messages. Each message is a dictionary with 'role' and 'content'
+                keys.
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
@@ -384,47 +386,51 @@ class LLM:
                 to each message.
 
         Returns:
-            A list of ``RequestOutput`` objects containing the generated
-            responses in the same order as the input messages.
+            A list of the ``RequestOutput`` objects containing the generated
+            responses in the same order as the input conversations and messages.
         """
+        generations = []
+        for messages in conversations:
+            tokenizer = self.get_tokenizer()
+            model_config = self.llm_engine.get_model_config()
 
-        tokenizer = self.get_tokenizer()
-        model_config = self.llm_engine.get_model_config()
+            conversation, mm_data = parse_chat_messages(
+                messages, model_config, tokenizer)
 
-        conversation, mm_data = parse_chat_messages(messages, model_config,
-                                                    tokenizer)
+            prompt: Union[str, List[int]]
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt = apply_mistral_chat_template(
+                    tokenizer,
+                    messages=messages,
+                    chat_template=chat_template,
+                    add_generation_prompt=add_generation_prompt,
+                )
+            else:
+                prompt = apply_hf_chat_template(
+                    tokenizer,
+                    conversation=conversation,
+                    chat_template=chat_template,
+                    add_generation_prompt=add_generation_prompt,
+                )
 
-        prompt: Union[str, List[int]]
-        if isinstance(tokenizer, MistralTokenizer):
-            prompt = apply_mistral_chat_template(
-                tokenizer,
-                messages=messages,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
+            inputs: PromptInputs
+            if is_list_of(prompt, int):
+                inputs = TokensPrompt(prompt_token_ids=prompt)
+            else:
+                inputs = TextPrompt(prompt=prompt)
+
+            if mm_data is not None:
+                inputs["multi_modal_data"] = mm_data
+
+            output = self.generate(
+                inputs,
+                sampling_params=sampling_params,
+                use_tqdm=use_tqdm,
+                lora_request=lora_request,
             )
-        else:
-            prompt = apply_hf_chat_template(
-                tokenizer,
-                conversation=conversation,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-            )
+            generations.append(output)
 
-        inputs: PromptInputs
-        if is_list_of(prompt, int):
-            inputs = TokensPrompt(prompt_token_ids=prompt)
-        else:
-            inputs = TextPrompt(prompt=prompt)
-
-        if mm_data is not None:
-            inputs["multi_modal_data"] = mm_data
-
-        return self.generate(
-            inputs,
-            sampling_params=sampling_params,
-            use_tqdm=use_tqdm,
-            lora_request=lora_request,
-        )
+        return generations
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
@@ -509,7 +515,7 @@ class LLM:
     def encode(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
-                       Optional[Union[str, List[str]]]] = None,
+                       Optional[Union[str, List[str]]], ] = None,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
@@ -595,8 +601,8 @@ class LLM:
         if prompts is not None:
             num_requests = len(prompts)
         if prompt_token_ids is not None:
-            if (num_requests is not None
-                    and num_requests != len(prompt_token_ids)):
+            if num_requests is not None and num_requests != len(
+                    prompt_token_ids):
                 raise ValueError("The lengths of prompts and prompt_token_ids "
                                  "must be the same.")
 
@@ -624,7 +630,7 @@ class LLM:
         self,
         inputs: Union[PromptInputs, Sequence[PromptInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
-                      Sequence[PoolingParams]],
+                      Sequence[PoolingParams], ],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
@@ -676,17 +682,21 @@ class LLM:
         )
 
     def _add_guided_processor(
-            self,
-            params: SamplingParams,
-            guided_options: Optional[GuidedDecodingRequest] = None):
+        self,
+        params: SamplingParams,
+        guided_options: Optional[GuidedDecodingRequest] = None,
+    ):
         if guided_options:
             if guided_options.guided_decoding_backend is None:
                 decoding_config = self.llm_engine.get_decoding_config()
                 guided_options.guided_decoding_backend = (
                     decoding_config.guided_decoding_backend)
-            guided_logits_processor = get_local_guided_decoding_logits_processor(  #noqa
-                guided_options.guided_decoding_backend, guided_options,
-                self.get_tokenizer())
+            guided_logits_processor = (
+                get_local_guided_decoding_logits_processor(  # noqa
+                    guided_options.guided_decoding_backend,
+                    guided_options,
+                    self.get_tokenizer(),
+                ))
             if guided_logits_processor:
                 if params.logits_processors is None:
                     params.logits_processors = []
