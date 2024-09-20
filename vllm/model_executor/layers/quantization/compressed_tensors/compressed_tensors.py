@@ -73,6 +73,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
+            # TODO: @dsikka: refactor this to use schemes as other kernels
+            # are supported + check if the layer is being ignored.
             weight_quant = self.target_scheme_map["Linear"].get("weights")
             input_quant = self.target_scheme_map["Linear"].get(
                 "input_activations")
