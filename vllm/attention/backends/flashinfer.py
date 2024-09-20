@@ -6,6 +6,7 @@ try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+    from flashinfer.cascade import MultiLevelCascadeAttentionWrapper
 
     import vllm.attention.backends.flash_attn  # noqa
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -113,22 +114,17 @@ class FlashInferState(AttentionState):
 
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
-            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
+            self._prefill_wrapper = MultiLevelCascadeAttentionWrapper(
+                2, self._get_workspace_buffer(), "NHD"
+            )
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
-        if self._decode_wrapper is None:
-            num_qo_heads = (self.runner.model_config.get_num_attention_heads(
-                self.runner.parallel_config))
-            num_kv_heads = self.runner.model_config.get_num_kv_heads(
-                self.runner.parallel_config)
-            use_tensor_cores = num_qo_heads // num_kv_heads > 4
-            self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(),
-                "NHD",
-                use_tensor_cores=use_tensor_cores)
-        return self._decode_wrapper
+        # if self._decode_wrapper is None:
+        #     self._decode_wrapper = MultiLevelCascadeAttentionWrapper(
+        #         1, self._get_workspace_buffer(), "NHD"
+        #     )
+        return self._prefill_wrapper
 
     @contextmanager
     def graph_capture(self, max_batch_size: int):
@@ -267,8 +263,8 @@ class FlashInferMetadata(AttentionMetadata):
 
     use_cuda_graph: bool = True
 
-    prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
-    decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
+    prefill_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
+    decode_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
 
     # Metadata for the prefill stage
     seq_start_loc: Optional[torch.Tensor] = None
@@ -294,6 +290,12 @@ class FlashInferMetadata(AttentionMetadata):
     # The number of entries in the last page of each request in
     # the paged kv cache, shape: [batch_size]
     paged_kv_last_page_len: Optional[torch.Tensor] = None
+
+
+    second_layer_kv_indptr: Optional[torch.Tensor] = None
+    second_layer_kv_indices: Optional[torch.Tensor] = None
+    second_layer_kv_last_page_len: Optional[torch.Tensor] = None
+
     # The number of query/output heads
     num_qo_heads: Optional[int] = None
     # The number of key/value heads
@@ -343,12 +345,18 @@ class FlashInferMetadata(AttentionMetadata):
                 self.block_table_bound = self.block_table_bound.to(self.device)
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
                 self.paged_kv_indices = self.paged_kv_indices.to(self.device)
-                self.prefill_wrapper.end_forward()
-                self.prefill_wrapper.begin_forward(
-                    self.query_start_loc, self.paged_kv_indptr,
-                    self.paged_kv_indices, self.paged_kv_last_page_len,
-                    self.num_qo_heads, self.num_kv_heads, self.head_dim,
-                    self.page_size)
+
+                self.prefill_wrapper.plan(
+                    [self.query_start_loc],
+                    [self.paged_kv_indptr],
+                    [self.paged_kv_indices],
+                    [self.paged_kv_last_page_len],
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.page_size,
+                    causal=True
+                )
         else:
             assert self.paged_kv_indices is not None
             assert self.paged_kv_indptr is not None
@@ -364,21 +372,18 @@ class FlashInferMetadata(AttentionMetadata):
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
 
             assert self.decode_wrapper is not None
-            self.decode_wrapper.end_forward()
-            self.decode_wrapper.begin_forward(
-                self.paged_kv_indptr,
-                self.paged_kv_indices,
-                self.paged_kv_last_page_len,
+
+            self.decode_wrapper.plan(
+                [self.query_start_loc],
+                [self.paged_kv_indptr],
+                [self.paged_kv_indices],    
+                [self.paged_kv_last_page_len],
                 self.num_qo_heads,
                 self.num_kv_heads,
                 self.head_dim,
                 self.page_size,
-                # Disable flashinfer's pos encoding and use vllm's rope.
-                pos_encoding_mode="NONE",
-                # kv-cache data type.
-                data_type=self.data_type,
-                # query data type.
-                q_data_type=self.q_data_type)
+                causal=False,
+            )
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -489,6 +494,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_indptr: List[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
         self.paged_kv_last_page_len: List[int] = []
+
+        self.second_layer_kv_indices: List[int] = []
+        self.second_layer_kv_indptr: List[int] = []
+        self.second_layer_kv_last_page_len: List[int] = []
+        
         self.total_blocks = 0
         self.is_profile_run: bool = False
 
@@ -813,19 +823,16 @@ class FlashInferImpl(AttentionImpl):
             else:
                 assert prefill_meta is not None
                 assert prefill_meta.prefill_wrapper is not None
-                output = prefill_meta.prefill_wrapper.forward(
+                output = prefill_meta.prefill_wrapper.run(
                     query,
-                    kv_cache,
-                    logits_soft_cap=self.logits_soft_cap,
-                    causal=True)
+                    kv_cache
+                )
         else:
             assert attn_metadata.decode_metadata is not None
             assert attn_metadata.decode_metadata.decode_wrapper is not None
-            output = attn_metadata.decode_metadata.decode_wrapper.forward(
+            output = attn_metadata.decode_metadata.decode_wrapper.run(
                 query,
-                kv_cache,
-                sm_scale=self.scale,
-                logits_soft_cap=self.logits_soft_cap,
-                k_scale=k_scale,
-                v_scale=v_scale)
+                kv_cache
+            )
+
         return output.view(num_tokens, hidden_size)
