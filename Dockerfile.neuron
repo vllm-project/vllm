@@ -1,5 +1,5 @@
 # default base image
-ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.1.2-neuronx-py310-sdk2.19.1-ubuntu20.04"
+ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.1.2-neuronx-py310-sdk2.20.0-ubuntu20.04"
 
 FROM $BASE_IMAGE
 
@@ -20,7 +20,7 @@ RUN python3 -m pip install --upgrade pip
 RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
 RUN python3 -m pip install sentencepiece transformers==4.36.2 -U
 RUN python3 -m pip install transformers-neuronx --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
-RUN python3 -m pip install --pre neuronx-cc==2.12.* --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
+RUN python3 -m pip install --pre neuronx-cc==2.15.* --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
 
 COPY ./vllm /app/vllm/vllm
 COPY ./setup.py /app/vllm/setup.py
