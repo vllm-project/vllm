@@ -109,7 +109,6 @@ def get_attn_backend(
     backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
                                 sliding_window, dtype, kv_cache_dtype,
                                 block_size, device)
-
     if backend == _Backend.FLASH_ATTN:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
@@ -184,7 +183,6 @@ def which_attn_to_use(
     if is_cpu() or device == "cpu":
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
-
         return _Backend.TORCH_SDPA
 
     if is_openvino():
