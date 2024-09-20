@@ -241,10 +241,9 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
     LoraMask.setLoraMask(mask)
 
     punica_wrapper = GaudiPunicaWrapper(4096, max_batches=256, device="hpu")
-    punica_wrapper.add_lora_packed_nslice(output, input,
-                                          lora_a_stacks,
-                                          lora_b_stacks, 
-                                          1.0, (qkv[0], qkv[1], qkv[2]))
+    qkvs = (qkv[0], qkv[1], qkv[2])
+    punica_wrapper.add_lora_packed_nslice(output, input, lora_a_stacks,
+                                          lora_b_stacks, 1.0, qkvs)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
@@ -253,10 +252,9 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
     indices = torch.full((len(input), ), -1, device="hpu")
     mask = createLoraMask(indices, k, 1, 8, rank, dtype)
     LoraMask.setLoraMask(mask)
-
+    qkvs = (qkv[0], qkv[1], qkv[2])
     punica_wrapper.add_lora_packed_nslice(output, input, lora_a_stacks,
-                                          lora_b_stacks, 1.0,
-                                          (qkv[0], qkv[1], qkv[2]))
+                                          lora_b_stacks, 1.0, qkvs)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
