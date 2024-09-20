@@ -269,8 +269,8 @@ def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
 
 def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
     width = height = hf_config.image_size
-    image = MiniCPMVImageInput(image=Image.new("RGB", (width, height),
-                                               color=0))
+    image = MiniCPMVImageInput(
+        image=Image.new("RGB", (width, height), color=0))
     return {"image": [image] if num_images == 1 else [image] * num_images}
 
 
@@ -375,17 +375,19 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
                            "to process the image object")
     try:
         batch_data = image_processor \
-            .preprocess([image["image"] for image in data], return_tensors="pt") \
+            .preprocess([img["image"] for img in data], return_tensors="pt") \
             .data
     except Exception:
         logger.error("Failed to process image (%s)", data)
         raise
 
-    for image in data
-        if "image_bounds" in img:
-            return MultiModalInputs(image_bounds=image["image_bounds"], **batch_data)
+    for image in data:
+        if "image_bounds" in image:
+            return MultiModalInputs(image_bounds=image["image_bounds"],
+                                    **batch_data)
 
     return MultiModalInputs(batch_data)
+
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     """
