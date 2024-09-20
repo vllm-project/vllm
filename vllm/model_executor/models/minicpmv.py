@@ -33,6 +33,7 @@ from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
 from transformers import PretrainedConfig
+from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -373,6 +374,10 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
     if image_processor is None:
         raise RuntimeError("No HuggingFace processor is available "
                            "to process the image object")
+
+    if not isinstance(data, list) or len(data) <= 0:
+        raise ValueError("Invalid image input (%s)", data)
+
     try:
         batch_data = image_processor \
             .preprocess([img["image"] for img in data], return_tensors="pt") \
@@ -381,7 +386,7 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
         logger.error("Failed to process image (%s)", data)
         raise
 
-    if len(data) > 0:
+    if "image_bounds" in data[0]:
         batch_data["image_bounds"] = data[0]["image_bounds"]
 
     return MultiModalInputs(batch_data)
@@ -443,7 +448,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
             if len(image_bounds) > 0:
                 image_indices = torch.stack([
                     torch.arange(start, end, dtype=torch.long)
-                    for start, end in image_bounds.squeeze(0).tolist()
+                    for start, end in image_bounds.tolist()
                 ]).to(vlm_embedding.device)
                 vlm_embedding.scatter_(
                     0,
@@ -462,7 +467,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     ) -> Optional[MiniCPMVImageInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
-        image_bounds = kwargs.pop("image_bounds", [])
+        image_bounds = kwargs.pop("image_bounds", torch.Tensor())
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
@@ -475,6 +480,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         if len(pixel_values) != len(tgt_sizes):
             raise ValueError("Inconsistent batch lengths, found: "
                              f"{len(pixel_values)} vs. {len(tgt_sizes)}")
+
+        if not isinstance(image_bounds, torch.Tensor):
+            raise ValueError("Incorrect type of image_bounds. "
+                             f"Got type: {type(image_bounds)}")
+        image_bounds = image_bounds.squeeze(0)
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
