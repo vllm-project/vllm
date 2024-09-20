@@ -135,6 +135,7 @@ def test_mistral_format(
         name_1="mistral",
     )
 
+
 @pytest.mark.parametrize("model", MODELS[1:])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
@@ -149,13 +150,14 @@ def test_mistral_symbolic_languages(
     prompt: str,
 ) -> None:
     prompt = "hi"
-    msg = {
-        "role": "user",
-        "content": prompt
-    }
-    llm = LLM(model=model, tokenizer_mode="mistral", config_format="mistral", load_format="mistral")
+    msg = {"role": "user", "content": prompt}
+    llm = LLM(model=model,
+              tokenizer_mode="mistral",
+              config_format="mistral",
+              load_format="mistral")
     outputs = llm.chat([msg], sampling_params=SAMPLING_PARAMS)
     assert "�" not in outputs[0].outputs[0].text.strip()
+
 
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("model", MODELS[1:])  # v1 can't do func calling
