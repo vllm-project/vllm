@@ -3,7 +3,9 @@ from typing import cast
 
 def get_video_processor(
     processor_name: str,
+    *args,
     trust_remote_code: bool = False,
+    **kwargs,
 ):
     """
     Gets a processor for the given model name via HuggingFace.
@@ -11,7 +13,12 @@ def get_video_processor(
     from transformers import AutoProcessor
 
     try:
-        processor = AutoProcessor.from_pretrained(processor_name)
+        processor = AutoProcessor.from_pretrained(
+            processor_name,
+            *args,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
         video_processor = processor.video_processor
 
     except ValueError as e:
