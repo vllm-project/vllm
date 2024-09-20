@@ -52,7 +52,7 @@ from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs, MultiModalPlugin
+from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -63,6 +63,15 @@ _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
     "llm.model": "llm",
 }
+
+
+class MiniCPMVImageInput(TypedDict):
+    """Image input to MiniCPM-V model with image bound auxiliary data."""
+
+    image: Image.Image
+
+    # If provided, contains image_bounds data for the whole prompt.
+    image_bounds: Optional[torch.Tensor]
 
 
 class MiniCPMVImagePixelInputs(TypedDict):
@@ -260,8 +269,9 @@ def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
 
 def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
     width = height = hf_config.image_size
-    image = Image.new("RGB", (width, height), color=0)
-    return {"image": image if num_images == 1 else [image] * num_images}
+    image = MiniCPMVImageInput(image=Image.new("RGB", (width, height),
+                                               color=0))
+    return {"image": [image] if num_images == 1 else [image] * num_images}
 
 
 def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
@@ -341,8 +351,11 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
 
-    multi_modal_data["image_bounds"] = _get_image_bounds(
-        tokenizer, new_token_ids)
+    image_bounds = _get_image_bounds(tokenizer, new_token_ids)
+    multi_modal_data["image"] = [
+        MiniCPMVImageInput(image=image, image_bounds=image_bounds)
+        for image in images
+    ]
 
     llm_inputs = LLMInputs(
         prompt_token_ids=new_token_ids,
@@ -352,19 +365,27 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     return llm_inputs
 
 
-class _ImageBoundsPlugin(MultiModalPlugin):
-    """Plugin for image bounds auxiliary data."""
+def input_mapper_for_minicpmv(ctx: InputContext, data: object):
+    model_config = ctx.model_config
 
-    def get_data_key(self) -> str:
-        return "image_bounds"
+    image_processor = cached_get_image_processor(
+        model_config.model, trust_remote_code=model_config.trust_remote_code)
+    if image_processor is None:
+        raise RuntimeError("No HuggingFace processor is available "
+                           "to process the image object")
+    try:
+        batch_data = image_processor \
+            .preprocess([image["image"] for image in data], return_tensors="pt") \
+            .data
+    except Exception:
+        logger.error("Failed to process image (%s)", data)
+        raise
 
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
-        return MultiModalInputs(image_bounds=data)
+    for image in data
+        if "image_bounds" in img:
+            return MultiModalInputs(image_bounds=image["image_bounds"], **batch_data)
 
-    def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
-        return 1
-
+    return MultiModalInputs(batch_data)
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     """
@@ -422,7 +443,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
             if len(image_bounds) > 0:
                 image_indices = torch.stack([
                     torch.arange(start, end, dtype=torch.long)
-                    for start, end in image_bounds.tolist()
+                    for start, end in image_bounds.tolist()[0]
                 ]).to(vlm_embedding.device)
                 vlm_embedding.scatter_(
                     0,
@@ -454,11 +475,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         if len(pixel_values) != len(tgt_sizes):
             raise ValueError("Inconsistent batch lengths, found: "
                              f"{len(pixel_values)} vs. {len(tgt_sizes)}")
-
-        if image_bounds != []:
-            # Batch size of 'image_bounds' is always 1
-            assert image_bounds.shape[0] == 1
-            image_bounds = image_bounds[0]
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
@@ -876,8 +892,7 @@ _SUPPORT_VERSION = {
 }
 
 
-@MULTIMODAL_REGISTRY.register_plugin(_ImageBoundsPlugin())
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_minicpmv)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_minicpmv_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_minicpmv)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_minicpmv)
