@@ -254,10 +254,9 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
     mask = createLoraMask(indices, k, 1, 8, rank, dtype)
     LoraMask.setLoraMask(mask)
 
-    punica_wrapper.add_lora_packed_nslice(output, input,
-                                          lora_a_stacks,
-                                          lora_b_stacks, 
-                                          1.0, (qkv[0], qkv[1], qkv[2]))
+    punica_wrapper.add_lora_packed_nslice(output, input, lora_a_stacks,
+                                          lora_b_stacks, 1.0,
+                                          (qkv[0], qkv[1], qkv[2]))
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
