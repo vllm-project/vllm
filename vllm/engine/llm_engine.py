@@ -1707,12 +1707,12 @@ class LLMEngine:
 
     def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
                                                    EncoderDecoderInputs]):
-        if self.is_encoder_decoder_model():
-            prompt_ids = inputs.get("encoder_prompt_token_ids")
+        if is_valid_encoder_decoder_inputs(inputs):
+            prompt_ids = inputs["encoder"].get("prompt_token_ids")
+            prompt_embeds = inputs["encoder"].get("prompt_embeds")
         else:
             prompt_ids = inputs.get("prompt_token_ids")
-
-        prompt_embeds = inputs.get("prompt_embeds")
+            prompt_embeds = inputs.get("prompt_embeds")
 
         if prompt_ids is None:
             if prompt_embeds is None:

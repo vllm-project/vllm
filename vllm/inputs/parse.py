@@ -112,4 +112,4 @@ def is_explicit_encoder_decoder_prompt(
 def is_valid_encoder_decoder_inputs(
     inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
 ) -> TypeIs[EncoderDecoderInputs]:
-    return "encoder_prompt_token_ids" in inputs
+    return "encoder" in inputs and "decoder" in inputs
