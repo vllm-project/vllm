@@ -4,16 +4,18 @@ import pytest
 import transformers
 from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
 
-from vllm.multimodal.utils import (rescale_video_size, resize_video,
-                                   sample_frames_from_video)
+from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
+                                   resize_video, sample_frames_from_video)
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import VIDEO_ASSETS, HfRunner, VllmRunner, _VideoAssets
+from ....conftest import (VIDEO_ASSETS, HfRunner, PromptImageInput, VllmRunner,
+                          _VideoAssets)
 from ...utils import check_logprobs_close
 
+# Video test
 HF_VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
     "sample_demo_1":
-    "“<|im_start|>user <video>\nwhy is this video funny? \
+    "<|im_start|>user <video>\nwhy is this video funny? \
     <|im_end|><|im_start|>assistant\n"
 })
 
@@ -46,7 +48,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 @overload
-def run_test(
+def run_video_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
     video_assets: _VideoAssets,
@@ -64,7 +66,7 @@ def run_test(
 
 
 @overload
-def run_test(
+def run_video_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
     video_assets: _VideoAssets,
@@ -81,7 +83,7 @@ def run_test(
     ...
 
 
-def run_test(
+def run_video_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
     video_assets: _VideoAssets,
@@ -100,9 +102,6 @@ def run_test(
         sample_frames_from_video(asset.np_ndarrays, num_frames)
         for asset in video_assets
     ]
-
-    for video in videos:
-        print(video.shape)
 
     if size_factors is not None:
         inputs_per_video = [(
@@ -188,7 +187,7 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    run_test(
+    run_video_test(
         hf_runner,
         vllm_runner,
         video_assets,
@@ -216,7 +215,7 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
 def test_models_fixed_sizes(hf_runner, vllm_runner, video_assets, model, sizes,
                             dtype, max_tokens, num_logprobs,
                             num_frames) -> None:
-    run_test(
+    run_video_test(
         hf_runner,
         vllm_runner,
         video_assets,
@@ -226,5 +225,113 @@ def test_models_fixed_sizes(hf_runner, vllm_runner, video_assets, model, sizes,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         num_frames=num_frames,
+        tensor_parallel_size=1,
+    )
+
+
+# Image test
+_LIMIT_IMAGE_PER_PROMPT = 4
+
+
+def run_image_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    inputs: List[Tuple[List[str], PromptImageInput]],
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
+    # max_model_len should be greater than image_feature_size
+    with vllm_runner(model,
+                     dtype=dtype,
+                     max_model_len=32768,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True,
+                     limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
+                                          }) as vllm_model:
+        vllm_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images)
+            for prompts, images in inputs
+        ]
+
+    with hf_runner(model, dtype=dtype,
+                   auto_cls=AutoModelForVision2Seq) as hf_model:
+        hf_outputs_per_image = [
+            hf_model.generate_greedy_logprobs_limit(prompts,
+                                                    max_tokens,
+                                                    num_logprobs=num_logprobs,
+                                                    images=images)
+            for prompts, images in inputs
+        ]
+
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
+                                        vllm_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=[
+                vllm_to_hf_output(vllm_output, model)
+                for vllm_output in vllm_outputs
+            ],
+            name_0="hf",
+            name_1="vllm",
+        )
+
+
+@pytest.mark.skipif(transformers.__version__ < "4.45",
+                    reason="Waiting for next transformers release")
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
+                                      model, dtype, max_tokens,
+                                      num_logprobs) -> None:
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
+
+    inputs = [(
+        [
+            "<|im_start|>user <image><image>\nDescribe 2 images. \
+                <|im_end|><|im_start|>assistant\n",
+            "<|im_start|>user <image><image>\nDescribe 2 images. \
+                <|im_end|><|im_start|>assistant\n",
+            "<|im_start|>user <image><image><image><image>\nDescribe 4 images. \
+                <|im_end|><|im_start|>assistant\n",
+            "<|im_start|>user <image>\nWhat is the season? \
+                <|im_end|><|im_start|>assistant\n",
+        ],
+        [
+            [stop_sign, cherry_blossom],
+            # Images with different sizes and aspect-ratios
+            [
+                rescale_image_size(stop_sign, 0.1),
+                stop_sign,
+            ],
+            [
+                stop_sign,
+                rescale_image_size(stop_sign, 0.25),
+                cherry_blossom.resize((183, 488)),
+                cherry_blossom.resize((488, 183))
+            ],
+            cherry_blossom,
+        ])]
+
+    run_image_test(
+        hf_runner,
+        vllm_runner,
+        inputs,
+        model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
         tensor_parallel_size=1,
     )

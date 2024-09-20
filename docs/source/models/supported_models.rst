@@ -242,7 +242,7 @@ Multimodal Language Models
     -
   * - :code:`LlavaOnevisionForConditionalGeneration`
     - LLaVA-Onevision
-    - Image\ :sup:`+` / Video\ :sup:`+`
+    - Image\ :sup:`+` / Video
     - :code:`llava-hf/llava-onevision-qwen2-7b-ov-hf`, :code:`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc. (see note)
     -
   * - :code:`MiniCPMV`
