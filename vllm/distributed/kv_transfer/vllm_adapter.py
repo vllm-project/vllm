@@ -51,10 +51,11 @@ IS_KV_CONSUMER: bool = (envs.VLLM_DISTRIBUTED_KV_ROLE in ["consumer", "both"])
 # When the current instance is both KV producer and KV consumer,
 # it is likely connected to a KV storage service on CPU/disk
 # so the communication backend needs to be "gloo" for that case.
-DISTRIBUTED_BACKEND: str = "gloo" if (IS_KV_PRODUCER and IS_KV_CONSUMER) else "nccl"
+DISTRIBUTED_BACKEND: str = "gloo" if (IS_KV_PRODUCER
+                                      and IS_KV_CONSUMER) else "nccl"
 # corresponding device
-DISTRIBUTED_DEVICE: str = "cpu" if (IS_KV_PRODUCER and IS_KV_CONSUMER) else "cuda"
-
+DISTRIBUTED_DEVICE: str = "cpu" if (IS_KV_PRODUCER
+                                    and IS_KV_CONSUMER) else "cuda"
 
 
 class KV_transfer_agent:
@@ -86,7 +87,7 @@ class KV_transfer_agent:
         # In remote KV cache store, vLLM will use both send pipe and recv pipe
         # So we build both send pipe and recv pipe for simplicity.
         if IS_KV_PRODUCER:
- 
+
             self.send_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
@@ -115,10 +116,10 @@ class KV_transfer_agent:
                                                     self.lookup_buffer_size)
             self.tensor_device = DISTRIBUTED_DEVICE
         else:
-            
-            # the current vLLM instance is KV consumer, so it needs to connect 
+
+            # the current vLLM instance is KV consumer, so it needs to connect
             # its recv pipe to the send pipe of KV producder
-            
+
             self.recv_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
@@ -208,10 +209,10 @@ class KV_transfer_agent:
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
-        # When this flag is set to False, it means that at least for one 
+        # When this flag is set to False, it means that at least for one
         # request its corresponding KV cache or hidden state is missing.
-        # In this case we need to do prefilling to recompute missing KV cache 
-        # and hidden states. 
+        # In this case we need to do prefilling to recompute missing KV cache
+        # and hidden states.
         bypass_model_exec = True
 
         input_tokens_tensor = model_input.input_tokens
@@ -259,12 +260,10 @@ class KV_transfer_agent:
 
             # check if both KV cache and the hidden states are received
             # If not, need to redo the forwarding to compute missing states
-            if not all([
-                (num_computed_tokens == num_tokens),
-                hidden is not None
-            ]):
+            if not all([(num_computed_tokens == num_tokens), hidden is not None
+                        ]):
                 bypass_model_exec = False
-                
+
             # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens
 
@@ -277,8 +276,10 @@ class KV_transfer_agent:
 
                 key_cache, value_cache = kv_cache[0], kv_cache[1]
                 ops.reshape_and_cache_flash(
-                    keys[i - model_executable.model.start_layer].to(key_cache.device),
-                    values[i - model_executable.model.start_layer].to(value_cache.device),
+                    keys[i - model_executable.model.start_layer].to(
+                        key_cache.device),
+                    values[i - model_executable.model.start_layer].to(
+                        value_cache.device),
                     key_cache,
                     value_cache,
                     slot_mapping[start_pos:end_pos],
@@ -289,12 +290,12 @@ class KV_transfer_agent:
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
-        if bypass_model_exec == False:
+        if not bypass_model_exec:
             # Some of the KV cache is not retrieved
             # so we need to adjust model_input and redo the forwarding.
-            logger.debug("[rank%d]: Failed to receive all KVs and hidden "
-                         "states, redo model forwarding.",
-                         torch.distributed.get_rank())
+            logger.debug(
+                "[rank%d]: Failed to receive all KVs and hidden "
+                "states, redo model forwarding.", torch.distributed.get_rank())
             rebuilt_model_input = build_partial_prefill_input(
                 model_input,
                 input_tokens_list,
@@ -307,15 +308,13 @@ class KV_transfer_agent:
             hidden_or_intermediate_states = None
 
         else:
-            logger.debug("[rank%d]: Successfully received all KVs and hidden "
-                         "states, skip model forwarding.",
-                         torch.distributed.get_rank())
+            logger.debug(
+                "[rank%d]: Successfully received all KVs and hidden "
+                "states, skip model forwarding.", torch.distributed.get_rank())
             hidden_or_intermediate_states = torch.cat(
-            hidden_or_intermediate_states_for_one_req, dim=0)
+                hidden_or_intermediate_states_for_one_req, dim=0)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
-
-
 
 
 def build_partial_prefill_input(
@@ -351,7 +350,7 @@ def build_partial_prefill_input(
         token_tensor = input_tokens_list[idx]
         num_token = len(token_tensor)
         num_computed_token = num_computed_tokens_list[idx]
-        # currently attention kernel cannot handle the case where there is 0 
+        # currently attention kernel cannot handle the case where there is 0
         # query token.
         if num_computed_token == num_token:
             num_computed_token -= 1
@@ -361,7 +360,7 @@ def build_partial_prefill_input(
         # TODO(Jiayi): please check the correctness of next line
         rebuilt_input_positions.append(
             model_input.input_positions[start_pos +
-                                        num_computed_token : start_pos +
+                                        num_computed_token:start_pos +
                                         num_token])
         q_len = num_token - num_computed_token
         rebuilt_query_lens.append(q_len)
@@ -369,7 +368,9 @@ def build_partial_prefill_input(
         # Attn metadata-related
         rebuilt_num_prefills += 1
         rebuilt_num_prefill_tokens += q_len
-        new_slot_mapping = slot_mapping_flat[start_pos + num_computed_token : start_pos + num_token]
+        new_slot_mapping = slot_mapping_flat[start_pos +
+                                             num_computed_token:start_pos +
+                                             num_token]
         rebuilt_slot_mapping.append(new_slot_mapping)
         rebuilt_max_query_len = max(q_len, rebuilt_max_query_len)
         # TODO(Jiayi): remove hard-code (block_size=16)
@@ -379,7 +380,8 @@ def build_partial_prefill_input(
             for i in range(start_pos, start_pos + num_token, blk_size)
         ]
         rebuilt_block_tables.append(temp_block_table)
-        rebuilt_query_start_loc.append(rebuilt_num_prefill_tokens)  #start with 0
+        rebuilt_query_start_loc.append(
+            rebuilt_num_prefill_tokens)  #start with 0
         rebuilt_context_lens_tensor.append(num_computed_token)
 
         # Sampling metadata related
@@ -390,8 +392,8 @@ def build_partial_prefill_input(
     rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
     rebuilt_attn_metadata.num_prefills = rebuilt_num_prefills
     rebuilt_attn_metadata.num_prefill_tokens = rebuilt_num_prefill_tokens
-    rebuilt_attn_metadata.slot_mapping = torch.cat(
-        rebuilt_slot_mapping).to(device)
+    rebuilt_attn_metadata.slot_mapping = torch.cat(rebuilt_slot_mapping).to(
+        device)
     rebuilt_attn_metadata.max_query_len = rebuilt_max_query_len
 
     rebuilt_attn_metadata.block_tables = torch.tensor(
@@ -420,8 +422,7 @@ def build_partial_prefill_input(
     ).to(device)
 
     # import here to avoid circular import.
-    from vllm.worker.model_runner import (
-        ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata)
     rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.cat(rebuilt_input_tokens).to(device),
         input_positions=torch.cat(rebuilt_input_positions).to(device),

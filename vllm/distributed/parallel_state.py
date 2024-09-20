@@ -992,10 +992,8 @@ def init_distributed_environment(
                 # this is decode instance.
                 # offset global rank by tp * pp (which is world_size)
                 maybe_disagg_rank = rank + world_size
-                logger.debug("rank %d is KV consumer, adjust it to %d",
-                             rank,
+                logger.debug("rank %d is KV consumer, adjust it to %d", rank,
                              maybe_disagg_rank)
-
 
         torch.distributed.init_process_group(
             backend=backend,
@@ -1137,7 +1135,6 @@ def initialize_model_parallel(
                                     group_name="pp")
     logger.debug("_PP initialized for rank %d", torch.distributed.get_rank())
 
-    
     if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
         global _DISAGG
         logger.debug("Disaggregated prefill enabled, create _DISAGG group")
@@ -1152,8 +1149,8 @@ def initialize_model_parallel(
             local_rank=get_world_group().local_rank,
         )
         logger.debug("_DISAGG initialized for rank %d",
-                    torch.distributed.get_rank())
-            
+                     torch.distributed.get_rank())
+
 
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
