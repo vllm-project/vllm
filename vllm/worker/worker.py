@@ -111,6 +111,11 @@ class Worker(LocalOrDistributedWorkerBase):
 
         self.swap_manager: Optional[SwapClientManagerBase] = None
 
+        # Initialize another cuda stream for layered transfer
+        self.layered_transfer_stream: Optional[
+            torch.cuda.Stream] = torch.cuda.Stream(
+            ) if self.cache_config.enable_layered_transfer else None
+
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
@@ -402,8 +407,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_swap_out is not None
                 and worker_input.blocks_to_swap_out.numel() > 0):
             if self.cache_config.enable_layered_transfer:
-                self.cache_engine[virtual_engine].swap_out_one_layer(
-                    worker_input.blocks_to_swap_out, 0)
+                assert self.layered_transfer_stream is not None
+                with torch.cuda.stream(self.layered_transfer_stream):
+                    self.cache_engine[virtual_engine].swap_out_one_layer(
+                        worker_input.blocks_to_swap_out, 0)
             else:
                 self.cache_engine[virtual_engine].swap_out(
                     worker_input.blocks_to_swap_out)
@@ -412,8 +419,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             if self.cache_config.enable_layered_transfer:
-                self.cache_engine[virtual_engine].copy_one_layer(
-                    worker_input.blocks_to_copy, 0)
+                assert self.layered_transfer_stream is not None
+                with torch.cuda.stream(self.layered_transfer_stream):
+                    self.cache_engine[virtual_engine].copy_one_layer(
+                        worker_input.blocks_to_copy, 0)
             else:
                 self.cache_engine[virtual_engine].copy(
                     worker_input.blocks_to_copy)
@@ -422,8 +431,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_swap_in is not None
                 and worker_input.blocks_to_swap_in.numel() > 0):
             if self.cache_config.enable_layered_transfer:
-                self.cache_engine[virtual_engine].swap_in_one_layer(
-                    worker_input.blocks_to_swap_in, 0)
+                assert self.layered_transfer_stream is not None
+                with torch.cuda.stream(self.layered_transfer_stream):
+                    self.cache_engine[virtual_engine].swap_in_one_layer(
+                        worker_input.blocks_to_swap_in, 0)
             else:
                 self.cache_engine[virtual_engine].swap_in(
                     worker_input.blocks_to_swap_in)

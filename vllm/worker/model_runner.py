@@ -1290,6 +1290,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     def add_kv_cache_for_layered_transfer(
             self,
             model_input: ModelInputForGPUWithSamplingMetadata,
+            cuda_stream: Optional[torch.cuda.Stream] = None,
             blocks_to_swap_in: Optional[torch.Tensor] = None,
             blocks_to_swap_out: Optional[torch.Tensor] = None,
             blocks_to_copy: Optional[torch.Tensor] = None,
@@ -1305,7 +1306,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_input.attn_metadata.add_kv_cache_for_layered_transfer(
                 self.model_config.get_num_attention_layers(
                     self.parallel_config), blocks_to_swap_in,
-                blocks_to_swap_out, blocks_to_copy, gpu_caches, cpu_caches)
+                blocks_to_swap_out, blocks_to_copy, gpu_caches, cpu_caches,
+                cuda_stream)
 
     @torch.inference_mode()
     def execute_model(
@@ -1396,7 +1398,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                          device=self.device),
             **seqlen_agnostic_kwargs)
-        #model_forward_end.record()
 
         model_forward_end.record()
         # Compute the logits in the last pipeline stage.
@@ -1414,10 +1415,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        #model_forward_end.synchronize()
-        #model_forward_time = model_forward_start.elapsed_time(
-        #    model_forward_end)
-        #print(model_forward_time / 1000)  #s
+        model_forward_end.synchronize()
+        model_forward_time = model_forward_start.elapsed_time(
+            model_forward_end)
+        print(model_forward_time / 1000)  #s
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token

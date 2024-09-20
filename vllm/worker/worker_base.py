@@ -276,6 +276,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             virtual_engine = worker_input.virtual_engine
             self.model_runner.add_kv_cache_for_layered_transfer(
                 model_input,
+                self.layered_transfer_stream if hasattr(
+                    self, "layered_transfer_stream") else None,
                 worker_input.blocks_to_swap_in,
                 worker_input.blocks_to_swap_out,
                 worker_input.blocks_to_copy,

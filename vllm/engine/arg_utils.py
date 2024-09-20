@@ -97,6 +97,7 @@ class EngineArgs:
     device: str = 'auto'
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
+    num_cpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
     ignore_patterns: Optional[Union[str, List[str]]] = None
@@ -371,6 +372,12 @@ class EngineArgs:
             default=None,
             help='If specified, ignore GPU profiling result and use this number'
             'of GPU blocks. Used for testing preemption.')
+        parser.add_argument(
+            '--num-cpu-blocks-override',
+            type=int,
+            default=None,
+            help='If specified, ignore CPU profiling result and use this number'
+            'of CPU blocks. Used for testing preemption.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,
@@ -747,6 +754,7 @@ class EngineArgs:
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
+            num_cpu_blocks_override=self.num_cpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             enable_memory_tiering=self.enable_memory_tiering,

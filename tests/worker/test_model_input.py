@@ -54,6 +54,13 @@ class MockAttentionBackend(AttentionBackend):
     ) -> None:
         pass
 
+    @staticmethod
+    def copy_blocks_one_layer(
+        kv_cache: torch.Tensor,
+        src_to_dists: torch.Tensor,
+    ) -> None:
+        pass
+
 
 def test_model_runner_input():
     sampling_metadata = SamplingMetadata(

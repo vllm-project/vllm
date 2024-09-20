@@ -61,7 +61,7 @@ class SequenceStatus(enum.IntEnum):
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
-        return status > SequenceStatus.SWAPPED
+        return status < SequenceStatus.FIXED and status > SequenceStatus.SWAPPED
 
     @staticmethod
     def is_fixed(status: "SequenceStatus") -> bool:

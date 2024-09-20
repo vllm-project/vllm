@@ -257,7 +257,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             blocks_to_swap_out: Optional[torch.Tensor] = None,
             blocks_to_copy: Optional[torch.Tensor] = None,
             gpu_caches: Optional[List[torch.Tensor]] = None,
-            cpu_caches: Optional[List[torch.Tensor]] = None):
+            cpu_caches: Optional[List[torch.Tensor]] = None,
+            cuda_stream: Optional[torch.cuda.Stream] = None):
         self.enable_layered_transfer = True
         self.blocks_to_swap_in = blocks_to_swap_in
         self.blocks_to_swap_out = blocks_to_swap_out
@@ -266,6 +267,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
         self.gpu_caches = gpu_caches
         self.num_hidden_layers = num_hidden_layers
         self.current_layer = 1
+        self.cuda_stream = cuda_stream
 
 
 class BlocksparseFlashAttentionMetadataBuilder(

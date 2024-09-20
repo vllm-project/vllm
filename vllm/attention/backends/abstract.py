@@ -137,7 +137,8 @@ class AttentionMetadata:
             blocks_to_swap_out: Optional[torch.Tensor] = None,
             blocks_to_copy: Optional[torch.Tensor] = None,
             gpu_caches: Optional[List[torch.Tensor]] = None,
-            cpu_caches: Optional[List[torch.Tensor]] = None):
+            cpu_caches: Optional[List[torch.Tensor]] = None,
+            cuda_stream: Optional[torch.cuda.Stream] = None):
         raise NotImplementedError
 
 

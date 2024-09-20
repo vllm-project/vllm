@@ -442,6 +442,8 @@ class CacheConfig:
         cache_dtype: Data type for kv cache storage.
         num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
+        num_cpu_blocks_override: Number of CPU blocks to use. This overrides the
+            profiled num_cpu_blocks if specified. Does nothing if None.
     """
 
     def __init__(
@@ -451,6 +453,7 @@ class CacheConfig:
         swap_space: int,
         cache_dtype: str,
         num_gpu_blocks_override: Optional[int] = None,
+        num_cpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
         enable_memory_tiering: bool = False,
@@ -463,6 +466,7 @@ class CacheConfig:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
         self.num_gpu_blocks_override = num_gpu_blocks_override
+        self.num_cpu_blocks_override = num_cpu_blocks_override
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
@@ -1290,8 +1294,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method !=
-                'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method
+                != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "

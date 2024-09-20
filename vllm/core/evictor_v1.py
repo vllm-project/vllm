@@ -26,6 +26,10 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
+    def __len__(self):
+        pass
+
+    @abstractmethod
     def evict(self) -> PhysicalTokenBlock:
         """Runs the eviction algorithm and returns the evicted block"""
         pass
@@ -63,6 +67,9 @@ class LRUEvictor(Evictor):
 
     def __contains__(self, block_hash: int) -> bool:
         return block_hash in self.free_table
+
+    def __len__(self):
+        return len(self.free_table)
 
     def evict(self) -> PhysicalTokenBlock:
         if len(self.free_table) == 0:
