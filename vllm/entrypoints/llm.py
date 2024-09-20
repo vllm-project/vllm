@@ -259,7 +259,7 @@ class LLM:
     def generate(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,  # We may enable `prompts` keyword after removing the old API
+        /,
         *,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
@@ -294,7 +294,9 @@ class LLM:
         into a single list and pass it to this method.
 
         Args:
-            inputs: A list of inputs to generate completions for.
+            prompts: The prompts to the LLM. You may pass a sequence of prompts
+                for batch inference. See :class:`~vllm.inputs.PromptType`
+                for more details about the format of each prompts.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
                 When it is a single value, it is applied to every prompt.
@@ -397,9 +399,9 @@ class LLM:
         conversation, mm_data = parse_chat_messages(messages, model_config,
                                                     tokenizer)
 
-        prompt: Union[str, List[int]]
+        prompt_data: Union[str, List[int]]
         if isinstance(tokenizer, MistralTokenizer):
-            prompt = apply_mistral_chat_template(
+            prompt_data = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
                 chat_template=chat_template,
@@ -407,7 +409,7 @@ class LLM:
                 tools=tools,
             )
         else:
-            prompt = apply_hf_chat_template(
+            prompt_data = apply_hf_chat_template(
                 tokenizer,
                 conversation=conversation,
                 chat_template=chat_template,
@@ -415,17 +417,17 @@ class LLM:
                 tools=tools,
             )
 
-        parsed_prompt: PromptType
-        if is_list_of(prompt, int):
-            parsed_prompt = TokensPrompt(prompt_token_ids=prompt)
+        prompt: PromptType
+        if is_list_of(prompt_data, int):
+            prompt = TokensPrompt(prompt_token_ids=prompt_data)
         else:
-            parsed_prompt = TextPrompt(prompt=prompt)
+            prompt = TextPrompt(prompt=prompt_data)
 
         if mm_data is not None:
-            parsed_prompt["multi_modal_data"] = mm_data
+            prompt["multi_modal_data"] = mm_data
 
         return self.generate(
-            parsed_prompt,
+            prompt,
             sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -496,7 +498,7 @@ class LLM:
     def encode(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,  # We may enable `inputs` keyword after removing the old API
+        /,
         *,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
@@ -529,9 +531,9 @@ class LLM:
         into a single list and pass it to this method.
 
         Args:
-            prompts: The prompts to the LLM. You may pass a sequence of inputs
+            prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See :class:`~vllm.inputs.PromptType`
-                for more details about the format of each input.
+                for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: Whether to use tqdm to display the progress bar.
@@ -656,9 +658,9 @@ class LLM:
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
-        for i, request_inputs in enumerate(prompts):
+        for i, prompt in enumerate(prompts):
             self._add_request(
-                request_inputs,
+                prompt,
                 params[i] if isinstance(params, Sequence) else params,
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,

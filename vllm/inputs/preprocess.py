@@ -199,7 +199,7 @@ class InputPreprocessor:
 
     def _prompt_to_llm_inputs(
         self,
-        inputs: SingletonPrompt,
+        prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
     ) -> DecoderOnlyInputs:
@@ -209,7 +209,7 @@ class InputPreprocessor:
         Arguments:
 
         * request_id
-        * inputs: single encoder or decoder input prompt
+        * prompt: single encoder or decoder input prompt
         * lora_request: this is only valid for decoder prompts
 
         Returns:
@@ -219,18 +219,18 @@ class InputPreprocessor:
         * multi_modal_data
         '''
 
-        parsed = parse_singleton_prompt(inputs)
+        parsed = parse_singleton_prompt(prompt)
 
         if parsed["type"] == "str":
-            prompt = parsed["content"]
+            prompt_text = parsed["content"]
             prompt_token_ids = self._tokenize_prompt(
-                prompt,
+                prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
             )
 
             return token_inputs(
-                prompt=prompt,
+                prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
             )
 
@@ -244,16 +244,16 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "text":
-            prompt = parsed["content"]["prompt"]
+            prompt_text = parsed["content"]["prompt"]
             prompt_token_ids = self._tokenize_prompt(
-                prompt,
+                prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
             )
             multi_modal_data = parsed["content"].get("multi_modal_data")
 
             return token_inputs(
-                prompt=prompt,
+                prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data=multi_modal_data,
             )
@@ -271,23 +271,23 @@ class InputPreprocessor:
 
     async def _prompt_to_llm_inputs_async(
         self,
-        inputs: SingletonPrompt,
+        prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
     ) -> DecoderOnlyInputs:
         """Async version of :meth:`_extract_prompt_components`."""
-        parsed = parse_singleton_prompt(inputs)
+        parsed = parse_singleton_prompt(prompt)
 
         if parsed["type"] == "str":
-            prompt = parsed["content"]
+            prompt_text = parsed["content"]
             prompt_token_ids = await self._tokenize_prompt_async(
-                prompt,
+                prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
             )
 
             return token_inputs(
-                prompt=prompt,
+                prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
             )
 
@@ -301,16 +301,16 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "text":
-            prompt = parsed["content"]["prompt"]
+            prompt_text = parsed["content"]["prompt"]
             prompt_token_ids = await self._tokenize_prompt_async(
-                prompt,
+                prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
             )
             multi_modal_data = parsed["content"].get("multi_modal_data")
 
             return token_inputs(
-                prompt=prompt,
+                prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data=multi_modal_data,
             )
@@ -391,7 +391,7 @@ class InputPreprocessor:
 
         Arguments:
 
-        * inputs: an input prompt
+        * prompt: an input prompt
         * request_id
 
         Returns:
@@ -481,7 +481,7 @@ class InputPreprocessor:
 
     def _process_decoder_only_prompt(
         self,
-        inputs: SingletonPrompt,
+        prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -492,7 +492,7 @@ class InputPreprocessor:
 
         Arguments:
 
-        * inputs: input prompt
+        * prompt: input prompt
         * request_id
         * lora_request
         * prompt_adapter_request
@@ -503,7 +503,7 @@ class InputPreprocessor:
         '''
 
         prompt_comps = self._prompt_to_llm_inputs(
-            inputs,
+            prompt,
             request_id=request_id,
             lora_request=lora_request,
         )
@@ -515,14 +515,14 @@ class InputPreprocessor:
 
     async def _process_decoder_only_prompt_async(
         self,
-        inputs: SingletonPrompt,
+        prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> DecoderOnlyInputs:
         """Async version of :meth:`_process_decoder_only_prompt`."""
         prompt_comps = await self._prompt_to_llm_inputs_async(
-            inputs,
+            prompt,
             request_id=request_id,
             lora_request=lora_request,
         )

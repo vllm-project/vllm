@@ -42,7 +42,7 @@ class EngineClient(Protocol):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncGenerator[RequestOutput, None]:
-        """Generate outputs for a request"""
+        """Generate outputs for a request."""
         ...
 
     def encode(

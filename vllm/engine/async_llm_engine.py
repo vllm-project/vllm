@@ -797,7 +797,7 @@ class AsyncLLMEngine:
         stream = self._request_tracker.add_request(
             request_id,
             verbose=self.log_requests,
-            inputs=prompt,
+            prompt=prompt,
             params=params,
             arrival_time=arrival_time or time.time(),
             lora_request=lora_request,
