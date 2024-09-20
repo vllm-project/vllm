@@ -1249,7 +1249,7 @@ def supports_dynamo() -> bool:
 # support `torch.library.custom_op`.
 def supports_custom_op() -> bool:
     # use Version lib like `supports_dynamo`` will break doc build.
-    return not (is_xpu() and is_neuron())
+    return not (is_xpu() or is_neuron())
 
 
 class AtomicCounter:
