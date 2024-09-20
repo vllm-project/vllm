@@ -292,7 +292,9 @@ def awq_gemm_triton(input: torch.Tensor,
         split_k_iters,
     )
 
-    result = torch.zeros((split_k_iters, M, N), dtype=scales.dtype, device=input.device)
+    result = torch.zeros((split_k_iters, M, N),
+                         dtype=scales.dtype,
+                         device=input.device)
 
     # A = input, B = qweight, C = result
     # A = M x K, B = K x N, C = M x N
