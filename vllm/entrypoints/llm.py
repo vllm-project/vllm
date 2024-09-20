@@ -258,8 +258,8 @@ class LLM:
     @overload
     def generate(
         self,
-        inputs: Union[PromptType, Sequence[PromptType]],
-        /,  # We may enable `inputs` keyword after removing the old API
+        prompts: Union[PromptType, Sequence[PromptType]],
+        /,  # We may enable `prompts` keyword after removing the old API
         *,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
