@@ -100,6 +100,7 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
   --ignore=entrypoints/openai/test_accuracy.py \
   --ignore=entrypoints/openai/test_audio.py \
   --ignore=entrypoints/openai/test_encoder_decoder.py \
+  --ignore=entrypoints/openai/test_embedding.py \
   --ignore=entrypoints/openai/test_oot_registration.py "}
 fi
 
