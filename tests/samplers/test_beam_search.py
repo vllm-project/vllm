@@ -27,7 +27,7 @@ def test_beam_search_single_input(
     max_tokens: int,
     beam_width: int,
 ) -> None:
-    example_prompts = example_prompts[1:2]
+    example_prompts = example_prompts[:1]
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
                                                    max_tokens)
