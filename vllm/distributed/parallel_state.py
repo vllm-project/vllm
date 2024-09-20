@@ -979,6 +979,8 @@ def init_distributed_environment(
             "distributed_init_method must be provided when initializing "
             "distributed environment")
         # this backend is used for WORLD
+
+        # offset world size and rank in disaggregated prefill scenario
         maybe_disagg_world_size = world_size
         maybe_disagg_rank = rank
         if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
@@ -994,6 +996,7 @@ def init_distributed_environment(
                 maybe_disagg_rank = rank + world_size
                 logger.debug("rank %d is KV consumer, adjust it to %d", rank,
                              maybe_disagg_rank)
+                
 
         torch.distributed.init_process_group(
             backend=backend,
@@ -1014,11 +1017,16 @@ def init_distributed_environment(
 
     global _WORLD
     if _WORLD is None:
-        ranks = [[i for i in range(world_size)]]
-        # offset the distributed group
+        # in single node the world size can be -1
+        # need to infer the world size from torch.distributed.get_world_size()
+        torch_dist_world_size = torch.distributed.get_world_size()
         if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
-            ranks = include_decoding_groups_if_disagg_enabled(
-                ranks, world_size)
+            # two vLLM instances in the world
+            # so this vLLM instance's world size is half of the world size
+            torch_dist_world_size = torch_dist_world_size // 2
+        ranks = [[i for i in range(torch_dist_world_size)]]
+        ranks = include_decoding_groups_if_disagg_enabled(
+            ranks, world_size)
 
         _WORLD = init_world_group(ranks, local_rank, backend)
         logger.debug("_WORLD initialized for rank %d",
