@@ -349,6 +349,34 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
+    @overload
+    def chat(
+        self,
+        conversations: List[ChatCompletionMessageParam],
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        chat_template: Optional[str] = None,
+        add_generation_prompt: bool = True,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload
+    def chat(
+        self,
+        conversations: List[List[ChatCompletionMessageParam]],
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        chat_template: Optional[str] = None,
+        add_generation_prompt: bool = True,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[List[RequestOutput]]:
+        ...
+
     def chat(
         self,
         conversations: Union[List[ChatCompletionMessageParam],
@@ -360,7 +388,7 @@ class LLM:
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
         tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Union[List[List[RequestOutput]], List[RequestOutput]]:
+    ) -> Union[List[RequestOutput], List[List[RequestOutput]]]:
         """
         Generate responses for a chat conversation.
 
@@ -446,7 +474,7 @@ class LLM:
             )
             outputs.append(out)
 
-        # When conversations is List[...], return a single list.
+        # When conversations is List[...], return a single list
         return outputs if len(outputs) > 1 else outputs[0]
 
     @overload  # LEGACY: single (prompt + optional token ids)
