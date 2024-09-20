@@ -97,7 +97,8 @@ class MQLLMEngine:
         self._errored_with: Optional[BaseException] = None
 
         # Heartbeat thread
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop)
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,
+                                                 daemon=True)
         self._heartbeat_stop_event = threading.Event()
         # The heartbeat needs to be faster than what the client will wait for
         # The VLLM_RPC_TIMEOUT duration is in ms, and we need one in seconds
@@ -213,7 +214,6 @@ class MQLLMEngine:
 
     def engine_step(self) -> List[RequestOutput]:
         """Engine step wrapper with error handling."""
-        self._alive()
         try:
             return self.engine.step()
         except SystemExit:
@@ -230,7 +230,6 @@ class MQLLMEngine:
         """Handle new input from the socket"""
         try:
             while self.input_socket.poll(timeout=0) != 0:
-                self._alive()
                 frames = self.input_socket.recv_multipart(copy=False)
                 request = pickle.loads(frames[0].buffer)
 
@@ -244,7 +243,8 @@ class MQLLMEngine:
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)
                 else:
-                    raise ValueError(f"Unknown RPCRequest Type: {request}")
+                    raise ValueError("Unknown RPCRequest Type: "
+                                     f"{type(request)}")
 
         except Exception as e:
             self._set_errored(e)
@@ -305,18 +305,18 @@ class MQLLMEngine:
             self._send_unhealthy(self._errored_with)
 
         # Check for life of the main loop
-        if time.time() - self._last_alive_time > self.last_alive_threshold:
+        elif time.time() - self._last_alive_time > self.last_alive_threshold:
             self._send_unhealthy(RuntimeError("Engine loop has died"))
 
-        # Raises error if unhealthy.
-        try:
-            self.engine.check_health()
-            self._send_healthy()
-        except Exception as e:
-            # TODO: set errored_with here?
-            # Does it matter if we're just gonna kill the engine?
-            # Assume requests will be failing anyway if engine is unhealthy?
-            self._send_unhealthy(e)
+        else:
+            # Otherwise- check health of the engine
+            # self.engine.check_health() raises on unhealthy
+            try:
+                self.engine.check_health()
+                self._send_healthy()
+            except Exception as e:
+                self._set_errored(e)
+                self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
@@ -331,10 +331,9 @@ class MQLLMEngine:
 
     def _send_unhealthy(self, error: BaseException):
         """Send UNHEALTHY message to RPCClient."""
-        if self.heartbeat_socket.closed:
-            return
-        error_bytes = pickle.dumps(error)
-        self.heartbeat_socket.send_multipart((error_bytes, ), copy=False)
+        if not self.heartbeat_socket.closed:
+            error_bytes = pickle.dumps(error)
+            self.heartbeat_socket.send_multipart((error_bytes, ), copy=False)
 
     def _async_socket_engine_callback(self,
                                       request_outputs: REQUEST_OUTPUTS_T):
