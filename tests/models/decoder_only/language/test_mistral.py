@@ -137,8 +137,6 @@ def test_mistral_format(
 
 @pytest.mark.parametrize("model", MODELS[1:])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_tokens", [64])
-@pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("prompt", SYMBOLIC_LANG_PROMPTS)
 def test_mistral_symbolic_languages(
     model: str,
