@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 
 import torch
 from vllm.lora.punica import PunicaWrapper
-from vllm.hpu.ops import dispatch_bgmv_linear, dispatch_bgmv_embedding
+from vllm_hpu_extension.ops import dispatch_bgmv_linear, dispatch_bgmv_embedding
 
 class GaudiPunicaWrapper(PunicaWrapper):
     def __init__(self, max_num_batched_tokens: int, max_batches: int,

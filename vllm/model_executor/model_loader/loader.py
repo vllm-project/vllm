@@ -85,6 +85,7 @@ def device_loading_context(module: torch.nn.Module,
                     p.data = p.data.to(original_device)
         # New parameters or parameters already on target device are untouched
 
+from vllm.utils import is_fake_hpu
 
 logger = init_logger(__name__)
 
@@ -353,7 +354,10 @@ class DefaultModelLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(self.load_config.device):
+            _device = torch.device(
+                device_config.device) if is_fake_hpu() else torch.device(
+                    self.load_config.device)
+            with _device:
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)

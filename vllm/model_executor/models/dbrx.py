@@ -82,21 +82,15 @@ class DbrxExperts(nn.Module):
 
         self.router = DbrxRouter(config, self.params_dtype)
         self.ws = nn.Parameter(
-            torch.empty(
-                self.num_total_experts,
-                2 * self.intermediate_size,
-                self.d_model,
-                device="cuda",
-                dtype=self.params_dtype,
-            ))
+            torch.empty(self.num_total_experts,
+                        2 * self.intermediate_size,
+                        self.d_model,
+                        dtype=self.params_dtype))
         self.w2s = nn.Parameter(
-            torch.empty(
-                self.num_total_experts,
-                self.d_model,
-                self.intermediate_size,
-                device="cuda",
-                dtype=self.params_dtype,
-            ))
+            torch.empty(self.num_total_experts,
+                        self.d_model,
+                        self.intermediate_size,
+                        dtype=self.params_dtype))
 
         set_weight_attrs(
             self.ws,

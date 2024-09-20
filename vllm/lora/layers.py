@@ -30,6 +30,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
 
+if current_platform.is_hpu():
+    from vllm_hpu_extension.ops import (dispatch_bgmv_embedding,
+                                        dispatch_bgmv_linear)
+
 if TYPE_CHECKING:
     pass
 

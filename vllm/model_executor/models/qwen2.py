@@ -47,7 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
+from vllm.platform import current_platform
 from .interfaces import SupportsLoRA
 from .utils import is_pp_missing_parameter, make_layers
 
@@ -272,6 +272,9 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+        if current_platform.is_hpu():
+            import habana_frameworks.torch as htorch
+            htorch.core.mark_step()
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -281,11 +284,15 @@ class Qwen2Model(nn.Module):
                 attn_metadata,
                 residual,
             )
+            if current_platform.is_hpu():
+                htorch.core.mark_step()
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
+
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

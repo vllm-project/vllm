@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE, UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -52,6 +54,8 @@ class INCConfig(QuantizationConfig):
                          prefix: str) -> Optional["INCLinearMethod"]:
         if isinstance(layer, LinearBase):
             return INCLinearMethod(self)
+        elif isinstance(layer, FusedMoE):
+            return UnquantizedFusedMoEMethod()
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -78,7 +82,7 @@ class INCLinearMethod(LinearMethodBase):
     1. Only support per-tensor quantization due to torch._scaled_mm support.
     2. Only support float8_e4m3fn data type due to the limitation of
        torch._scaled_mm (https://github.com/pytorch/pytorch/blob/2e48b39603411a41c5025efbe52f89560b827825/aten/src/ATen/native/cuda/Blas.cpp#L854-L856)
-       
+
     Args:
         quant_config: The quantization config.
     """

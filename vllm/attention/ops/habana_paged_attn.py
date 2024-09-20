@@ -6,8 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
-
-from vllm.hpu import cache_ops, ops
+from vllm_hpu_extension import cache_ops, ops
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
