@@ -79,16 +79,6 @@ class ipex_ops:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
-        num_heads = out.size(1)
-        num_queries_per_tokens = num_heads // num_kv_heads
-        head_mapping = torch.arange(
-            0,
-            num_kv_heads,
-            device=query.device,
-            dtype=torch.int32,
-        ).view(num_kv_heads,
-               1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
         import vllm._C.ops
         vllm._C.ops.paged_attention_v1(out, query,
@@ -122,16 +112,6 @@ class ipex_ops:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
-        num_heads = out.size(1)
-        num_queries_per_tokens = num_heads // num_kv_heads
-        head_mapping = torch.arange(
-            0,
-            num_kv_heads,
-            dtype=torch.int32,
-            device=query.device,
-        ).view(num_kv_heads,
-               1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
         import vllm._C.ops
         vllm._C.ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out,
