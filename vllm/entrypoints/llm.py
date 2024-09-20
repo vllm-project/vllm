@@ -397,13 +397,15 @@ class LLM:
                     new_beams.append(new_beam)
             
             sorted_beams = sorted(new_beams, key=lambda x: x.logprob, reverse=True)
-
             beams = sorted_beams[:beam_width]
+        
+        completed.extend(beams)
+        completed = sorted(completed, key=lambda x: x.logprob, reverse=True)
 
         beam_search_params = SamplingParams(
                             max_tokens=1,
                             temperature=0.0)
-        return self.generate(beams[0].sequence, beam_search_params)
+        return self.generate(completed[0].sequence, beam_search_params)
 
     def chat(
         self,
