@@ -30,7 +30,7 @@ from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 
 if current_platform.is_hpu():
-    from vllm.hpu.punica_hpu import GaudiPunicaWrapper
+    from vllm_hpu_extension.punica_hpu import GaudiPunicaWrapper
 
 logger = init_logger(__name__)
 
