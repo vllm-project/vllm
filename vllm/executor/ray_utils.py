@@ -10,7 +10,7 @@ from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import get_ip, is_hip, is_xpu, hpu_device_string
+from vllm.utils import get_ip, hpu_device_string, is_hip, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)

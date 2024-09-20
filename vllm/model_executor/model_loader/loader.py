@@ -44,7 +44,7 @@ from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_pin_memory_available
+from vllm.utils import is_fake_hpu, is_pin_memory_available
 
 
 @contextmanager
@@ -87,8 +87,6 @@ def device_loading_context(module: torch.nn.Module,
                     p.data = p.data.to(original_device)
         # New parameters or parameters already on target device are untouched
 
-
-from vllm.utils import is_fake_hpu
 
 logger = init_logger(__name__)
 

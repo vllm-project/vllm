@@ -2,7 +2,6 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
-from array import array
 import collections
 import contextlib
 import dataclasses
@@ -13,6 +12,7 @@ import math
 import operator
 import os
 import time
+from array import array
 from enum import IntEnum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
                     Optional, Set, Tuple, Type, TypeVar, Union)
@@ -24,23 +24,21 @@ from vllm_hpu_extension.ops import LoraMask as LoraMask
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed.parallel_state import get_world_group
-from vllm.inputs.registry import InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal.registry import MultiModalRegistry
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.utils import (HabanaMemoryProfiler, format_bytes, is_fake_hpu,
                         is_pin_memory_available, make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
@@ -1096,7 +1094,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if batch_size_padding > 0:
             dummy_seq_group_metadata = self.create_dummy_seq_group_metadata(
                 0, 0, is_prompt)
-            seq_group_metadata_list.extend(seq_group_metadata_list[0]
+            seq_group_metadata_list.extend(dummy_seq_group_metadata
                                            for _ in range(batch_size_padding))
 
         prefill_reqs = []

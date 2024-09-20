@@ -1,9 +1,9 @@
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
+import math
 import warnings
 from dataclasses import dataclass
 from importlib.util import find_spec
-import math
 from math import inf
 from typing import Dict, List, Optional, Tuple, Union
 

@@ -5,11 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
 
-from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 import torch
+from vllm_hpu_extension.ops import (dispatch_bgmv_embedding,
+                                    dispatch_bgmv_linear)
+
 from vllm.lora.punica import PunicaWrapper
-from vllm_hpu_extension.ops import dispatch_bgmv_linear, dispatch_bgmv_embedding
 
 
 class GaudiPunicaWrapper(PunicaWrapper):

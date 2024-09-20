@@ -16,9 +16,9 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -1023,8 +1023,8 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        load_device = device_config.device if self.weights_load_device is None else \
-                 self.weights_load_device
+        load_device = device_config.device if self.weights_load_device is \
+            None else self.weights_load_device
         load_config = self.create_load_config(load_device)
 
         prompt_adapter_config = PromptAdapterConfig(

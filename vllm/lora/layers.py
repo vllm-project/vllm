@@ -17,6 +17,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
+from vllm.hpu.punica_hpu import GaudiPunicaWrapper
 from vllm.lora.punica import PunicaWrapper
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -29,10 +30,6 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
-
-if current_platform.is_hpu():
-    from vllm_hpu_extension.ops import (dispatch_bgmv_embedding,
-                                        dispatch_bgmv_linear)
 
 if TYPE_CHECKING:
     pass
@@ -250,6 +247,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[1], -1)
         # Embedding layer only need expand op
         if current_platform.is_hpu():
+            assert isinstance(self.punica_wrapper, GaudiPunicaWrapper)
             self.punica_wrapper.add_lora_embedding(full_output,
                                                    full_lora_a_embeddings,
                                                    self.lora_b_stacked,

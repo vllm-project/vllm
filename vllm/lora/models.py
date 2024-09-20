@@ -26,8 +26,8 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.utils import is_pin_memory_available, get_device
 from vllm.platforms import current_platform
+from vllm.utils import is_pin_memory_available
 
 if current_platform.is_hpu():
     from vllm.hpu.punica_hpu import GaudiPunicaWrapper
