@@ -22,8 +22,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, ToolCall, UsageInfo,
-    RequestResponseMetadata)
+    DeltaToolCall, ErrorResponse, FunctionCall, RequestResponseMetadata,
+    ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing,
@@ -589,12 +589,12 @@ class OpenAIServingChat(OpenAIServing):
                     exclude_unset=True, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
-            # report to FastAPI middleware aggregate number of completion tokens (across all choices)
+            # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
             request_metadata.final_usage_info = UsageInfo(
-                                      prompt_tokens=num_prompt_tokens,
-                                      completion_tokens=num_completion_tokens,
-                                      total_tokens=num_prompt_tokens+num_completion_tokens)
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=num_completion_tokens,
+                total_tokens=num_prompt_tokens + num_completion_tokens)
 
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error

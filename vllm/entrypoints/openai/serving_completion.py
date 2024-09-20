@@ -18,8 +18,9 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              ErrorResponse, UsageInfo,
-                                              RequestResponseMetadata)
+                                              ErrorResponse,
+                                              RequestResponseMetadata,
+                                              UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
@@ -170,14 +171,15 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Streaming response
         if stream:
-            return self.completion_stream_generator(request,
-                                                    result_generator,
-                                                    request_id,
-                                                    created_time,
-                                                    model_name,
-                                                    num_prompts=len(prompts),
-                                                    tokenizer=tokenizer,
-                                                    request_metadata=request_metadata)
+            return self.completion_stream_generator(
+                request,
+                result_generator,
+                request_id,
+                created_time,
+                model_name,
+                num_prompts=len(prompts),
+                tokenizer=tokenizer,
+                request_metadata=request_metadata)
 
         # Non-streaming response
         final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
@@ -354,12 +356,13 @@ class OpenAIServingCompletion(OpenAIServing):
                     exclude_unset=False, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
-            # report to FastAPI middleware aggregate tokens (all prompts, all completions)
+            # report to FastAPI middleware aggregate usage across all choices
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
-            request_metadata.final_usage_info = UsageInfo(prompt_tokens=total_prompt_tokens,
-                                                           completion_tokens=total_completion_tokens,
-                                                           total_tokens=total_prompt_tokens + total_completion_tokens)
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens)
 
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
