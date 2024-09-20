@@ -6,6 +6,7 @@ import torch
 
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
+from vllm.utils import seed_everything
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -55,10 +56,7 @@ def test_copy_blocks(
 ) -> None:
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
     # Generate random block mappings where each source block is mapped to two
     # destination blocks.
@@ -134,10 +132,7 @@ def test_reshape_and_cache(
 ) -> None:
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
@@ -229,9 +224,7 @@ def test_reshape_and_cache_flash(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
 
     # Create a random slot mapping.
@@ -345,10 +338,8 @@ def test_swap_blocks(
         pytest.skip()
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+
+    seed_everything(seed)
 
     src_device = device if direction[0] == "cuda" else 'cpu'
     dst_device = device if direction[1] == "cuda" else 'cpu'
@@ -417,9 +408,7 @@ def test_fp8_e4m3_conversion(
     seed: int,
     device: str,
 ) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     low = -224.0
     high = 224.0
