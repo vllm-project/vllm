@@ -1,5 +1,5 @@
-from typing import (TYPE_CHECKING, Generic, Iterable, List, Optional, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Generic, Iterable, List, Literal, Optional,
+                    Tuple, Union)
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar
@@ -47,7 +47,7 @@ class EmbedsPrompt(TypedDict):
     """
 
 
-SingletonPromptInputs = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
+SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 Set of possible schemas for a single LLM input:
 
@@ -61,7 +61,7 @@ which may be utilized for encoder/decoder models when
 the user desires to express both the encoder & decoder
 prompts explicitly, i.e. :class:`ExplicitEncoderDecoderPrompt`
 
-A prompt of type :class:`SingletonPromptInputs` may be employed
+A prompt of type :class:`SingletonPrompt` may be employed
 as (1) input to a decoder-only model, (2) input to
 the encoder of an encoder/decoder model, in the scenario
 where the decoder-prompt is not specified explicitly, or
@@ -70,12 +70,12 @@ more than one prompt, i.e. :class:`ExplicitEncoderDecoderPrompt`
 """
 
 _T1_co = TypeVar("_T1_co",
-                 bound=SingletonPromptInputs,
-                 default=SingletonPromptInputs,
+                 bound=SingletonPrompt,
+                 default=SingletonPrompt,
                  covariant=True)
 _T2_co = TypeVar("_T2_co",
-                 bound=SingletonPromptInputs,
-                 default=SingletonPromptInputs,
+                 bound=SingletonPrompt,
+                 default=SingletonPrompt,
                  covariant=True)
 
 
@@ -87,7 +87,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
 
     The encoder and decoder prompts, respectively,
     may formatted according to any of the
-    :class:`SingletonPromptInputs` schemas, and are not
+    :class:`SingletonPrompt` schemas, and are not
     required to have the same schema.
 
     Only the encoder prompt may have multi-modal data.
@@ -96,7 +96,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     be used as an input to a decoder-only model,
     and that the `encoder_prompt` and `decoder_prompt`
     fields of this data structure themselves must be
-    :class:`SingletonPromptInputs` instances.
+    :class:`SingletonPrompt` instances.
     """
 
     encoder_prompt: _T1_co
@@ -104,7 +104,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     decoder_prompt: Optional[_T2_co]
 
 
-PromptInputs = Union[SingletonPromptInputs, ExplicitEncoderDecoderPrompt]
+PromptType = Union[SingletonPrompt, ExplicitEncoderDecoderPrompt]
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:
@@ -116,56 +116,76 @@ both decoder-only and encoder/decoder input types:
 """
 
 
-class LLMInputs(TypedDict):
-    """
-    The inputs in :class:`~vllm.LLMEngine` before they are
-    passed to the model executor.
+class TokenInputs(TypedDict):
+    """Represents token-based inputs."""
 
-    This specifies the data required for decoder-only models.
-    """
-    prompt_token_ids: Optional[List[int]]
+    type: Literal["token"]
+    """The type of inputs."""
+
+    prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
-    prompt: NotRequired[Optional[str]]
+    prompt: NotRequired[str]
     """
     The original prompt text corresponding to the token IDs, if available.
     """
 
-    prompt_embeds: NotRequired[Optional[torch.Tensor]]
-    """
-    The embeddings of the prompt, if available.
-    """
-
-    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
+    multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
 
-class EncoderDecoderLLMInputs(LLMInputs):
+class EmbedInputs(TypedDict):
+    """Represents embedding-based inputs."""
+
+    type: Literal["embed"]
+    """The type of inputs."""
+
+    prompt_embeds: torch.Tensor
+    """The embeddings of the prompt."""
+
+    multi_modal_data: NotRequired["MultiModalDataDict"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
+
+
+LLMInputs = Union[TokenInputs, EmbedInputs]
+"""
+The inputs in :class:`~vllm.LLMEngine` before they are
+passed to the model executor.
+
+This specifies the data required for decoder-only models.
+"""
+
+
+class EmptyInputs(TypedDict):
+    """Represents empty inputs."""
+
+    type: Literal["empty"]
+    """The type of inputs."""
+
+
+class EncoderDecoderInputs(TypedDict):
     """
     The inputs in :class:`~vllm.LLMEngine` before they are
     passed to the model executor.
 
     This specifies the required data for encoder-decoder models.
     """
-    encoder_prompt_token_ids: Optional[List[int]]
-    """The token IDs of the encoder prompt."""
 
-    encoder_prompt: NotRequired[Optional[str]]
-    """
-    The original encoder prompt text corresponding to the token IDs, if
-    available.
-    """
+    encoder: TokenInputs
+    """The inputs for the encoder portion."""
+
+    decoder: Union[EmptyInputs, TokenInputs]
+    """The inputs for the decoder portion."""
 
 
-_T1 = TypeVar("_T1",
-              bound=SingletonPromptInputs,
-              default=SingletonPromptInputs)
-_T2 = TypeVar("_T2",
-              bound=SingletonPromptInputs,
-              default=SingletonPromptInputs)
+_T1 = TypeVar("_T1", bound=SingletonPrompt, default=SingletonPrompt)
+_T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)
 
 
 def build_explicit_enc_dec_prompt(

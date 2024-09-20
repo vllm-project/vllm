@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
 import torch
@@ -11,30 +10,14 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
-from .data import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
-                   SingletonPromptInputs)
+from .data import (TokenInputs, EmbedInputs, EncoderDecoderInputs, EmptyInputs,
+                   LLMInputs, PromptType, SingletonPrompt)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
 
 logger = init_logger(__name__)
-
-
-@dataclass(frozen=True)
-class PromptComponents:
-    prompt: Optional[str]
-    prompt_token_ids: List[int]
-    prompt_embeds: Optional[torch.Tensor] = None
-    multi_modal_data: Optional["MultiModalDataDict"] = None
-
-
-@dataclass(frozen=True)
-class DecoderPromptComponents:
-    prompt: Optional[str]
-    prompt_token_ids: Optional[List[int]]
-    prompt_embeds: Optional[torch.Tensor] = None
-    multi_modal_data: Optional["MultiModalDataDict"] = None
 
 
 class InputPreprocessor:
@@ -217,12 +200,42 @@ class InputPreprocessor:
                                             prompt=prompt,
                                             lora_request=lora_request)
 
-    def _extract_prompt_components(
+    def _token_inputs(
         self,
-        inputs: SingletonPromptInputs,
+        prompt_token_ids: List[int],
+        prompt: Optional[str] = None,
+        multi_modal_data: Optional["MultiModalDataDict"] = None,
+    ) -> TokenInputs:
+        inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
+
+        if prompt is not None:
+            inputs["prompt"] = prompt
+        if multi_modal_data is not None:
+            inputs["multi_modal_data"] = multi_modal_data
+
+        return inputs
+
+    def _embed_inputs(
+        self,
+        prompt_embeds: torch.Tensor,
+        multi_modal_data: Optional["MultiModalDataDict"] = None,
+    ) -> EmbedInputs:
+        inputs = EmbedInputs(type="embed", prompt_embeds=prompt_embeds)
+
+        if multi_modal_data is not None:
+            inputs["multi_modal_data"] = multi_modal_data
+
+        return inputs
+
+    def _empty_inputs(self) -> EmptyInputs:
+        return EmptyInputs(type="empty")
+
+    def _prompt_to_llm_inputs(
+        self,
+        inputs: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-    ) -> PromptComponents:
+    ) -> LLMInputs:
         '''
         Extract the components of any single encoder or decoder input prompt.
 
@@ -249,16 +262,19 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
 
-            return PromptComponents(prompt=prompt,
-                                    prompt_token_ids=prompt_token_ids)
+            return self._token_inputs(
+                prompt=prompt,
+                prompt_token_ids=prompt_token_ids,
+            )
 
         if parsed["type"] == "tokens":
             prompt_token_ids = parsed["content"]["prompt_token_ids"]
             multi_modal_data = parsed["content"].get("multi_modal_data")
 
-            return PromptComponents(prompt=None,
-                                    prompt_token_ids=prompt_token_ids,
-                                    multi_modal_data=multi_modal_data)
+            return self._token_inputs(
+                prompt_token_ids=prompt_token_ids,
+                multi_modal_data=multi_modal_data,
+            )
 
         if parsed["type"] == "text":
             prompt = parsed["content"]["prompt"]
@@ -269,27 +285,29 @@ class InputPreprocessor:
             )
             multi_modal_data = parsed["content"].get("multi_modal_data")
 
-            return PromptComponents(prompt=prompt,
-                                    prompt_token_ids=prompt_token_ids,
-                                    multi_modal_data=multi_modal_data)
+            return self._token_inputs(
+                prompt=prompt,
+                prompt_token_ids=prompt_token_ids,
+                multi_modal_data=multi_modal_data,
+            )
 
         if parsed["type"] == "embeds":
             prompt_embeds = parsed["content"]["prompt_embeds"]
             multi_modal_data = parsed["content"].get("multi_modal_data")
 
-            return PromptComponents(prompt=None,
-                                    prompt_token_ids=[],
-                                    multi_modal_data=multi_modal_data,
-                                    prompt_embeds=prompt_embeds)
+            return self._embed_inputs(
+                prompt_embeds=prompt_embeds,
+                multi_modal_data=multi_modal_data,
+            )
 
         assert_never(parsed)
 
-    async def _extract_prompt_components_async(
+    async def _prompt_to_llm_inputs_async(
         self,
-        inputs: SingletonPromptInputs,
+        inputs: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-    ) -> PromptComponents:
+    ) -> LLMInputs:
         """Async version of :meth:`_extract_prompt_components`."""
         parsed = parse_singleton_prompt(inputs)
 
@@ -301,16 +319,19 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
 
-            return PromptComponents(prompt=prompt,
-                                    prompt_token_ids=prompt_token_ids)
+            return self._token_inputs(
+                prompt=prompt,
+                prompt_token_ids=prompt_token_ids,
+            )
 
         if parsed["type"] == "tokens":
             prompt_token_ids = parsed["content"]["prompt_token_ids"]
             multi_modal_data = parsed["content"].get("multi_modal_data")
 
-            return PromptComponents(prompt=None,
-                                    prompt_token_ids=prompt_token_ids,
-                                    multi_modal_data=multi_modal_data)
+            return self._token_inputs(
+                prompt_token_ids=prompt_token_ids,
+                multi_modal_data=multi_modal_data,
+            )
 
         if parsed["type"] == "text":
             prompt = parsed["content"]["prompt"]
@@ -321,46 +342,63 @@ class InputPreprocessor:
             )
             multi_modal_data = parsed["content"].get("multi_modal_data")
 
-            return PromptComponents(prompt=prompt,
-                                    prompt_token_ids=prompt_token_ids,
-                                    multi_modal_data=multi_modal_data)
+            return self._token_inputs(
+                prompt=prompt,
+                prompt_token_ids=prompt_token_ids,
+                multi_modal_data=multi_modal_data,
+            )
 
         if parsed["type"] == "embeds":
             prompt_embeds = parsed["content"]["prompt_embeds"]
             multi_modal_data = parsed["content"].get("multi_modal_data")
 
-            return PromptComponents(prompt=None,
-                                    prompt_token_ids=[],
-                                    multi_modal_data=multi_modal_data,
-                                    prompt_embeds=prompt_embeds)
+            return self._embed_inputs(
+                prompt_embeds=prompt_embeds,
+                multi_modal_data=multi_modal_data,
+            )
 
         assert_never(parsed)
 
     def _build_enc_dec_llm_inputs(
         self,
-        encoder_comps: PromptComponents,
-        decoder_comps: Union[PromptComponents, DecoderPromptComponents],
-    ) -> EncoderDecoderLLMInputs:
-        if (encoder_comps.multi_modal_data is not None
-                or decoder_comps.multi_modal_data is not None):
-            raise ValueError("Multi-modal encoder-decoder models are "
-                             "not supported yet")
+        encoder_inputs: LLMInputs,
+        decoder_inputs: Union[EmptyInputs, LLMInputs],
+    ) -> EncoderDecoderInputs:
+        if encoder_inputs["type"] == "token":
+            if "multi_modal_data" in encoder_inputs:
+                raise ValueError("Multi-modal encoder-decoder models are "
+                                 "not supported yet")
+        elif encoder_inputs["type"] == "embed":
+            raise NotImplementedError
+        else:
+            assert_never(encoder_inputs)
 
-        decoder_prompt_ids = self._prepare_decoder_input_ids_for_generation(
-            decoder_comps.prompt_token_ids)
+        if decoder_inputs["type"] == "token":
+            if "prompt_token_ids" in decoder_inputs:
+                decoder_inputs["prompt_token_ids"] = (
+                    self._prepare_decoder_input_ids_for_generation(
+                        decoder_inputs["prompt_token_ids"]))
 
-        return EncoderDecoderLLMInputs(
-            prompt_token_ids=decoder_prompt_ids,
-            prompt=decoder_comps.prompt,
-            encoder_prompt_token_ids=encoder_comps.prompt_token_ids,
-            encoder_prompt=encoder_comps.prompt,
+            if "multi_modal_data" in decoder_inputs:
+                raise ValueError("Multi-modal encoder-decoder models are "
+                                 "not supported yet")
+        elif decoder_inputs["type"] == "embed":
+            raise NotImplementedError
+        elif decoder_inputs["type"] == "empty":
+            pass
+        else:
+            assert_never(encoder_inputs)
+
+        return EncoderDecoderInputs(
+            encoder=encoder_inputs,
+            decoder=decoder_inputs,
         )
 
     def _process_encoder_decoder_prompt(
         self,
-        inputs: PromptInputs,
+        prompt: PromptType,
         request_id: str,
-    ) -> EncoderDecoderLLMInputs:
+    ) -> EncoderDecoderInputs:
         '''
         For encoder/decoder models only:
         Process an input prompt into an
@@ -394,90 +432,89 @@ class InputPreprocessor:
         * :class:`EncoderDecoderLLMInputs` instance
         '''
 
-        encoder_comps: PromptComponents
-        decoder_comps: Union[PromptComponents, DecoderPromptComponents]
+        encoder_inputs: LLMInputs
+        decoder_inputs: Union[EmptyInputs, LLMInputs]
 
-        if is_explicit_encoder_decoder_prompt(inputs):
-            encoder_comps = self._extract_prompt_components(
-                inputs["encoder_prompt"],
+        if is_explicit_encoder_decoder_prompt(prompt):
+            encoder_inputs = self._prompt_to_llm_inputs(
+                prompt["encoder_prompt"],
                 request_id=request_id,
             )
 
-            if (decoder_input := inputs["decoder_prompt"]) is None:
-                decoder_comps = DecoderPromptComponents(prompt=None,
-                                                        prompt_token_ids=None)
+            if (decoder_input := prompt["decoder_prompt"]) is None:
+                decoder_inputs = self._empty_inputs()
             else:
-                decoder_comps = self._extract_prompt_components(
+                decoder_inputs = self._prompt_to_llm_inputs(
                     decoder_input,
                     request_id=request_id,
                 )
         else:
-            encoder_comps = self._extract_prompt_components(
-                inputs,
+            encoder_inputs = self._prompt_to_llm_inputs(
+                prompt,
                 request_id=request_id,
             )
 
-            decoder_comps = DecoderPromptComponents(prompt=None,
-                                                    prompt_token_ids=None)
+            decoder_inputs = self._empty_inputs()
 
-        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
+        return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 
     async def _process_encoder_decoder_prompt_async(
         self,
-        inputs: PromptInputs,
+        inputs: PromptType,
         request_id: str,
-    ) -> EncoderDecoderLLMInputs:
+    ) -> EncoderDecoderInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
-        encoder_comps: PromptComponents
-        decoder_comps: Union[PromptComponents, DecoderPromptComponents]
+        encoder_inputs: LLMInputs
+        decoder_inputs: Union[EmptyInputs, LLMInputs]
 
         if is_explicit_encoder_decoder_prompt(inputs):
-            encoder_task = self._extract_prompt_components_async(
+            encoder_task = self._prompt_to_llm_inputs_async(
                 inputs["encoder_prompt"],
                 request_id=request_id,
             )
 
             if (decoder_input := inputs["decoder_prompt"]) is None:
-                encoder_comps = await encoder_task
-                decoder_comps = DecoderPromptComponents(prompt=None,
-                                                        prompt_token_ids=None)
+                encoder_inputs = await encoder_task
+                decoder_inputs = self._empty_inputs()
             else:
-                decoder_task = self._extract_prompt_components_async(
+                decoder_task = self._prompt_to_llm_inputs_async(
                     decoder_input,
                     request_id=request_id,
                 )
 
-                encoder_comps, decoder_comps = await asyncio.gather(
+                encoder_inputs, decoder_inputs = await asyncio.gather(
                     encoder_task, decoder_task)
         else:
-            encoder_comps = await self._extract_prompt_components_async(
+            encoder_inputs = await self._prompt_to_llm_inputs_async(
                 inputs,
                 request_id=request_id,
             )
 
-            decoder_comps = DecoderPromptComponents(prompt=None,
-                                                    prompt_token_ids=None)
+            decoder_inputs = self._empty_inputs()
 
-        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
+        return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 
     def _build_decoder_only_llm_inputs(
         self,
-        prompt_comps: PromptComponents,
+        prompt_inputs: LLMInputs,
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> LLMInputs:
-        prompt_token_ids = self._apply_prompt_adapter(
-            prompt_comps.prompt_token_ids,
-            prompt_adapter_request=prompt_adapter_request,
-        )
+        if prompt_inputs["type"] == "token":
+            if "prompt_token_ids" in prompt_inputs:
+                prompt_inputs["prompt_token_ids"] = self._apply_prompt_adapter(
+                    prompt_inputs["prompt_token_ids"],
+                    prompt_adapter_request=prompt_adapter_request,
+                )
+        elif prompt_inputs["type"] == "embed":
+            pass
+        else:
+            assert_never(prompt_inputs)
 
-        return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=prompt_comps.prompt,
-                         prompt_embeds=prompt_comps.prompt_embeds,
-                         multi_modal_data=prompt_comps.multi_modal_data)
+        return prompt_inputs
 
     def _process_decoder_only_prompt(
         self,
-        inputs: SingletonPromptInputs,
+        inputs: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -498,7 +535,7 @@ class InputPreprocessor:
         * :class:`LLMInputs` instance
         '''
 
-        prompt_comps = self._extract_prompt_components(
+        prompt_comps = self._prompt_to_llm_inputs(
             inputs,
             request_id=request_id,
             lora_request=lora_request,
@@ -511,13 +548,13 @@ class InputPreprocessor:
 
     async def _process_decoder_only_prompt_async(
         self,
-        inputs: SingletonPromptInputs,
+        inputs: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         """Async version of :meth:`_process_decoder_only_prompt`."""
-        prompt_comps = await self._extract_prompt_components_async(
+        prompt_comps = await self._prompt_to_llm_inputs_async(
             inputs,
             request_id=request_id,
             lora_request=lora_request,
@@ -530,11 +567,11 @@ class InputPreprocessor:
 
     def preprocess(
         self,
-        inputs: PromptInputs,
+        inputs: PromptType,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
+    ) -> Union[LLMInputs, EncoderDecoderInputs]:
         """Preprocess the input prompt."""
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of
@@ -558,11 +595,11 @@ class InputPreprocessor:
 
     async def preprocess_async(
         self,
-        inputs: PromptInputs,
+        inputs: PromptType,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
+    ) -> Union[LLMInputs, EncoderDecoderInputs]:
         """Async version of :meth:`preprocess`."""
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of

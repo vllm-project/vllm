@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List, Mapping, Optional, Union
 
-from vllm.inputs import PromptInputs
+from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -22,7 +22,7 @@ class MQEngineDeadError(RuntimeError):
 
 @dataclass
 class RPCGenerateRequest:
-    inputs: PromptInputs
+    prompt: PromptType
     sampling_params: SamplingParams
     request_id: str
     lora_request: Optional[LoRARequest] = None

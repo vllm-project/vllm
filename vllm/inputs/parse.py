@@ -4,9 +4,9 @@ from typing_extensions import TypeIs
 
 from vllm.utils import is_list_of
 
-from .data import (EmbedsPrompt, EncoderDecoderLLMInputs,
-                   ExplicitEncoderDecoderPrompt, LLMInputs, PromptInputs,
-                   SingletonPromptInputs, TextPrompt, TokensPrompt)
+from .data import (EmbedsPrompt, EncoderDecoderInputs,
+                   ExplicitEncoderDecoderPrompt, LLMInputs, PromptType,
+                   SingletonPrompt, TextPrompt, TokensPrompt)
 
 
 class ParsedText(TypedDict):
@@ -86,30 +86,30 @@ class ParsedEmbedsPrompt(TypedDict):
 
 
 def parse_singleton_prompt(
-    inputs: SingletonPromptInputs,
+    prompt: SingletonPrompt,
 ) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
            ParsedEmbedsPrompt]:
-    if isinstance(inputs, str):
-        return ParsedStrPrompt(type="str", content=inputs)
-    elif isinstance(inputs, dict):
-        if 'prompt_embeds' in inputs:
+    if isinstance(prompt, str):
+        return ParsedStrPrompt(type="str", content=prompt)
+    elif isinstance(prompt, dict):
+        if 'prompt_embeds' in prompt:
             return ParsedEmbedsPrompt(type="embeds",
-                                      content=inputs)  # type: ignore
-        elif "prompt_token_ids" in inputs:
+                                      content=prompt)  # type: ignore
+        elif "prompt_token_ids" in prompt:
             return ParsedTokensPrompt(type="tokens",
-                                      content=inputs)  # type: ignore
-        elif "prompt" in inputs:
-            return ParsedTextPrompt(type="text", content=inputs)
+                                      content=prompt)  # type: ignore
+        elif "prompt" in prompt:
+            return ParsedTextPrompt(type="text", content=prompt)
 
     raise TypeError("inputs must be a string, TextPrompt, or TokensPrompt")
 
 
 def is_explicit_encoder_decoder_prompt(
-        inputs: PromptInputs) -> TypeIs[ExplicitEncoderDecoderPrompt]:
-    return isinstance(inputs, dict) and "encoder_prompt" in inputs
+        prompt: PromptType) -> TypeIs[ExplicitEncoderDecoderPrompt]:
+    return isinstance(prompt, dict) and "encoder_prompt" in prompt
 
 
 def is_valid_encoder_decoder_llm_inputs(
-    inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
-) -> TypeIs[EncoderDecoderLLMInputs]:
+    inputs: Union[LLMInputs, EncoderDecoderInputs],
+) -> TypeIs[EncoderDecoderInputs]:
     return "encoder_prompt_token_ids" in inputs

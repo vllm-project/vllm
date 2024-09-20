@@ -24,7 +24,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupResponse)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
-from vllm.inputs import PromptInputs
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -389,7 +389,7 @@ class MQLLMEngineClient:
 
     async def generate(
         self,
-        inputs: PromptInputs,
+        prompt: PromptType,
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -421,7 +421,7 @@ class MQLLMEngineClient:
 
             request_bytes = pickle.dumps(
                 RPCGenerateRequest(
-                    inputs=inputs,
+                    prompt=prompt,
                     sampling_params=sampling_params,
                     request_id=request_id,
                     lora_request=lora_request,
