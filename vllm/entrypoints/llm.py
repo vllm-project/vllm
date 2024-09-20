@@ -372,9 +372,9 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            conversations: A list or a single conversation represented as a list
-                of messages. Each message is a dictionary with 'role' and
-                'content' keys.
+            conversations: A list of conversations or a single conversation. 
+                - Each conversation is represented as a list of messages.
+                - Each message is a dictionary with 'role' and 'content' keys.
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
