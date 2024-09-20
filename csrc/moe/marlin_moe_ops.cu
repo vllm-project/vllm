@@ -26,10 +26,10 @@
 #include <iostream>
 
 #include "core/scalar_type.hpp"
-#include "marlin_moe_kernel_ku4b8.h"
-#include "marlin_moe_kernel_ku8b128.h"
-#include "marlin_moe_kernel_ku4.h"
-#include "marlin_moe_kernel_ku8.h"
+#include "marlin_kernels/marlin_moe_kernel_ku4b8.h"
+#include "marlin_kernels/marlin_moe_kernel_ku8b128.h"
+#include "marlin_kernels/marlin_moe_kernel_ku4.h"
+#include "marlin_kernels/marlin_moe_kernel_ku8.h"
 
 template <typename T>
 inline std::string str(T x) {
@@ -312,15 +312,15 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   return exec_config_t{0, {-1, -1, -1}};
 }
 
-#define CALL_MOE_KERNEL_FUNCTION(KERNEL_FUNCTION)                              \
-  else if (KERNEL_FUNCTION(                                                    \
-               q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,      \
-               has_act_order, has_zp, group_blocks, num_threads, blocks,       \
-               max_shared_mem, stream, A_ptr, B_ptr, C_ptr, sorted_ids_ptr,    \
-               topk_weights_ptr, s_ptr, zp_ptr, g_idx_ptr, expert_offsets_ptr, \
-               num_groups, expert_idx, num_experts, topk, prob_m, prob_n,      \
-               prob_k, tot_m, locks, replicate_input, apply_weights, m_block,  \
-               max_par, exec_cfg.max_m_blocks)) {                              \
+#define CALL_MOE_KERNEL_FUNCTION(KERNEL_FUNCTION)                             \
+  else if (KERNEL_FUNCTION(                                                   \
+               q_type, thread_n_blocks, thread_k_blocks, has_act_order,       \
+               group_blocks, num_threads, blocks, max_shared_mem, stream,     \
+               A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,  \
+               zp_ptr, g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx, \
+               num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,       \
+               replicate_input, apply_weights, m_block, max_par,              \
+               exec_cfg.max_m_blocks)) {                                      \
   }
 
 void marlin_mm_moe(const void* A, const void* B, void* C,
@@ -462,9 +462,6 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
     int tot_m_blocks = ceildiv(tot_m, 16);
     for (int m_block = 0; m_block < tot_m_blocks;
          m_block += 4 * exec_cfg.max_m_blocks) {
-      // make it max possible value
-      int thread_m_blocks = exec_cfg.max_m_blocks;
-
       int cfg_max_m_blocks = exec_cfg.max_m_blocks;
 
       if (false) {
@@ -479,7 +476,6 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
                                ", has_act_order = " + str(has_act_order) +
                                ", num_groups = " + str(num_groups) +
                                ", group_size = " + str(group_size) +
-                               ", thread_m_blocks = " + str(thread_m_blocks) +
                                ", thread_n_blocks = " + str(thread_n_blocks) +
                                ", thread_k_blocks = " + str(thread_k_blocks));
       }
