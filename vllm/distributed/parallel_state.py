@@ -1021,7 +1021,7 @@ def init_distributed_environment(
         torch_dist_world_size = torch.distributed.get_world_size()
         if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
             # two vLLM instances in the world
-            # so this vLLM instance's world size is half of the world size
+            # so this vLLM instance's world size is half of torch's world size
             torch_dist_world_size = torch_dist_world_size // 2
         ranks = [[i for i in range(torch_dist_world_size)]]
         ranks = include_decoding_groups_if_disagg_enabled(ranks, world_size)
