@@ -575,25 +575,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             block_table = block_tables[seq_id]
             self._update_two_level_kv_tensors(block_table, seq_len)
 
-    def _update_paged_kv_tensors(self, block_table: List[int], seq_len: int):
-        # Get the number of valid blocks based on sequence length.
-        # If seq_len = 16, block_size = 16,
-        # block_table_bound is 1 with 1 valid block.
-        # If seq_len = 15, block_size = 16,
-        # block_table_bound is 0 + 1 with 1 valid block.
-        self.total_blocks += len(block_table)
-        block_table_bound = seq_len // self.block_size + 1 \
-                            if seq_len % self.block_size != 0 \
-                            else seq_len // self.block_size
-        self.paged_kv_indices.extend(block_table[:block_table_bound])
-        self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
-                                    block_table_bound)
-
-        last_page_len = seq_len % self.block_size
-        if last_page_len == 0:
-            last_page_len = self.block_size
-        self.paged_kv_last_page_len.append(last_page_len)
-
     def _update_two_level_kv_tensors(self, block_table: List[int], seq_len:int):
         self.total_blocks += len(block_table)
         block_table_bound = seq_len // self.block_size + 1 \
@@ -608,7 +589,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             last_page_len = self.block_size
         self.second_layer_kv_last_page_len.append(last_page_len)
 
-        ##Set these 0 since we are not using cascade inference yet
+        # Set to 0 since we are not emulating beam search yet.
         self.paged_kv_last_page_len.append(0)
         self.paged_kv_indptr.append(self.paged_kv_indptr[-1])
 
