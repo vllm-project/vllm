@@ -422,7 +422,7 @@ def build_partial_prefill_input(
     ).to(device)
 
     # import here to avoid circular import.
-    from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
     rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.cat(rebuilt_input_tokens).to(device),
         input_positions=torch.cat(rebuilt_input_positions).to(device),

@@ -23,23 +23,43 @@ def setup_servers():
 
     # Start prefill instance
     prefill_cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server", "-tp", "2",
-        "--model", "meta-llama/Meta-Llama-3.1-8B-Instruct", "--port", "8100",
-        "--gpu-memory-utilization", "0.8", "--max-model-len", "1000",
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "-tp",
+        "2",
+        "--model",
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "--port",
+        "8100",
+        "--gpu-memory-utilization",
+        "0.8",
+        "--max-model-len",
+        "1000",
     ]
     prefill_env = os.environ.copy()
-    prefill_env["VLLM_DISAGG_PREFILL_ROLE"] = "prefill"
+    prefill_env["VLLM_DISTRIBUTED_KV_ROLE"] = "producer"
     prefill_env["CUDA_VISIBLE_DEVICES"] = "0,1"
     prefill_proc = Popen(prefill_cmd, env=prefill_env)
 
     # Start decode instance
     decode_cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server", "-tp", "2",
-        "--model", "meta-llama/Meta-Llama-3.1-8B-Instruct", "--port", "8200",
-        "--gpu-memory-utilization", "0.8", "--max-model-len", "1000",
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "-tp",
+        "2",
+        "--model",
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "--port",
+        "8200",
+        "--gpu-memory-utilization",
+        "0.8",
+        "--max-model-len",
+        "1000",
     ]
     decode_env = os.environ.copy()
-    decode_env["VLLM_DISAGG_PREFILL_ROLE"] = "decode"
+    decode_env["VLLM_DISTRIBUTED_KV_ROLE"] = "consumer"
     decode_env["CUDA_VISIBLE_DEVICES"] = "2,3"
     decode_proc = Popen(decode_cmd, env=decode_env)
 

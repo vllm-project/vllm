@@ -14,6 +14,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
@@ -22,7 +23,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.distributed import get_pp_group, get_disagg_group
+from vllm.distributed import get_disagg_group, get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -54,8 +55,6 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict, dump_input_when_exception)
-
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -1615,13 +1614,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                            device=self.device),
+                                             device=self.device),
                 **seqlen_agnostic_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end.record()
-            
+
         # Sending KV cache in distributed KV cache transfer setting
         # NOTE: the send operation is non-blocking
         if self.send_kv_needed(model_input, kv_caches):
@@ -1702,8 +1701,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.hidden_states = hidden_states
 
         return [output]
-    
-    
+
     def recv_kv_needed(self, model_input, kv_caches) -> bool:
         """
             Need to receive KV when
@@ -1722,7 +1720,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         return all([
             dist_kv.IS_KV_CONSUMER,
             not is_profile_run,
-            is_prefill_run, 
+            is_prefill_run,
         ])
 
     def send_kv_needed(self, model_input, kv_caches) -> bool:
@@ -1740,11 +1738,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
 
-        return all([
-            dist_kv.IS_KV_PRODUCER,
-            not is_profile_run,
-            is_prefill_run
-        ])
+        return all(
+            [dist_kv.IS_KV_PRODUCER, not is_profile_run, is_prefill_run])
 
 
 class CUDAGraphRunner:
