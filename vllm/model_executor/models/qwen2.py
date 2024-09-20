@@ -47,6 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.utils import is_hpu
 
 from .interfaces import SupportsLoRA
 
@@ -260,6 +261,9 @@ class Qwen2Model(nn.Module):
         else:
             hidden_states = self.embed_tokens(input_ids)
         residual = None
+        if is_hpu():
+            import habana_frameworks.torch as htorch
+            htorch.core.mark_step()
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -269,6 +273,9 @@ class Qwen2Model(nn.Module):
                 attn_metadata,
                 residual,
             )
+            if is_hpu():
+                htorch.core.mark_step()
+
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
