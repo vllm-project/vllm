@@ -375,7 +375,7 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
         raise RuntimeError("No HuggingFace processor is available "
                            "to process the image object")
 
-    if not isinstance(data, list) or len(data) <= 0:
+    if not isinstance(data, list):
         raise ValueError("Invalid image input (%s)", data)
 
     try:
@@ -386,7 +386,7 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
         logger.error("Failed to process image (%s)", data)
         raise
 
-    if "image_bounds" in data[0]:
+    if len(data) > 0 and "image_bounds" in data[0]:
         batch_data["image_bounds"] = data[0]["image_bounds"]
 
     return MultiModalInputs(batch_data)
