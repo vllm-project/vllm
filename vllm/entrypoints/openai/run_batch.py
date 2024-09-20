@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.serving_engine import BaseModelPath
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
@@ -196,6 +197,10 @@ async def main(args):
         engine_args, usage_context=UsageContext.OPENAI_BATCH_RUNNER)
 
     model_config = await engine.get_model_config()
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model)
+        for name in served_model_names
+    ]
 
     if args.disable_log_requests:
         request_logger = None
@@ -206,7 +211,7 @@ async def main(args):
     openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
-        served_model_names,
+        base_model_paths,
         args.response_role,
         lora_modules=None,
         prompt_adapters=None,
@@ -216,7 +221,7 @@ async def main(args):
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
-        served_model_names,
+        base_model_paths,
         request_logger=request_logger,
     )
 
