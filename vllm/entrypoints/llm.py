@@ -347,27 +347,74 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
-    
-    def generate_beam_search(
+
+    def beam_search(
         self,
-        prompts: List[str],
+        prompt: str,
         beam_width: int,
         max_tokens: int,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
-        beam_search_params = SamplingParams(n=beam_width,
-                                            use_beam_search=True,
-                                            temperature=0.0,
-                                            max_tokens=max_tokens)
-        outputs = self.generate(prompts, beam_search_params)
-        for i in range(len(outputs)):
-            output_ids, output_str = outputs[i]
-            for j in range(len(output_ids)):
-                output_ids[j] = [
-                    x for x in output_ids[j]
-                    if x != self.tokenizer.pad_token_id
-                ]
-            outputs[i] = (output_ids, output_str)
-        return outputs
+    ) -> str:
+
+        class BeamSearchSequence:
+            def __init__(self, sequence: str, tokens: List[int], logprob: float):
+                self.sequence = sequence
+                self.tokens = tokens
+                self.logprob = logprob
+        
+        beams: List[BeamSearchSequence] = []
+        completed: List[BeamSearchSequence] = []
+
+        beam_search_params = SamplingParams(
+                            prompt_logprobs=True, 
+                            max_tokens=1,
+                            temperature=0.0)
+        output = self.generate(prompt, beam_search_params)
+
+        logprobs = []
+        for item in output[0].prompt_logprobs:
+            if item is not None:
+                for token_id, logprob_obj in item.items():
+                    logprobs.append((token_id, logprob_obj))
+        
+        sorted_logprobs = sorted(logprobs, key=lambda x: x[1].logprob, reverse=True)
+
+        tokens = output[0].prompt_token_ids
+        top_tokens = sorted_logprobs[:beam_width]
+        
+        for token_id, logprob in top_tokens:
+            sequence_str = prompt + logprob.decoded_token
+            beam_tokens = tokens + [token_id]
+            new_beam = BeamSearchSequence(sequence=sequence_str, tokens=beam_tokens, logprob=logprob.logprob)
+            beams.append(new_beam)
+
+        for _ in range(1, max_tokens):
+            prompts = [TokensPrompt(prompt_token_ids=s.tokens) for s in beams]
+            output = self.generate(prompts, sampling_params=beam_search_params)
+
+            new_beams = []
+            for j in range(len(output)):
+                currentBeam = beams[j]
+
+                logprobs = []
+                for item in output[j].prompt_logprobs:
+                    if item is not None:
+                        for token_id, logprob_obj in item.items():
+                            logprobs.append((token_id, logprob_obj))
+                
+                sorted_logprobs = sorted(logprobs, key=lambda x: x[1].logprob, reverse=True)
+                top_tokens = sorted_logprobs[:beam_width]
+                
+                for token_id, logprob in top_tokens:
+                    sequence_str = currentBeam.sequence + logprob.decoded_token
+                    beam_tokens = currentBeam.tokens + [token_id]
+                    beam_logprob = currentBeam.logprob + logprob.logprob
+                    new_beam_sequence = BeamSearchSequence(sequence=sequence_str, tokens=beam_tokens, logprob=beam_logprob)
+                    new_beams.append(new_beam_sequence)
+            
+            sorted_beams = sorted(new_beams, key=lambda x: x.logprob, reverse=True)
+            beams = sorted_beams[:beam_width]
+
+        return beams[0].sequence
 
     def chat(
         self,
