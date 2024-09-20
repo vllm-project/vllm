@@ -381,10 +381,8 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
         logger.error("Failed to process image (%s)", data)
         raise
 
-    for image in data:
-        if "image_bounds" in image:
-            return MultiModalInputs(image_bounds=image["image_bounds"],
-                                    **batch_data)
+    if len(data) > 0:
+        batch_data["image_bounds"] = data[0]["image_bounds"]
 
     return MultiModalInputs(batch_data)
 
