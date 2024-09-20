@@ -307,6 +307,11 @@ class LLMEngine:
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
+        logger.info(
+            "Stored default generation configuration %s",
+            self.generation_config_fields,
+        )
+
         self.input_preprocessor = InputPreprocessor(model_config,
                                                     self.tokenizer)
 
@@ -765,6 +770,8 @@ class LLMEngine:
         encoder_seq: Optional[Sequence] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
+        logger.info("Received sampling parameters %s", sampling_params)
+
         max_logprobs = self.get_model_config().max_logprobs
         if (sampling_params.logprobs
                 and sampling_params.logprobs > max_logprobs) or (
@@ -777,8 +784,15 @@ class LLMEngine:
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
 
+        logger.info(
+            "Start to update sampling parameters %s with default "
+            "generation configuration %s", sampling_params,
+            self.generation_config_fields)
+
         sampling_params.update_from_generation_config(
             self.generation_config_fields, seq.eos_token_id)
+
+        logger.info("Updated sampling parameters %s", sampling_params)
 
         # Create the sequence group.
         seq_group = SequenceGroup(
