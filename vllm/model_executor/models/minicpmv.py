@@ -71,7 +71,7 @@ class MiniCPMVImageInput(TypedDict):
     image: Image.Image
 
     # If provided, contains image_bounds data for the whole prompt.
-    image_bounds: Optional[torch.Tensor]
+    image_bounds: NotRequired[torch.Tensor]
 
 
 class MiniCPMVImagePixelInputs(TypedDict):
