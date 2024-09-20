@@ -11,7 +11,7 @@ ARG BUILD_FA="1"
 # If this succeeds, we use the downloaded wheel and skip building flash-attention.
 # Otherwise, ROCm flash-attention from `FA_BRANCH` will be built for the
 # architectures specified in `FA_GFX_ARCHS`
-ARG TRY_FA_WHEEL="1"
+ARG TRY_FA_WHEEL="0"
 ARG FA_WHEEL_URL="https://github.com/ROCm/flash-attention/releases/download/v2.5.9post1-cktile-vllm/flash_attn-2.5.9.post1-cp39-cp39-linux_x86_64.whl"
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
 ARG FA_BRANCH="3cea2fb"
@@ -119,6 +119,7 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
     if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
+    && python3 -m pip install ninja cmake wheel pybind11 \
     && git clone https://github.com/OpenAI/triton.git \
     && cd triton \
     && git checkout "${TRITON_BRANCH}" \
