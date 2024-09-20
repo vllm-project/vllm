@@ -235,14 +235,14 @@ def run_hf(
     device: str,
 ) -> float:
     assert not use_beam_search
+    is_cuda = device == "cuda"
+    if is_cuda:
+        llm = llm.cuda()
     llm = AutoModelForCausalLM.from_pretrained(
-        model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
+        model, torch_dtype=torch.float16 if is_cuda else torch.float32, trust_remote_code=trust_remote_code)
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
-    is_cuda = device=="cuda"
-    if is_cuda:
-        llm = llm.cuda()
 
     pbar = tqdm(total=len(requests))
     start = time.perf_counter()
