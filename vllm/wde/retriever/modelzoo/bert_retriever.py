@@ -1,6 +1,8 @@
 # Adapted from
 # https://github.com/FlagOpen/FlagEmbedding/blob/master/FlagEmbedding/flag_models.py
 # FlagEmbedding is licensed under the MIT License.
+# BertRetriever also supports Snowflake Arctic Embed (Family)
+# Arctic is licensed under the Apache-2.
 
 from typing import Optional
 
@@ -15,7 +17,10 @@ from vllm.wde.encode_only.modelzoo.bert import (BertConfig, BertModel,
                                                 LoadWeightsMixin)
 
 
-class BGEv1_5(nn.Module, LoadWeightsMixin):
+class BertRetriever(nn.Module, LoadWeightsMixin):
+    # bge v1.5 family
+    # Snowflake Arctic Embed (Family)
+
     prefix = "bert."
     _ignore_weights_keys = [
         "bert.embeddings.position_ids", 'bert.pooler.dense.weight'
