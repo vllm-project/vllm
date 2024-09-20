@@ -947,7 +947,7 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
-                 use_v2_block_manager: bool = False,
+                 use_v2_block_manager: bool = True,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
@@ -988,7 +988,8 @@ class SchedulerConfig:
 
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.use_v2_block_manager = use_v2_block_manager
+        #self.use_v2_block_manager = use_v2_block_manager
+        self.use_v2_block_manager = True
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
