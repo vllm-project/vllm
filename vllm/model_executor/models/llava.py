@@ -26,7 +26,7 @@ from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
-from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
+from .utils import (check_filter_available, filter_weights, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 
@@ -393,7 +393,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
-        vit_weights, mlp_weights, llm_weights = itertools.tee(weights, 3)
+        vit_weights, mlp_weights, llm_weights, tracker = itertools.tee(weights, 4)
+        check_filter_available(tracker, ["vision_tower", "multi_modal_projector", "language_model"])
 
         # load vision encoder
         vit_weights = filter_weights(vit_weights, "vision_tower")

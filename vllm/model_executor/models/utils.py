@@ -30,6 +30,20 @@ def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
             yield name, loaded_weight
 
 
+def check_filter_available(weights: Iterable[Tuple[str, torch.Tensor]], prefix: List[str]):
+    """
+    Helper function to check if the filter is available for the loaded weights
+    """
+    unexpected_name = set()
+    for name, _ in weights:
+        weight_prefix = name.split(".")[0]
+        if weight_prefix not in prefix:
+            unexpected_name.add(name)
+
+    if unexpected_name:
+        raise ValueError(f"Loaded weights contents unexpected weight: {unexpected_name}")
+
+
 def init_vllm_registered_model(
     hf_config: PretrainedConfig,
     cache_config: Optional[CacheConfig],
