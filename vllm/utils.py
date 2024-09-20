@@ -1248,8 +1248,7 @@ def supports_dynamo() -> bool:
 # Some backends use pytorch version < 2.4.0 which doesn't
 # support `torch.library.custom_op`.
 def supports_custom_op() -> bool:
-    # use Version lib like `supports_dynamo`` will break doc build.
-    return not (is_xpu() or is_neuron())
+    return hasattr(torch.library, "custom_op")
 
 
 class AtomicCounter:
