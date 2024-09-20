@@ -1017,7 +1017,7 @@ def init_distributed_environment(
 
     global _WORLD
     if _WORLD is None:
-        # in single node the world size can be -1
+        # in single node single process the world size can be -1
         # need to infer the world size from torch.distributed.get_world_size()
         torch_dist_world_size = torch.distributed.get_world_size()
         if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
