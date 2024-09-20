@@ -326,9 +326,8 @@ class MQLLMEngine:
 
     def _send_healthy(self):
         """Send HEALTHY message to RPCClient."""
-        if self.heartbeat_socket.closed:
-            return
-        self.heartbeat_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
+        if not self.heartbeat_socket.closed:
+            self.heartbeat_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
 
     def _send_unhealthy(self, error: BaseException):
         """Send UNHEALTHY message to RPCClient."""
