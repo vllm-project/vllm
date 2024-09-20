@@ -121,9 +121,12 @@ class FlashInferState(AttentionState):
 
     def _get_decode_wrapper(self):
         if self._decode_wrapper is None:
-            self._decode_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), "NHD"
-            )
+            if self._prefill_wrapper is not None:
+                self._decode_wrapper = self._prefill_wrapper
+            else:
+                self._prefill_wrapper = MultiLevelCascadeAttentionWrapper(
+                    2, self._get_workspace_buffer(), "NHD"
+                )
         return self._decode_wrapper
 
     @contextmanager
