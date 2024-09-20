@@ -44,8 +44,11 @@ except Exception:
 
 is_hpu = False
 try:
+    import os
     from importlib import util
-    is_hpu = util.find_spec('habana_frameworks') is not None
+    is_hpu = util.find_spec('habana_frameworks') is not None or os.environ.get(
+        'VLLM_USE_FAKE_HPU', '0') != '0'
+
 except Exception:
     pass
 
