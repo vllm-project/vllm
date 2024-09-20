@@ -491,6 +491,10 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
         "o_proj",
         "embed_tokens",
         "lm_head",
+        "w1",
+        "w2",
+        "w3",
+        "gate",
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
