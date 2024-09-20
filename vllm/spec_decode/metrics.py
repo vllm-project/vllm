@@ -104,8 +104,8 @@ class AsyncMetricsCollector:
         if self._rank != 0:
             return False
 
-        if (now - self._last_metrics_collect_time <
-                self._rejsample_metrics_collect_interval_s):
+        if (now - self._last_metrics_collect_time
+                < self._rejsample_metrics_collect_interval_s):
             return False
         return True
 

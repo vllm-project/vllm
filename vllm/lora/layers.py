@@ -209,8 +209,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                                 lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
-                index, :embeddings_tensor.shape[0], :embeddings_tensor.
-                shape[1], ].copy_(embeddings_tensor, non_blocking=True)
+                index,
+                :embeddings_tensor.shape[0],
+                :embeddings_tensor.shape[1],
+            ].copy_(embeddings_tensor, non_blocking=True)
             if self.embeddings_slice is not None:
                 # TODO(yard1): Optimize this copy, we don't need to copy
                 # everything, just the modified part
@@ -795,17 +797,25 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     ) -> List[Union[torch.Tensor, None]]:
         lora_b_q, lora_b_k, lora_b_v = None, None, None
         if lora_b[0] is not None:
-            lora_b_q = lora_b[0][:, self.q_proj_shard_size *
-                                 self.q_shard_id:self.q_proj_shard_size *
-                                 (self.q_shard_id + 1), ]
+            lora_b_q = lora_b[0][
+                :,
+                self.q_proj_shard_size *
+                self.q_shard_id:self.q_proj_shard_size * (self.q_shard_id + 1),
+            ]
         if lora_b[1] is not None:
-            lora_b_k = lora_b[1][:, self.kv_proj_shard_size *
-                                 self.kv_shard_id:self.kv_proj_shard_size *
-                                 (self.kv_shard_id + 1), ]
+            lora_b_k = lora_b[1][
+                :,
+                self.kv_proj_shard_size *
+                self.kv_shard_id:self.kv_proj_shard_size *
+                (self.kv_shard_id + 1),
+            ]
         if lora_b[2] is not None:
-            lora_b_v = lora_b[2][:, self.kv_proj_shard_size *
-                                 self.kv_shard_id:self.kv_proj_shard_size *
-                                 (self.kv_shard_id + 1), ]
+            lora_b_v = lora_b[2][
+                :,
+                self.kv_proj_shard_size *
+                self.kv_shard_id:self.kv_proj_shard_size *
+                (self.kv_shard_id + 1),
+            ]
         lora_b = [lora_b_q, lora_b_k, lora_b_v]
         return lora_b
 
@@ -1139,8 +1149,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                                 lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
-                index, :embeddings_tensor.shape[0], :embeddings_tensor.
-                shape[1], ] = embeddings_tensor
+                index,
+                :embeddings_tensor.shape[0],
+                :embeddings_tensor.shape[1],
+            ] = embeddings_tensor
 
     def _get_logits(
         self,
@@ -1194,9 +1206,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         ).index_select(0, indices_padded).nan_to_num_(nan=float("-inf"),
                                                       posinf=float("inf"),
                                                       neginf=float("-inf")))
-        logits[:,
-               self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
-               lora_logits.shape[1], ] = lora_logits
+        logits[
+            :,
+            self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
+            lora_logits.shape[1],
+        ] = lora_logits
 
         # LogitsProcessorWithLoRA always using bgmv
         self.punica_wrapper.add_lora_logits(logits, hidden_states,

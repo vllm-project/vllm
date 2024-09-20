@@ -71,7 +71,7 @@ class OpenAIServingCaching(OpenAIServing):
             conversation, mm_futures = parse_chat_messages(
                 request.messages, model_config, tokenizer)
 
-            if len(mm_futures) > 0:  # TODO
+            if mm_futures is not None and len(mm_futures) > 0:  # TODO
                 raise NotImplementedError(
                     "Context caching with mm is not supported")
 

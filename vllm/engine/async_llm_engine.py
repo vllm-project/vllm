@@ -16,11 +16,12 @@ from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import LLMInputs, PromptInputs, TokensPrompt
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput, CachingRequestOutput
+from vllm.outputs import (CachingRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -877,7 +878,7 @@ class AsyncLLMEngine:
                       expired_at: Optional[float],
                       ttl: Optional[float]) -> RequestOutput:
         # assert isinstance(inputs, TokensPrompt)
-        async for output in self._process_request(
+        async for output in await self.add_request(
                 request_id, inputs,
                 CachingParams(expired_at=expired_at, ttl=ttl)):
             # TODO: Only yield once

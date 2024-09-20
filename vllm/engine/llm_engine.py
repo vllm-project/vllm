@@ -99,8 +99,7 @@ class SchedulerContext:
 
     def __init__(self):
         self.output_queue: Deque[OutputData] = deque()
-        self.request_outputs: List[Union[RequestOutput,
-                                         EmbeddingRequestOutput,
+        self.request_outputs: List[Union[RequestOutput, EmbeddingRequestOutput,
                                          CachingRequestOutput]] = []
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None

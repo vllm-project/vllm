@@ -34,9 +34,10 @@ class RefCounter(RefCounterProtocol):
 
     def __init__(self, all_block_indices: Iterable[BlockId]):
         deduped = set(all_block_indices)
-        self._refcounts: Dict[BlockId,
-                              RefCount] = {index: 0
-                                           for index in deduped}
+        self._refcounts: Dict[BlockId, RefCount] = {
+            index: 0
+            for index in deduped
+        }
 
     def incr(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts

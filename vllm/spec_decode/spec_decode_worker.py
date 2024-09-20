@@ -417,8 +417,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self, execute_model_req: ExecuteModelRequest) -> bool:
         # When the batch size is too large, disable speculative decoding
         # to stop trading off throughput for latency.
-        return (execute_model_req.running_queue_size >=
-                self.disable_by_batch_size)
+        return (execute_model_req.running_queue_size
+                >= self.disable_by_batch_size)
 
     def _maybe_disable_speculative_tokens(
             self, disable_all_speculation: bool,

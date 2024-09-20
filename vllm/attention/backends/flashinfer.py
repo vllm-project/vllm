@@ -453,6 +453,7 @@ class FlashInferMetadata(AttentionMetadata):
             paged_kv_indptr=self.paged_kv_indptr,
             paged_kv_last_page_len=self.paged_kv_last_page_len,
             block_table_bound=self.block_table_bound)
+
     def add_kv_cache_for_layered_transfer(
             self,
             num_hidden_layers: int,

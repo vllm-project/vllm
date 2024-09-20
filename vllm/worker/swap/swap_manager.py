@@ -145,7 +145,7 @@ class SwapSpaceManager(SwapSpaceManagerBase):
                             disk_block_table: Dict[int, BlockTable]):
         for dev_id, block_table in disk_block_table.items():
             self.disk_block_tables.setdefault(dev_id, {}).setdefault(
-                seq_id, []).extend(block_table)
+                seq_id, BlockTable()).extend(block_table)
 
     def free_block_tables(self):
         # Free all the block tables. Invoked at the end of the scheduler

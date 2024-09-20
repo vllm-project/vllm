@@ -1255,6 +1255,7 @@ class AtomicCounter:
     def value(self):
         return self._value
 
+
 def size_to_bytes(size_str: str):
     size_str = size_str.strip()
 

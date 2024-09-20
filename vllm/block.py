@@ -32,7 +32,7 @@ class PhysicalTokenBlock:
 
         self.is_evicted = False
 
-        self.device_id = self.device if device is None else device_id
+        self.device_id = int(self.device) if device_id is None else device_id
 
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
@@ -85,6 +85,9 @@ class BlockTable:
             self._blocks[key] = block
             self._block_ids[key] = block.block_number
 
+    def __add__(self, other: "BlockTable") -> "BlockTable":
+        return BlockTable(self._blocks + other._blocks)
+
     def reset(self):
         self._blocks = []
         self._block_ids = []
@@ -97,3 +100,12 @@ class BlockTable:
 
     def ids(self) -> List[int]:
         return self._block_ids
+
+    def extend(self, block_table: "BlockTable"):
+        self._blocks.extend(block_table._blocks)
+        self._block_ids.extend(block_table._block_ids)
+
+    def pop(self) -> PhysicalTokenBlock:
+        block = self._blocks.pop()
+        self._block_ids.pop()
+        return block

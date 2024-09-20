@@ -318,9 +318,12 @@ def scheduler_running_outputs_builder():
                                    prefill_seq_groups=[],
                                    preempted=[],
                                    swapped_out=[],
+                                   blocks_to_swap_in=[],
                                    blocks_to_swap_out=[],
                                    blocks_to_copy=[],
                                    num_lookahead_slots=0,
+                                   blocks_to_swap_in_from_disk=[],
+                                   blocks_to_swap_out_to_disk=[],
                                    prefill_seq_groups_list=[],
                                    decode_seq_groups_list=[])
 
@@ -580,8 +583,10 @@ class Scheduler:
         blocks_to_swap_in: List[Tuple[int, int]] = ret.blocks_to_swap_in
         blocks_to_swap_out: List[Tuple[int, int]] = ret.blocks_to_swap_out
         blocks_to_copy: List[Tuple[int, int]] = ret.blocks_to_copy
-        blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]] = ret.blocks_to_swap_in_from_disk
-        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = ret.blocks_to_swap_out_to_disk
+        blocks_to_swap_in_from_disk: List[Tuple[
+            int, int, int, int]] = ret.blocks_to_swap_in_from_disk
+        blocks_to_swap_out_to_disk: List[Tuple[
+            int, int, int, int]] = ret.blocks_to_swap_out_to_disk
 
         decode_seq_groups: List[ScheduledSequenceGroup] = ret.decode_seq_groups
         prefill_seq_groups: List[
@@ -1367,8 +1372,8 @@ class Scheduler:
                 # NOTE: We use get_len instead of get_prompt_len because when
                 # a sequence is preempted, prefill includes previous generated
                 # output tokens.
-                if (token_chunk_size + num_computed_tokens <
-                        seqs[0].data.get_len() or seq_group.caching_params):
+                if (token_chunk_size + num_computed_tokens
+                        < seqs[0].data.get_len() or seq_group.caching_params):
                     do_sample = False
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.

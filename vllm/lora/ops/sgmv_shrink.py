@@ -90,8 +90,8 @@ def _sgmv_shrink_kernel(
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     c_ptr = (out_ptr + offset_cm[:, None] * cm_stride +
              offset_cn[None, :] * cn_stride)
-    c_mask = (offset_cm[:, None] <
-              (cur_seq_start + M)) & (offset_cn[None, :] < N)
+    c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (offset_cn[None, :]
+                                                           < N)
     accumulator *= scaling
     # handles write-back with reduction-splitting
     if SPLIT_K == 1:

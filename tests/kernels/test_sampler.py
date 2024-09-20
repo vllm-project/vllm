@@ -65,8 +65,8 @@ def test_sample_decoding_only(random_sampling, max_best_of,
     sample_indices = torch.arange(bs, dtype=torch.long, device="cuda")
     n_splits = get_num_triton_sampler_splits(probs.shape[1])
     if random_sampling == "mixed":
-        random_sampling_mask = (torch.rand(
-            (1, bs), device="cuda") < 0.5).expand(n_splits, bs)
+        random_sampling_mask = (torch.rand((1, bs), device="cuda")
+                                < 0.5).expand(n_splits, bs)
     elif random_sampling:
         random_sampling_mask = torch.ones((n_splits, bs),
                                           dtype=torch.bool,
@@ -152,8 +152,8 @@ def test_sample_prompt_logprobs(random_sampling, max_best_of,
                                   device="cuda").cumsum_(0)
     n_splits = get_num_triton_sampler_splits(probs.shape[1])
     if random_sampling == "mixed":
-        random_sampling_mask = torch.rand(
-            (n_splits, samples), device="cuda") < 0.5
+        random_sampling_mask = torch.rand((n_splits, samples),
+                                          device="cuda") < 0.5
     elif random_sampling:
         random_sampling_mask = torch.ones((n_splits, samples),
                                           dtype=torch.bool,

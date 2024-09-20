@@ -398,6 +398,7 @@ class FlashAttentionMetadata(AttentionMetadata):
                                    seq_lens=self.seq_lens_tensor,
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
+
     def add_kv_cache_for_layered_transfer(
             self,
             num_hidden_layers: int,

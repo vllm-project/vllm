@@ -750,9 +750,10 @@ def _sample_with_torch(
       tensors required for Pythonization
     '''
 
-    categorized_seq_group_ids: Dict[SamplingType,
-                                    List[int]] = {t: []
-                                                  for t in SamplingType}
+    categorized_seq_group_ids: Dict[SamplingType, List[int]] = {
+        t: []
+        for t in SamplingType
+    }
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params
@@ -869,9 +870,10 @@ def _sample_with_triton_kernel(
     sampling_metadata: SamplingMetadata,
     sampling_tensors: SamplingTensors,
 ) -> SampleResultType:
-    categorized_seq_group_ids: Dict[SamplingType,
-                                    List[int]] = {t: []
-                                                  for t in SamplingType}
+    categorized_seq_group_ids: Dict[SamplingType, List[int]] = {
+        t: []
+        for t in SamplingType
+    }
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params

@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Literal, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -289,7 +289,7 @@ class CachingRequestOutput:
         self.error = error
         self.object = object
 
-        # for compatability
+        # for compatibility
         self.finished = status in ["ready", "error", "inactive"]
 
     @classmethod

@@ -16,8 +16,8 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
                                          VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCUtilityRequest,
-                                         RPCCachingRequest)
+                                         RPCCachingRequest, RPCGenerateRequest,
+                                         RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 

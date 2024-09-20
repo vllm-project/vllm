@@ -468,7 +468,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self.swap_manager: SwapSpaceManagerBase = swap_manager
 
     def _get_seq_num_required_blocks(
-            self, seq: Sequence, is_encoder_decoder: bool) -> Tuple[int, int]:
+            self, seq: Optional[Sequence],
+            is_encoder_decoder: bool) -> Tuple[int, int]:
         # Perform a prefix matching to
         n_prefix_matching_blocks = 0
         # The number of prefix matching blocks which are free
@@ -710,8 +711,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 dev_id = to_block.device_id - Device.SWAP
                 to_block.computed = block.prev_computed
                 assert block_table_swap_out_to_disk is not None
-                block_table_swap_out_to_disk.setdefault(dev_id,
-                                                        []).append(to_block)
+                block_table_swap_out_to_disk.setdefault(
+                    dev_id, BlockTable()).append(to_block)
             elif enable_swap_out_to_cpu and (
                     self.cpu_allocator.get_num_free_blocks() > 0
                     or is_in_cpu_allocator):
@@ -772,8 +773,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                                           block_rmap_from[block])
                 dev_id = to_block.device_id - Device.SWAP
                 assert block_table_swap_out_to_disk is not None
-                block_table_swap_out_to_disk.setdefault(dev_id,
-                                                        []).append(to_block)
+                block_table_swap_out_to_disk.setdefault(
+                    dev_id, BlockTable()).append(to_block)
             else:
                 logger.debug("Drop %s block: %d", block.device,
                              block.block_number)
@@ -827,7 +828,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         dev_id = disk_block.device - Device.SWAP
         swap_in_disk_to_gpu.setdefault(dev_id, []).append(
             (disk_block.block_number, gpu_block.block_number))
-        disk_block_table.setdefault(dev_id, []).append(disk_block)
+        disk_block_table.setdefault(dev_id, BlockTable()).append(disk_block)
 
     # TODO(PAN): Refactor at least the return type
     def _allocate_sequence(self, \
@@ -844,7 +845,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                                       Dict[int, List[Tuple[int, int]]],
                                       Dict[int, List[Tuple[int, int]]]]:
         # Allocate new physical token blocks that will store the prompt tokens.
-        num_prompt_blocks = self._get_seq_num_required_blocks(seq)
+        num_prompt_blocks = seq.n_blocks if seq is not None else 0
 
         block_table: BlockTable = BlockTable()
 
@@ -939,8 +940,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             # Verify
             if (is_encoder_decoder or not self.enable_caching or
                 (self.enable_caching and not self.enable_memory_tiering)):
-                assert (cpu_block_table_swap_in + cpu_block_table_swap_out
-                        == []) and (swap_in == []) and (swap_out_mapping == {})
+                assert (cpu_block_table_swap_in == BlockTable()
+                        and cpu_block_table_swap_out == BlockTable()) and (
+                            swap_in == []) and (swap_out_mapping == {})
 
             block_table.append(block)
 
@@ -970,9 +972,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         # CPU Block Table can contain blocks which we only takes a
         # reference in case they are freed or used by other sequences
-        cpu_block_table = [
-            cpu_block for _, cpu_block in swap_out_mapping.items()
-        ]
+        cpu_block_table = BlockTable(
+            [cpu_block for _, cpu_block in swap_out_mapping.items()])
 
         # Handle DRAM -> Disk case and prevent oooxxxooo case
         if self.enable_disk_swap and len(cpu_block_table) > 0:
@@ -1113,7 +1114,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def _allocate_last_physical_block(
         self,
         seq: Sequence,
-    ) -> Tuple[PhysicalTokenBlock, PhysicalTokenBlock, PhysicalTokenBlock]:
+    ) -> Tuple[PhysicalTokenBlock, Optional[PhysicalTokenBlock],
+               Optional[PhysicalTokenBlock]]:
         # Called before a new block is appended.
         # This is in charge of allocating a new physical block (to be appended).
 
@@ -1210,8 +1212,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     self._allocate_last_physical_block(seq)
                 block_table.append(new_block)
                 if cpu_block is not None:
-                    self.evict_block_tables.setdefault(seq.seq_id,
-                                                       []).append(cpu_block)
+                    self.evict_block_tables.setdefault(
+                        seq.seq_id, BlockTable()).append(cpu_block)
                     if disk_block is not None:
                         dev_id = disk_block.device_id - Device.SWAP
                         self.swap_manager.update_block_tables(
@@ -1247,8 +1249,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             new_block, cpu_block, disk_block = \
                 self._allocate_last_physical_block(seq)
             if cpu_block is not None:
-                self.evict_block_tables.setdefault(seq.seq_id,
-                                                   []).append(cpu_block)
+                self.evict_block_tables.setdefault(
+                    seq.seq_id, BlockTable()).append(cpu_block)
                 if disk_block is not None:
                     dev_id = disk_block.device_id - Device.SWAP
                     self.swap_manager.update_block_tables(
@@ -1346,8 +1348,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         disk_block_table: Dict[int, BlockTable] = {}
 
         # Can be extended to disk next
-        gpu_block_table_swap_out: BlockTable = []
-        cpu_block_table_swap_out: BlockTable = []
+        gpu_block_table_swap_out: BlockTable = BlockTable()
+        cpu_block_table_swap_out: BlockTable = BlockTable()
 
         # Store the rmap of the CC GPU blocks
         gpu_block_rmap: Dict[PhysicalTokenBlock, Set[Tuple[int, int]]] = {}
@@ -1410,13 +1412,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     block_table_swap_out_to_disk=None,
                     swap_out_mapping_to_cpu=swap_out_mapping_to_cpu,
                     swap_out_mapping_to_disk=None)
-        cpu_block_table += cpu_block_table_swap_out
+        cpu_block_table.extend(cpu_block_table_swap_out)
 
         # CPU Block Table can contain blocks which we only takes a
         # reference in case they are freed or used by other sequences
-        cpu_evict_block_table = [
-            cpu_block for _, cpu_block in swap_out_mapping_to_cpu.items()
-        ]
+        cpu_evict_block_table = BlockTable(
+            [cpu_block for _, cpu_block in swap_out_mapping_to_cpu.items()])
 
         if enable_swap_out_to_disk and len(cpu_evict_block_table) > 0:
             self._handle_swap_out(
@@ -1445,11 +1446,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         # Right now, the sequence level swap to disk is not supported yet
         # We only evict the free block or CC blocks to disk
-        cpu_block_table: BlockTable = []
+        cpu_block_table: BlockTable = BlockTable()
         disk_block_table: Dict[int, BlockTable] = {}
 
         # Can be extended to disk next
-        cpu_block_table_swap_out: BlockTable = []
+        cpu_block_table_swap_out: BlockTable = BlockTable()
 
         # Store the rmap of the CC GPU blocks
         cpu_block_rmap: Dict[PhysicalTokenBlock, Set[Tuple[int, int]]] = {}
@@ -1509,7 +1510,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         dest_allocator: BlockAllocatorBase,
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock],
     ) -> BlockTable:
-        new_block_table: BlockTable = []
+        new_block_table: BlockTable = BlockTable()
 
         for from_block in block_table:
             if from_block in mapping:
@@ -1915,7 +1916,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             #if block_table[i].computed:
             #    break
             block_table[i].computed = True
-            
 
     def get_all_computed_blocks(self, seq: Sequence) -> List[int]:
         if seq.seq_id not in self.block_tables:

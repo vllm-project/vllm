@@ -427,6 +427,7 @@ class LLM:
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
+
     def caching(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],

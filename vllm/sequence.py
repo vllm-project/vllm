@@ -1,7 +1,6 @@
 """Sequence and its related classes."""
 import copy
 import enum
-import math
 import time
 from abc import ABC, abstractmethod
 from array import array
@@ -14,8 +13,8 @@ from typing import Set, Tuple, Union, cast
 import msgspec
 import torch
 
-from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.caching_params import CachingParams
+from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -960,7 +959,7 @@ class SequenceGroupMetadata(
     block_tables: Dict[int, List[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
-    caching_params: Optional[CachingParams] = None,
+    caching_params: Optional[CachingParams] = None
     lora_request: Optional[LoRARequest] = None
     computed_block_nums: Optional[List[int]] = None
     state: Optional[SequenceGroupState] = msgspec.field(
@@ -1301,9 +1300,10 @@ class ExecuteModelRequest(
     # NOTE: Add as additional field as we don't fix the format yet
     # For now, the format is block_id, block_id, from_dev, to_dev
     blocks_to_swap_in_from_disk: List[Tuple[int, int, int,
-                                            int]] = msgspec.spec(default_factory=list)
-    blocks_to_swap_out_to_disk: List[Tuple[int, int, int,
-                                           int]] = msgspec.spec(default_factory=list)
+                                            int]] = msgspec.spec(
+                                                default_factory=list)
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = msgspec.spec(
+        default_factory=list)
 
     @property
     def is_first_multi_step(self) -> bool:
