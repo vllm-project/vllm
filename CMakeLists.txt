@@ -285,15 +285,15 @@ endif()
 
 message(STATUS "Enabling C extension.")
 define_gpu_extension_target(
-_C
-DESTINATION vllm
-LANGUAGE ${VLLM_GPU_LANG}
-SOURCES ${VLLM_EXT_SRC}
-COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-ARCHITECTURES ${VLLM_GPU_ARCHES}
-INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-USE_SABI 3
-WITH_SOABI)
+  _C
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  USE_SABI 3
+  WITH_SOABI)
 
 # If CUTLASS is compiled on NVCC >= 12.5, it by default uses 
 # cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the 
@@ -325,11 +325,6 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-# vllm-flash-attn currently only supported on CUDA
-if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda")
-  return()
-endif ()
-
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
@@ -349,6 +344,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 endif()
 
+# vllm-flash-attn currently only supported on CUDA
+if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda")
+  return()
+endif ()
+
 #
 # Build vLLM flash attention from source
 #
@@ -357,7 +357,7 @@ endif()
 # They should be identical but if they aren't, this is a massive footgun.
 #
 # The vllm-flash-attn install rules are nested under vllm to make sure the library gets installed in the correct place.
-# To only install vllm-flash-attn, use --component vllm-flash-attn_c.
+# To only install vllm-flash-attn, use --component vllm_flash_attn_c.
 # If no component is specified, vllm-flash-attn is still installed.
 
 # If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
