@@ -257,8 +257,14 @@ class MultiModalPlugin(ABC):
         model_cls, _ = get_model_architecture(model_config)
 
         mapper = self._input_mappers.get(model_cls)
-        processor_kwargs = get_allowed_kwarg_only_overrides(
-            callable=mapper, overrides=model_config.processor_kwargs)
+        # Only get processor kwargs at mapping time if we are not using the
+        # input mapper; no overrides are used on the default here because they
+        # should be passed to the huggingface resource at initialization time.
+        if mapper != self._default_input_mapper:
+            processor_kwargs = get_allowed_kwarg_only_overrides(
+                callable=mapper, overrides=model_config.processor_kwargs)
+        else:
+            processor_kwargs = {}
 
         if mapper is None:
             raise KeyError(f"No input mapper in {self} is registered for "
