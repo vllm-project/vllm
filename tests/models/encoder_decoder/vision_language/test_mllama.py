@@ -11,6 +11,7 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
 from ...utils import check_logprobs_close
+from ....utils import multi_gpu_test
 
 _LIMIT_IMAGE_PER_PROMPT = 1
 
@@ -19,8 +20,11 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|image|><|begin_of_text|>The meaning of the image is",
     "cherry_blossom":
     "<|image|><|begin_of_text|>The city is",
-    None: "<|begin_of_text|>The color of the sky is blue but sometimes it can also be",
 })
+
+text_only_prompts = [
+    "The color of the sky is blue but sometimes it can also be",
+]
 
 models = [
     "nltpt/Llama-3.2-11B-Vision-Instruct", # TODO: Update model path to huggingface model
@@ -31,8 +35,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-    print("output_str:", output_str)
+    output_ids, output_str, out_logprobs = vllm_outpu
 
     config = AutoConfig.from_pretrained(model)
     image_token_id = config.image_token_index
@@ -110,9 +113,11 @@ def run_test(
         ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
     elif sizes is not None:
         inputs_per_image = [(
-            [prompt for _ in sizes],
-            [image.resize(size) for size in sizes],
+            [prompt if size is not None else text_only_prompts[0] for size in sizes],
+            [image.resize(size) if size is not None else None for size in sizes],
         ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+        if len(sizes) == 0:
+            inputs_per_image.append((text_only_prompts, [None] * len(text_only_prompts)))
     else:
         raise ValueError("You must provide either `size_factors` or `sizes`")
 
@@ -205,32 +210,63 @@ def _run_test(
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
-    "size_factors",
+    "sizes",
     [
-        # No image
+        # Text only
         [],
-        # Single-scale
-        [1.0],
-        # Single-scale, batched
-        [1.0, 1.0, 1.0],
-        # Multi-scale
-        [0.25, 0.5, 1.0],
+        # Single-size
+        [(512, 512)],
+        # Single-size, batched
+        [(512, 512), (512, 512), (512, 512)],
+        # Multi-size, batched
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), 
+         (512, 1024), (1024, 1024), (512, 1536), (512, 2028)],
+        # Multi-size, batched, including text only
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), 
+         (512, 1024), (1024, 1024), (512, 1536), (512, 2028), None],
+        # mllama has 8 possible aspect ratios, carefully set the sizes to cover all of them
     ],
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
+def test_models(hf_runner, vllm_runner, image_assets, model, sizes,
                 dtype, max_tokens, num_logprobs) -> None:
     run_test(
         hf_runner,
         vllm_runner,
         image_assets,
         model,
-        size_factors=size_factors,
+        sizes=sizes,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
     )
 
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), 
+         (512, 1024), (1024, 1024), (512, 1536), (512, 2028), None],
+    ],
+)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_distributed(hf_runner, vllm_runner, image_assets, model, sizes,
+                dtype, max_tokens, num_logprobs) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model,
+        sizes=sizes,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=2,
+    )

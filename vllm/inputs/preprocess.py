@@ -300,7 +300,7 @@ class InputPreprocessor:
             raise ValueError("Multi-modality decoder inputs of encoder-decoder models are "
                              "not supported yet")
 
-        # For Multi-Modal models, the start token can be the image token
+         # For Multi-Modal models (e.g., mllama), the text input can be <|image|><|begin_of_text|>hello world. And we should not add another <|begin_of_text|> to the beginning.
         decoder_prompt_ids = (
             self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids, force_bos=(encoder_mm_data is None and decoder_mm_data is None)))
 

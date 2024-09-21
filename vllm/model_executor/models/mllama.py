@@ -98,9 +98,10 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
                 llm_inputs["prompt_token_ids"] = llm_inputs["prompt_token_ids"][:index_198] + llm_inputs["prompt_token_ids"][index_198+1:]
     multi_modal_data = llm_inputs.get("encoder_multi_modal_data")
     hf_config = ctx.model_config.hf_config
-    if multi_modal_data is None or "image" not in multi_modal_data:
+    if multi_modal_data is None or "image" not in multi_modal_data or multi_modal_data["image"] is None:
         llm_inputs["encoder_prompt"] = ""
         llm_inputs["encoder_prompt_token_ids"] = []
+        llm_inputs["encoder_multi_modal_data"] = {}
         return llm_inputs
     global image_processor
     if image_processor is None:
