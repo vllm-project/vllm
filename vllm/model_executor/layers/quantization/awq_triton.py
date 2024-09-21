@@ -209,12 +209,9 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
     c = accumulator.to(c_ptr.type.element_ty)
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + N * offs_cm[:, None] + offs_cn[None, :]
+    c_ptrs = c_ptr + pid_z * N * M + N * offs_cm[:, None] + offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    if SPLIT_K == 1:
-        tl.store(c_ptrs, c, mask=c_mask)
-    else:
-        tl.atomic_add(c_ptrs, c, mask=c_mask)
+    tl.store(c_ptrs, c, mask=c_mask)
 
 
 # qweights - [K     , M // 8], int32
@@ -295,7 +292,9 @@ def awq_gemm_triton(input: torch.Tensor,
         split_k_iters,
     )
 
-    result = torch.zeros((M, N), dtype=scales.dtype, device=input.device)
+    result = torch.zeros((split_k_iters, M, N),
+                         dtype=scales.dtype,
+                         device=input.device)
 
     # A = input, B = qweight, C = result
     # A = M x K, B = K x N, C = M x N
@@ -312,5 +311,7 @@ def awq_gemm_triton(input: torch.Tensor,
                           BLOCK_SIZE_N=block_size_n,
                           BLOCK_SIZE_K=block_size_k,
                           SPLIT_K=split_k_iters)
+
+    result = result.sum(0)
 
     return result
