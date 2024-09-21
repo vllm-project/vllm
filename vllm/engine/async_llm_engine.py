@@ -17,7 +17,7 @@ from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import PromptInputs
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -405,7 +405,7 @@ class _AsyncLLMEngine(LLMEngine):
     async def add_request_async(
         self,
         request_id: str,
-        inputs: PromptInputs,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -420,7 +420,7 @@ class _AsyncLLMEngine(LLMEngine):
             arrival_time = time.time()
 
         preprocessed_inputs = await self.input_preprocessor.preprocess_async(
-            inputs,
+            prompt,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
@@ -777,7 +777,7 @@ class AsyncLLMEngine:
     async def add_request(
         self,
         request_id: str,
-        inputs: PromptInputs,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -797,7 +797,7 @@ class AsyncLLMEngine:
         stream = self._request_tracker.add_request(
             request_id,
             verbose=self.log_requests,
-            inputs=inputs,
+            prompt=prompt,
             params=params,
             arrival_time=arrival_time or time.time(),
             lora_request=lora_request,
@@ -808,7 +808,7 @@ class AsyncLLMEngine:
 
     async def generate(
         self,
-        inputs: PromptInputs,
+        prompt: PromptType,
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -822,8 +822,7 @@ class AsyncLLMEngine:
         from the LLMEngine to the caller.
 
         Args:
-            inputs: The inputs to the LLM. See
-                :class:`~vllm.inputs.PromptInputs`
+            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
@@ -881,7 +880,7 @@ class AsyncLLMEngine:
         """
         async for output in await self.add_request(
                 request_id,
-                inputs,
+                prompt,
                 sampling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
@@ -891,7 +890,7 @@ class AsyncLLMEngine:
 
     async def encode(
         self,
-        inputs: PromptInputs,
+        prompt: PromptType,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -904,8 +903,7 @@ class AsyncLLMEngine:
         from the LLMEngine to the caller.
 
         Args:
-            inputs: The inputs to the LLM. See
-                :class:`~vllm.inputs.PromptInputs`
+            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
@@ -959,7 +957,7 @@ class AsyncLLMEngine:
         """
         async for output in await self.add_request(
                 request_id,
-                inputs,
+                prompt,
                 pooling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
