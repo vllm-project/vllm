@@ -36,7 +36,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -277,10 +277,10 @@ def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
     return seq_data, mm_data
 
 
-def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+def input_processor_for_minicpmv(ctx: InputContext, inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
     model_config = ctx.model_config
     version = get_version_by_config(model_config.hf_config)
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
@@ -294,9 +294,9 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         return image_processor. \
             get_slice_image_placeholder(image_size, num_image)
 
-    prompt = llm_inputs.get("prompt")
+    prompt = inputs.get("prompt")
     if prompt is None:
-        token_ids = llm_inputs.get("prompt_token_ids")
+        token_ids = inputs.get("prompt_token_ids")
         prompt = tokenizer.decode(token_ids)
 
     pattern = "(<image>./</image>)"
@@ -320,12 +320,12 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
 
-    llm_inputs = LLMInputs(
+    inputs = DecoderOnlyInputs(
         prompt_token_ids=new_token_ids,
         prompt=new_prompt,
         multi_modal_data=multi_modal_data,
     )
-    return llm_inputs
+    return inputs
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):

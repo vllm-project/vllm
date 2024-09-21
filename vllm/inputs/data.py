@@ -35,7 +35,7 @@ class TokensPrompt(TypedDict):
 
 SingletonPrompt = Union[str, TextPrompt, TokensPrompt]
 """
-Set of possible schemas for a single LLM input:
+Set of possible schemas for a single prompt:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
@@ -46,7 +46,7 @@ which may be utilized for encoder/decoder models when
 the user desires to express both the encoder & decoder
 prompts explicitly, i.e. :class:`ExplicitEncoderDecoderPrompt`
 
-A prompt of type :class:`SingletonPromptType` may be employed
+A prompt of type :class:`SingletonPrompt` may be employed
 as (1) input to a decoder-only model, (2) input to
 the encoder of an encoder/decoder model, in the scenario
 where the decoder-prompt is not specified explicitly, or
@@ -66,22 +66,21 @@ _T2_co = TypeVar("_T2_co",
 
 # TODO: Make fields ReadOnly once mypy supports it
 class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
-    """Represents an encoder/decoder model input prompt,
-    comprising an explicit encoder prompt and a 
-    decoder prompt.
+    """
+    Represents an encoder/decoder model input prompt,
+    comprising an explicit encoder prompt and a decoder prompt.
 
-    The encoder and decoder prompts, respectively,
-    may formatted according to any of the
-    :class:`SingletonPromptType` schemas, and are not
-    required to have the same schema.
+    The encoder and decoder prompts, respectively, may be formatted
+    according to any of the :class:`SingletonPrompt` schemas,
+    and are not required to have the same schema.
 
     Only the encoder prompt may have multi-modal data.
 
     Note that an :class:`ExplicitEncoderDecoderPrompt` may not
     be used as an input to a decoder-only model,
-    and that the `encoder_prompt` and `decoder_prompt`
+    and that the :code:`encoder_prompt` and :code:`decoder_prompt`
     fields of this data structure themselves must be
-    :class:`SingletonPromptType` instances.
+    :class:`SingletonPrompt` instances.
     """
 
     encoder_prompt: _T1_co
@@ -101,13 +100,8 @@ both decoder-only and encoder/decoder input types:
 """
 
 
-class LLMInputs(TypedDict):
-    """
-    The inputs in :class:`~vllm.LLMEngine` before they are
-    passed to the model executor.
-
-    This specifies the data required for decoder-only models.
-    """
+class TokenInputs(TypedDict):
+    """Represents token-based inputs."""
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
@@ -123,7 +117,21 @@ class LLMInputs(TypedDict):
     """
 
 
-class EncoderDecoderLLMInputs(LLMInputs):
+SingletonInputs = TokenInputs
+"""
+A processed :class:`SingletonPrompt` which can be passed to
+:class:`vllm.sequence.Sequence`.
+"""
+
+DecoderOnlyInputs = TokenInputs
+"""
+The inputs in :class:`~vllm.LLMEngine` before they are
+passed to the model executor.
+This specifies the data required for decoder-only models.
+"""
+
+
+class EncoderDecoderInputs(TokenInputs):
     """
     The inputs in :class:`~vllm.LLMEngine` before they are
     passed to the model executor.

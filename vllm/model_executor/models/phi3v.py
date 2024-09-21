@@ -27,7 +27,7 @@ from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -398,10 +398,10 @@ def _get_image_placeholder_token_ids(model_config: ModelConfig,
     return image_placeholder_token_ids
 
 
-def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+def input_processor_for_phi3v(ctx: InputContext, inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     model_config = ctx.model_config
     hf_config = ctx.get_hf_image_processor_config()
@@ -430,7 +430,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
-    prompt = llm_inputs.get("prompt")
+    prompt = inputs.get("prompt")
     if prompt is None:
         # for async server request, we assume prompt and its token_ids is always
         # in correct format. And num_image_tags == len(image_data) always True.
@@ -447,7 +447,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
                 image_data), "The count of image_placeholder not match image's"
         new_prompt = prompt
 
-    prompt_token_ids = llm_inputs["prompt_token_ids"].copy()
+    prompt_token_ids = inputs["prompt_token_ids"].copy()
 
     # masked place_holder with image token id
     for idx in image_idx:
@@ -485,10 +485,10 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
             new_token_ids.append(token_id)
 
     # NOTE: Create a defensive copy of the original inputs
-    llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
-                           prompt=new_prompt,
-                           multi_modal_data=multi_modal_data)
-    return llm_inputs
+    inputs = DecoderOnlyInputs(prompt_token_ids=new_token_ids,
+                               prompt=new_prompt,
+                               multi_modal_data=multi_modal_data)
+    return inputs
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()

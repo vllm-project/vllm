@@ -27,7 +27,7 @@ from transformers import FuyuConfig, FuyuImageProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -153,10 +153,10 @@ def _fuyu_image_preprocess(image_processor: FuyuImageProcessor,
     return model_image_input
 
 
-def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     model_config = ctx.model_config
     image_data = multi_modal_data["image"]
@@ -180,8 +180,8 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
     # process prompts
-    prompt = llm_inputs.get("prompt")
-    prompt_token_ids = llm_inputs["prompt_token_ids"]
+    prompt = inputs.get("prompt")
+    prompt_token_ids = inputs["prompt_token_ids"]
     tokenizer = cached_get_tokenizer(model_config.model)
     # dim0 is batch_size, dim1 is subseq_size which will always be 1
     image_input_ids: List[List[
@@ -194,9 +194,9 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
     new_prompt_token_ids = image_input_ids + bos_token + prompt_token_ids[
         1:] + boa_token
 
-    return LLMInputs(prompt=new_prompt,
-                     prompt_token_ids=new_prompt_token_ids,
-                     multi_modal_data=new_multi_modal_data)
+    return DecoderOnlyInputs(prompt=new_prompt,
+                             prompt_token_ids=new_prompt_token_ids,
+                             multi_modal_data=new_multi_modal_data)
 
 
 def input_mapper_for_fuyu(ctx: InputContext, data: object):

@@ -8,7 +8,7 @@ from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -71,7 +71,8 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
     return seq_data, mm_data
 
 
-def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_paligemma(ctx: InputContext,
+                                  inputs: DecoderOnlyInputs):
 
     """
     The correct prompt format needs to be:
@@ -80,9 +81,9 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
     See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
     """ # noqa
 
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
@@ -94,8 +95,8 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
     image_token_str_pad = image_token_str * image_feature_size
     image_token_ids_pad = [hf_config.image_token_index] * image_feature_size
 
-    orig_prompt = llm_inputs.get("prompt")
-    orig_prompt_ids = llm_inputs.get("prompt_token_ids")
+    orig_prompt = inputs.get("prompt")
+    orig_prompt_ids = inputs.get("prompt_token_ids")
 
     if orig_prompt is not None and image_token_str in orig_prompt:
         logger.warning(
@@ -109,9 +110,9 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
     new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
+                             prompt=new_prompt,
+                             multi_modal_data=multi_modal_data)
 
 
 class PaliGemmaMultiModalProjector(nn.Module):

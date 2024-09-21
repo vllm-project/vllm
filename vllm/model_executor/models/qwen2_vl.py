@@ -47,7 +47,7 @@ from vllm.attention.selector import (_Backend, backend_name_to_enum,
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
@@ -721,11 +721,11 @@ def _get_llm_num_vision_tokens(
     return llm_num_vision_tokens
 
 
-def input_processor_for_qwen2_vl(ctx: InputContext,
-                                 llm_inputs: LLMInputs) -> LLMInputs:
-    multi_modal_data = llm_inputs.get("multi_modal_data", None)
+def input_processor_for_qwen2_vl(
+        ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
+    multi_modal_data = inputs.get("multi_modal_data", None)
     if multi_modal_data is None:
-        return llm_inputs
+        return inputs
 
     image_inputs = multi_modal_data.get("image", None)
     video_inputs = multi_modal_data.get("video", None)
@@ -739,7 +739,7 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     # `transformers.models.qwen2_vl.processing_qwen2_vl.Qwen2VLProcessor`.
     #
     # The following code is equivalent to:
-    #    prompt = llm_inputs["prompt"]
+    #    prompt = inputs["prompt"]
     #    inputs = processor(text=[prompt],
     #                       images=image_inputs,
     #                       videos=video_inputs,
@@ -747,9 +747,9 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     #                       return_tensors="pt")
     #    prompt_token_ids = inputs["input_ids"][0].tolist()
 
-    prompt_token_ids = llm_inputs.get("prompt_token_ids", None)
+    prompt_token_ids = inputs.get("prompt_token_ids", None)
     if prompt_token_ids is None:
-        prompt = llm_inputs["prompt"]
+        prompt = inputs["prompt"]
         prompt_token_ids = processor.tokenizer(
             prompt,
             padding=True,
@@ -814,9 +814,9 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
                                                             1:])
         prompt_token_ids = prompt_token_ids_with_video
 
-    return LLMInputs(
+    return DecoderOnlyInputs(
         prompt_token_ids=prompt_token_ids,
-        prompt=llm_inputs["prompt"],
+        prompt=inputs["prompt"],
         multi_modal_data=multi_modal_data,
     )
 
