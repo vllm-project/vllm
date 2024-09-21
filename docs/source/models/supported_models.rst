@@ -127,6 +127,10 @@ Decoder-only Language Models
     - Nemotron-3, Nemotron-4, Minitron
     - :code:`nvidia/Minitron-8B-Base`, :code:`mgoin/Nemotron-4-340B-Base-hf-FP8`, etc.
     - ✅︎
+  * - :code:`OLMoEForCausalLM`
+    - OLMoE
+    - :code:`allenai/OLMoE-1B-7B-0924`, :code:`allenai/OLMoE-1B-7B-0924-Instruct`, etc.
+    -
   * - :code:`OLMoForCausalLM`
     - OLMo
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
