@@ -77,15 +77,11 @@ def get_ultravox_max_audio_tokens(ctx: InputContext):
     return math.ceil(feature_extractor.chunk_length * _AUDIO_TOKENS_PER_SECOND)
 
 
-def dummy_data_for_ultravox(
+def dummy_seq_data_for_ultravox(
     ctx: InputContext,
     seq_len: int,
-    mm_counts: Mapping[str, int],
+    audio_count: int,
 ):
-    feature_extractor = whisper_feature_extractor(ctx)
-
-    audio_count = mm_counts["audio"]
-
     audio_placeholder = array(
         VLLM_TOKEN_ID_ARRAY_TYPE,
         [_AUDIO_PLACEHOLDER_TOKEN]) * get_ultravox_max_audio_tokens(ctx)
@@ -96,10 +92,28 @@ def dummy_data_for_ultravox(
     other_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                             [0]) * (seq_len - len(audio_token_ids))
 
-    audio_and_sr = (np.array([0.0] * feature_extractor.chunk_length), 1)
-    mm_dict = {"audio": [audio_and_sr] * audio_count}
+    return SequenceData(audio_token_ids + other_token_ids)
 
-    return (SequenceData(audio_token_ids + other_token_ids), mm_dict)
+
+def dummy_audio_for_ultravox(
+    ctx: InputContext,
+    audio_count: int,
+):
+    feature_extractor = whisper_feature_extractor(ctx)
+    audio_and_sr = (np.array([0.0] * feature_extractor.chunk_length), 1)
+    return {"audio": [audio_and_sr] * audio_count}
+
+
+def dummy_data_for_ultravox(
+    ctx: InputContext,
+    seq_len: int,
+    mm_counts: Mapping[str, int],
+):
+    audio_count = mm_counts["audio"]
+    seq_data = dummy_seq_data_for_ultravox(ctx, seq_len, audio_count)
+    mm_dict = dummy_audio_for_ultravox(ctx, audio_count)
+
+    return (seq_data, mm_dict)
 
 
 def input_mapper_for_ultravox(ctx: InputContext, data: object):

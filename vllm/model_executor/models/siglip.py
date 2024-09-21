@@ -2,7 +2,6 @@
 within a vision language model."""
 
 import math
-from array import array
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -24,7 +23,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.sequence import SequenceData
 
 try:
     from xformers import ops as xops
@@ -67,11 +66,10 @@ def dummy_seq_data_for_siglip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * image_feature_size
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceData.from_token_counts(
+        (image_token_id, image_feature_size * num_images),
+        (0, seq_len - image_feature_size * num_images),
+    )
 
 
 def dummy_image_for_siglip(
