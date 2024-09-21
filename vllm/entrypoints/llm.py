@@ -355,72 +355,73 @@ class LLM:
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        outputs = []
-        for prompt in prompts:
-            outputs.append(self._run_beam_search(prompt, beam_width, max_tokens))
-        return outputs
-
-    def _run_beam_search(
-        self,
-        prompt: Union[List[int], str],
-        beam_width: int,
-        max_tokens: int,
-    ) -> Tuple[List[List[int]], List[str]]:
-
+        
         class BeamSearchSequence:
             def __init__(self, tokens: List[int], logprob: float):
                 self.tokens = tokens
                 self.logprob = logprob
         
-        beams: List[BeamSearchSequence] = []
-        completed: List[BeamSearchSequence] = []
+        class BeamSearchInstance:
+            def __init__(self, tokens: List[int], logprob: float):
+                self.beams: List[BeamSearchSequence] = [BeamSearchSequence(tokens, logprob)]
+                self.completed: List[BeamSearchSequence] = []
 
         tokenizer = self.get_tokenizer()
-        tokens = prompt
+        beam_search_params = SamplingParams(logprobs=beam_width, max_tokens=1, temperature=0.0)
+        instances: List[BeamSearchInstance] = []
 
-        if isinstance(prompt, str):
-            tokens = tokenizer.encode(prompt)
-        
-        beams.append(BeamSearchSequence(tokens=tokens, logprob=0))
-        beam_search_params = SamplingParams(
-                            logprobs=beam_width, 
-                            max_tokens=1,
-                            temperature=0.0)
+        for prompt in prompts:
+            tokens = prompt if isinstance(prompt, list) else tokenizer.encode(prompt)
+            instance = BeamSearchInstance(tokens, logprob=0)
+            instances.append(instance)
 
         for _ in range(max_tokens):
-            if len(beams) == 0:
+            all_beams = []
+            instance_to_beam_index = {}
+
+            for i, instance in enumerate(instances):
+                for beam in instance.beams:
+                    all_beams.append(beam)
+                    instance_to_beam_index[len(all_beams) - 1] = i
+
+            if len(all_beams) == 0:
                 break
 
-            prompts = [TokensPrompt(prompt_token_ids=s.tokens) for s in beams]
-            output = self.generate(prompts, sampling_params=beam_search_params)
+            prompts_batch = [TokensPrompt(prompt_token_ids=beam.tokens) for beam in all_beams]
+            output = self.generate(prompts_batch, sampling_params=beam_search_params)
 
-            new_beams = []
-            for j in range(len(output)):
-                current_beam = beams[j]
+            new_instance_beams: Dict[int, List[BeamSearchSequence]] = {i: [] for i in range(len(instances))}
 
-                logprobs = output[j].outputs[0].logprobs[0]
+            for i, result in enumerate(output):
+                current_beam = all_beams[i]
+                instance_id = instance_to_beam_index[i]
+
+                logprobs = result.outputs[0].logprobs[0]
                 for token_id, logprob_obj in logprobs.items():
-                    beam_tokens = current_beam.tokens + [token_id]
-                    beam_logprob = current_beam.logprob + logprob_obj.logprob
-                    new_beam = BeamSearchSequence(tokens=beam_tokens, logprob=beam_logprob)
+                    new_tokens = current_beam.tokens + [token_id]
+                    new_logprob = current_beam.logprob + logprob_obj.logprob
+                    new_beam = BeamSearchSequence(tokens=new_tokens, logprob=new_logprob)
+
                     if token_id == tokenizer.eos_token_id:
-                        completed.append(new_beam)
+                        instances[instance_id].completed.append(new_beam)
                     else:
-                        new_beams.append(new_beam)
-            
-            sorted_beams = sorted(new_beams, key=lambda x: x.logprob, reverse=True)
-            beams = sorted_beams[:beam_width]
-        
-        completed.extend(beams)
-        completed = sorted(completed, key=lambda x: x.logprob, reverse=True)
-        completed = completed[:beam_width]
+                        new_instance_beams[instance_id].append(new_beam)
 
-        for final_beams in completed:
+            for i, instance in enumerate(instances):
+                sorted_beams = sorted(new_instance_beams[i], key=lambda x: x.logprob, reverse=True)
+                instances[i].beams = sorted_beams[:beam_width]
 
-        final_tokens = completed[0].tokens
-        final_sequence = tokenizer.decode(final_tokens)
+        outputs = []
+        for instance in instances:
+            instance.completed.extend(instance.beams)
+            sorted_completed = sorted(instance.completed, key=lambda x: x.logprob, reverse=True)
+            best_beams = sorted_completed[:beam_width]
 
-        return (final_tokens, final_sequence)
+            final_tokens_list = [beam.tokens for beam in best_beams]
+            final_sequence_list = [tokenizer.decode(beam.tokens) for beam in best_beams]
+            outputs.append((final_tokens_list, final_sequence_list))
+
+        return outputs
 
     def chat(
         self,
