@@ -361,7 +361,7 @@ class HfRunner:
         prompts: List[str],
         beam_width: int,
         max_tokens: int,
-    ) -> str:
+    ) -> List[Tuple[List[List[int]], List[str]]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
