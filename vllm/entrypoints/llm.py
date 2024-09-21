@@ -352,7 +352,7 @@ class LLM:
     @overload
     def chat(
         self,
-        conversations: List[ChatCompletionMessageParam],
+        messages: List[ChatCompletionMessageParam],
         sampling_params: Optional[Union[SamplingParams,
                                         List[SamplingParams]]] = None,
         use_tqdm: bool = True,
@@ -366,7 +366,7 @@ class LLM:
     @overload
     def chat(
         self,
-        conversations: List[List[ChatCompletionMessageParam]],
+        messages: List[List[ChatCompletionMessageParam]],
         sampling_params: Optional[Union[SamplingParams,
                                         List[SamplingParams]]] = None,
         use_tqdm: bool = True,
@@ -379,8 +379,8 @@ class LLM:
 
     def chat(
         self,
-        conversations: Union[List[ChatCompletionMessageParam],
-                             List[List[ChatCompletionMessageParam]]],
+        messages: Union[List[ChatCompletionMessageParam],
+                        List[List[ChatCompletionMessageParam]]],
         sampling_params: Optional[Union[SamplingParams,
                                         List[SamplingParams]]] = None,
         use_tqdm: bool = True,
@@ -400,7 +400,7 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            conversations: A list of conversations or a single conversation. 
+            messages: A list of conversations or a single conversation. 
                 - Each conversation is represented as a list of messages.
                 - Each message is a dictionary with 'role' and 'content' keys.
             sampling_params: The sampling parameters for text generation.
@@ -420,30 +420,30 @@ class LLM:
             containing the generated responses in the same order as the input
             conversations and messages.
         """
-        list_of_conversations: List[List[ChatCompletionMessageParam]]
+        list_of_messages: List[List[ChatCompletionMessageParam]]
 
         # Handle multi and single conversations
-        if is_list_of(conversations, list):
+        if is_list_of(messages, list):
             # conversations is List[List[...]]
-            list_of_conversations = conversations
+            list_of_messages = messages
         else:
             # conversations is List[...]
-            list_of_conversations = [conversations]
+            list_of_messages = [messages]
 
         outputs = []
 
-        for messages in list_of_conversations:
+        for msgs in list_of_messages:
             tokenizer = self.get_tokenizer()
             model_config = self.llm_engine.get_model_config()
 
             conversation, mm_data = parse_chat_messages(
-                messages, model_config, tokenizer)
+                msgs, model_config, tokenizer)
 
             prompt: Union[str, List[int]]
             if isinstance(tokenizer, MistralTokenizer):
                 prompt = apply_mistral_chat_template(
                     tokenizer,
-                    messages=messages,
+                    messages=msgs,
                     chat_template=chat_template,
                     add_generation_prompt=add_generation_prompt,
                     tools=tools,
