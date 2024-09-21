@@ -83,7 +83,7 @@ Option 2: Build from source
 
 For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging`, `rocm/pytorch-nightly`.
 
-Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guild in PyTorch `Getting Started <https://pytorch.org/get-started/locally/>`_
+Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch `Getting Started <https://pytorch.org/get-started/locally/>`_
 
 
 1. Install `Triton flash attention for ROCm <https://github.com/ROCm/triton>`_
@@ -104,7 +104,7 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
     $ cd vllm
     $ pip install -U -r requirements-rocm.txt
-    $ python setup.py develop # This may take 5-10 minutes. Currently, `pip install .`` does not work for ROCm installation
+    $ python setup.py develop # This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation
 
 
 .. tip::
