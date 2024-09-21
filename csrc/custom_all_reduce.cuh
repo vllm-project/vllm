@@ -259,11 +259,13 @@ __global__ void __launch_bounds__(512, 1)
       if (gather_from_rank == ngpus - 1 || idx < part) {
         int dst_idx = gather_from_rank * part + idx;
         // ((P*)result)[dst_idx] = tmps[i][idx];
-        // __ldcv supports only limited data types: 
+        // __ldcv supports only limited data types:
         //   https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html?#load-functions-using-cache-hints
-        // But we noticed that PTX treats 128-bits array as a uint4, this is the PTX code:
+        // But we noticed that PTX treats 128-bits array as a uint4, this is the
+        // ptx code:
         //   ld.v4.u32 	{%r212, %r213, %r214, %r215}, [%rd135];
-        // So we use a very tricky way here to enable __ldcv, and the PTX code will be:
+        // So we use a very tricky way here to enable __ldcv, and the ptx code
+        // will be:
         //   ld.global.cv.v4.u32 {%r163,%r164,%r165,%r166}, [%rd112];
         ((uint4*)result)[dst_idx] = __ldcv((uint4*)&tmps[i][idx]);
       }
