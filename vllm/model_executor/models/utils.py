@@ -39,15 +39,12 @@ def group_weights_with_prefix(
     Helper function to group weights with prefix
     """
     init_weights, repeated_weights = itertools.tee(weights, 2)
-
-    prefix = set(map(lambda x: x[0].split(".")[0], init_weights))
-
-    repeated_weights = itertools.tee(repeated_weights, len(prefix))
+    weights_prefix = set(map(lambda x: x[0].split(".")[0], init_weights))
+    repeated_weights = itertools.tee(repeated_weights, len(weights_prefix))
 
     grouped_weights = {}
-    for weight_component, weight_prefix in zip(repeated_weights, prefix):
-        grouped_weights[weight_prefix] = filter_weights(
-            weight_component, weight_prefix)
+    for component, prefix in zip(repeated_weights, weights_prefix):
+        grouped_weights[prefix] = filter_weights(component, prefix)
     return grouped_weights
 
 
