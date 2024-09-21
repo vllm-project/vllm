@@ -460,7 +460,7 @@ class LLM:
                     tools=tools,
                 )
 
-            prompt: PromptInputs
+            prompt: PromptType
             if is_list_of(prompt_data, int):
                 prompt = TokensPrompt(prompt_token_ids=prompt_data)
             else:
