@@ -424,10 +424,10 @@ class LLM:
 
         # Handle multi and single conversations
         if is_list_of(messages, list):
-            # conversations is List[List[...]]
+            # messages is List[List[...]]
             list_of_messages = messages
         else:
-            # conversations is List[...]
+            # messages is List[...]
             list_of_messages = [messages]
 
         outputs = []
@@ -474,7 +474,7 @@ class LLM:
             )
             outputs.append(out)
 
-        # When conversations is List[...], return a single list
+        # When messages is List[...], return a single list
         return outputs if len(outputs) > 1 else outputs[0]
 
     @overload  # LEGACY: single (prompt + optional token ids)

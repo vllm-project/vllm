@@ -169,28 +169,29 @@ def test_multi_chat():
     prompt1 = "Explain the concept of entropy."
     prompt2 = "Explain what among us is."
 
-    messages = [
-        [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant"
-            },
-            {
-                "role": "user",
-                "content": prompt1
-            },
-        ],
-        [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant"
-            },
-            {
-                "role": "user",
-                "content": prompt2
-            },
-        ]        
+    conversation1 = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": prompt1
+        },
     ]
+
+    conversation2 = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": prompt2
+        },
+    ]
+
+    messages = [conversation1, conversation2]
 
     outputs = llm.chat(messages)
     assert len(outputs) == 2
