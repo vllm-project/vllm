@@ -291,25 +291,34 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, dummy_multi_modal_data = self.input_registry \
+            decoder_seq_data, decoder_dummy_multi_modal_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
-                                          self.mm_registry)
+                                          self.mm_registry,
+                                          is_encoder_data=False)
+            encoder_seq_data, encoder_dummy_multi_modal_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                         seq_len,
+                                         self.mm_registry,
+                                         is_encoder_data=True)
 
             # Having more tokens is over-conservative but otherwise fine
-            assert len(seq_data.prompt_token_ids) >= seq_len, (
+            assert len(decoder_seq_data.prompt_token_ids) >= seq_len, (
                 f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(seq_data.prompt_token_ids)}")
+                f"but got: {len(decoder_seq_data.prompt_token_ids)}")
+            
+            assert decoder_dummy_multi_modal_data is None or encoder_dummy_multi_modal_data is None, (
+                "Multi-modal data cannot be provided for both encoder and decoder")
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: seq_data},
+                seq_data={group_id: decoder_seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                encoder_seq_data=seq_data,
+                encoder_seq_data=encoder_seq_data,
                 cross_block_table=None,
-                multi_modal_data=dummy_multi_modal_data,
+                multi_modal_data=decoder_dummy_multi_modal_data or encoder_dummy_multi_modal_data,
             )
             seqs.append(seq)
 

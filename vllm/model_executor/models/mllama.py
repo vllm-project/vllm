@@ -118,11 +118,17 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
     assert "decoder_multi_modal_data" not in llm_inputs, "multi-modal data should be put in encoder message of LLaMA Vision"
     return llm_inputs
 
+def get_max_mllama_image_tokens(ctx: InputContext) -> int:
+    hf_config = ctx.model_config.hf_config
+    token_per_chunk = (hf_config.vision_config.image_size // 14) ** 2 + 1
+    return hf_config.vision_config.max_num_tiles * token_per_chunk 
 
-def dummy_seq_data(
+
+def dummy_decoder_seq_data(
     seq_len: int,
     num_images: int
 ):
+    # <|image|> * num_images + 0 * (seq_len - num_images)
     assert seq_len >= num_images, "seq_len should be greater than or equal to num_images"
     token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                       [LLAMA_IMAGE_TOKEN_ID]) * num_images
@@ -131,22 +137,29 @@ def dummy_seq_data(
     return SequenceData(token_ids)
 
 
+def dummy_encoder_seq_data(
+    ctx: InputContext,
+    num_images: int
+):
+    num_tokens = get_max_mllama_image_tokens(ctx) * num_images
+    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [LLAMA_IMAGE_TOKEN_ID]) * num_tokens
+    return SequenceData(token_ids)
+
+
 def dummy_image(
     num_images: int,
 ):
-    width = height = 512
+    width = height = 1024
     image = Image.new("RGB", (width, height), color=0)
     return {"image": image if num_images == 1 else [image] * num_images}
 
-def dummy_data_for_mllama(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
+def dummy_decoder_data_for_mllama(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
-    return dummy_seq_data(seq_len, num_images), dummy_image(num_images)
+    return dummy_decoder_seq_data(seq_len, num_images), None
 
-def get_max_mllama_image_tokens(ctx: InputContext) -> int:
-    hf_config = ctx.model_config.hf_config
-    token_per_chunk = (hf_config.vision_config.image_size // 14) ** 2 + 1
-    return hf_config.vision_config.max_num_tiles * token_per_chunk 
-
+def dummy_encoder_data_for_mllama(ctx: InputContext, seq_len:int, mm_counts: Mapping[str, int]):
+    num_images = mm_counts["image"]
+    return dummy_encoder_seq_data(ctx, num_images), dummy_image(num_images)
 
 # Copied from transformers.models.llama.modeling_llama._prepare_4d_causal_attention_mask_with_cache_position
 def _prepare_4d_causal_attention_mask_with_cache_position(
@@ -1217,7 +1230,8 @@ class MllamaForCausalLM(nn.Module):
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_mllama_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_mllama)
+@INPUT_REGISTRY.register_dummy_data(dummy_decoder_data_for_mllama)
+@INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_mllama)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def __init__(self, config: MllamaConfig,
