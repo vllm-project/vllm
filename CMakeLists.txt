@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.26)
 
+# When building directly using CMake, make sure you run the install step
+# (it places the .so files in the correct location).
+#
+# Example:
+# mkdir build && cd build
+# cmake -G Ninja -DVLLM_PYTHON_EXECUTABLE=`which python3` -DCMAKE_INSTALL_PREFIX=.. ..
+# cmake --build . --target install
+#
+# If you want to only build one target, make sure to install it manually:
+# cmake --build . --target _C
+# cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
@@ -12,6 +23,9 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
+
+# Prevent installation of dependencies (cutlass) by default.
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 
 #
 # Supported python versions.  These versions will be searched in order, the
@@ -70,19 +84,6 @@ endif()
 find_package(Torch REQUIRED)
 
 #
-# Add the `default` target which detects which extensions should be
-# built based on platform/architecture.  This is the same logic that
-# setup.py uses to select which extensions should be built and should
-# be kept in sync.
-#
-# The `default` target makes direct use of cmake easier since knowledge
-# of which extensions are supported has been factored in, e.g.
-#
-# mkdir build && cd build
-# cmake -G Ninja -DVLLM_PYTHON_EXECUTABLE=`which python3` -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=../vllm ..
-# cmake --build . --target default
-#
-add_custom_target(default)
 message(STATUS "Enabling core extension.")
 
 # Define _core_C extension
@@ -99,8 +100,6 @@ define_gpu_extension_target(
   COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
   USE_SABI 3
   WITH_SOABI)
-
-add_dependencies(default _core_C)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -167,6 +166,8 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_GPU_FLAGS "--threads=${NVCC_THREADS}")
 endif()
 
+include(FetchContent)
+
 #
 # Define other extension targets
 #
@@ -190,7 +191,6 @@ set(VLLM_EXT_SRC
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  include(FetchContent)
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
   FetchContent_Declare(
         cutlass
@@ -283,6 +283,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     csrc/quantization/machete/machete_pytorch.cu)
 endif()
 
+message(STATUS "Enabling C extension.")
 define_gpu_extension_target(
   _C
   DESTINATION vllm
@@ -313,6 +314,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/moe/marlin_moe_ops.cu")
 endif()
 
+message(STATUS "Enabling moe extension.")
 define_gpu_extension_target(
   _moe_C
   DESTINATION vllm
@@ -322,7 +324,6 @@ define_gpu_extension_target(
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   USE_SABI 3
   WITH_SOABI)
-
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
@@ -343,16 +344,63 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 endif()
 
+# vllm-flash-attn currently only supported on CUDA
+if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda")
+  return()
+endif ()
 
-if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
-  message(STATUS "Enabling C extension.")
-  add_dependencies(default _C)
+#
+# Build vLLM flash attention from source
+#
+# IMPORTANT: This has to be the last thing we do, because vllm-flash-attn uses the same macros/functions as vLLM.
+# Because functions all belong to the global scope, vllm-flash-attn's functions overwrite vLLMs.
+# They should be identical but if they aren't, this is a massive footgun.
+#
+# The vllm-flash-attn install rules are nested under vllm to make sure the library gets installed in the correct place.
+# To only install vllm-flash-attn, use --component vllm_flash_attn_c.
+# If no component is specified, vllm-flash-attn is still installed.
 
-  message(STATUS "Enabling moe extension.")
-  add_dependencies(default _moe_C)
+# If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
+# This is to enable local development of vllm-flash-attn within vLLM.
+# It can be set as an environment variable or passed as a cmake argument.
+# The environment variable takes precedence.
+if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
+  set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
 endif()
 
-if(VLLM_GPU_LANG STREQUAL "HIP")
-  message(STATUS "Enabling rocm extension.")
-  add_dependencies(default _rocm_C)
+if(VLLM_FLASH_ATTN_SRC_DIR)
+  FetchContent_Declare(vllm-flash-attn SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
+else()
+  FetchContent_Declare(
+          vllm-flash-attn
+          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
+          GIT_TAG 013f0c4fc47e6574060879d9734c1df8c5c273bd
+          GIT_PROGRESS TRUE
+  )
 endif()
+
+# Set the parent build flag so that the vllm-flash-attn library does not redo compile flag and arch initialization.
+set(VLLM_PARENT_BUILD ON)
+
+# Make sure vllm-flash-attn install rules are nested under vllm/
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY FALSE)" COMPONENT vllm_flash_attn_c)
+install(CODE "set(OLD_CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
+install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" COMPONENT vllm_flash_attn_c)
+
+# Fetch the vllm-flash-attn library
+FetchContent_MakeAvailable(vllm-flash-attn)
+message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
+
+# Restore the install prefix
+install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" COMPONENT vllm_flash_attn_c)
+
+# Copy over the vllm-flash-attn python files
+install(
+        DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
+        DESTINATION vllm/vllm_flash_attn
+        COMPONENT vllm_flash_attn_c
+        FILES_MATCHING PATTERN "*.py"
+)
+
+# Nothing after vllm-flash-attn, see comment about macros above
