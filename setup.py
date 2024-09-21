@@ -493,7 +493,9 @@ if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
-    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"],
+    # Include all Python files in vllm_flash_attn
+    'vllm.vllm_flash_attn': ['*.py'],
 }
 if envs.VLLM_USE_PRECOMPILED:
     ext_modules = []
