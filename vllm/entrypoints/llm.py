@@ -433,7 +433,7 @@ class LLM:
             # messages is List[...]
             list_of_messages = [messages]
 
-        outputs = []
+        outputs: List[List[RequestOutput]]] = []
 
         for msgs in list_of_messages:
             tokenizer = self.get_tokenizer()
