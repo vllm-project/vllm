@@ -262,8 +262,6 @@ class SequenceData(msgspec.Struct,
         self._mrope_position_delta = new_mrope_position_delta
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
-        self.last_appended_tokens.append(token_id)
-
         self._output_token_ids.append(token_id)
         self._new_appended_tokens.append(token_id)
         self._cached_all_token_ids.append(token_id)
@@ -438,7 +436,7 @@ class Sequence:
         self.stop_reason: Union[int, str, None] = None
 
         # These are used to keep track of delta outputs
-        self._last_token_ids_offset: int = 0
+        self._last_output_token_ids_offset: int = 0
         self._last_output_text_offset: int = 0
 
         # Used for incremental detokenization
@@ -508,16 +506,22 @@ class Sequence:
         if not delta:
             return self.get_output_token_ids()
 
-        # Optimization for single decode token case
-        # (which is what we have most of the time)
-        if len(self.data.last_appended_tokens) == 1:
-            new_token = self.data.last_appended_tokens[0]
-            self.data.last_appended_tokens.clear()
-            return new_token
+        prompt_len = self.get_prompt_len()
+        output_len = self.get_output_len()
+
+        # Get the number of new tokens
+        output_last_offset = self._last_output_token_ids_offset
+        num_new_tokens = output_len - self._last_output_token_ids_offset
+        self._last_output_token_ids_offset = output_len
+
+        # Return new tokens
+        if num_new_tokens == 1:
+            # Optimization for single decode token case
+            # (which is what we have most of the time)
+            return self.data._cached_all_token_ids[-1]
         else:
-            new_tokens = self.data.last_appended_tokens
-            self.data.last_appended_tokens = []
-            return new_tokens
+            return self.data._cached_all_token_ids[prompt_len +
+                                                   output_last_offset:]
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
