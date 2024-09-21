@@ -171,13 +171,13 @@ class SequenceData(msgspec.Struct,
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_counts(counts_by_token: Mapping[int, int]) -> "SequenceData":
-        if len(counts_by_token) == 0:
+    def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+        if len(token_counts) == 0:
             return SequenceData.from_seqs([])
 
         arrs = [
             array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
-            for token_id, count in counts_by_token.items()
+            for token_id, count in token_counts
         ]
 
         return SequenceData(reduce(array.__add__, arrs))
