@@ -33,7 +33,7 @@ class TokensPrompt(TypedDict):
     """
 
 
-SingletonPromptInputs = Union[str, TextPrompt, TokensPrompt]
+SingletonPrompt = Union[str, TextPrompt, TokensPrompt]
 """
 Set of possible schemas for a single LLM input:
 
@@ -46,7 +46,7 @@ which may be utilized for encoder/decoder models when
 the user desires to express both the encoder & decoder
 prompts explicitly, i.e. :class:`ExplicitEncoderDecoderPrompt`
 
-A prompt of type :class:`SingletonPromptInputs` may be employed
+A prompt of type :class:`SingletonPromptType` may be employed
 as (1) input to a decoder-only model, (2) input to
 the encoder of an encoder/decoder model, in the scenario
 where the decoder-prompt is not specified explicitly, or
@@ -55,12 +55,12 @@ more than one prompt, i.e. :class:`ExplicitEncoderDecoderPrompt`
 """
 
 _T1_co = TypeVar("_T1_co",
-                 bound=SingletonPromptInputs,
-                 default=SingletonPromptInputs,
+                 bound=SingletonPrompt,
+                 default=SingletonPrompt,
                  covariant=True)
 _T2_co = TypeVar("_T2_co",
-                 bound=SingletonPromptInputs,
-                 default=SingletonPromptInputs,
+                 bound=SingletonPrompt,
+                 default=SingletonPrompt,
                  covariant=True)
 
 
@@ -72,7 +72,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
 
     The encoder and decoder prompts, respectively,
     may formatted according to any of the
-    :class:`SingletonPromptInputs` schemas, and are not
+    :class:`SingletonPromptType` schemas, and are not
     required to have the same schema.
 
     Only the encoder prompt may have multi-modal data.
@@ -81,7 +81,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     be used as an input to a decoder-only model,
     and that the `encoder_prompt` and `decoder_prompt`
     fields of this data structure themselves must be
-    :class:`SingletonPromptInputs` instances.
+    :class:`SingletonPromptType` instances.
     """
 
     encoder_prompt: _T1_co
@@ -89,7 +89,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     decoder_prompt: Optional[_T2_co]
 
 
-PromptInputs = Union[SingletonPromptInputs, ExplicitEncoderDecoderPrompt]
+PromptType = Union[SingletonPrompt, ExplicitEncoderDecoderPrompt]
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:
@@ -140,12 +140,8 @@ class EncoderDecoderLLMInputs(LLMInputs):
     """
 
 
-_T1 = TypeVar("_T1",
-              bound=SingletonPromptInputs,
-              default=SingletonPromptInputs)
-_T2 = TypeVar("_T2",
-              bound=SingletonPromptInputs,
-              default=SingletonPromptInputs)
+_T1 = TypeVar("_T1", bound=SingletonPrompt, default=SingletonPrompt)
+_T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)
 
 
 def build_explicit_enc_dec_prompt(

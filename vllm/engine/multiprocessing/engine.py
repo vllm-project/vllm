@@ -245,7 +245,7 @@ class MQLLMEngine:
         try:
             self.engine.add_request(
                 request_id=request_id,
-                inputs=request.inputs,
+                prompt=request.prompt,
                 params=request.params,
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
