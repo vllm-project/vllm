@@ -1,6 +1,5 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from array import array
 from typing import Optional, Union
 
 import torch
@@ -19,7 +18,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.sequence import SequenceData
 
 try:
     from xformers import ops as xops
@@ -53,6 +52,7 @@ def get_max_blip_image_tokens(
 def dummy_seq_data_for_blip(
     hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
     seq_len: int,
+    num_images: int,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
@@ -62,11 +62,10 @@ def dummy_seq_data_for_blip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * image_feature_size
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceData.from_token_counts(
+        (image_token_id, image_feature_size * num_images),
+        (0, seq_len - image_feature_size * num_images),
+    )
 
 
 def dummy_image_for_blip(
