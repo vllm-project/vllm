@@ -382,6 +382,9 @@ endif()
 # Set the parent build flag so that the vllm-flash-attn library does not redo compile flag and arch initialization.
 set(VLLM_PARENT_BUILD ON)
 
+# make sure vllm/vllm_flash_attn exists
+file(MAKE_DIRECTORY ${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn)
+
 # Make sure vllm-flash-attn install rules are nested under vllm/
 install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY FALSE)" COMPONENT vllm_flash_attn_c)
 install(CODE "set(OLD_CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
@@ -394,9 +397,6 @@ message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 # Restore the install prefix
 install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
 install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" COMPONENT vllm_flash_attn_c)
-
-# make sure vllm/vllm_flash_attn exists
-make_directory(${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn)
 
 # Copy over the vllm-flash-attn python files
 install(
