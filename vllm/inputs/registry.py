@@ -21,10 +21,6 @@ logger = init_logger(__name__)
 
 C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
 
-# NOTE: This has to match with sequence.py's VLLM_TOKEN_ID_ARRAY_TYPE.
-# We cannot import it here because of circular dependencies.
-VLLM_TOKEN_ID_ARRAY_TYPE = "l"
-
 
 @dataclass(frozen=True)
 class InputContext:
@@ -129,7 +125,7 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        dummy_seq_data = SequenceData.from_seqs([0] * seq_len)
+        dummy_seq_data = SequenceData.from_counts({0: seq_len})
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data
