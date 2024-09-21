@@ -680,7 +680,7 @@ def dummy_data_for_qwen2_vl(
 
     hf_config = ctx.get_hf_config(Qwen2VLConfig)
 
-    dummy_seqdata = SequenceData.from_token_counts(
+    dummy_seqdata = SequenceData.from_prompt_token_counts(
         (hf_config.vision_start_token_id, 1),
         (hf_config.image_token_id, max_llm_image_tokens),
         (hf_config.vision_end_token_id, 1),

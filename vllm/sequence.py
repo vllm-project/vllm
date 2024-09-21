@@ -176,7 +176,8 @@ class SequenceData(msgspec.Struct,
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+    def from_prompt_token_counts(
+            *token_counts: Tuple[int, int]) -> "SequenceData":
         """
         Construct a :class:`SequenceData` instance by concatenating
         prompt token sequences.
