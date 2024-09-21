@@ -321,13 +321,13 @@ class PhiMoEAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=True,
-            quant_config=None,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=True,
-            quant_config=None,
+            quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -579,14 +579,10 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            print("Loading weight for", name)
             if "rotary_emb.inv_freq" in name:
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                print("param_name", param_name)
-                print("weight_name", weight_name)
-                print("shard_id", shard_id)
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
