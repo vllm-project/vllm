@@ -7,7 +7,6 @@
 
 import math
 import re
-from array import array
 from functools import partial
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Tuple, TypedDict, Union)
@@ -45,8 +44,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import is_list_of
 
 from .utils import flatten_bn, is_pp_missing_parameter, make_layers
@@ -819,7 +817,7 @@ def dummy_data_for_qwen(
     # The presence of a visual config indicates this is a multimodal model.
     # If we don't have it, the model is considered an LLM for warmup purposes.
     if not hasattr(hf_config, "visual"):
-        seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [0] * seq_len))
+        seq_data = SequenceData.from_token_counts((0, seq_len))
         mm_data = None
         return seq_data, mm_data
 
@@ -846,11 +844,13 @@ def dummy_data_for_qwen(
     if len(toks) < seq_len:
         toks += [0] * (seq_len - len(toks))
 
+    seq_data = SequenceData.from_seqs(toks)
+
     # Build the input images; width/height doesn't actually matter here since
     # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
     mm_data = {"image": image if num_images == 1 else [image] * num_images}
-    return SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, toks)), mm_data
+    return seq_data, mm_data
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
