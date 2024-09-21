@@ -99,13 +99,12 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("encoder_multi_modal_data")
     hf_config = ctx.model_config.hf_config
     if multi_modal_data is None or "image" not in multi_modal_data:
+        llm_inputs["encoder_prompt"] = ""
+        llm_inputs["encoder_prompt_token_ids"] = []
         return llm_inputs
     global image_processor
     if image_processor is None:
-        image_processor = MllamaImageProcessor(
-            ctx.model_config.model,
-            size={"height": hf_config.vision_config.image_size, "width": hf_config.vision_config.image_size},
-        )
+        image_processor = MllamaImageProcessor.from_pretrained(ctx.model_config.model)
     processed_image = image_processor(multi_modal_data["image"])
     llm_inputs["encoder_multi_modal_data"]["image"] = processed_image
     num_tiles = recursive_sum(processed_image["num_tiles"])
@@ -951,6 +950,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
+        hidden_states = full_text_row_masked_out_mask * hidden_states
         hidden_states = residual + self.cross_attn_attn_gate.tanh() * hidden_states
 
         residual = hidden_states
@@ -1346,7 +1346,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             xattn_caches = None
             vision_tokens = None
             cross_attention_states = None
-            skip_cross_attention = max(attn_metadata.encoder_seq_lens) > 0
+            skip_cross_attention = max(attn_metadata.encoder_seq_lens) == 0
         else:
             # llama's reference implementation runs the vision model on CPU
             pixel_values = image_inputs['data']
