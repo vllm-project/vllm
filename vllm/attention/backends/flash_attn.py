@@ -19,8 +19,13 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
 
-from vllm_flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
-from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
+# yapf: disable
+from vllm.vllm_flash_attn import (
+    flash_attn_varlen_func as _flash_attn_varlen_func)
+from vllm.vllm_flash_attn import (
+    flash_attn_with_kvcache as _flash_attn_with_kvcache)
+
+# yapf: enable
 
 
 @torch.library.custom_op("vllm::flash_attn_varlen_func", mutates_args=[])
