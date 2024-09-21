@@ -175,7 +175,7 @@ DINLINE void multi_gpu_barrier(const RankSignals& sg, Signal* self_sg,
         &sg.signals[threadIdx.x]->peer_counter[val % 2][blockIdx.x][rank];
     auto self_counter_ptr =
         &self_sg->peer_counter[val % 2][blockIdx.x][threadIdx.x];
-    if constexpr (need_fence) {
+    if constexpr (false) {
       st_flag_release(peer_counter_ptr, val);
       while (ld_flag_acquire(self_counter_ptr) != val);
     } else {
@@ -258,7 +258,14 @@ __global__ void __launch_bounds__(512, 1)
       int gather_from_rank = ((rank + i) % ngpus);
       if (gather_from_rank == ngpus - 1 || idx < part) {
         int dst_idx = gather_from_rank * part + idx;
-        ((P*)result)[dst_idx] = tmps[i][idx];
+        // ((P*)result)[dst_idx] = tmps[i][idx];
+        // __ldcv supports only limited data types: 
+        //   https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html?#load-functions-using-cache-hints
+        // But we noticed that PTX treats 128-bits array as a uint4, this is the PTX code:
+        //   ld.v4.u32 	{%r212, %r213, %r214, %r215}, [%rd135];
+        // So we use a very tricky way here to enable __ldcv, and the PTX code will be:
+        //   ld.global.cv.v4.u32 {%r163,%r164,%r165,%r166}, [%rd112];
+        ((uint4*)result)[dst_idx] = __ldcv((uint4*)&tmps[i][idx]);
       }
     }
   }
