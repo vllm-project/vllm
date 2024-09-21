@@ -817,7 +817,7 @@ def dummy_data_for_qwen(
     # The presence of a visual config indicates this is a multimodal model.
     # If we don't have it, the model is considered an LLM for warmup purposes.
     if not hasattr(hf_config, "visual"):
-        seq_data = SequenceData.from_counts((0, seq_len))
+        seq_data = SequenceData.from_token_counts((0, seq_len))
         mm_data = None
         return seq_data, mm_data
 

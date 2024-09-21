@@ -171,7 +171,7 @@ class SequenceData(msgspec.Struct,
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+    def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
         if len(token_counts) == 0:
             return SequenceData.from_seqs([])
 

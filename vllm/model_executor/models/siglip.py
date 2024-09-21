@@ -66,7 +66,7 @@ def dummy_seq_data_for_siglip(
     else:
         image_feature_size = image_feature_size_override
 
-    return SequenceData.from_counts(
+    return SequenceData.from_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
     )

@@ -257,7 +257,7 @@ def get_max_minicpmv_image_tokens(ctx: InputContext):
 
 
 def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
-    return SequenceData.from_counts((0, seq_len))
+    return SequenceData.from_token_counts((0, seq_len))
 
 
 def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
