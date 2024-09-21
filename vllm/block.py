@@ -109,3 +109,7 @@ class BlockTable:
         block = self._blocks.pop()
         self._block_ids.pop()
         return block
+
+    def clear(self):
+        self._blocks.clear()
+        self._block_ids.clear()

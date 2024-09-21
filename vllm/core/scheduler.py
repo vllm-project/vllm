@@ -1103,11 +1103,12 @@ class Scheduler:
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
 
-        if self.block_manager.evict_block_tables != {}:
+        if (hasattr(self.block_manager, "evict_block_tables")
+                and self.block_manager.evict_block_tables != {}):
             for sg in scheduled_seq_groups:
                 for seq in sg.seq_group.seqs:
                     self.block_manager.free_evict(seq)
-        assert self.block_manager.evict_block_tables == {}
+            assert self.block_manager.evict_block_tables == {}
         if self.swap_manager is not None:
             self.swap_manager.free_block_tables()
 
@@ -1240,7 +1241,8 @@ class Scheduler:
                                 running_scheduled.decode_seq_groups +
                                 swapped_in.decode_seq_groups)
         # Delayed free swapped-in sequences
-        if self.block_manager.evict_block_tables != {}:
+        if (hasattr(self.block_manager, "evict_block_tables")
+                and self.block_manager.evict_block_tables != {}):
             for sg in scheduled_seq_groups:
                 for seq in sg.seq_group.seqs:
                     self.block_manager.free_evict(seq)

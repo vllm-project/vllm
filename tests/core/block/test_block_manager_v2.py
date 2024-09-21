@@ -337,7 +337,7 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
     assert block_manager.can_swap_out(seq_group)
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    mapping = block_manager.swap_out(seq_group)
+    mapping, _ = block_manager.swap_out(seq_group)
     mapping_keys = [key for key, _ in mapping]
     assert mapping_keys == gpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()

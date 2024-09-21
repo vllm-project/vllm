@@ -181,6 +181,7 @@ def test_multi_step_model_runner_input():
         num_prefill_tokens=2,
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
+        enable_layered_transfer=False,
     )
     frozen_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),

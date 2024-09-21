@@ -118,6 +118,12 @@ class Worker(LocalOrDistributedWorkerBase):
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
+        self.swap_manager: Optional[SwapClientManagerBase] = None
+
+        # Initialize another cuda stream for layered transfer
+        self.layered_transfer_stream: Optional[
+            torch.cuda.Stream] = torch.cuda.Stream(
+            ) if self.cache_config.enable_layered_transfer else None
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -151,13 +157,6 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _is_embedding_model(self):
         return self.model_config.is_embedding_model
-
-        self.swap_manager: Optional[SwapClientManagerBase] = None
-
-        # Initialize another cuda stream for layered transfer
-        self.layered_transfer_stream: Optional[
-            torch.cuda.Stream] = torch.cuda.Stream(
-            ) if self.cache_config.enable_layered_transfer else None
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -371,8 +370,9 @@ class Worker(LocalOrDistributedWorkerBase):
         layers: List[int] = list(range(start, end))
 
         tp_rank = self.rank % self.parallel_config.tensor_parallel_size
-        head_size = self.cache_engine[virtual_engine].num_kv_heads
-        head_range = (tp_rank * head_size, (tp_rank + 1) * head_size - 1)
+        if self.swap_manager is not None:
+            head_size = self.cache_engine[virtual_engine].num_kv_heads
+            head_range = (tp_rank * head_size, (tp_rank + 1) * head_size - 1)
 
         blocks_to_swap_out_gpu_to_dev: Dict[int, List[Tuple[int, int]]] = {}
         blocks_to_swap_out_cpu_to_dev: Dict[int, List[Tuple[int, int]]] = {}

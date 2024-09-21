@@ -892,7 +892,7 @@ def test_schedule_context_caching_no_swap():
                                        prompt_tokens=list(range(0, 12)),
                                        caching_params=caching_params)
     scheduler.add_seq_group(seq_group)
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
         if s.seq_group.caching_params:
@@ -917,7 +917,7 @@ def test_schedule_context_caching_no_swap():
                                        block_size=block_size,
                                        prompt_tokens=list(range(0, 12)))
     scheduler.add_seq_group(seq_group)
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
     block_table_prefix = block_tables[seq_group.get_seqs()[0].seq_id].copy()
@@ -990,7 +990,7 @@ def test_schedule_context_caching_swap():
                                        prompt_tokens=list(range(0, 31)),
                                        caching_params=caching_params)
     scheduler.add_seq_group(seq_group)
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
         if s.seq_group.caching_params:
@@ -1017,7 +1017,7 @@ def test_schedule_context_caching_swap():
                                        block_size=block_size,
                                        prompt_tokens=list(range(32, 47)))
     scheduler.add_seq_group(seq_group)
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
     for s in out.scheduled_seq_groups:
@@ -1067,7 +1067,7 @@ def test_schedule_context_caching_swap():
                                        block_size=block_size,
                                        prompt_tokens=list(range(0, 31)))
     scheduler.add_seq_group(seq_group)
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
     for s in out.scheduled_seq_groups:

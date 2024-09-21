@@ -940,9 +940,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             # Verify
             if (is_encoder_decoder or not self.enable_caching or
                 (self.enable_caching and not self.enable_memory_tiering)):
-                assert (cpu_block_table_swap_in == BlockTable()
-                        and cpu_block_table_swap_out == BlockTable()) and (
-                            swap_in == []) and (swap_out_mapping == {})
+                assert (len(cpu_block_table_swap_in) == 0
+                        and len(cpu_block_table_swap_out)
+                        == 0) and (swap_in == []) and (swap_out_mapping == {})
 
             block_table.append(block)
 
@@ -1217,7 +1217,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     if disk_block is not None:
                         dev_id = disk_block.device_id - Device.SWAP
                         self.swap_manager.update_block_tables(
-                            seq.seq_id, {dev_id: [disk_block]})
+                            seq.seq_id, {dev_id: BlockTable([disk_block])})
                         return [], [], [(new_block.block_number,
                                         cpu_block.block_number)], \
                                 [], [(cpu_block.block_number,
@@ -1254,7 +1254,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 if disk_block is not None:
                     dev_id = disk_block.device_id - Device.SWAP
                     self.swap_manager.update_block_tables(
-                        seq.seq_id, {dev_id: [disk_block]})
+                        seq.seq_id, {dev_id: BlockTable([disk_block])})
 
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)

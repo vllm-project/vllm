@@ -1300,10 +1300,11 @@ class ExecuteModelRequest(
     # NOTE: Add as additional field as we don't fix the format yet
     # For now, the format is block_id, block_id, from_dev, to_dev
     blocks_to_swap_in_from_disk: List[Tuple[int, int, int,
-                                            int]] = msgspec.spec(
+                                            int]] = msgspec.field(
                                                 default_factory=list)
-    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = msgspec.spec(
-        default_factory=list)
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int,
+                                           int]] = msgspec.field(
+                                               default_factory=list)
 
     @property
     def is_first_multi_step(self) -> bool:
