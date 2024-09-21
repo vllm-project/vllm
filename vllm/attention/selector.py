@@ -245,7 +245,6 @@ def which_attn_to_use(
     if selected_backend == _Backend.FLASH_ATTN:
         try:
             import vllm.vllm_flash_attn  # noqa: F401
-
             from vllm.attention.backends.flash_attn import (  # noqa: F401
                 FlashAttentionBackend)
 
@@ -260,8 +259,7 @@ def which_attn_to_use(
                 "Cannot use FlashAttention-2 backend because the "
                 "vllm.vllm_flash_attn package is not found. "
                 "Make sure that vllm_flash_attn was built and installed "
-                "(on by default)."
-            )
+                "(on by default).")
             selected_backend = _Backend.XFORMERS
 
     return selected_backend
