@@ -89,6 +89,13 @@ def recursive_sum(x):
     return 0
 
 def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
+    if llm_inputs.get("prompt") is None:
+        llm_inputs["prompt"] = llm_inputs["encoder_prompt"]
+        llm_inputs["prompt_token_ids"] = llm_inputs["encoder_prompt_token_ids"]
+        if 198 in llm_inputs["prompt_token_ids"]:
+            index_198 = llm_inputs["prompt_token_ids"].index(198)
+            if index_198 > 0 and llm_inputs["prompt_token_ids"][index_198 - 1] == LLAMA_IMAGE_TOKEN_ID:
+                llm_inputs["prompt_token_ids"] = llm_inputs["prompt_token_ids"][:index_198] + llm_inputs["prompt_token_ids"][index_198+1:]
     multi_modal_data = llm_inputs.get("encoder_multi_modal_data")
     hf_config = ctx.model_config.hf_config
     if multi_modal_data is None or "image" not in multi_modal_data:
@@ -105,13 +112,6 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
     assert hf_config.vision_config.image_size % 14 == 0, "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14) ** 2 + 1
     num_tokens = num_tiles * token_per_chunk
-    if llm_inputs.get("prompt") is None:
-        llm_inputs["prompt"] = llm_inputs["encoder_prompt"]
-        llm_inputs["prompt_token_ids"] = llm_inputs["encoder_prompt_token_ids"]
-        if 198 in llm_inputs["prompt_token_ids"]:
-            index_198 = llm_inputs["prompt_token_ids"].index(198)
-            if index_198 > 0 and llm_inputs["prompt_token_ids"][index_198 - 1] == LLAMA_IMAGE_TOKEN_ID:
-                llm_inputs["prompt_token_ids"] = llm_inputs["prompt_token_ids"][:index_198] + llm_inputs["prompt_token_ids"][index_198+1:]
     llm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
     llm_inputs["encoder_prompt_token_ids"] = [LLAMA_IMAGE_TOKEN_ID] * num_tokens
 
@@ -937,7 +937,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         cross_attention_states: torch.Tensor,
         cross_attention_mask: torch.Tensor,
-        full_text_row_masked_out_mask: Tuple[torch.Tensor, torch.Tensor],
+        full_text_row_masked_out_mask: torch.Tensor,
         kv_cache: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
@@ -956,8 +956,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        if full_text_row_masked_out_mask is not None:
-            hidden_states = full_text_row_masked_out_mask[:, 0] * hidden_states  # type: ignore
+        hidden_states = full_text_row_masked_out_mask * hidden_states
         hidden_states = residual + self.cross_attn_mlp_gate.tanh() * hidden_states
         return hidden_states
 
@@ -1000,21 +999,23 @@ class MllamaTextModel(nn.Module):
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        skip_cross_attention: bool,
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
         for idx, decoder_layer in enumerate(self.layers):
             if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
-                hidden_states = decoder_layer(
-                    hidden_states=hidden_states,
-                    cross_attention_states=cross_attention_states,
-                    cross_attention_mask=cross_attention_mask,
-                    full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-                    # xattn_cache=xattn_caches[xattn_layer_idx] if xattn_caches is not None else None,
-                    kv_cache=kv_caches[idx],
-                    attn_metadata=attn_metadata,
-                )
+                if not skip_cross_attention:
+                    hidden_states = decoder_layer(
+                        hidden_states=hidden_states,
+                        cross_attention_states=cross_attention_states,
+                        cross_attention_mask=cross_attention_mask,
+                        full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+                        # xattn_cache=xattn_caches[xattn_layer_idx] if xattn_caches is not None else None,
+                        kv_cache=kv_caches[idx],
+                        attn_metadata=attn_metadata,
+                    )
             elif isinstance(decoder_layer, MllamaSelfAttentionDecoderLayer):
                 hidden_states = decoder_layer(
                     hidden_states=hidden_states,
@@ -1124,6 +1125,7 @@ class MllamaForCausalLM(nn.Module):
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor, torch.Tensor]],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        skip_cross_attention: bool,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,
@@ -1133,6 +1135,7 @@ class MllamaForCausalLM(nn.Module):
             full_text_row_masked_out_mask=full_text_row_masked_out_mask,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            skip_cross_attention=skip_cross_attention,
         )
         return hidden_states
 
@@ -1339,11 +1342,11 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         image_inputs = self._parse_and_validate_image_input(**kwargs)
         if image_inputs is None:
             cross_attention_mask = None
-            run_xattn_mask = (attn_metadata.encoder_seq_lens_tensor != 0).reshape(-1, 1).cuda()
+            full_text_row_masked_out_mask = (attn_metadata.encoder_seq_lens_tensor != 0).reshape(-1, 1).to(input_ids.device)
             xattn_caches = None
             vision_tokens = None
             cross_attention_states = None
-            full_text_row_masked_out_mask = None
+            skip_cross_attention = max(attn_metadata.encoder_seq_lens) > 0
         else:
             # llama's reference implementation runs the vision model on CPU
             pixel_values = image_inputs['data']
@@ -1363,42 +1366,15 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 start_pos = end_pos
             cross_attention_states = cross_attention_states_flat
             cross_attention_mask = None # TODO
-            full_text_row_masked_out_mask = None # TODO
 
-            # run_xattn_mask = torch.ones((attn_metadata.num_prefill_tokens, 1), dtype=torch.bool, device=cross_attention_states.device) 
-            # start_pos = 0
-            # for seq_len, encoder_seq_len in zip(attn_metadata.seq_lens_tensor, attn_metadata.encoder_seq_lens):
-            #     if encoder_seq_len == 0:
-            #         run_xattn_mask[start_pos:start_pos+seq_len] = False
-            #     start_pos += seq_len
-
-        # if pixel_values is not None:
-        #     if aspect_ratio_ids is None:
-        #         raise ValueError("`aspect_ratio_ids` must be provided if `pixel_values` is provided")
-        #     # get vision tokens from vision model
-        #     cross_attention_states = self.vision_model(pixel_values, aspect_ratio_ids, aspect_ratio_mask)
-        #     cross_attention_states = self.multi_modal_projector(cross_attention_states).reshape(
-        #         -1, cross_attention_states.shape[-2], self.hidden_size
-        #     )
-
-        # cross_attention_mask, full_text_row_masked_out_mask = _prepare_cross_attention_mask(
-        #     cross_attention_mask,
-        #     past_key_values=past_key_values,
-        #     num_vision_tokens=self.vision_model.num_patches,
-        #     cross_attention_layers=self.language_model.model.cross_attention_layers,
-        #     cross_attention_states=cross_attention_states,
-        #     device=self.device,
-        #     dtype=self.dtype,
-        # )
-
-        # if cross_attention_mask is not None and cache_position is not None:
-        #     cross_attention_mask = cross_attention_mask[:, :, cache_position]
-        #     full_text_row_masked_out_mask = full_text_row_masked_out_mask[:, :, cache_position]
-
-        # print("input_ids", input_ids, cross_attention_states is None)
-        # if positions.numel() == 1:
-        #     global step_name
-        #     step_name = f"decode_{positions.item()}"
+            full_text_row_masked_out_mask = torch.ones((attn_metadata.num_prefill_tokens, 1), dtype=torch.bool) 
+            start_pos = 0
+            for seq_len, encoder_seq_len in zip(attn_metadata.seq_lens_tensor.cpu(), attn_metadata.encoder_seq_lens):
+                if encoder_seq_len == 0:
+                    full_text_row_masked_out_mask[start_pos:start_pos+seq_len] = False
+                start_pos += seq_len
+            full_text_row_masked_out_mask = full_text_row_masked_out_mask.to(cross_attention_states.device)
+            skip_cross_attention = False
 
         outputs = self.language_model(
             input_ids=input_ids,
@@ -1408,9 +1384,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             full_text_row_masked_out_mask=full_text_row_masked_out_mask,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            skip_cross_attention=skip_cross_attention,
         )
-        # if positions.numel() == 1 and positions.item() == 20:
-        #     exit(0)
 
         return outputs
 

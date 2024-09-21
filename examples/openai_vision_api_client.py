@@ -33,8 +33,7 @@ image_url = "https://llava-vl.github.io/static/images/view.jpg"
 ## Use image url in the payload
 chat_completion_from_url = client.chat.completions.create(
     messages=[{
-        "role":
-        "user",
+        "role": "user",
         "content": [
             {
                 "type": "text",
@@ -47,14 +46,34 @@ chat_completion_from_url = client.chat.completions.create(
                 },
             },
         ],
-    }],
+    }
+    ],
     model=model,
     max_tokens=64,
     temperature=0.0,
 )
 
 result = chat_completion_from_url.choices[0].message.content
-print("Chat completion output:", result)
+print("Text + image output:", result)
+
+chat_completion_text_only = client.chat.completions.create(
+    messages=[{
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "what is the recipe of mayonnaise in two sentences?"
+            },
+        ]
+    }
+    ],
+    model=model,
+    max_tokens=64,
+    temperature=0.0,
+)
+
+result = chat_completion_text_only.choices[0].message.content
+print("Text-only output output:", result)
 
 print("remove me: testing done, exitting...")
 import sys; sys.exit(0)
