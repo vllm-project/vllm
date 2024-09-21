@@ -395,6 +395,9 @@ message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
 install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" COMPONENT vllm_flash_attn_c)
 
+# make sure vllm/vllm_flash_attn exists
+make_directory(${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn)
+
 # Copy over the vllm-flash-attn python files
 install(
         DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
