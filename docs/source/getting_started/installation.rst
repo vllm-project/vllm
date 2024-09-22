@@ -93,7 +93,7 @@ You can also build and install vLLM from source:
     This is especially useful when the PyTorch dependency cannot be easily installed via pip, e.g.:
 
     - build vLLM with PyTorch nightly or a custom PyTorch build.
-    - build vLLM with aarch64 and cuda (GH200), where the PyTorch wheels are not available on PyPI. Currently, only PyTorch nightly has wheels for aarch64 with CUDA. You can run ``pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121`` to install PyTorch nightly, and then build vLLM on top of it.
+    - build vLLM with aarch64 and cuda (GH200), where the PyTorch wheels are not available on PyPI. Currently, only PyTorch nightly has wheels for aarch64 with CUDA. You can run ``pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124`` to install PyTorch nightly, and then build vLLM on top of it.
 
 .. note::
 
