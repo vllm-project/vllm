@@ -24,7 +24,7 @@ ModelRequestData = namedtuple(
     ["llm", "prompt", "stop_token_ids", "image_data", "chat_template"])
 
 
-def load_qwenvl_chat(question: str, image_urls: List[str]):
+def load_qwenvl_chat(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     llm = LLM(
         model=model_name,
@@ -62,7 +62,7 @@ def load_qwenvl_chat(question: str, image_urls: List[str]):
     )
 
 
-def load_phi3v(question: str, image_urls: List[str]):
+def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
     llm = LLM(
         model="microsoft/Phi-3.5-vision-instruct",
         trust_remote_code=True,
@@ -83,7 +83,7 @@ def load_phi3v(question: str, image_urls: List[str]):
     )
 
 
-def load_internvl(question: str, image_urls: List[str]):
+def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
     llm = LLM(
@@ -120,7 +120,7 @@ def load_internvl(question: str, image_urls: List[str]):
     )
 
 
-def load_qwen2_vl(question, image_urls: List[str]):
+def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
     try:
         from qwen_vl_utils import process_vision_info
     except ModuleNotFoundError:
