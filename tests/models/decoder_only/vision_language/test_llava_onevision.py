@@ -41,7 +41,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
         if token_id != video_token_id or output_ids[idx - 1] != video_token_id
     ]
 
-    hf_output_str = output_str[1:]
+    hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
