@@ -139,7 +139,8 @@ def run_video_test(
             .to(torch_dtype)  # type: ignore
         return hf_inputs
 
-    with hf_runner(model, dtype=dtype,
+    with hf_runner(model,
+                   dtype=dtype,
                    postprocess_inputs=process,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_video = [
@@ -277,7 +278,8 @@ def run_image_test(
             .to(torch_dtype)  # type: ignore
         return hf_inputs
 
-    with hf_runner(model, dtype=dtype,
+    with hf_runner(model,
+                   dtype=dtype,
                    postprocess_inputs=process,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
