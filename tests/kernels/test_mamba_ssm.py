@@ -255,7 +255,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
             ssm_states=state if c > 0 else None,
             has_initial_state=torch.ones(batch_size,
                                          device=u.device,
-                                         dtype=torch.int32) if c > 0 else None)
+                                         dtype=torch.bool) if c > 0 else None)
         outs.append(out)
         if return_last_state:
             state = rest[0]
@@ -360,7 +360,9 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
     # set seed
     torch.random.manual_seed(0)
     seqlens = []
-    nsplits = 0
+    nsplits = 3
+    if seqlen < 10:
+        nsplits = 0
     eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
     seqlens.append(
         torch.diff(
@@ -397,21 +399,19 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
     delta_ref = delta.clone()
     out = None
     out_ref = None
-    prev_state = torch.randn((
-        cumsum.shape[0],
-        u.shape[0],
-        int(A.shape[1]),
-    ),
+    prev_state = torch.randn((cumsum.shape[0], u.shape[0], int(A.shape[1]),),
                              device=u.device,
                              dtype=itype,
                              requires_grad=False)
     prev_state_ref = prev_state.clone()
-    cache_indices = torch.arange(cumsum.shape[0],
-                                 dtype=torch.int32,
-                                 device=u.device)
-    has_initial_state = torch.ones_like(cumsum,
-                                        dtype=torch.int32,
-                                        device=u.device)
+    cache_indices = torch.randperm(cumsum.shape[0],
+                                   dtype=torch.int32,
+                                   device=u.device)
+
+    has_initial_state = torch.randint(0,
+                                      2, (cumsum.shape[0], ),
+                                      dtype=torch.bool,
+                                      device=u.device)
     out, last_state = selective_scan_fn(u, delta, A, B, C, D, z,
                                         delta_bias, delta_softplus,
                                         cumsum.cuda(), cache_indices,
@@ -435,12 +435,14 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
             delta_bias=delta_bias,
             delta_softplus=delta_softplus,
             return_last_state=return_last_state,
-            prev_state=prev_state_ref[i].unsqueeze(0))
+            prev_state=prev_state_ref[cache_indices[i]].unsqueeze(0)
+            if has_initial_state[i] else None)
         outs.append(out_ref_s)
         last_state_refs.append(last_state_ref_s)
     if len(outs) > 1:
         out_ref = torch.cat(outs, dim=-1)
         last_state_ref = torch.cat(last_state_refs, dim=0).to(itype)
+        last_state_ref = last_state_ref[cache_indices]
     else:
         out_ref = outs[0]
         last_state_ref = last_state_refs[0].to(itype)

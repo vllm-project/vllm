@@ -147,7 +147,7 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
                                          conv_states=initial_states,
                                          has_initial_state=torch.ones(
                                              batch,
-                                             dtype=torch.int32,
+                                             dtype=torch.bool,
                                              device=x.device))
     out_ref, final_states_ref = causal_conv1d_ref(
         x_ref,
@@ -258,34 +258,42 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
                                device=x.device,
                                dtype=x.dtype)
     final_states_ref = final_states.clone()
-    has_initial_states = torch.ones_like(cumsum,
-                                         dtype=torch.int32,
+    has_initial_states = torch.randint(0,2,(cumsum.shape[0],),
+                                         dtype=torch.bool,
                                          device=x.device)
-    cache_indices = torch.arange(cumsum.shape[0],
+    cache_indices = torch.randperm(cumsum.shape[0],
                                  dtype=torch.int32,
                                  device=x.device)
-
     out, final_states = causal_conv1d_fn(x.squeeze(0), weight, bias,
                                          cumsum.cuda(), cache_indices,
                                          has_initial_states, final_states,
                                          activation)
     out_ref = []
     out_ref_b = []
-    for i, x_s in enumerate(torch.split(x_ref[[0]], seqlens[0], dim=2)):
+
+    splits = [
+        torch.split(var, seqlens[0], dim=-1)
+        for var in (x_ref)
+    ]
+    for i in range(len(seqlens[0])):
+        x_s = [v[i].unsqueeze(0) for v in splits][0]
         out_ref_b.append(
-            causal_conv1d_ref(x_s,
-                              weight_ref,
-                              bias_ref,
-                              activation=activation,
-                              return_final_states=True,
-                              initial_states=final_states_ref[i].unsqueeze(0)))
+            causal_conv1d_ref(
+                x_s,
+                weight_ref,
+                bias_ref,
+                activation=activation,
+                return_final_states=True,
+                final_states_out=final_states_ref[cache_indices[i]].unsqueeze(0),
+                initial_states=final_states_ref[cache_indices[i]].unsqueeze(0)
+                if has_initial_states[i] else None))
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=2))
     out_ref = torch.cat(out_ref, dim=0)
 
-    ref_final_states = torch.concat([t[1] for t in out_ref_b], dim=0)
+
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
-    print(f"Output state max diff:{(final_states - ref_final_states).max()}")
-    print(f"Output state mean diff:{(final_states - ref_final_states).mean()}")
+    print(f"Output state max diff:{(final_states - final_states_ref).abs().max()}")
+    print(f"Output state mean diff:{(final_states - final_states_ref).abs().mean()}")
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
-    assert torch.allclose(final_states, ref_final_states, rtol=rtol, atol=atol)
+    assert torch.allclose(final_states, final_states_ref, rtol=rtol, atol=atol)
