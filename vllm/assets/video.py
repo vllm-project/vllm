@@ -79,7 +79,7 @@ class VideoAsset:
         return ret
 
     @property
-    def np_ndarrays(self) -> List[npt.NDArray]:
+    def np_ndarrays(self) -> npt.NDArray:
         video_path = download_video_asset(self.name)
         ret = video_to_ndarrays(video_path, self.num_frames)
         return ret
