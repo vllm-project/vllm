@@ -11,7 +11,6 @@ from transformers import (CLIPVisionConfig, LlavaNextVideoConfig,
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -31,8 +30,6 @@ from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip)
 from .utils import (group_weights_with_prefix, init_vllm_registered_model,
                     merge_multimodal_embeddings)
-
-logger = init_logger(__name__)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 32
