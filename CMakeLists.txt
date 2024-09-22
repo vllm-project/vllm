@@ -192,6 +192,10 @@ set(VLLM_EXT_SRC
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+
+  # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
+  set(CUTLASS_REVISION "v3.5.1" CACHE STRING "CUTLASS revision to use")
+
   FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
@@ -201,7 +205,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
+        #        GIT_SHALLOW TRUE
   )
   FetchContent_MakeAvailable(cutlass)
 
