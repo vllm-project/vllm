@@ -1,4 +1,3 @@
-import itertools
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -26,8 +25,8 @@ from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
-from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+from .utils import (flatten_bn, group_weights_with_prefix,
+                    init_vllm_registered_model, merge_multimodal_embeddings)
 
 
 class LlavaImagePixelInputs(TypedDict):
@@ -393,21 +392,18 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
-        vit_weights, mlp_weights, llm_weights = itertools.tee(weights, 3)
+        weights_group = group_weights_with_prefix(weights)
 
         # load vision encoder
-        vit_weights = filter_weights(vit_weights, "vision_tower")
-        self.vision_tower.load_weights(vit_weights)
+        self.vision_tower.load_weights(weights_group["vision_tower"])
 
         # load mlp projector
-        mlp_weights = filter_weights(mlp_weights, "multi_modal_projector")
         mlp_params_dict = dict(self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in mlp_weights:
+        for name, loaded_weight in weights_group["multi_modal_projector"]:
             param = mlp_params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
 
         # load llm backbone
-        llm_weights = filter_weights(llm_weights, "language_model")
-        self.language_model.load_weights(llm_weights)
+        self.language_model.load_weights(weights_group["language_model"])
