@@ -114,7 +114,7 @@ Just add the following lines in your code:
     from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
 
-If your model is a multimodal model, then indicate so by setting the `is_multimodal` flag.
+If your model is a multimodal model, then indicate so by setting the :code:`is_multimodal` flag.
 
 .. code-block:: python
 
