@@ -82,9 +82,9 @@ class DummyDataFactory(Protocol):
         Note:
             :data:`InputProcessor` is not applied to the dummy data.
 
-            The :code:`processor_kwargs` are overrides provided at initialization
-            time to values in the config whose values may affect the number
-            of tokens per instance.
+            The :code:`processor_kwargs` are overrides provided at
+            initialization time to values in the config whose values
+            may affect the number of tokens per instance.
         """
         ...
 
@@ -243,7 +243,8 @@ class InputRegistry:
         return wrapper
 
     def _process_input(self, inputs: LLMInputs, model_config: "ModelConfig",
-                       processor: InputProcessor, **processor_kwargs: Any) -> LLMInputs:
+                       processor: InputProcessor,
+                       **processor_kwargs: Any) -> LLMInputs:
         """
         Apply an input processor to an instance of model inputs. This will
         usually not be invoked be directly, and instead will be wrapped in
@@ -274,8 +275,7 @@ class InputRegistry:
                                  processor=processor,
                                  **processor_kwargs)
 
-    def _get_model_input_processor(self,
-                                   model_config: "ModelConfig"):
+    def _get_model_input_processor(self, model_config: "ModelConfig"):
         """
         Grabs the input processor for the provided model.
         
