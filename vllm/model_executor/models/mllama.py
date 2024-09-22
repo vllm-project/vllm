@@ -383,35 +383,31 @@ class MllamaVisionEncoder(nn.Module):
         config: MllamaConfig
     """
 
-    def __init__(self, config: MllamaVisionConfig, num_layers=32, is_gated=False):
+    def __init__(self, config: MllamaVisionConfig, num_layers=32, is_gated=False, output_hidden_states=None):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([MllamaVisionEncoderLayer(config, is_gated) for _ in range(num_layers)])
-        self.config = config
+        self.output_hidden_states = output_hidden_states or []
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutput]:
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        encoder_states = () if output_hidden_states else None
+        encoder_states = ()
 
-        for encoder_layer in self.layers:
-            if output_hidden_states:
+        for i, encoder_layer in enumerate(self.layers):
+            if i in self.output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
             hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask,
             )
 
-        if output_hidden_states:
+        if len(self.layers) - 1 in self.output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
         return hidden_states, encoder_states
@@ -448,7 +444,7 @@ class MllamaVisionModel(nn.Module):
         self.layernorm_post = nn.LayerNorm(self.hidden_size)
 
         # encoders
-        self.transformer = MllamaVisionEncoder(config, config.num_hidden_layers, is_gated=False)
+        self.transformer = MllamaVisionEncoder(config, config.num_hidden_layers, is_gated=False, output_hidden_states=config.intermediate_layers_indices)
         self.global_transformer = MllamaVisionEncoder(config, config.num_global_layers, is_gated=True)
 
     def apply_class_embedding(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -508,14 +504,8 @@ class MllamaVisionModel(nn.Module):
         output = self.transformer(
             hidden_state,
             attention_mask=attention_mask,
-            output_hidden_states=True,
         )
-        hidden_state, all_intermediate_hidden_states = output[0], output[1]
-        intermediate_hidden_states = [
-            hidden_state
-            for idx, hidden_state in enumerate(all_intermediate_hidden_states)
-            if idx in self.intermediate_layers_indices
-        ]
+        hidden_state, intermediate_hidden_states = output[0], output[1]
         intermediate_hidden_states = torch.stack(intermediate_hidden_states, dim=-1)
 
         # apply global encoder
