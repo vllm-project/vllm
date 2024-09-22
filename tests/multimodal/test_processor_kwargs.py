@@ -7,7 +7,6 @@ import torch
 
 from vllm.inputs import InputContext, LLMInputs
 from vllm.inputs.registry import InputRegistry
-from vllm.model_executor.models.phi3v import Phi3VForCausalLM
 from vllm.multimodal import MultiModalRegistry
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
 
@@ -63,6 +62,13 @@ def use_dummy_data_mock():
             "vllm.inputs.registry.InputRegistry._default_dummy_data_factory",
             custom_dummy_data_factory):
         yield
+
+
+# Lazy import to avoid CUDA reinitialization error
+def mm_model_cls():
+    from vllm.model_executor.models.phi3v import Phi3VForCausalLM
+
+    return Phi3VForCausalLM
 
 
 # lambda whose signature matches max token calcs extra & mapper + extra kwargs
@@ -199,7 +205,7 @@ def test_max_tokens_kwarg_overrides(num_crops):
     with patch.object(
             mm_registry._get_plugin("image"),
             "_max_mm_tokens",
-        {Phi3VForCausalLM: get_num_crops},
+        {mm_model_cls(): get_num_crops},
     ):
         max_multimodal_tokens = mm_registry.get_max_multimodal_tokens(
             ctx.model_config)
@@ -234,7 +240,7 @@ def test_max_tokens_with_sad_kwarg_overrides(mm_processor_kwargs):
     with patch.object(
             mm_registry._get_plugin("image"),
             "_max_mm_tokens",
-        {Phi3VForCausalLM: get_num_crops},
+        {mm_model_cls(): get_num_crops},
     ):
         max_multimodal_tokens = mm_registry.get_max_multimodal_tokens(
             ctx.model_config)
@@ -288,7 +294,7 @@ def test_custom_mapper_kwarg_overrides(image_assets, num_crops):
     with patch.object(
             mm_registry._get_plugin("image"),
             "_default_input_mapper",
-        {Phi3VForCausalLM: custom_mapper},
+        {mm_model_cls(): custom_mapper},
     ):
         mapped_inputs = mm_registry.map_input(ctx.model_config, mm_inputs)
 
@@ -326,7 +332,7 @@ def test_custom_mapper_with_sad_kwarg_overrides(image_assets,
     with patch.object(
             mm_registry._get_plugin("image"),
             "_default_input_mapper",
-        {Phi3VForCausalLM: custom_mapper},
+        {mm_model_cls(): custom_mapper},
     ):
         mapped_inputs = mm_registry.map_input(ctx.model_config, mm_inputs)
 
