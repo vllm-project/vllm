@@ -61,10 +61,10 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     image_feature_size = (size**2) // (patch_size**2)
 
     num_image_tokens = image_feature_size * num_images
-    seq_data = SequenceData.from_counts({
-        image_token_id: num_image_tokens,
-        0: seq_len - num_image_tokens,
-    })
+    seq_data = SequenceData.from_token_counts(
+        (image_token_id, num_image_tokens),
+        (0, seq_len - num_image_tokens),
+    )
 
     mm_data = {"image": num_images * [image]}
     return seq_data, mm_data

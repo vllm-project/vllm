@@ -13,7 +13,6 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -36,8 +35,6 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsMultiModal
-
-logger = init_logger(__name__)
 
 # These configs are not part of the model config but the preprocessor
 # and processor files, so we hardcode them in the model file for now.
@@ -71,12 +68,10 @@ def dummy_seq_data_for_chameleon(
     else:
         image_feature_size = image_feature_size_override
 
-    return SequenceData.from_counts({
-        image_token_id:
-        image_feature_size * num_images,
-        0:
-        seq_len - image_feature_size * num_images,
-    })
+    return SequenceData.from_token_counts(
+        (image_token_id, image_feature_size * num_images),
+        (0, seq_len - image_feature_size * num_images),
+    )
 
 
 def dummy_image_for_chameleon(
