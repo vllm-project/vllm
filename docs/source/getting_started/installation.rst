@@ -74,6 +74,18 @@ You can also build and install vLLM from source:
 
 .. note::
 
+    This will uninstall existing PyTorch, and install the version required by vLLM. If you want to use an existing PyTorch installation, please execute ``python use_existing_torch.py`` before running ``pip install -e .``. This command will remove all the PyTorch versions in the requirements files, so that the existing PyTorch installation will be used. For example, a common use case is to build vLLM with PyTorch nightly:
+
+    .. code-block:: console
+
+        $ pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
+        $ git clone https://github.com/vllm-project/vllm.git
+        $ cd vllm
+        $ python use_existing_torch.py
+        $ pip install -e .
+
+.. note::
+
     vLLM can fully run only on Linux, but you can still build it on other systems (for example, macOS). This build is only for development purposes, allowing for imports and a more convenient dev environment. The binaries will not be compiled and not work on non-Linux systems. You can create such a build with the following commands:
 
     .. code-block:: console
