@@ -14,7 +14,8 @@ from vllm.utils import FlexibleArgumentParser
 
 
 # LLaVA-1.5
-def run_llava(question):
+def run_llava(question, modality):
+    assert modality == "image"
 
     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
@@ -24,7 +25,8 @@ def run_llava(question):
 
 
 # LLaVA-1.6/LLaVA-NeXT
-def run_llava_next(question):
+def run_llava_next(question, modality):
+    assert modality == "image"
 
     prompt = f"[INST] <image>\n{question} [/INST]"
     llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf", max_model_len=8192)
@@ -34,15 +36,35 @@ def run_llava_next(question):
 
 # LlaVA-NeXT-Video
 # Currently only support for video input
-def run_llava_next_video(question):
+def run_llava_next_video(question, modality):
+    assert modality == "video"
+
     prompt = f"USER: <video>\n{question} ASSISTANT:"
     llm = LLM(model="llava-hf/LLaVA-NeXT-Video-7B-hf", max_model_len=8192)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
 
+# LLaVA-OneVision
+def run_llava_onevision(question, modality):
+
+    if modality == "video":
+        prompt = f"<|im_start|>user <video>\n{question}<|im_end|> \
+        <|im_start|>assistant\n"
+
+    elif modality == "image":
+        prompt = f"<|im_start|>user <image>\n{question}<|im_end|> \
+        <|im_start|>assistant\n"
+
+    llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
+              max_model_len=32768)
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 # Fuyu
-def run_fuyu(question):
+def run_fuyu(question, modality):
+    assert modality == "image"
 
     prompt = f"{question}\n"
     llm = LLM(model="adept/fuyu-8b")
@@ -51,7 +73,8 @@ def run_fuyu(question):
 
 
 # Phi-3-Vision
-def run_phi3v(question):
+def run_phi3v(question, modality):
+    assert modality == "image"
 
     prompt = f"<|user|>\n<|image_1|>\n{question}<|end|>\n<|assistant|>\n"  # noqa: E501
     # Note: The default setting of max_num_seqs (256) and
@@ -70,7 +93,8 @@ def run_phi3v(question):
 
 
 # PaliGemma
-def run_paligemma(question):
+def run_paligemma(question, modality):
+    assert modality == "image"
 
     # PaliGemma has special prompt format for VQA
     prompt = "caption en"
@@ -80,7 +104,8 @@ def run_paligemma(question):
 
 
 # Chameleon
-def run_chameleon(question):
+def run_chameleon(question, modality):
+    assert modality == "image"
 
     prompt = f"{question}<image>"
     llm = LLM(model="facebook/chameleon-7b")
@@ -89,7 +114,8 @@ def run_chameleon(question):
 
 
 # MiniCPM-V
-def run_minicpmv(question):
+def run_minicpmv(question, modality):
+    assert modality == "image"
 
     # 2.0
     # The official repo doesn't work yet, so we need to use a fork for now
@@ -129,7 +155,9 @@ def run_minicpmv(question):
 
 
 # InternVL
-def run_internvl(question):
+def run_internvl(question, modality):
+    assert modality == "image"
+
     model_name = "OpenGVLab/InternVL2-2B"
 
     llm = LLM(
@@ -155,7 +183,8 @@ def run_internvl(question):
 
 
 # BLIP-2
-def run_blip2(question):
+def run_blip2(question, modality):
+    assert modality == "image"
 
     # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
@@ -166,7 +195,8 @@ def run_blip2(question):
 
 
 # Qwen
-def run_qwen_vl(question):
+def run_qwen_vl(question, modality):
+    assert modality == "image"
 
     llm = LLM(
         model="Qwen/Qwen-VL",
@@ -180,7 +210,9 @@ def run_qwen_vl(question):
 
 
 # Qwen2-VL
-def run_qwen2_vl(question):
+def run_qwen2_vl(question, modality):
+    assert modality == "image"
+
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
     llm = LLM(
@@ -200,6 +232,7 @@ model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
+    "llava-onevision": run_llava_onevision,
     "fuyu": run_fuyu,
     "phi3_v": run_phi3v,
     "paligemma": run_paligemma,
@@ -255,7 +288,7 @@ def main(args):
     data = mm_input["data"]
     question = mm_input["question"]
 
-    llm, prompt, stop_token_ids = model_example_map[model](question)
+    llm, prompt, stop_token_ids = model_example_map[model](question, modality)
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
@@ -306,6 +339,7 @@ if __name__ == "__main__":
     parser.add_argument('--modality',
                         type=str,
                         default="image",
+                        choices=['image', 'video'],
                         help='Modality of the input.')
     parser.add_argument('--num-frames',
                         type=int,
