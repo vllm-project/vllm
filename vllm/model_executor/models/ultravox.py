@@ -20,7 +20,6 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY
 from vllm.inputs.data import LLMInputs
 from vllm.inputs.registry import InputContext
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.base_config import (
@@ -42,8 +41,6 @@ from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
-
-logger = init_logger(__name__)
 
 
 class UltravoxAudioFeatureInputs(TypedDict):
