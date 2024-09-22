@@ -68,7 +68,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import get_processor
 
-from .utils import (is_pp_missing_parameter,
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
 
 logger = init_logger(__name__)
@@ -859,12 +859,15 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.model = Qwen2Model(config, cache_config, quant_config)
 
-        if config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
+        if get_pp_group().is_last_rank:
+            if config.tie_word_embeddings:
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(config.vocab_size,
+                                              config.hidden_size,
+                                              quant_config=quant_config)
         else:
-            self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.hidden_size,
-                                          quant_config=quant_config)
+            self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
