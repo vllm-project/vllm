@@ -258,6 +258,21 @@ class cmake_build_ext(build_ext):
             ]
             subprocess.check_call(install_args, cwd=self.build_temp)
 
+    def run(self):
+        # First, run the standard build_ext command to compile the extensions
+        super().run()
+
+        # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
+        # directory so that they can be included in the editable build
+        import glob
+        files = glob.glob(
+            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
+        for file in files:
+            dst_file = os.path.join("vllm/vllm_flash_attn",
+                                    os.path.basename(file))
+            print(f"Copying {file} to {dst_file}")
+            self.copy_file(file, dst_file)
+
 
 def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
