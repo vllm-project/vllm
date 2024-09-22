@@ -244,6 +244,11 @@ Multimodal Language Models
     - Video
     - :code:`llava-hf/LLaVA-NeXT-Video-7B-hf`, etc. (see note)
     -
+  * - :code:`LlavaOnevisionForConditionalGeneration`
+    - LLaVA-Onevision
+    - Image\ :sup:`+` / Video
+    - :code:`llava-hf/llava-onevision-qwen2-7b-ov-hf`, :code:`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc. (see note)
+    -
   * - :code:`MiniCPMV`
     - MiniCPM-V
     - Image\ :sup:`+`
@@ -288,7 +293,7 @@ Multimodal Language Models
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
 .. note::
-  For :code:`LLaVA-NeXT-Video` and :code:`Qwen2-VL`, the latest release of :code:`huggingface/transformers` doesn't work yet, so we need to use a developer version (:code:`21fac7abba2a37fae86106f87fcf9974fd1e3830`) for now.
+  For :code:`LLaVA-NeXT-Video`, :code:`LLaVA-Onevision` and :code:`Qwen2-VL`, the latest release of :code:`huggingface/transformers` doesn't work yet, so we need to use a developer version (:code:`21fac7abba2a37fae86106f87fcf9974fd1e3830`) for now.
   This can be installed by running the following command: 
 
   .. code-block:: bash
