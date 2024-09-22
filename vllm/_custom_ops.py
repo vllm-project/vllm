@@ -772,22 +772,13 @@ def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
 
 
 def causal_conv1d_update(
-        x: torch.Tensor,
-        conv_state: torch.Tensor,
-        weight: torch.Tensor,
-        bias_: Optional[torch.Tensor],
-        silu_activation: bool,
-        cache_seqlens: Optional[torch.Tensor] = None,
+        x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
+        bias_: Optional[torch.Tensor], silu_activation: bool,
+        cache_seqlens: Optional[torch.Tensor],
         conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_update(
-        x,
-        conv_state,
-        weight,
-        bias_,
-        silu_activation,
-        cache_seqlens,
-        conv_state_indices
-    )
+    return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
+                                             silu_activation, cache_seqlens,
+                                             conv_state_indices)
 
 
 def selective_scan_fwd(

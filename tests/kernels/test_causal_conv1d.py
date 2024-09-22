@@ -284,6 +284,10 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_bias,
 @pytest.mark.parametrize('dim', [64, 4096])
 def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
                               itype):
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
     # set seed
     seed_everything(0)
     batch = 1
@@ -313,12 +317,13 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
                                device=x.device,
                                dtype=x.dtype)
     final_states_ref = final_states.clone()
-    has_initial_states = torch.randint(0,2,(cumsum.shape[0],),
-                                         dtype=torch.bool,
-                                         device=x.device)
+    has_initial_states = torch.randint(0,
+                                       2, (cumsum.shape[0], ),
+                                       dtype=torch.bool,
+                                       device=x.device)
     cache_indices = torch.randperm(cumsum.shape[0],
-                                 dtype=torch.int32,
-                                 device=x.device)
+                                   dtype=torch.int32,
+                                   device=x.device)
     out, final_states = causal_conv1d_fn(x.squeeze(0), weight, bias,
                                          cumsum.cuda(), cache_indices,
                                          has_initial_states, final_states,
@@ -326,10 +331,7 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
     out_ref = []
     out_ref_b = []
 
-    splits = [
-        torch.split(var, seqlens[0], dim=-1)
-        for var in (x_ref)
-    ]
+    splits = [torch.split(var, seqlens[0], dim=-1) for var in (x_ref)]
     for i in range(len(seqlens[0])):
         x_s = [v[i].unsqueeze(0) for v in splits][0]
         out_ref_b.append(
@@ -339,16 +341,18 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
                 bias_ref,
                 activation=activation,
                 return_final_states=True,
-                final_states_out=final_states_ref[cache_indices[i]].unsqueeze(0),
+                final_states_out=final_states_ref[cache_indices[i]].unsqueeze(
+                    0),
                 initial_states=final_states_ref[cache_indices[i]].unsqueeze(0)
                 if has_initial_states[i] else None))
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=2))
     out_ref = torch.cat(out_ref, dim=0)
 
-
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
-    print(f"Output state max diff:{(final_states - final_states_ref).abs().max()}")
-    print(f"Output state mean diff:{(final_states - final_states_ref).abs().mean()}")
+    print("Output state max diff"
+          f":{(final_states - final_states_ref).abs().max()}")
+    print("Output state mean diff"
+          f":{(final_states - final_states_ref).abs().mean()}")
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
     assert torch.allclose(final_states, final_states_ref, rtol=rtol, atol=atol)

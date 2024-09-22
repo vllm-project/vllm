@@ -62,7 +62,7 @@ def causal_conv1d_update(x: torch.Tensor,
                          weight: torch.Tensor,
                          bias: Optional[torch.Tensor] = None,
                          activation: Optional[str] = None,
-                         cache_seqlens: Optional[torch.Tensor]=None,
+                         cache_seqlens: Optional[torch.Tensor] = None,
                          conv_state_indices: Optional[torch.Tensor] = None):
     """
     x: (batch, dim) or (batch, dim, seqlen)
@@ -83,11 +83,11 @@ def causal_conv1d_update(x: torch.Tensor,
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    activation = activation in ["silu", "swish"]
+    activation_val = activation in ["silu", "swish"]
     unsqueeze = x.dim() == 2
     if unsqueeze:
         x = x.unsqueeze(-1)
-    out = ops.causal_conv1d_update(x, conv_state, weight, bias, activation,
+    out = ops.causal_conv1d_update(x, conv_state, weight, bias, activation_val,
                                    cache_seqlens, conv_state_indices)
     if unsqueeze:
         out = out.squeeze(-1)

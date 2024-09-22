@@ -400,7 +400,11 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
     delta_ref = delta.clone()
     out = None
     out_ref = None
-    prev_state = torch.randn((cumsum.shape[0], u.shape[0], int(A.shape[1]),),
+    prev_state = torch.randn((
+        cumsum.shape[0],
+        u.shape[0],
+        int(A.shape[1]),
+    ),
                              device=u.device,
                              dtype=itype,
                              requires_grad=False)
