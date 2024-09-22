@@ -26,7 +26,7 @@ from torch import nn
 
 from transformers.modeling_outputs import BaseModelOutput, CausalLMOutputWithPast
 from transformers.models.mllama.configuration_mllama import MllamaConfig, MllamaTextConfig, MllamaVisionConfig
-from transformers.models.mllama.image_processing_mllama import MllamaImageProcessor
+from transformers.models.mllama.image_processing_mllama import get_optimal_tiled_canvas
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
@@ -67,45 +67,53 @@ class MllamaImagePixelInputs(TypedDict):
 
 # TODO: support LlamaImageEmbeddingInputs
 
-image_processor = None
-
-def recursive_sum(x):
-    if isinstance(x, torch.Tensor):
-        return x.sum()
-    if isinstance(x, (list, tuple)):
-        return sum(recursive_sum(v) for v in x)
-    if isinstance(x, (int, float)):
-        return x
-    return 0
-
 def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
+    # move prompt to encoder_prompt
     if llm_inputs.get("prompt") is None:
         llm_inputs["prompt"] = llm_inputs["encoder_prompt"]
         llm_inputs["prompt_token_ids"] = llm_inputs["encoder_prompt_token_ids"]
+        # TODO: remove this hack
         if 198 in llm_inputs["prompt_token_ids"]:
             index_198 = llm_inputs["prompt_token_ids"].index(198)
             if index_198 > 0 and llm_inputs["prompt_token_ids"][index_198 - 1] == LLAMA_IMAGE_TOKEN_ID:
                 llm_inputs["prompt_token_ids"] = llm_inputs["prompt_token_ids"][:index_198] + llm_inputs["prompt_token_ids"][index_198+1:]
+    
+    # process multi-modal data
+    assert "decoder_multi_modal_data" not in llm_inputs, "multi-modal data should be put in encoder message of LLaMA Vision models"
     multi_modal_data = llm_inputs.get("encoder_multi_modal_data")
-    hf_config = ctx.model_config.hf_config
+
     if multi_modal_data is None or "image" not in multi_modal_data or multi_modal_data["image"] is None:
+        # text-only
         llm_inputs["encoder_prompt"] = ""
         llm_inputs["encoder_prompt_token_ids"] = []
         llm_inputs["encoder_multi_modal_data"] = {}
         return llm_inputs
-    global image_processor
-    if image_processor is None:
-        image_processor = MllamaImageProcessor.from_pretrained(ctx.model_config.model)
-    processed_image = image_processor(multi_modal_data["image"])
-    llm_inputs["encoder_multi_modal_data"]["image"] = processed_image
-    num_tiles = recursive_sum(processed_image["num_tiles"])
+
+    # get num_tiles
+    if isinstance(multi_modal_data['image'], Image.Image):
+        multi_modal_data['image'] = [multi_modal_data['image']]
+    hf_config = ctx.model_config.hf_config
+    num_tiles = 0
+    for image in multi_modal_data["image"]:
+        width, height = image.size
+        tile_size = hf_config.vision_config.image_size
+        canvas_height, canvas_width = get_optimal_tiled_canvas(
+            image_height=height,
+            image_width=width,
+            max_image_tiles=hf_config.vision_config.max_num_tiles,
+            tile_size=tile_size,
+        )
+        num_tiles_height = canvas_height // tile_size
+        num_tiles_width = canvas_width // tile_size
+        num_tiles += num_tiles_height * num_tiles_width
+
+    # set encoder prompt based on num_tiles
     assert hf_config.vision_config.image_size % 14 == 0, "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14) ** 2 + 1
     num_tokens = num_tiles * token_per_chunk
     llm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
     llm_inputs["encoder_prompt_token_ids"] = [LLAMA_IMAGE_TOKEN_ID] * num_tokens
 
-    assert "decoder_multi_modal_data" not in llm_inputs, "multi-modal data should be put in encoder message of LLaMA Vision"
     return llm_inputs
 
 def get_max_mllama_image_tokens(ctx: InputContext) -> int:
@@ -616,7 +624,6 @@ class MllamaTextCrossAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        """Input shape: Batch x Time x Channel"""
         qkv_dec, _ = self.qkv_proj(hidden_states)
         q, _, _ = qkv_dec.split([self.q_local_size, self.kv_local_size, self.kv_local_size],
                                 dim=-1)
@@ -710,13 +717,6 @@ class MllamaTextModel(nn.Module):
 
         self.layers = nn.ModuleList(layers)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        # self.rotary_emb = MllamaRotaryEmbedding(config=config)
-
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
 
     def forward(
         self,
