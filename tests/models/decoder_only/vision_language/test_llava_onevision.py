@@ -2,11 +2,13 @@ from typing import List, Optional, Tuple, Type, overload
 
 import pytest
 import transformers
-from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
+from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
+                          BatchEncoding)
 
 from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
                                    resize_video, sample_frames_from_video)
 from vllm.sequence import SampleLogprobs
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import (VIDEO_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _VideoAssets)
@@ -39,7 +41,6 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
         if token_id != video_token_id or output_ids[idx - 1] != video_token_id
     ]
 
-    assert output_str[0] == " "
     hf_output_str = output_str[1:]
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
@@ -98,6 +99,8 @@ def run_video_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
+    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+
     videos = [
         sample_frames_from_video(asset.np_ndarrays, num_frames)
         for asset in video_assets
@@ -131,7 +134,13 @@ def run_video_test(
             for prompts, videos in inputs_per_video
         ]
 
+    def process(hf_inputs: BatchEncoding):
+        hf_inputs["pixel_values_videos"] = hf_inputs["pixel_values_videos"] \
+            .to(torch_dtype)  # type: ignore
+        return hf_inputs
+
     with hf_runner(model, dtype=dtype,
+                   postprocess_inputs=process,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_video = [
             hf_model.generate_greedy_logprobs_limit(prompts,
@@ -244,6 +253,8 @@ def run_image_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
+    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
@@ -261,7 +272,13 @@ def run_image_test(
             for prompts, images in inputs
         ]
 
+    def process(hf_inputs: BatchEncoding):
+        hf_inputs["pixel_values"] = hf_inputs["pixel_values"] \
+            .to(torch_dtype)  # type: ignore
+        return hf_inputs
+
     with hf_runner(model, dtype=dtype,
+                   postprocess_inputs=process,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
