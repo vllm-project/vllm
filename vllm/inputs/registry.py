@@ -243,7 +243,7 @@ class InputRegistry:
         return wrapper
 
     def _process_input(self, inputs: LLMInputs, model_config: "ModelConfig",
-                       processor: Callable, **processor_kwargs) -> LLMInputs:
+                       processor: InputProcessor, **processor_kwargs: Any) -> LLMInputs:
         """
         Apply an input processor to an instance of model inputs. This will
         usually not be invoked be directly, and instead will be wrapped in
