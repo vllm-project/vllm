@@ -73,12 +73,14 @@ def test_batching(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float16"])
 @pytest.mark.parametrize("max_tokens", [10])
-def test_mamba_prefill_chunking_with_n_lt_1(hf_runner, vllm_runner,
-                                            example_prompts, model: str,
-                                            dtype: str,
-                                            max_tokens: int) -> None:
+def test_mamba_prefill_chunking_with_parallel_sampling(
+        hf_runner, vllm_runner, example_prompts, model: str, dtype: str,
+        max_tokens: int) -> None:
     # Tests prefill chunking in conjunction with n>1, in this case,
     # prefill is populated with decoding tokens and we test that it doesn't fail
+    # This test might fail if cache is not allocated correctly for n > 1 decoding
+    # steps inside a chunked prefill forward pass (where we have both prefills
+    # and decoding together )
     sampling_params = SamplingParams(n=3,
                                      temperature=1,
                                      seed=0,
@@ -126,7 +128,7 @@ def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [15])
-def test_n_lt_1(
+def test_parallel_sampling(
     vllm_runner,
     example_prompts,
     model: str,
