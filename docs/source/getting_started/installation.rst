@@ -74,7 +74,7 @@ You can also build and install vLLM from source:
 
 .. note::
 
-    This will uninstall existing PyTorch, and install the version required by vLLM. If you want to use an existing PyTorch installation, please execute ``python use_existing_torch.py`` before running ``pip install -e .``. This command will remove all the PyTorch versions in the requirements files, so that the existing PyTorch installation will be used. For example, a common use case is to build vLLM with PyTorch nightly:
+    This will uninstall existing PyTorch, and install the version required by vLLM. If you want to use an existing PyTorch installation (e.g. build vLLM with PyTorch nightly), there need to be some changes:
 
     .. code-block:: console
 
@@ -82,7 +82,14 @@ You can also build and install vLLM from source:
         $ git clone https://github.com/vllm-project/vllm.git
         $ cd vllm
         $ python use_existing_torch.py
-        $ pip install -e .
+        $ pip install -r requirements-build.txt
+        $ pip install -e . --no-build-isolation
+
+    The differences are:
+
+    - ``python use_existing_torch.py``: This script will remove all the PyTorch versions in the requirements files, so that the existing PyTorch installation will be used.
+    - ``pip install -r requirements-build.txt``: You need to manually install the requirements for building vLLM.
+    - ``pip install -e . --no-build-isolation``: You need to disable build isolation, so that the build system can use the existing PyTorch installation.
 
 .. note::
 
