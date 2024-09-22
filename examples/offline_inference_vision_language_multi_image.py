@@ -4,9 +4,9 @@ multi-image input on vision language models, using the chat template defined
 by the model.
 """
 from argparse import Namespace
-from collections import namedtuple
-from typing import List
+from typing import List, NamedTuple, Optional
 
+from PIL.Image import Image
 from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -19,9 +19,13 @@ IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg",
 ]
 
-ModelRequestData = namedtuple(
-    "ModelRequestData",
-    ["llm", "prompt", "stop_token_ids", "image_data", "chat_template"])
+
+class ModelRequestData(NamedTuple):
+    llm: LLM
+    prompt: str
+    stop_token_ids: Optional[List[str]]
+    image_data: List[Image]
+    chat_template: Optional[str]
 
 
 def load_qwenvl_chat(question: str, image_urls: List[str]) -> ModelRequestData:
