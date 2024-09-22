@@ -38,7 +38,6 @@ def main(args: argparse.Namespace):
         quantization_param_path=args.quantization_param_path,
         device=args.device,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
-        use_v2_block_manager=args.use_v2_block_manager,
         enable_chunked_prefill=args.enable_chunked_prefill,
         download_dir=args.download_dir,
         block_size=args.block_size,

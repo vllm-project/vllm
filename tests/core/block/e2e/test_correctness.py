@@ -22,13 +22,10 @@ from .conftest import get_token_ids_from_llm_generator
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "use_v2_block_manager": False
 }])
 @pytest.mark.parametrize("test_llm_kwargs", [{
-    "use_v2_block_manager": True,
     "preemption_mode": "swap"
 }, {
-    "use_v2_block_manager": True,
     "preemption_mode": "recompute"
 }])
 @pytest.mark.parametrize("batch_size", [10])
@@ -99,13 +96,10 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "use_v2_block_manager": False
 }])
 @pytest.mark.parametrize("test_llm_kwargs", [{
-    "use_v2_block_manager": True,
     "preemption_mode": "swap"
 }, {
-    "use_v2_block_manager": True,
     "preemption_mode": "recompute"
 }])
 @pytest.mark.parametrize("batch_size", [10])
@@ -164,9 +158,6 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
 
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
-
-        # Lookahead scheduling only supported in v2 block manager.
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -279,16 +270,13 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
                          }])
 @pytest.mark.parametrize("baseline_llm_kwargs", [
     {
-        "use_v2_block_manager": False,
     },
 ])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "use_v2_block_manager": True,
         "num_lookahead_slots": 0,
     },
     {
-        "use_v2_block_manager": True,
         "num_lookahead_slots": 5,
     },
 ])
@@ -351,13 +339,10 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "use_v2_block_manager": False
 }])
 @pytest.mark.parametrize("test_llm_kwargs", [{
-    "use_v2_block_manager": True,
     "preemption_mode": "swap"
 }, {
-    "use_v2_block_manager": True,
     "preemption_mode": "recompute"
 }])
 @pytest.mark.parametrize("batch_size", [10])
@@ -426,9 +411,6 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
         # Allow only 5 sequences of ~1024 tokens in worst case.
         "block_size": 16,
         "num_gpu_blocks_override": 5 * (64 + 1),
-
-        # Test APC in v2 block
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
@@ -504,9 +486,6 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
         "max_model_len": 48,
         "block_size": 16,
         "num_gpu_blocks_override": 3,
-
-        # Test APC in v2 block
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{

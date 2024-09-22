@@ -133,7 +133,6 @@ def main(args):
               tokenizer_mode='auto',
               trust_remote_code=True,
               enforce_eager=True,
-              use_v2_block_manager=args.use_v2_block_manager,
               tensor_parallel_size=args.tensor_parallel_size,
               enable_prefix_caching=args.enable_prefix_caching)
 
@@ -175,9 +174,6 @@ if __name__ == "__main__":
     parser.add_argument('--enable-prefix-caching',
                         action='store_true',
                         help='enable prefix caching')
-    parser.add_argument('--use-v2-block-manager',
-                        action='store_true',
-                        help='Use BlockSpaceMangerV2')
     parser.add_argument('--num-prompts',
                         type=int,
                         default=1,
