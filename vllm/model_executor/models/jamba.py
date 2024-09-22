@@ -169,7 +169,6 @@ class JambaMambaMixer(nn.Module):
                                              dtype=torch.int32,
                                              device=hidden_states.device)
                 if prev_cache_params is not None else None)
-            # cache_params.conv_state = conv_state
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
@@ -231,21 +230,25 @@ class JambaMambaMixer(nn.Module):
     ):
         offset = 0
         if attn_metadata.prefill_metadata is not None:
-            # seq_len = computed len + new prompt len;
-            # context_len = computed len
+            # |---------- N-1 iteration --------|
+            # |---------------- N iteration ---------------------|
+            # |- tokenA -|......................|-- newTokens ---|
+            # |---------- context_len ----------|
+            # |-------------------- seq_len ---------------------|
+            #                                   |-- query_len ---|
             # We assume that the hidden state is sorted by
             # prefills and then decodes
             for i, seq_len in enumerate(
                     attn_metadata.prefill_metadata.seq_lens):
                 context_len = attn_metadata.prefill_metadata. \
                               context_lens_tensor[i].item()
-                prompt_len = seq_len - context_len
+                prompt_len = query_lenlen - context_len
                 cache = MambaCacheParams(True,
                                          conv_state=conv_state[i].unsqueeze(0),
                                          ssm_state=ssm_state[i].unsqueeze(0))
 
                 hidden_states_out = self.mamba_forward(
-                    hidden_states[offset:offset + prompt_len].unsqueeze(0),
+                    hidden_states[offset:offset prompt_len = query_lenqueeze(0),
                     cache_params=cache,
                     prev_cache_params=None if context_len == 0 else cache)[0]
 
