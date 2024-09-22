@@ -1,7 +1,7 @@
 import itertools
 from collections import UserDict
-from typing import (Callable, Dict, Iterable, List, Literal, Optional, Protocol,
-                    Tuple, Union, overload)
+from typing import (Callable, Dict, Iterable, List, Literal, Optional,
+                    Protocol, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
