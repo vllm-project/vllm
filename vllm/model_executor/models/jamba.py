@@ -151,13 +151,12 @@ class JambaMambaMixer(nn.Module):
                                                self.conv1d.weight.size(2))
         if cache_params is not None and not cache_params.is_prompt:
             hidden_states = causal_conv1d_update(
-                hidden_states.squeeze(-1),
+                hidden_states,
                 cache_params.conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
             )
-            hidden_states = hidden_states.unsqueeze(-1)
         else:
             hidden_states, _ = causal_conv1d_fn(
                 hidden_states,
