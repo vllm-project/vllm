@@ -31,7 +31,7 @@ MAIN_MODEL = "JackFram/llama-68m"
 # speculative model
 SPEC_MODEL = "abhigoyal/vllm-medusa-llama-68m-random"
 
-# max. number of speculative tokens: this corresponds to
+# max number of speculative tokens: this corresponds to
 # num_heads in the config.json of the speculator model.
 MAX_SPEC_TOKENS = 5
 
