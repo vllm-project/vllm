@@ -81,7 +81,8 @@ class DummyDataFactory(Protocol):
 
         Note:
             :data:`InputProcessor` is not applied to the dummy data.
-            The processor_kwargs are overrides provided at initialization
+
+            The :code:`processor_kwargs` are overrides provided at initialization
             time to values in the config whose values may affect the number
             of tokens per instance.
         """
