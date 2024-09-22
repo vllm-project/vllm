@@ -166,7 +166,7 @@ class JambaMambaMixer(nn.Module):
                 activation=self.activation,
                 conv_states=cache_params.conv_state,
                 has_initial_state=torch.ones(hidden_states.shape[0],
-                                             dtype=torch.int32,
+                                             dtype=torch.bool,
                                              device=hidden_states.device)
                 if prev_cache_params is not None else None)
 
@@ -213,7 +213,7 @@ class JambaMambaMixer(nn.Module):
                 delta_softplus=True,
                 ssm_states=cache_params.ssm_state,
                 has_initial_state=torch.ones(hidden_states.shape[0],
-                                             dtype=torch.int32,
+                                             dtype=torch.bool,
                                              device=hidden_states.device)
                 if prev_cache_params is not None else None)
 
@@ -242,19 +242,19 @@ class JambaMambaMixer(nn.Module):
                     attn_metadata.prefill_metadata.seq_lens):
                 context_len = attn_metadata.prefill_metadata. \
                               context_lens_tensor[i].item()
-                prompt_len = query_lenlen - context_len
+                query_len = seq_len - context_len
                 cache = MambaCacheParams(True,
                                          conv_state=conv_state[i].unsqueeze(0),
                                          ssm_state=ssm_state[i].unsqueeze(0))
 
                 hidden_states_out = self.mamba_forward(
-                    hidden_states[offset:offset prompt_len = query_lenqueeze(0),
+                    hidden_states[offset:offset + query_len].unsqueeze(0),
                     cache_params=cache,
                     prev_cache_params=None if context_len == 0 else cache)[0]
 
                 hidden_states[offset:offset +
-                              prompt_len].copy_(hidden_states_out)
-                offset += prompt_len
+                              query_len].copy_(hidden_states_out)
+                offset += query_len
 
         if attn_metadata.decode_metadata is not None:
             cache = MambaCacheParams(
