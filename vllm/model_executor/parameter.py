@@ -1,3 +1,4 @@
+from fractions import Fraction
 from typing import Callable, Optional, Union
 
 import torch
@@ -208,9 +209,16 @@ class PerTensorScaleParameter(BasevLLMParameter):
         if isinstance(shard_id, int):
             return shard_id
 
+        # if not int, assume shard_id for qkv
+        # map to int and return
         assert isinstance(shard_id, str)
         assert shard_id in self.qkv_idxs
         return self.qkv_idxs[shard_id]
+
+    # For row parallel layers, no sharding needed
+    # load weight into parameter as is
+    def load_row_parallel_weight(self, *args, **kwargs):
+        super().load_row_parallel_weight(*args, **kwargs)
 
     def load_merged_column_weight(self, *args, **kwargs):
         self._load_into_shard_id(*args, **kwargs)
@@ -219,7 +227,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
         self._load_into_shard_id(*args, **kwargs)
 
     def load_column_parallel_weight(self, *args, **kwargs):
-        self._load_into_shard_id(*args, **kwargs)
+        super().load_row_parallel_weight(*args, **kwargs)
 
     def _load_into_shard_id(self, loaded_weight: torch.Tensor,
                             shard_id: Union[str, int], **kwargs):
@@ -250,7 +258,7 @@ class PackedColumnParameter(_ColumnvLLMParameter):
     """
 
     def __init__(self,
-                 packed_factor: int,
+                 packed_factor: Union[int, Fraction],
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):
@@ -291,7 +299,7 @@ class PackedvLLMParameter(ModelWeightParameter):
     """
 
     def __init__(self,
-                 packed_factor: int,
+                 packed_factor: Union[int, Fraction],
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):

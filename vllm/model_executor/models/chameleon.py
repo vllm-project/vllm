@@ -1,4 +1,3 @@
-from array import array
 from functools import cached_property
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
                     Tuple, TypedDict)
@@ -13,7 +12,6 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -22,7 +20,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -30,15 +28,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (cached_get_tokenizer,
-                                   repeat_and_pad_image_tokens)
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SamplerOutput, SequenceData)
+from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   repeat_and_pad_placeholder_tokens)
+from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsMultiModal
-
-logger = init_logger(__name__)
 
 # These configs are not part of the model config but the preprocessor
 # and processor files, so we hardcode them in the model file for now.
@@ -53,7 +48,7 @@ CHAMELEON_SEP_TOKEN_ID = 8710
 class ChameleonImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: `(batch_size, num_channels, height, width)`"""
+    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
 
 
 def get_max_chameleon_image_tokens(ctx: InputContext):
@@ -72,11 +67,10 @@ def dummy_seq_data_for_chameleon(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * image_feature_size * num_images
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceData.from_token_counts(
+        (image_token_id, image_feature_size * num_images),
+        (0, seq_len - image_feature_size * num_images),
+    )
 
 
 def dummy_image_for_chameleon(
@@ -124,11 +118,11 @@ def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
 
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
-    new_prompt, new_token_ids = repeat_and_pad_image_tokens(
+    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
         tokenizer,
         llm_inputs.get("prompt"),
         llm_inputs["prompt_token_ids"],
-        image_token_id=CHAMELEON_IMAGE_TOKEN_ID,
+        placeholder_token_id=CHAMELEON_IMAGE_TOKEN_ID,
         repeat_count=CHAMELEON_IMAGE_SEQ_LENGTH,
         pad_token_left=CHAMELEON_IMAGE_START_TOKEN_ID,
         pad_token_right=CHAMELEON_IMAGE_END_TOKEN_ID,
@@ -945,6 +939,9 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal):
         if not isinstance(pixel_values, torch.Tensor):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
+
+        # Remove the N dimension until multiple images are supported.
+        pixel_values = pixel_values.squeeze(1)
 
         return ChameleonImagePixelInputs(
             type="pixel_values",

@@ -1,6 +1,6 @@
 """Sampling parameters for text generation."""
 import copy
-from enum import IntEnum
+from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
@@ -31,6 +31,15 @@ of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
 first argument, and returns a modified tensor of logits
 to sample from."""
+
+
+class RequestOutputKind(Enum):
+    # Return entire output so far in every RequestOutput
+    CUMULATIVE = 0
+    # Return only deltas in each RequestOutput
+    DELTA = 1
+    # Do not return intermediate RequestOuputs
+    FINAL_ONLY = 2
 
 
 class SamplingParams(
@@ -147,11 +156,76 @@ class SamplingParams(
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
     _all_stop_token_ids: Set[int] = msgspec.field(default_factory=set)
+
+    @staticmethod
+    def from_optional(
+        n: Optional[int] = 1,
+        best_of: Optional[int] = None,
+        presence_penalty: Optional[float] = 0.0,
+        frequency_penalty: Optional[float] = 0.0,
+        repetition_penalty: Optional[float] = 1.0,
+        temperature: Optional[float] = 1.0,
+        top_p: Optional[float] = 1.0,
+        top_k: int = -1,
+        min_p: float = 0.0,
+        seed: Optional[int] = None,
+        use_beam_search: bool = False,
+        length_penalty: float = 1.0,
+        early_stopping: Union[bool, str] = False,
+        stop: Optional[Union[str, List[str]]] = None,
+        stop_token_ids: Optional[List[int]] = None,
+        include_stop_str_in_output: bool = False,
+        ignore_eos: bool = False,
+        max_tokens: Optional[int] = 16,
+        min_tokens: int = 0,
+        logprobs: Optional[int] = None,
+        prompt_logprobs: Optional[int] = None,
+        detokenize: bool = True,
+        skip_special_tokens: bool = True,
+        spaces_between_special_tokens: bool = True,
+        logits_processors: Optional[List[LogitsProcessor]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int,
+                                                   msgspec.Meta(ge=1)]] = None,
+        output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+    ) -> "SamplingParams":
+        return SamplingParams(
+            n=1 if n is None else n,
+            best_of=best_of,
+            presence_penalty=0.0
+            if presence_penalty is None else presence_penalty,
+            frequency_penalty=0.0
+            if frequency_penalty is None else frequency_penalty,
+            repetition_penalty=1.0
+            if repetition_penalty is None else repetition_penalty,
+            temperature=1.0 if temperature is None else temperature,
+            top_p=1.0 if top_p is None else top_p,
+            top_k=top_k,
+            min_p=min_p,
+            seed=seed,
+            use_beam_search=use_beam_search,
+            length_penalty=length_penalty,
+            early_stopping=early_stopping,
+            stop=stop,
+            stop_token_ids=stop_token_ids,
+            include_stop_str_in_output=include_stop_str_in_output,
+            ignore_eos=ignore_eos,
+            max_tokens=max_tokens,
+            min_tokens=min_tokens,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
+            detokenize=detokenize,
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+            logits_processors=logits_processors,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            output_kind=output_kind,
+        )
 
     def __post_init__(self) -> None:
         self.best_of = self.best_of or self.n
@@ -199,9 +273,14 @@ class SamplingParams(
         self._all_stop_token_ids = set(self.stop_token_ids)
 
     def _verify_args(self) -> None:
+        if not isinstance(self.n, int):
+            raise ValueError(f"n must be an int, but is of "
+                             f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
-        assert isinstance(self.best_of, int)
+        if not isinstance(self.best_of, int):
+            raise ValueError(f'best_of must be an int, but is of '
+                             f'type {type(self.best_of)}')
         if self.best_of < self.n:
             raise ValueError(f"best_of must be greater than or equal to n, "
                              f"got n={self.n} and best_of={self.best_of}.")
@@ -255,6 +334,9 @@ class SamplingParams(
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
+        if self.best_of != self.n and self.output_kind == (
+                RequestOutputKind.DELTA):
+            raise ValueError("best_of must equal n to use output_kind=DELTA")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:

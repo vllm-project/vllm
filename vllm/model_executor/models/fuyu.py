@@ -28,23 +28,21 @@ from transformers import FuyuConfig, FuyuImageProcessor
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
-from vllm.multimodal.image import (cached_get_image_processor,
-                                   cached_get_tokenizer)
+from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SamplerOutput, SequenceData)
+                           SequenceData)
 
 from .interfaces import SupportsMultiModal
 from .utils import merge_multimodal_embeddings
-
-logger = init_logger(__name__)
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -249,6 +247,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
         image_patches = kwargs.pop("image_patches", None)
 
         if isinstance(image_patches, torch.Tensor):
+            # Remove the N dimension until multiple images are supported.
+            image_patches = image_patches.squeeze(1)
+
             expected_feature_size = self.image_feature_size
             if image_patches.size(-1) != expected_feature_size:
                 raise ValueError(

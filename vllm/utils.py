@@ -5,6 +5,7 @@ import datetime
 import enum
 import gc
 import os
+import random
 import socket
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import uuid
 import warnings
+import weakref
 from asyncio import FIRST_COMPLETED, ensure_future
 from functools import lru_cache, partial, wraps
 from platform import uname
@@ -25,10 +27,13 @@ import numpy.typing as npt
 import psutil
 import torch
 import torch.types
+import yaml
+from packaging.version import Version
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -68,10 +73,6 @@ STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
                                  "currently supported with encoder/"
                                  "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_CUDAGRAPH = ("CUDAGraph is not "
-                                  "currently supported with encoder/"
-                                  "decoder models.")
-
 STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers is the only backend "
                                 "currently supported with encoder/"
                                 "decoder models.")
@@ -79,6 +80,9 @@ STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers is the only backend "
 STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
                                        "currently supported with encoder/"
                                        "decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_CPU = ("CPU is not currently supported with "
+                            "encoder/decoder models.")
 
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
@@ -92,9 +96,9 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
     "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
-    "STR_NOT_IMPL_ENC_DEC_CUDA_GRAPH": STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
     "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
+    "STR_NOT_IMPL_ENC_DEC_CPU": STR_NOT_IMPL_ENC_DEC_CPU
 }
 
 # Constants related to forcing the attention backend selection
@@ -263,7 +267,7 @@ class LRUCache(Generic[T]):
 
 
 class PyObjectCache:
-    """Used to cache python objects to avoid object allocations 
+    """Used to cache python objects to avoid object allocations
     across scheduler iterations.
     """
 
@@ -282,7 +286,7 @@ class PyObjectCache:
             self._obj_cache.append(self._obj_builder())
 
     def get_object(self):
-        """Returns a pre-allocated cached object. If there is not enough 
+        """Returns a pre-allocated cached object. If there is not enough
         objects, then the cache size will double.
         """
         if self._index >= len(self._obj_cache):
@@ -369,6 +373,22 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
+
+
+def seed_everything(seed: int) -> None:
+    """
+    Set the seed of each random module.
+
+    Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    if current_platform.is_cuda_alike():
+        torch.cuda.manual_seed_all(seed)
+
+    if is_xpu():
+        torch.xpu.manual_seed_all(seed)
 
 
 def random_uuid() -> str:
@@ -547,6 +567,16 @@ def get_open_port() -> int:
             return s.getsockname()[1]
 
 
+def find_process_using_port(port: int) -> Optional[psutil.Process]:
+    for conn in psutil.net_connections():
+        if conn.laddr.port == port:
+            try:
+                return psutil.Process(conn.pid)
+            except psutil.NoSuchProcess:
+                return None
+    return None
+
+
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
@@ -622,9 +652,7 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -666,9 +694,7 @@ def create_kv_caches_with_random(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
 
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -731,14 +757,14 @@ def is_pin_memory_available() -> bool:
     return True
 
 
-class CudaMemoryProfiler:
+class DeviceMemoryProfiler:
 
     def __init__(self, device: Optional[torch.types.Device] = None):
         self.device = device
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        if torch.cuda.is_available():
+        if current_platform.is_cuda_alike():
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():
@@ -818,15 +844,6 @@ def async_tensor_h2d(
     """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
     return t.to(device=target_device, non_blocking=True)
-
-
-def maybe_expand_dim(tensor: torch.Tensor,
-                     target_dims: int,
-                     size: int = 1) -> torch.Tensor:
-    """Expand the tensor to the target_dims."""
-    if tensor.ndim < target_dims:
-        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
-    return tensor
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
@@ -1053,7 +1070,7 @@ def _cuda_device_count_stateless(
 def cuda_device_count_stateless() -> int:
     """Get number of CUDA devices, caching based on the value of
     CUDA_VISIBLE_DEVICES at the time of call.
-    
+
     This should be used instead of torch.cuda.device_count()
     unless CUDA_VISIBLE_DEVICES has already been set to the desired
     value."""
@@ -1061,6 +1078,20 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
+    """Make an instance method that weakly references
+    its associated instance and no-ops once that
+    instance is collected."""
+    ref = weakref.ref(bound_method.__self__)  # type: ignore[attr-defined]
+    unbound = bound_method.__func__  # type: ignore[attr-defined]
+
+    def weak_bound(*args, **kwargs) -> None:
+        if inst := ref():
+            unbound(inst, *args, **kwargs)
+
+    return weak_bound
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
@@ -1082,6 +1113,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         if args is None:
             args = sys.argv[1:]
 
+        if '--config' in args:
+            args = FlexibleArgumentParser._pull_args_from_config(args)
+
         # Convert underscores to dashes and vice versa in argument names
         processed_args = []
         for arg in args:
@@ -1098,9 +1132,145 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return super().parse_args(processed_args, namespace)
 
+    @staticmethod
+    def _pull_args_from_config(args: List[str]) -> List[str]:
+        """Method to pull arguments specified in the config file
+        into the command-line args variable.
+
+        The arguments in config file will be inserted between
+        the argument list.
+
+        example:
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        ```python
+        $: vllm {serve,chat,complete} "facebook/opt-12B" \
+            --config config.yaml -tp 2
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B",
+            '--config', 'config.yaml',
+            '-tp', '2'
+        ]
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B",
+            '--port', '12323',
+            '--tensor-parallel-size', '4',
+            '-tp', '2'
+            ]
+        ```
+
+        Please note how the config args are inserted after the sub command.
+        this way the order of priorities is maintained when these are args
+        parsed by super().
+        """
+        assert args.count(
+            '--config') <= 1, "More than one config file specified!"
+
+        index = args.index('--config')
+        if index == len(args) - 1:
+            raise ValueError("No config file specified! \
+                             Please check your command-line arguments.")
+
+        file_path = args[index + 1]
+
+        config_args = FlexibleArgumentParser._load_config_file(file_path)
+
+        # 0th index is for {serve,chat,complete}
+        # followed by config args
+        # followed by rest of cli args.
+        # maintaining this order will enforce the precedence
+        # of cli > config > defaults
+        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+
+        return args
+
+    @staticmethod
+    def _load_config_file(file_path: str) -> List[str]:
+        """Loads a yaml file and returns the key value pairs as a
+        flattened list with argparse like pattern
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        returns:
+            processed_args: list[str] = [
+                '--port': '12323',
+                '--tensor-parallel-size': '4'
+            ]
+
+        """
+
+        extension: str = file_path.split('.')[-1]
+        if extension not in ('yaml', 'yml'):
+            raise ValueError(
+                "Config file must be of a yaml/yml type.\
+                              %s supplied", extension)
+
+        # only expecting a flat dictionary of atomic types
+        processed_args: List[str] = []
+
+        config: Dict[str, Union[int, str]] = {}
+        try:
+            with open(file_path, 'r') as config_file:
+                config = yaml.safe_load(config_file)
+        except Exception as ex:
+            logger.error(
+                "Unable to read the config file at %s. \
+                Make sure path is correct", file_path)
+            raise ex
+
+        for key, value in config.items():
+            processed_args.append('--' + key)
+            processed_args.append(str(value))
+
+        return processed_args
+
 
 async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
                               **kwargs):
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
+# In particular, the FakeScalarType is not supported for earlier versions of
+# PyTorch which breaks dynamo for any ops registered using ScalarType.
+def supports_dynamo() -> bool:
+    base_torch_version = Version(Version(torch.__version__).base_version)
+    return base_torch_version >= Version("2.4.0")
+
+
+# Some backends use pytorch version < 2.4.0 which doesn't
+# support `torch.library.custom_op`.
+def supports_custom_op() -> bool:
+    return hasattr(torch.library, "custom_op")
+
+
+class AtomicCounter:
+    """An atomic, thread-safe counter"""
+
+    def __init__(self, initial=0):
+        """Initialize a new atomic counter to given initial value"""
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def inc(self, num=1):
+        """Atomically increment the counter by num and return the new value"""
+        with self._lock:
+            self._value += num
+            return self._value
+
+    def dec(self, num=1):
+        """Atomically decrement the counter by num and return the new value"""
+        with self._lock:
+            self._value -= num
+            return self._value
+
+    @property
+    def value(self):
+        return self._value

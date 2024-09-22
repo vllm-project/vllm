@@ -39,13 +39,13 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA
 from .utils import is_pp_missing_parameter, make_layers
@@ -73,6 +73,7 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
+
         self.gate = ReplicatedLinear(hidden_size,
                                      num_experts,
                                      bias=False,
@@ -434,7 +435,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if ((name.endswith(".bias") or name.endswith("_bias"))
+                        and name not in params_dict):
                     continue
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
@@ -453,6 +455,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
+                    if ((name.endswith(".bias") or name.endswith("_bias"))
+                            and name not in params_dict):
+                        continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param,
@@ -463,7 +468,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
+                    if ((name.endswith(".bias") or name.endswith("_bias"))
+                            and name not in params_dict):
                         continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):

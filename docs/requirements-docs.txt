@@ -6,9 +6,10 @@ sphinx-argparse==0.4.0
 msgspec
 
 # packages to install to build the documentation
-pydantic
+pydantic >= 2.8
 -f https://download.pytorch.org/whl/cpu
 torch
 py-cpuinfo
 transformers
+mistral_common >= 1.3.4
 openai # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args

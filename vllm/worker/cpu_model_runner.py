@@ -10,12 +10,12 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
-from vllm.utils import make_tensor_with_pad
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.utils import STR_NOT_IMPL_ENC_DEC_ERR_STRS, make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -113,11 +113,17 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         )
 
         # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.multi_modal_input_mapper = self.mm_registry \
             .create_input_mapper(self.model_config)
+        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
+
+        if self.model_config.is_encoder_decoder_model:
+            raise NotImplementedError(
+                STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
 
     def load_model(self) -> None:
         self.model = get_model(model_config=self.model_config,
