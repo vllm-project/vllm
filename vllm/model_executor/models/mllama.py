@@ -604,7 +604,7 @@ class MllamaTextCrossAttention(nn.Module):
             bias=False,
             input_is_parallel=True,
         )
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = MllamaTextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         # vllm.model_executor.layers.layernorm.RMSNorm will cause precision issue
         self.k_norm = MllamaTextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.scaling = self.head_dim**-0.5
