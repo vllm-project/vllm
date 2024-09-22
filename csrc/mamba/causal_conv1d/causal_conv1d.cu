@@ -216,7 +216,6 @@ causal_conv1d_update(const at::Tensor &x,
     TORCH_CHECK(conv_state_len >= width - 1);
 
     CHECK_SHAPE(x, batch_size, dim, seqlen);
-    CHECK_SHAPE(conv_state, batch_size, dim, conv_state_len);
     CHECK_SHAPE(weight, dim, width);
 
     TORCH_CHECK(width >= 2 && width <= 4, "causal_conv1d only supports width between 2 and 4");
@@ -261,11 +260,11 @@ causal_conv1d_update(const at::Tensor &x,
         CHECK_SHAPE(conv_state_indices, batch_size);
 
         int conv_state_entries = conv_state.size(0);
-        CHECK_SHAPE(conv_state, conv_state_entries, dim, width);
+        CHECK_SHAPE(conv_state, conv_state_entries, dim, conv_state_len);
 
         params.conv_state_indices_ptr = conv_state_indices.data_ptr<int32_t>();
     } else {
-        CHECK_SHAPE(conv_state, batch_size, dim, width);
+        CHECK_SHAPE(conv_state, batch_size, dim, conv_state_len);
         params.conv_state_indices_ptr = nullptr;
     }
 

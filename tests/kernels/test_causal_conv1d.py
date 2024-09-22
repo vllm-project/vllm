@@ -240,7 +240,7 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_bias,
     total_entries = 10 * batch
     conv_state = torch.randn(total_entries,
                              dim,
-                             width,
+                             width - 1,
                              device=device,
                              dtype=itype)
     conv_state_indices = torch.randperm(total_entries)[:batch].to(
