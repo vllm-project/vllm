@@ -274,7 +274,7 @@ class InputRegistry:
                                  **processor_kwargs)
 
     def _get_model_input_processor(self,
-                                   model_config: "ModelConfig") -> Callable:
+                                   model_config: "ModelConfig"):
         """
         Grabs the input processor for the provided model.
         
