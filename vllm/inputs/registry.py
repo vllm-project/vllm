@@ -256,7 +256,7 @@ class InputRegistry:
         return processor(InputContext(model_config), inputs,
                          **processor_kwargs)
 
-    def create_input_processor(self, model_config: "ModelConfig") -> Callable:
+    def create_input_processor(self, model_config: "ModelConfig"):
         """
         Create an input processor (see :meth:`_process_input`) for a
         specific model.
