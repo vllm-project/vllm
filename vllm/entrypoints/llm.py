@@ -134,7 +134,7 @@ class LLM:
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
-        processor_kwargs=None,
+        processor_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         '''
