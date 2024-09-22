@@ -200,7 +200,7 @@ class ModelRegistry:
                 model_cls.__name__)
 
         # NOTE: This is needed to store the information if the OOT model is
-        # an multimodal model.
+        # a multimodal model.
         if is_multimodal:
             global _OOT_MULTIMODAL_MODELS
             _OOT_MULTIMODAL_MODELS[model_arch] = model_cls
