@@ -217,7 +217,7 @@ class InputRegistry:
         """The default input processor is a no-op."""
         return inputs
 
-    def register_input_processor(self, processor: InputProcessor) -> Callable:
+    def register_input_processor(self, processor: InputProcessor):
         """
         Register an input processor to a model class.
 
