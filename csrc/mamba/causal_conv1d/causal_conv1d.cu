@@ -131,6 +131,29 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     }
 
 
+    if (has_initial_state.has_value()) {
+        auto has_initial_state_ = has_initial_state.value();
+        TORCH_CHECK(has_initial_state_.scalar_type() == at::ScalarType::Bool);
+        TORCH_CHECK(has_initial_state_.is_cuda());
+        CHECK_SHAPE(has_initial_state_, batch_size);
+    }
+
+
+    if (cu_seq_len.has_value()) {
+        auto cu_seq_len_ = cu_seq_len.value();
+        TORCH_CHECK(cu_seq_len_.scalar_type() == at::ScalarType::Int);
+        TORCH_CHECK(cu_seq_len_.is_cuda());
+        CHECK_SHAPE(cu_seq_len_, batch_size);
+    }
+
+
+    if (cache_indices.has_value()) {
+        auto cache_indices_ = cache_indices.value();
+        TORCH_CHECK(cache_indices_.scalar_type() == at::ScalarType::Int);
+        TORCH_CHECK(cache_indices_.is_cuda());
+        CHECK_SHAPE(cache_indices_, batch_size);
+    }
+
     at::Tensor out = torch::empty_like(x);
 
     ConvParamsBase params;
