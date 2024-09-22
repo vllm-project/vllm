@@ -14,6 +14,7 @@ from vllm.transformers_utils.configs.mllama import MllamaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
+from vllm.transformers_utils.configs.solar import SolarConfig
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "MllamaConfig",
     "MLPSpeculatorConfig",
     "NemotronConfig",
+    "SolarConfig",
     "UltravoxConfig",
     # Granite can be removed from here once we have upgraded to
     # transformers 4.45+
