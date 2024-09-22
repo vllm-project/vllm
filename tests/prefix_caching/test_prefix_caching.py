@@ -97,7 +97,6 @@ def test_eviction(num_blocks: int, ):
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("cached_position", [0, 1])
-@pytest.mark.parametrize("use_v2_block_manager", [False, True])
 def test_mixed_requests(
     hf_runner,
     vllm_runner,
@@ -107,7 +106,6 @@ def test_mixed_requests(
     dtype: str,
     max_tokens: int,
     cached_position: int,
-    use_v2_block_manager: bool,
     monkeypatch,
 ) -> None:
     """
@@ -125,7 +123,6 @@ def test_mixed_requests(
             model,
             dtype=dtype,
             enable_prefix_caching=True,
-            use_v2_block_manager=use_v2_block_manager,
     ) as vllm_model:
         # Run the first prompt so the cache is populated
         vllm_outputs = vllm_model.generate_greedy([cached_prompt], max_tokens)

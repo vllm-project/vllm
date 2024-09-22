@@ -72,7 +72,6 @@ def test_multi_step_llm(
             enforce_eager=enforce_eager,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
-            use_v2_block_manager=True,
             num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
         vllm_outputs = (vllm_model.generate_greedy(prompts, max_tokens)
@@ -164,7 +163,6 @@ def test_multi_step_llm_w_prompt_logprobs(
             enforce_eager=enforce_eager,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
-            use_v2_block_manager=True,
             num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(

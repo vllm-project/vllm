@@ -11,9 +11,6 @@ from .conftest import get_output_from_llm_generator
         "model": "JackFram/llama-68m",
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -50,9 +47,6 @@ def test_spec_decode_xfail_chunked_prefill(test_llm_generator):
         "model": "meta-llama/Llama-2-7b-chat-hf",
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",

@@ -980,7 +980,6 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
-            use_v2_block_manager=self.use_v2_block_manager,
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
@@ -1035,8 +1034,7 @@ class EngineArgs:
         )
 
         if (model_config.get_sliding_window() is not None
-                and scheduler_config.chunked_prefill_enabled
-                and not scheduler_config.use_v2_block_manager):
+                and scheduler_config.chunked_prefill_enabled):
             raise ValueError(
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")

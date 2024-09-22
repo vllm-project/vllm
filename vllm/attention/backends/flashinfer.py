@@ -470,8 +470,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
-        self.use_v2_block_manager = (
-            input_builder.scheduler_config.use_v2_block_manager)
 
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
         # for the precise definition of the following fields.
@@ -538,8 +536,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             # Compute slot mapping.
             start_idx = compute_slot_mapping_start_idx(
-                is_prompt, query_len, context_len, self.sliding_window,
-                self.use_v2_block_manager)
+                is_prompt, query_len, context_len, self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
