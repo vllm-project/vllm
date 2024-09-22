@@ -1267,7 +1267,7 @@ def get_allowed_kwarg_only_overrides(
         if param.kind == inspect.Parameter.KEYWORD_ONLY
     ]
 
-    # Drop any processor_kwargs provided by the user that are
+    # Drop any mm_processor_kwargs provided by the user that are
     # not kwarg names accepted by the provided input processor.
     filtered_overrides = {
         kwarg_name: val

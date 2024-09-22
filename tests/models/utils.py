@@ -247,7 +247,7 @@ def check_logprobs_close(
 def build_model_context(model_name: str,
                         tokenizer_name: Optional[str] = None,
                         trust_remote_code: bool = False,
-                        processor_kwargs: Optional[Dict] = None,
+                        mm_processor_kwargs: Optional[Dict] = None,
                         limit_mm_per_prompt: Optional[Dict] = None):
     """Creates an InputContext for a given model.
     
@@ -255,7 +255,7 @@ def build_model_context(model_name: str,
         model_name: Name of the model being considered.
         tokenizer_name: Name of the tokenizer being considered.
         trust_remote_code: Whether or not to allow loading remote code.
-        processor_kwargs: optional processor kwargs for to be leveraged
+        mm_processor_kwargs: optional processor kwargs for to be leveraged
             in the input processor, mapper, dummy data creation, etc.
         limit_mm_per_prompt: Multimodal limits.
 
@@ -271,7 +271,7 @@ def build_model_context(model_name: str,
         trust_remote_code=trust_remote_code,
         dtype="float32",
         seed=0,
-        processor_kwargs=processor_kwargs,
+        mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
     return InputContext(model_config)

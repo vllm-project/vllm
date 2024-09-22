@@ -18,14 +18,14 @@ DUMMY_MODEL_ID = "facebook/opt-125m"
 # Used for tests that need a multimodal model
 MULTIMODAL_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 
-# For processor_kwargs - we test overrides by defining mocks for each place
+# For mm_processor_kwargs - we test overrides by defining mocks for each place
 # it is used, and ensuring that we can pass processor kwargs an override value
 # to receive the intended result for things like sequence length etc.
 DEFAULT_NUM_CROPS = 4
 NUM_CROPS_OVERRIDE = 16
 
 
-# Mocks for all of the places that we use the processor_kwargs
+# Mocks for all of the places that we use the mm_processor_kwargs
 # to override values in different callables
 @pytest.fixture
 def use_processor_mock():
@@ -72,7 +72,7 @@ custom_mapper = lambda ctx, data, *, num_crops=DEFAULT_NUM_CROPS: {
 }
 
 
-### Test for default processor logic & processor_kwargs wrapping
+### Test for default processor logic & mm_processor_kwargs wrapping
 def test_default_processor_is_a_noop():
     """Ensure that by default, there is no processor override."""
     dummy_registry = InputRegistry()
@@ -90,10 +90,12 @@ def test_processor_default_kwargs(use_processor_mock, num_crops):
     # If we have a value for num_crops, pass the override value and make
     # sure we get that value as a return-value from out mock processor,
     # otherwise fall back to the default value
-    processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
+    mm_processor_kwargs = None if num_crops is None else {
+        "num_crops": num_crops
+    }
     expected_num_crops = DEFAULT_NUM_CROPS if num_crops is None else num_crops
     ctx = build_model_context(DUMMY_MODEL_ID,
-                              processor_kwargs=processor_kwargs)
+                              mm_processor_kwargs=mm_processor_kwargs)
     processor = dummy_registry.create_input_processor(ctx.model_config)
 
     num_crops_val = processor(LLMInputs(prompt_token_ids=[], prompt=""))
@@ -101,7 +103,7 @@ def test_processor_default_kwargs(use_processor_mock, num_crops):
 
 
 @pytest.mark.parametrize(
-    "processor_kwargs",
+    "mm_processor_kwargs",
     [
         # Not part of the signature
         {
@@ -113,11 +115,11 @@ def test_processor_default_kwargs(use_processor_mock, num_crops):
         }
     ])
 def test_processor_with_sad_kwarg_overrides(use_processor_mock,
-                                            processor_kwargs):
-    """Ensure that input processors filter out invalid processor_kwargs."""
+                                            mm_processor_kwargs):
+    """Ensure that input processors filter out invalid mm_processor_kwargs"""
     dummy_registry = InputRegistry()
     ctx = build_model_context(DUMMY_MODEL_ID,
-                              processor_kwargs=processor_kwargs)
+                              mm_processor_kwargs=mm_processor_kwargs)
 
     processor = dummy_registry.create_input_processor(ctx.model_config)
     num_crops_val = processor(LLMInputs(prompt_token_ids=[], prompt=""))
@@ -128,24 +130,26 @@ def test_processor_with_sad_kwarg_overrides(use_processor_mock,
 @pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
 def test_dummy_data_kwarg_overrides(use_dummy_data_mock, num_crops):
     """Ensure dummy data factories can use processor kwargs."""
-    processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
+    mm_processor_kwargs = None if num_crops is None else {
+        "num_crops": num_crops
+    }
     expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
     dummy_registry = InputRegistry()
     ctx = build_model_context(DUMMY_MODEL_ID,
-                              processor_kwargs=processor_kwargs)
+                              mm_processor_kwargs=mm_processor_kwargs)
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(ctx.model_config)
 
     # NOTE: seq_len is thrown away here since this will leverage the
     # default dummy data factory that we have patched in, whose seq
-    # len is solely dependent on the value of the processor_kwargs.
+    # len is solely dependent on the value of the mm_processor_kwargs.
     seq_data, _ = dummy_registry.dummy_data_for_profiling(
         ctx.model_config, seq_len=-1, mm_registry=mm_registry)
     assert len(seq_data.prompt_token_ids) == expected_seq_count
 
 
 @pytest.mark.parametrize(
-    "processor_kwargs",
+    "mm_processor_kwargs",
     [
         # Not part of the signature
         {
@@ -157,17 +161,17 @@ def test_dummy_data_kwarg_overrides(use_dummy_data_mock, num_crops):
         }
     ])
 def test_dummy_data_with_sad_kwarg_overrides(use_dummy_data_mock,
-                                             processor_kwargs):
-    """Ensure that dummy data factory filters out invalid processor_kwargs."""
+                                             mm_processor_kwargs):
+    """Ensure the dummy data factory filters out invalid mm_processor_kwargs"""
     dummy_registry = InputRegistry()
     ctx = build_model_context(DUMMY_MODEL_ID,
-                              processor_kwargs=processor_kwargs)
+                              mm_processor_kwargs=mm_processor_kwargs)
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(ctx.model_config)
 
     # NOTE: seq_len is thrown away here since this will leverage the
     # default dummy data factory that we have patched in, whose seq
-    # len is solely dependent on the value of the processor_kwargs.
+    # len is solely dependent on the value of the mm_processor_kwargs.
     seq_data, _ = dummy_registry.dummy_data_for_profiling(
         ctx.model_config, seq_len=-1, mm_registry=mm_registry)
     assert len(seq_data.prompt_token_ids) == DEFAULT_NUM_CROPS
@@ -177,19 +181,21 @@ def test_dummy_data_with_sad_kwarg_overrides(use_dummy_data_mock,
 @pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
 def test_max_tokens_kwarg_overrides(num_crops):
     """Ensure max token calcs can use processor kwargs."""
-    processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
+    mm_processor_kwargs = None if num_crops is None else {
+        "num_crops": num_crops
+    }
     expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
 
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
                               trust_remote_code=True,
-                              processor_kwargs=processor_kwargs,
+                              mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(ctx.model_config)
     # Patch the image registry for phi3v with our lambda that is compatible
     # with overrides, then ensure that calling the method correctly echos
-    # our num_crops value back from the processor_kwargs.
+    # our num_crops value back from the mm_processor_kwargs.
     with patch.object(
             mm_registry._get_plugin("image"),
             "_max_mm_tokens",
@@ -202,7 +208,7 @@ def test_max_tokens_kwarg_overrides(num_crops):
 
 
 @pytest.mark.parametrize(
-    "processor_kwargs",
+    "mm_processor_kwargs",
     [
         # Not part of the signature
         {
@@ -213,11 +219,11 @@ def test_max_tokens_kwarg_overrides(num_crops):
             "ctx": "something bad"
         }
     ])
-def test_max_tokens_with_sad_kwarg_overrides(processor_kwargs):
-    """Ensure that max token calcs filters out invalid processor_kwargs."""
+def test_max_tokens_with_sad_kwarg_overrides(mm_processor_kwargs):
+    """Ensure that max token calcs filters out invalid mm_processor_kwargs"""
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
                               trust_remote_code=True,
-                              processor_kwargs=processor_kwargs,
+                              mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
@@ -245,7 +251,7 @@ def test_default_mapper_with_processer_kwargs(image_assets, num_crops):
     # inspect what kwargs are or are not allowed.
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
                               trust_remote_code=True,
-                              processor_kwargs={"num_crops": num_crops},
+                              mm_processor_kwargs={"num_crops": num_crops},
                               limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
@@ -262,18 +268,20 @@ def test_default_mapper_with_processer_kwargs(image_assets, num_crops):
 @pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
 def test_custom_mapper_kwarg_overrides(image_assets, num_crops):
     """Ensure custom mappers can use processor kwargs."""
-    processor_kwargs = None if num_crops is None else {"num_crops": num_crops}
+    mm_processor_kwargs = None if num_crops is None else {
+        "num_crops": num_crops
+    }
     expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
                               trust_remote_code=True,
-                              processor_kwargs=processor_kwargs,
+                              mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(ctx.model_config)
     # Patch the image registry for phi3v with our lambda that is compatible
     # with overrides, then ensure that calling the method correctly echos
-    # our num_crops value back from the processor_kwargs.
+    # our num_crops value back from the mm_processor_kwargs.
     image = image_assets[0].pil_image
     mm_inputs = {"image": image}
 
@@ -288,7 +296,7 @@ def test_custom_mapper_kwarg_overrides(image_assets, num_crops):
 
 
 @pytest.mark.parametrize(
-    "processor_kwargs",
+    "mm_processor_kwargs",
     [
         # Not part of the signature
         {
@@ -300,18 +308,18 @@ def test_custom_mapper_kwarg_overrides(image_assets, num_crops):
         }
     ])
 def test_custom_mapper_with_sad_kwarg_overrides(image_assets,
-                                                processor_kwargs):
-    """Ensure that custom mappers filters out invalid processor_kwargs."""
+                                                mm_processor_kwargs):
+    """Ensure that custom mappers filters out invalid mm_processor_kwargs"""
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
                               trust_remote_code=True,
-                              processor_kwargs=processor_kwargs,
+                              mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})
 
     mm_registry = MultiModalRegistry()
     mm_registry.init_mm_limits_per_prompt(ctx.model_config)
     # Patch the image registry for phi3v with our lambda that is compatible
     # with overrides, then ensure that calling the method correctly echos
-    # our num_crops value back from the processor_kwargs.
+    # our num_crops value back from the mm_processor_kwargs.
     image = image_assets[0].pil_image
     mm_inputs = {"image": image}
 

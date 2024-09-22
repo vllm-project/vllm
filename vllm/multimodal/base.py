@@ -261,16 +261,16 @@ class MultiModalPlugin(ABC):
         # input mapper; no overrides are used on the default here because they
         # should be passed to the huggingface resource at initialization time.
         if mapper != self._default_input_mapper:
-            processor_kwargs = get_allowed_kwarg_only_overrides(
-                callable=mapper, overrides=model_config.processor_kwargs)
+            mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+                callable=mapper, overrides=model_config.mm_processor_kwargs)
         else:
-            processor_kwargs = {}
+            mm_processor_kwargs = {}
 
         if mapper is None:
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
 
-        return mapper(InputContext(model_config), data, **processor_kwargs)
+        return mapper(InputContext(model_config), data, **mm_processor_kwargs)
 
     @abstractmethod
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
@@ -343,11 +343,11 @@ class MultiModalPlugin(ABC):
                            f"for model class {model_cls.__name__} in {self}.")
 
         if callable(max_mm_tokens):
-            processor_kwargs = get_allowed_kwarg_only_overrides(
+            mm_processor_kwargs = get_allowed_kwarg_only_overrides(
                 callable=max_mm_tokens,
-                overrides=model_config.processor_kwargs)
+                overrides=model_config.mm_processor_kwargs)
             max_mm_tokens = max_mm_tokens(InputContext(model_config),
-                                          **processor_kwargs)
+                                          **mm_processor_kwargs)
 
         self._validate_max_multimodal_tokens(max_mm_tokens)
 

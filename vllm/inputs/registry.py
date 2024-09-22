@@ -74,7 +74,7 @@ class DummyDataFactory(Protocol):
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        **processor_kwargs: Any,
+        **mm_processor_kwargs: Any,
     ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data to be inputted into the model.
@@ -82,7 +82,7 @@ class DummyDataFactory(Protocol):
         Note:
             :data:`InputProcessor` is not applied to the dummy data.
 
-            The :code:`processor_kwargs` are overrides provided at
+            The :code:`mm_processor_kwargs` are overrides provided at
             initialization time to values in the config whose values
             may affect the number of tokens per instance.
         """
@@ -190,12 +190,12 @@ class InputRegistry:
             .get(model_cls, self._default_dummy_data_factory)
         mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
 
-        processor_kwargs = get_allowed_kwarg_only_overrides(
-            callable=dummy_factory, overrides=model_config.processor_kwargs)
+        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+            callable=dummy_factory, overrides=model_config.mm_processor_kwargs)
 
         seq_data, mm_data = dummy_factory(InputContext(model_config), seq_len,
                                           _MultiModalCounts(mm_counts),
-                                          **processor_kwargs)
+                                          **mm_processor_kwargs)
 
         # Having more tokens is over-conservative but otherwise fine
         num_tokens = seq_data.prompt_token_ids
@@ -244,7 +244,7 @@ class InputRegistry:
 
     def _process_input(self, inputs: LLMInputs, model_config: "ModelConfig",
                        processor: InputProcessor,
-                       **processor_kwargs: Any) -> LLMInputs:
+                       **mm_processor_kwargs: Any) -> LLMInputs:
         """
         Apply an input processor to an instance of model inputs. This will
         usually not be invoked be directly, and instead will be wrapped in
@@ -256,7 +256,7 @@ class InputRegistry:
             :ref:`input_processing_pipeline`
         """
         return processor(InputContext(model_config), inputs,
-                         **processor_kwargs)
+                         **mm_processor_kwargs)
 
     def create_input_processor(self, model_config: "ModelConfig"):
         """
@@ -268,12 +268,12 @@ class InputRegistry:
         # NOTE: we don't allow override values for ctx/inputs, since doing
         # so can lead to value collisions etc.
         processor = self._get_model_input_processor(model_config)
-        processor_kwargs = get_allowed_kwarg_only_overrides(
-            callable=processor, overrides=model_config.processor_kwargs)
+        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+            callable=processor, overrides=model_config.mm_processor_kwargs)
         return functools.partial(self._process_input,
                                  model_config=model_config,
                                  processor=processor,
-                                 **processor_kwargs)
+                                 **mm_processor_kwargs)
 
     def _get_model_input_processor(self, model_config: "ModelConfig"):
         """

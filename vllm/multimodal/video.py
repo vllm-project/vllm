@@ -37,14 +37,14 @@ class VideoPlugin(ImagePlugin):
         return "video"
 
     def _get_hf_video_processor(self, model_config: ModelConfig):
-        processor_kwargs = ({} if model_config.processor_kwargs is None else
-                            model_config.processor_kwargs)
+        mm_processor_kwargs = ({} if model_config.mm_processor_kwargs is None
+                               else model_config.mm_processor_kwargs)
         # We don't explicitly check kwarg overrides to the HF class
         # since the automodel just takes kwargs, so we can't inspect it
         return cached_get_video_processor(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code,
-            **processor_kwargs)
+            **mm_processor_kwargs)
 
     def _default_input_mapper(
         self,

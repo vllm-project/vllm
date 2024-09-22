@@ -54,10 +54,10 @@ def test_bad_nullable_kvs(arg):
         }
     }),
 ])
-def test_processor_kwargs_prompt_parser(arg, expected):
+def test_mm_processor_kwargs_prompt_parser(arg, expected):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
     else:
-        args = parser.parse_args(["--processor-kwargs", arg])
-    assert args.processor_kwargs == expected
+        args = parser.parse_args(["--mm-processor-kwargs", arg])
+    assert args.mm_processor_kwargs == expected
