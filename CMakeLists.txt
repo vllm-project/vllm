@@ -205,7 +205,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        #        GIT_SHALLOW TRUE
+        GIT_SHALLOW TRUE
   )
   FetchContent_MakeAvailable(cutlass)
 
