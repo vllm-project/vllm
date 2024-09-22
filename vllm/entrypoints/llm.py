@@ -10,7 +10,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
                                          parse_chat_messages)
-from vllm.inputs import PromptInputs, TextPrompt, TokensPrompt
+from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -260,8 +260,8 @@ class LLM:
     @overload
     def generate(
         self,
-        inputs: Union[PromptInputs, Sequence[PromptInputs]],
-        /,  # We may enable `inputs` keyword after removing the old API
+        prompts: Union[PromptType, Sequence[PromptType]],
+        /,
         *,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
@@ -278,7 +278,7 @@ class LLM:
     )
     def generate(
         self,
-        prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
+        prompts: Union[Union[PromptType, Sequence[PromptType]],
                        Optional[Union[str, List[str]]]] = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
@@ -296,7 +296,9 @@ class LLM:
         into a single list and pass it to this method.
 
         Args:
-            inputs: A list of inputs to generate completions for.
+            prompts: The prompts to the LLM. You may pass a sequence of prompts
+                for batch inference. See :class:`~vllm.inputs.PromptType`
+                for more details about the format of each prompts.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
                 When it is a single value, it is applied to every prompt.
@@ -322,12 +324,13 @@ class LLM:
                 "models (XForCausalLM, XForConditionalGeneration).")
 
         if prompt_token_ids is not None:
-            inputs = self._convert_v1_inputs(
+            parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
             )
         else:
-            inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
+            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
+                                  prompts)
 
         if isinstance(guided_options_request, dict):
             if len(guided_options_request) > 1:
@@ -342,7 +345,7 @@ class LLM:
             sampling_params = SamplingParams()
 
         self._validate_and_add_requests(
-            inputs=inputs,
+            prompts=parsed_prompts,
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
@@ -398,9 +401,9 @@ class LLM:
         conversation, mm_data = parse_chat_messages(messages, model_config,
                                                     tokenizer)
 
-        prompt: Union[str, List[int]]
+        prompt_data: Union[str, List[int]]
         if isinstance(tokenizer, MistralTokenizer):
-            prompt = apply_mistral_chat_template(
+            prompt_data = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
                 chat_template=chat_template,
@@ -408,7 +411,7 @@ class LLM:
                 tools=tools,
             )
         else:
-            prompt = apply_hf_chat_template(
+            prompt_data = apply_hf_chat_template(
                 tokenizer,
                 conversation=conversation,
                 chat_template=chat_template,
@@ -416,17 +419,17 @@ class LLM:
                 tools=tools,
             )
 
-        inputs: PromptInputs
-        if is_list_of(prompt, int):
-            inputs = TokensPrompt(prompt_token_ids=prompt)
+        prompt: PromptType
+        if is_list_of(prompt_data, int):
+            prompt = TokensPrompt(prompt_token_ids=prompt_data)
         else:
-            inputs = TextPrompt(prompt=prompt)
+            prompt = TextPrompt(prompt=prompt_data)
 
         if mm_data is not None:
-            inputs["multi_modal_data"] = mm_data
+            prompt["multi_modal_data"] = mm_data
 
         return self.generate(
-            inputs,
+            prompt,
             sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -496,8 +499,8 @@ class LLM:
     @overload
     def encode(
         self,
-        inputs: Union[PromptInputs, Sequence[PromptInputs]],
-        /,  # We may enable `inputs` keyword after removing the old API
+        prompts: Union[PromptType, Sequence[PromptType]],
+        /,
         *,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
@@ -514,7 +517,7 @@ class LLM:
     )
     def encode(
         self,
-        prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
+        prompts: Union[Union[PromptType, Sequence[PromptType]],
                        Optional[Union[str, List[str]]]] = None,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
@@ -530,9 +533,9 @@ class LLM:
         into a single list and pass it to this method.
 
         Args:
-            inputs: The inputs to the LLM. You may pass a sequence of inputs for
-                batch inference. See :class:`~vllm.inputs.PromptInputs`
-                for more details about the format of each input.
+            prompts: The prompts to the LLM. You may pass a sequence of prompts
+                for batch inference. See :class:`~vllm.inputs.PromptType`
+                for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: Whether to use tqdm to display the progress bar.
@@ -555,19 +558,20 @@ class LLM:
             )
 
         if prompt_token_ids is not None:
-            inputs = self._convert_v1_inputs(
+            parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
             )
         else:
-            inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
+            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
+                                  prompts)
 
         if pooling_params is None:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
         self._validate_and_add_requests(
-            inputs=inputs,
+            prompts=parsed_prompts,
             params=pooling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
@@ -611,9 +615,9 @@ class LLM:
             raise ValueError("Either prompts or prompt_token_ids must be "
                              "provided.")
 
-        inputs: List[PromptInputs] = []
+        parsed_prompts: List[PromptType] = []
         for i in range(num_requests):
-            item: PromptInputs
+            item: PromptType
 
             if prompts is not None:
                 item = TextPrompt(prompt=prompts[i])
@@ -622,24 +626,24 @@ class LLM:
             else:
                 raise AssertionError
 
-            inputs.append(item)
+            parsed_prompts.append(item)
 
-        return inputs
+        return parsed_prompts
 
     def _validate_and_add_requests(
         self,
-        inputs: Union[PromptInputs, Sequence[PromptInputs]],
+        prompts: Union[PromptType, Sequence[PromptType]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
     ) -> None:
-        if isinstance(inputs, (str, dict)):
+        if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
-            inputs = [inputs]
+            prompts = [prompts]
 
-        num_requests = len(inputs)
+        num_requests = len(prompts)
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
@@ -656,9 +660,9 @@ class LLM:
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
-        for i, request_inputs in enumerate(inputs):
+        for i, prompt in enumerate(prompts):
             self._add_request(
-                request_inputs,
+                prompt,
                 params[i] if isinstance(params, Sequence) else params,
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
@@ -667,7 +671,7 @@ class LLM:
 
     def _add_request(
         self,
-        inputs: PromptInputs,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -675,7 +679,7 @@ class LLM:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(
             request_id,
-            inputs,
+            prompt,
             params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
