@@ -17,28 +17,21 @@ from array import array
 import math
 from PIL import Image
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union, Callable, Dict, Any, Set)
+                    TypedDict, Union,)
 
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 
-from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, StaticCache
-from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from transformers.modeling_outputs import BaseModelOutput, CausalLMOutputWithPast
 from transformers.models.mllama.configuration_mllama import MllamaConfig, MllamaTextConfig, MllamaVisionConfig
 from transformers.models.mllama.image_processing_mllama import MllamaImageProcessor
 from vllm.attention import Attention, AttentionMetadata, AttentionType
-from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -49,13 +42,12 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal
-from .llama import LlamaAttention, LlamaMLP, LlamaDecoderLayer
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
+from .llama import LlamaMLP, LlamaDecoderLayer
+from .clip import CLIPMLP
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear,
                                                ColumnParallelLinear)
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_tensor_model_parallel_world_size
 
 import vllm.distributed.parallel_state as ps
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
@@ -159,111 +151,6 @@ def dummy_encoder_data_for_mllama(ctx: InputContext, seq_len:int, mm_counts: Map
     num_images = mm_counts["image"]
     return dummy_encoder_seq_data(ctx, num_images), dummy_image(num_images)
 
-# Copied from transformers.models.llama.modeling_llama._prepare_4d_causal_attention_mask_with_cache_position
-def _prepare_4d_causal_attention_mask_with_cache_position(
-    attention_mask: torch.Tensor,
-    sequence_length: int,
-    target_length: int,
-    dtype: torch.dtype,
-    device: torch.device,
-    min_dtype: float,
-    cache_position: torch.Tensor,
-    batch_size: int,
-):
-    """
-    Creates a causal 4D mask of shape `(batch_size, 1, query_length, key_value_length)` from a 2D mask of shape
-    `(batch_size, key_value_length)`, or if the input `attention_mask` is already 4D, do nothing.
-
-    Args:
-        attention_mask (`torch.Tensor`):
-            A 2D attention mask of shape `(batch_size, key_value_length)` or a 4D attention mask of shape `(batch_size, 1, query_length, key_value_length)`.
-        sequence_length (`int`):
-            The sequence length being processed.
-        target_length (`int`):
-            The target length: when generating with static cache, the mask should be as long as the static cache, to account for the 0 padding, the part of the cache that is not filled yet.
-        dtype (`torch.dtype`):
-            The dtype to use for the 4D attention mask.
-        device (`torch.device`):
-            The device to plcae the 4D attention mask on.
-        min_dtype (`float`):
-            The minimum value representable with the dtype `dtype`.
-        cache_position (`torch.Tensor`):
-            Indices depicting the position of the input sequence tokens in the sequence.
-        batch_size (`torch.Tensor`):
-            Batch size.
-    """
-    if attention_mask is not None and attention_mask.dim() == 4:
-        # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
-        causal_mask = attention_mask
-    else:
-        causal_mask = torch.full((sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device)
-        if sequence_length != 1:
-            causal_mask = torch.triu(causal_mask, diagonal=1)
-        causal_mask *= torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
-        causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
-        if attention_mask is not None:
-            causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
-            mask_length = attention_mask.shape[-1]
-            padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
-            padding_mask = padding_mask == 0
-            causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
-                padding_mask, min_dtype
-            )
-
-    return causal_mask
-
-
-def _prepare_cross_attention_mask(
-    cross_attention_mask: torch.Tensor,
-    past_key_values: Cache,
-    num_vision_tokens: int,
-    cross_attention_states: torch.Tensor,
-    cross_attention_layers: List[int],
-    device: str,
-    dtype: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    if cross_attention_mask is None:
-        # should we raise error or prepare a full attn mask with all ones?
-        return None, None
-    else:
-        # reshape so it can be used by attn module
-        batch_size, text_total_length, *_ = cross_attention_mask.shape
-        cross_attention_mask = cross_attention_mask.repeat_interleave(num_vision_tokens, dim=3)
-        cross_attention_mask = cross_attention_mask.view(batch_size, text_total_length, -1)
-        cross_attention_mask = cross_attention_mask.unsqueeze(1)
-
-    # invert the mask
-    inverted_cross_attn_mask = (1.0 - cross_attention_mask).to(dtype)
-    cross_attention_mask = inverted_cross_attn_mask.masked_fill(
-        inverted_cross_attn_mask.to(torch.bool), torch.finfo(dtype).min
-    )
-
-    # apply full-row bias, which return 4D tensor of shape [B, H, S1, 1] where value is 0 if the a full row in cross attn mask's
-    # last dimension contains negative infinity values, otherwise it's 1
-    negative_inf_value = torch.finfo(dtype).min
-    full_text_row_masked_out_mask = (
-        (cross_attention_mask != negative_inf_value).any(dim=-1).type_as(cross_attention_mask)[..., None]
-    )
-    cross_attention_mask *= full_text_row_masked_out_mask
-
-    # In case we receive a new image but already have previous cross-attention key/values in cache,
-    # then we need to extend the attention-mask and add previous images' lengths
-    if (
-        past_key_values is not None
-        and cross_attention_states is not None
-        and past_key_values.get_seq_length(cross_attention_layers[0]) != 0
-    ):
-        # make all zeros mask for cross-attn-mask from previuos cached hidden_states, all zeros right?
-        # i.e. extend current cross-attn-mask on image-seq-length dimension to account for past_seen_tokens
-        past_cross_attn_kv_length = past_key_values.get_seq_length(cross_attention_layers[0])
-        past_cross_attn_mask = torch.zeros(
-            (*cross_attention_mask.shape[:-1], past_cross_attn_kv_length), dtype=dtype, device=device
-        )
-        # concatenate both on image-seq-length dimension
-        cross_attention_mask = torch.cat([past_cross_attn_mask, cross_attention_mask], dim=-1)
-
-    return cross_attention_mask, full_text_row_masked_out_mask
-
 
 def _prepare_aspect_ratio_attention_mask(
     aspect_ratio_mask: torch.Tensor,
@@ -330,7 +217,6 @@ class ColumnParallelConv2dPatch(torch.nn.Module):
         return x
 
 
-
 class MllamaPrecomputedAspectRatioEmbedding(nn.Module):
     def __init__(self, config: MllamaVisionConfig, is_gated: bool = True):
         super().__init__()
@@ -391,22 +277,6 @@ class MllamaPrecomputedPositionEmbedding(nn.Module):
         return hidden_state
 
 
-# Copied from transformers.models.clip.modeling_clip.CLIPMLP with CLIP->MllamaVision
-class MllamaVisionMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.activation_fn = ACT2FN[config.hidden_act]
-        self.fc1 = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=True)
-        self.fc2 = RowParallelLinear(config.intermediate_size, config.hidden_size, bias=True)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states)
-        return hidden_states
-
-
 class MllamaVisionSdpaAttention(nn.Module):
     def __init__(self, config: MllamaVisionConfig):
         super().__init__()
@@ -464,7 +334,7 @@ class MllamaVisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         self.self_attn = MllamaVisionSdpaAttention(config)
-        self.mlp = MllamaVisionMLP(config)
+        self.mlp = CLIPMLP(config)
 
         self.input_layernorm = nn.LayerNorm(self.hidden_size)
         self.post_attention_layernorm = nn.LayerNorm(self.hidden_size)
@@ -726,8 +596,8 @@ class MllamaTextCrossAttention(nn.Module):
             bias=False,
             input_is_parallel=True,
         )
-
-        self.q_norm = MllamaTextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        # vllm.model_executor.layers.layernorm.RMSNorm will cause precision issue
         self.k_norm = MllamaTextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.scaling = self.head_dim**-0.5
 
