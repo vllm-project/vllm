@@ -177,6 +177,7 @@ endif()
 
 set(VLLM_EXT_SRC
   "csrc/cache_kernels.cu"
+  "csrc/valkey.cu"
   "csrc/attention/attention_kernels.cu"
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
@@ -188,6 +189,41 @@ set(VLLM_EXT_SRC
   "csrc/moe_align_block_size_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/torch_bindings.cpp")
+
+if(DEFINED ENV{USE_VALKEY})
+  message("Debug mode is enabled.")
+  message("The value of libvalkey is: ${CMAKE_CURRENT_BINARY_DIR}")
+
+  execute_process(COMMAND bash -c "mkdir _deps; cd _deps && git clone https://github.com/valkey-io/libvalkey.git && cd libvalkey && USE_RDMA=1 make -j"
+                  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                  RESULT_VARIABLE libvalkey_build_result
+                  OUTPUT_VARIABLE libvalkey_build_output
+                  OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/libvalkey_build.log
+                  ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/libvalkey_build.log)
+
+  if (NOT libvalkey_build_result EQUAL 0)
+    message(FATAL_ERROR "Libvalkey build failed."
+                      " Result: \"${libvalkey_build_result}\"" 
+                      "\nCheck the log for details: "
+                      "${CMAKE_CURRENT_BINARY_DIR}/libvalkey_build.log")
+  else()
+    message(STATUS "Libvalkey build successfully.")
+  endif()
+
+  set(
+    VALKEY_INCLUDE_DIRS
+    ${CMAKE_CURRENT_BINARY_DIR}/_deps/libvalkey/include
+  )
+
+  set(
+    VALKEY_LIBRARIES_DIRS
+    ${CMAKE_CURRENT_BINARY_DIR}/_deps/libvalkey/lib/libvalkey_rdma.a
+    ${CMAKE_CURRENT_BINARY_DIR}/_deps/libvalkey/lib/libvalkey.a
+    rdmacm
+    ibverbs
+  )
+
+endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   include(FetchContent)

@@ -906,6 +906,21 @@ def register_graph_buffers(fa: int, handles: List[str],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
+def valkey_init(ip: str, port: int, enable_rdma: bool) -> None:
+    torch.ops._C_valkey_ops.valkey_init(ip, port, enable_rdma)
+
+def valkey_set(key: str, value: torch.Tensor) -> int:
+    return torch.ops._C_valkey_ops.valkey_set(key, value)
+
+def valkey_get(key: str, value: torch.Tensor) -> int:
+    return torch.ops._C_valkey_ops.valkey_get(key, value)
+
+def valkey_del(key: str) -> int:
+    return torch.ops._C_valkey_ops.valkey_delete(key)
+
+def valkey_key_exists(key: str) -> bool:
+    return torch.ops._C_valkey_ops.valkey_key_exists(key)
+
 
 # temporary fix for https://github.com/vllm-project/vllm/issues/5456
 # TODO: remove this in v0.6.0

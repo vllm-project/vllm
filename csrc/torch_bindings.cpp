@@ -1,6 +1,7 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
+#include "valkey.h"
 #include "core/registration.h"
 
 #include <torch/library.h>
@@ -347,6 +348,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
+}
+
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _valkey_ops), valkey_ops) {
+  valkey_ops.def("valkey_init(str ip, int port, bool enable_rdma) -> int");
+  valkey_ops.impl("valkey_init", &valkey_init);
+
+  valkey_ops.def("valkey_set(str key, Tensor value) -> int");
+  valkey_ops.impl("valkey_set", &valkey_set);
+
+  valkey_ops.def("valkey_get(str key, Tensor! value) -> int");
+  valkey_ops.impl("valkey_get", &valkey_get);
+
+  valkey_ops.def("valkey_delete(str key) -> int");
+  valkey_ops.impl("valkey_delete", &valkey_delete);
+
+  valkey_ops.def("valkey_key_exists(str key) -> bool");
+  valkey_ops.impl("valkey_key_exists", &valkey_key_exists);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
