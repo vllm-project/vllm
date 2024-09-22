@@ -103,29 +103,28 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int dim_id = blockIdx.y;
     const int group_id = dim_id / (params.dim_ngroups_ratio);
     int seqlen = params.seqlen;
-    int bos = batch_id;
+    int sequence_start_index = batch_id;
     if constexpr (kVarlen){
         int *cu_seq_len = reinterpret_cast<int *>(params.cu_seq_len_ptr);
-        bos = batch_id == 0 ? 0 : cu_seq_len[batch_id - 1];
-        const int eos = cu_seq_len[batch_id];
-        seqlen = eos - bos;
+        sequence_start_index = batch_id == 0 ? 0 : cu_seq_len[batch_id - 1];
+        const int sequence_end_index = cu_seq_len[batch_id];
+        seqlen = sequence_end_index - sequence_start_index;
     }
-    int* has_initial_state = params.has_initial_state_ptr == nullptr ? nullptr
-        : reinterpret_cast<int *>(params.has_initial_state_ptr);
-    const bool has_initial_state_bo = has_initial_state != nullptr && (has_initial_state[batch_id] == 1);
+    const bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
+        : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
 
-    int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
+    const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
     const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
-    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + bos * params.u_batch_stride
+    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + sequence_start_index * params.u_batch_stride
         + dim_id * kNRows * params.u_d_stride;
-    input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + bos * params.delta_batch_stride
+    input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + sequence_start_index * params.delta_batch_stride
         + dim_id * kNRows * params.delta_d_stride;
     weight_t *A = reinterpret_cast<weight_t *>(params.A_ptr) + dim_id * kNRows * params.A_d_stride;
     weight_t *B = reinterpret_cast<weight_t *>(params.B_ptr) + dim_id * kNRows * params.B_d_stride;
-    input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + bos * params.B_batch_stride + group_id * params.B_group_stride;
+    input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + sequence_start_index * params.B_batch_stride + group_id * params.B_group_stride;
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
-    input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + bos * params.C_batch_stride + group_id * params.C_group_stride;
+    input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + sequence_start_index * params.C_batch_stride + group_id * params.C_group_stride;
     input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + (cache_index * params.dim + dim_id * kNRows) * params.dstate;
 
     float D_val[kNRows] = {0};
@@ -242,7 +241,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 }
                 // Initialize running total
 
-                scan_t running_prefix = chunk > 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.0, has_initial_state_bo ? float(x[state_idx]): 0.0);
+                scan_t running_prefix = chunk > 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.0, has_initial_state ? float(x[state_idx]): 0.0);
 
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
@@ -266,7 +265,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             }
         }
         
-        input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + bos * params.out_batch_stride
+        input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + sequence_start_index * params.out_batch_stride
             + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
         __syncthreads();
         #pragma unroll
@@ -278,9 +277,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
 
         if constexpr (kHasZ) {
-            input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + bos * params.z_batch_stride
+            input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + sequence_start_index * params.z_batch_stride
                 + dim_id * kNRows * params.z_d_stride + chunk * kChunkSize;
-            input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + bos * params.out_z_batch_stride
+            input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + sequence_start_index * params.out_z_batch_stride
                 + dim_id * kNRows * params.out_z_d_stride + chunk * kChunkSize;
             #pragma unroll
             for (int r = 0; r < kNRows; ++r) {
@@ -620,7 +619,7 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
         CHECK_SHAPE(z, batch_size, dim, seqlen);
     }
 
-    out_z = (z);
+    out_z = z;
 
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
     // const int n_chunks = (seqlen + 1024 - 1) / 1024;

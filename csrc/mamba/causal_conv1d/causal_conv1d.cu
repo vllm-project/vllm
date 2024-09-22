@@ -177,7 +177,6 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
         params.conv_states_ptr = nullptr;
     }
 
-
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
     at::cuda::CUDAGuard device_guard{(char)x.get_device()};
@@ -311,19 +310,18 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
     const int batch_id = blockIdx.x;
     const int channel_id = blockIdx.y;
     const int *cu_seq_len = kVarlen ? reinterpret_cast<int *>(params.cu_seq_len_ptr) : nullptr;
-    const int bos = kVarlen ? (batch_id == 0 ? 0 : cu_seq_len[batch_id - 1]) : batch_id;
-    const int seqlen = kVarlen ? cu_seq_len[batch_id] - bos : params.seqlen;
+    const int sequence_start_index = kVarlen ? (batch_id == 0 ? 0 : cu_seq_len[batch_id - 1]) : batch_id;
+    const int seqlen = kVarlen ? cu_seq_len[batch_id] - sequence_start_index : params.seqlen;
 
-    input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + bos * params.x_batch_stride
+    input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + sequence_start_index * params.x_batch_stride
         + channel_id * params.x_c_stride;
     weight_t *weight = reinterpret_cast<weight_t *>(params.weight_ptr) + channel_id * params.weight_c_stride;
-    input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + bos * params.out_batch_stride
+    input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + sequence_start_index * params.out_batch_stride
         + channel_id * params.out_c_stride;
     float bias_val = params.bias_ptr == nullptr ? 0.f : float(reinterpret_cast<weight_t *>(params.bias_ptr)[channel_id]);
 
-    int* has_initial_state = params.has_initial_state_ptr == nullptr ? nullptr
-        : reinterpret_cast<int *>(params.has_initial_state_ptr);
-    bool has_initial_state_bo = has_initial_state != nullptr && (has_initial_state[batch_id] == 1);
+    bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
+        : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
 
     int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
@@ -335,7 +333,7 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
     // Thread 0 will load the last elements of the previous chunk, so we initialize those to 0.
     if (tidx == 0) {
         input_t zeros[kNElts] = {0};
-        if (has_initial_state_bo) {
+        if (has_initial_state) {
             #pragma unroll
             for (int w = 0; w < kWidth - 1; ++w){ zeros[kNElts - 1 - (kWidth - 2) + w ] = conv_states[w]; }
         }
@@ -410,8 +408,8 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
             #pragma unroll
             for (int w = 0; w < kWidth - 1; ++w){
                 // pad the existing state
-                if ((w - seqlen) >= 0 && has_initial_state_bo) { conv_states[w - seqlen] = conv_states[w]; }
-                else if (!has_initial_state_bo) { conv_states[w - seqlen] = 0; }
+                if ((w - seqlen) >= 0 && has_initial_state) { conv_states[w - seqlen] = conv_states[w]; }
+                else if ((w - seqlen) >= 0 && !has_initial_state) { conv_states[w - seqlen] = input_t(0.0f); }
             }
             #pragma unroll
             for (int w = 0; w < kWidth - 1; ++w){
