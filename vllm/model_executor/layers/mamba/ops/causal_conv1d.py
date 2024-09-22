@@ -22,16 +22,16 @@ def causal_conv1d_fn(
         sequences are concatenated from left to right for varlen
     weight: (dim, width)
     bias: (dim,)
-    cu_seq_len: (batch)
+    cu_seq_len: (batch) int32
         tensor contains cumulative input ids sequence lengths
         for example: cu_seq_len = torch.Tensor([10,16,17]), x.shape=(dim,17)
-    cache_indices: (batch) 
+    cache_indices: (batch)  int32
         indicates the corresponding state index, 
         like so: conv_state = conv_states[cache_indices[batch_id]]
-    has_initial_state: (batch)
+    has_initial_state: (batch) bool
         indicates whether should the kernel take the current state as initial 
         state for the calculations
-    conv_states: (...,dim,width - 1)
+    conv_states: (...,dim,width - 1) itype
         updated inplace if provided
     activation: either None or "silu" or "swish"
 

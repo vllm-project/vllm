@@ -316,16 +316,16 @@ def selective_scan_fn(u,
     D: (dim,) 
     z: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
     dt_bias: (dim,) or (dim)
-    cu_seq_len: (batch)
+    cu_seq_len: (batch) int32
         Cumulative tokens along the last dimension, 
         sequence lengths are passed through cu_seq_len therefore are required 
         for variable lengths kernel activation.
         for example: cu_seq_len = torch.Tensor([10,15,16]) 
         then u.shape = (dim,16)
-    cache_indices: (batch)
+    cache_indices: (batch) int32
         A tensor with each cell is a correspondent 
         input and output ssm_state index
-    has_initial_state: (batch)
+    has_initial_state: (batch) bool
         A tensor populated with ones and zeros, 
         indicate if the ssm_state at the corresponding index should be 
         used as initial state. Not providing argument assumes 
