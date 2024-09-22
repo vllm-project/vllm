@@ -1,6 +1,6 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from typing import Optional, Union
+from typing import Iterable, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import SequenceData
@@ -342,6 +343,10 @@ class BlipVisionModel(nn.Module):
                  num_hidden_layers_override: Optional[int] = None):
         super().__init__()
 
+        tp_size = get_tensor_model_parallel_world_size()
+        num_heads = config.num_attention_heads
+        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
+
         self.config = config
 
         self.embeddings = BlipVisionEmbeddings(config)
@@ -350,11 +355,61 @@ class BlipVisionModel(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-        self.post_layernorm = nn.LayerNorm(config.hidden_size,
-                                           eps=config.layer_norm_eps)
+
+        if len(self.encoder.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {config.num_hidden_layers} "
+                f"layers, but you requested {len(self.encoder.layers)} layers."
+            )
+        elif len(self.encoder.layers) == config.num_hidden_layers:
+            self.post_layernorm = nn.LayerNorm(config.hidden_size,
+                                               eps=config.layer_norm_eps)
+        else:
+            # post_layernorm is unused when we extract intermediate features
+            # In this case, we can skip it to conserve memory
+            self.post_layernorm = None
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.encoder(inputs_embeds=hidden_states)
 
+        if self.post_layernorm is None:
+            return hidden_states
+
         return self.post_layernorm(hidden_states)
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ] if self.shard_weight else []
+        params_dict = dict(self.named_parameters())
+        layer_count = len(self.encoder.layers)
+
+        for name, loaded_weight in weights:
+            # post_layernorm is not needed in BlipVisionModel
+            if (name.startswith("post_layernorm")
+                    and self.post_layernorm is None):
+                continue
+
+            # omit layers when num_hidden_layers_override is set
+            if name.startswith("encoder.layers"):
+                layer_idx = int(name.split(".")[2])
+                if layer_idx >= layer_count:
+                    continue
+
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+
+                param = params_dict[name.replace(weight_name, param_name)]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
