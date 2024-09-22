@@ -264,6 +264,7 @@ run_serving_tests() {
           --result-dir $RESULTS_FOLDER \
           --result-filename ${new_test_name}.json \
           --request-rate $qps \
+          --ignore-eos \
           $client_args"
 
       else
