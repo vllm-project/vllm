@@ -1,7 +1,6 @@
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 
-import itertools
 import math
 from array import array
 from functools import lru_cache
@@ -29,7 +28,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.utils import (filter_weights, flatten_bn,
+from vllm.model_executor.models.utils import (flatten_bn,
+                                              group_weights_with_prefix,
                                               init_vllm_registered_model,
                                               merge_multimodal_embeddings)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -77,15 +77,11 @@ def get_ultravox_max_audio_tokens(ctx: InputContext):
     return math.ceil(feature_extractor.chunk_length * _AUDIO_TOKENS_PER_SECOND)
 
 
-def dummy_data_for_ultravox(
+def dummy_seq_data_for_ultravox(
     ctx: InputContext,
     seq_len: int,
-    mm_counts: Mapping[str, int],
+    audio_count: int,
 ):
-    feature_extractor = whisper_feature_extractor(ctx)
-
-    audio_count = mm_counts["audio"]
-
     audio_placeholder = array(
         VLLM_TOKEN_ID_ARRAY_TYPE,
         [_AUDIO_PLACEHOLDER_TOKEN]) * get_ultravox_max_audio_tokens(ctx)
@@ -96,10 +92,28 @@ def dummy_data_for_ultravox(
     other_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                             [0]) * (seq_len - len(audio_token_ids))
 
-    audio_and_sr = (np.array([0.0] * feature_extractor.chunk_length), 1)
-    mm_dict = {"audio": [audio_and_sr] * audio_count}
+    return SequenceData(audio_token_ids + other_token_ids)
 
-    return (SequenceData(audio_token_ids + other_token_ids), mm_dict)
+
+def dummy_audio_for_ultravox(
+    ctx: InputContext,
+    audio_count: int,
+):
+    feature_extractor = whisper_feature_extractor(ctx)
+    audio_and_sr = (np.array([0.0] * feature_extractor.chunk_length), 1)
+    return {"audio": [audio_and_sr] * audio_count}
+
+
+def dummy_data_for_ultravox(
+    ctx: InputContext,
+    seq_len: int,
+    mm_counts: Mapping[str, int],
+):
+    audio_count = mm_counts["audio"]
+    seq_data = dummy_seq_data_for_ultravox(ctx, seq_len, audio_count)
+    mm_dict = dummy_audio_for_ultravox(ctx, audio_count)
+
+    return (seq_data, mm_dict)
 
 
 def input_mapper_for_ultravox(ctx: InputContext, data: object):
@@ -453,11 +467,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
-        projector_weights, llm_weights = itertools.tee(weights, 2)
+        weights_group = group_weights_with_prefix(weights)
 
         # load projector weights
-        projector_weights = filter_weights(projector_weights,
-                                           "multi_modal_projector")
+        projector_weights = weights_group["multi_modal_projector"]
         projector_params_dict = dict(
             self.multi_modal_projector.named_parameters())
         for name, loaded_weight in projector_weights:
@@ -467,5 +480,4 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
             weight_loader(param, loaded_weight)
 
         # load llm backbone
-        llm_weights = filter_weights(llm_weights, "language_model")
-        self.language_model.load_weights(llm_weights)
+        self.language_model.load_weights(weights_group["language_model"])

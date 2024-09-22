@@ -1,4 +1,3 @@
-import itertools
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -30,8 +29,8 @@ from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+from .utils import (flatten_bn, group_weights_with_prefix,
+                    init_vllm_registered_model, merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -82,17 +81,19 @@ def _get_llava_next_num_unpadded_features(
     current_height = npatches * num_patch_height
     current_width = npatches * num_patch_width
 
-    aspect_ratio = original_width / original_height
+    original_aspect_ratio = original_width / original_height
     current_aspect_ratio = current_width / current_height
 
-    if aspect_ratio > current_aspect_ratio:
-        new_height = (original_height * current_width) // original_width
+    if original_aspect_ratio > current_aspect_ratio:
+        scale_factor = current_width / original_width
+        new_height = int(original_height * scale_factor)
         padding = (current_height - new_height) // 2
-        current_height -= padding * 2
+        current_height -= 2 * padding
     else:
-        new_width = (original_width * current_height) // original_height
+        scale_factor = current_height / original_height
+        new_width = int(original_width * scale_factor)
         padding = (current_width - new_width) // 2
-        current_width -= padding * 2
+        current_width -= 2 * padding
 
     unpadded_features = current_height * current_width
     newline_features = current_height
@@ -630,29 +631,21 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
-        (
-            vit_weights,
-            mlp_weights,
-            newline_weights,
-            llm_weights,
-        ) = itertools.tee(weights, 4)
+        weights_group = group_weights_with_prefix(weights)
 
         # load vision encoder
-        vit_weights = filter_weights(vit_weights, "vision_tower")
-        self.vision_tower.load_weights(vit_weights)
+        self.vision_tower.load_weights(weights_group["vision_tower"])
 
         # load mlp projector
-        mlp_weights = filter_weights(mlp_weights, "multi_modal_projector")
         mlp_params_dict = dict(self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in mlp_weights:
+        for name, loaded_weight in weights_group["multi_modal_projector"]:
             param = mlp_params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
 
         # load newline
-        newline_weights = filter_weights(newline_weights, "image_newline")
-        for name, loaded_weight in newline_weights:
+        for name, loaded_weight in weights_group["image_newline"]:
             assert name == ""
             param = self.image_newline
             weight_loader = getattr(param, "weight_loader",
@@ -660,5 +653,4 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
             weight_loader(param, loaded_weight)
 
         # load llm backbone
-        llm_weights = filter_weights(llm_weights, "language_model")
-        self.language_model.load_weights(llm_weights)
+        self.language_model.load_weights(weights_group["language_model"])

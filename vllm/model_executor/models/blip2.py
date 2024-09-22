@@ -1,5 +1,4 @@
 import itertools
-from array import array
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -17,8 +16,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceData
 
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
@@ -424,11 +422,10 @@ def dummy_seq_data_for_blip2(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * image_feature_size * num_images
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceData.from_token_counts(
+        (image_token_id, image_feature_size * num_images),
+        (0, seq_len - image_feature_size * num_images),
+    )
 
 
 def dummy_data_for_blip2(ctx: InputContext, seq_len: int,

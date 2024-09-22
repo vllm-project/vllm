@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import openai
+import pytest
 import requests
 from openai.types.completion import Completion
 from transformers import AutoTokenizer
@@ -22,7 +23,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
+from vllm.utils import (FlexibleArgumentParser, cuda_device_count_stateless,
+                        get_open_port, is_hip)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -117,7 +119,7 @@ class RemoteOpenAIServer:
     def __exit__(self, exc_type, exc_value, traceback):
         self.proc.terminate()
         try:
-            self.proc.wait(3)
+            self.proc.wait(8)
         except subprocess.TimeoutExpired:
             # force kill if needed
             self.proc.kill()
@@ -452,6 +454,22 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
+def multi_gpu_test(*, num_gpus: int):
+    """
+    Decorate a test to be run only when multiple GPUs are available.
+    """
+    test_selector = getattr(pytest.mark, f"distributed_{num_gpus}_gpus")
+    test_skipif = pytest.mark.skipif(
+        cuda_device_count_stateless() < num_gpus,
+        reason=f"Need at least {num_gpus} GPUs to run the test.",
+    )
+
+    def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
+        return test_selector(test_skipif(fork_new_process_for_each_test(f)))
+
+    return wrapper
+
+
 async def completions_with_server_args(
     prompts: List[str],
     model_name: str,
@@ -475,6 +493,7 @@ async def completions_with_server_args(
     '''
 
     outputs = None
+    max_wait_seconds = 240 * 3  # 240 is default
     with RemoteOpenAIServer(model_name,
                             server_cli_args,
                             max_wait_seconds=max_wait_seconds) as server:
@@ -485,7 +504,7 @@ async def completions_with_server_args(
                                                   stream=False,
                                                   max_tokens=5,
                                                   logprobs=num_logprobs)
-    assert outputs is not None
+    assert outputs is not None, "Completion API call failed."
 
     return outputs
 
