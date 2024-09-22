@@ -1,12 +1,10 @@
 import argparse
 import json
-import math
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from tabulate import tabulate
-import numpy as np
 
 
 def parse_arguments():
@@ -25,12 +23,12 @@ def parse_arguments():
     args = parser.parse_args()
     return args
 
-    
+
 def get_perf(df, method, model, metric):
-    
+
     means = []
-    
-    for qps in [2,4,8,16,"inf"]:
+
+    for qps in [2, 4, 8, 16, "inf"]:
         target = df['Test name'].str.contains(model)
         target = target & df['Engine'].str.contains(method)
         target = target & df['Test name'].str.contains("qps_" + str(qps))
@@ -43,8 +41,9 @@ def get_perf(df, method, model, metric):
 
     return np.array(means)
 
+
 def get_perf_w_std(df, method, model, metric):
-    
+
     if metric in ["TTFT", "ITL"]:
         mean = get_perf(df, method, model, "Mean " + metric + " (ms)")
         mean = mean.tolist()
@@ -58,7 +57,8 @@ def get_perf_w_std(df, method, model, metric):
 
     else:
         assert metric == "Tput"
-        mean = get_perf(df, method, model, "Input Tput (tok/s)") + get_perf(df, method, model, "Output Tput (tok/s)")
+        mean = get_perf(df, method, model, "Input Tput (tok/s)") + get_perf(
+            df, method, model, "Output Tput (tok/s)")
         mean = mean.tolist()
         std = None
 
@@ -88,6 +88,7 @@ def main(args):
 
     with open("nightly_results.md", "w") as f:
         f.write(description)
+
 
 if __name__ == '__main__':
     args = parse_arguments()
