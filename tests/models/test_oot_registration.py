@@ -29,3 +29,23 @@ def test_oot_registration(dummy_opt_path):
         # make sure only the first token is generated
         rest = generated_text.replace(first_token, "")
         assert rest == ""
+
+
+@fork_new_process_for_each_test
+def test_oot_mutlimodal_registration(dummy_phi3v_path):
+    os.environ["VLLM_PLUGINS"] = "register_dummy_model"
+    prompts = ["Hello, my name is", "The text does not matter"]
+    sampling_params = SamplingParams(temperature=0)
+    llm = LLM(model=dummy_phi3v_path,
+              load_format="dummy",
+              max_num_seqs=1,
+              trust_remote_code=True,
+              limit_mm_per_prompt={"image": 2})
+    first_token = llm.get_tokenizer().decode(0)
+    outputs = llm.generate(prompts, sampling_params)
+
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        # make sure only the first token is generated
+        rest = generated_text.replace(first_token, "")
+        assert rest == ""
