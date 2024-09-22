@@ -35,7 +35,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_outpu
+    output_ids, output_str, out_logprobs = vllm_output
 
     config = AutoConfig.from_pretrained(model)
     image_token_id = config.image_token_index
@@ -181,6 +181,10 @@ def _run_test(
     def process(hf_inputs: BatchEncoding):
         return hf_inputs
 
+    from transformers import AutoConfig
+    from transformers.models.mllama import MllamaConfig as MllamaConfigHf
+    # use transformer's MllamaConfig for hf_runner and vllm's MllamaConfig for vllm_runner
+    AutoConfig.register("mllama", MllamaConfigHf, exist_ok=True)
     with hf_runner(model,
                    dtype=dtype,
                    postprocess_inputs=process,
@@ -193,6 +197,8 @@ def _run_test(
             for prompts, images in inputs
         ]
 
+    from vllm.transformers_utils.configs.mllama import MllamaConfig
+    AutoConfig.register("mllama", MllamaConfig, exist_ok=True)
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
         # TODO: Check whether using original CLIPVisionModel can improve

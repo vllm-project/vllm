@@ -583,9 +583,7 @@ class ModelConfig:
     @property
     def is_encoder_decoder_model(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
-        if self.hf_config.model_type == "mllama":
-            return True
-        return getattr(self.hf_config, "is_encoder_decoder", False)
+        return getattr(self.hf_config, "is_encoder_decoder", False) or ((hasattr(self.hf_config, "text_config") and getattr(self.hf_config.text_config, "is_encoder_decoder", False)))
 
     @property
     def is_embedding_model(self) -> bool:
@@ -1628,12 +1626,6 @@ def _get_and_verify_dtype(
                         "For Gemma 2, we downcast float32 to bfloat16 instead "
                         "of float16 by default. Please specify `dtype` if you "
                         "want to use float16.")
-                    torch_dtype = torch.bfloat16
-                if config.model_type == "mllama_text_model":
-                    # the config is MllamaConfig.text_config
-                    logger.info(
-                        "Some llama vision models lack default dtype. Hardcode to bfloat16."
-                    )
                     torch_dtype = torch.bfloat16
                 else:
                     # Following the common practice, we use float16 for float32
