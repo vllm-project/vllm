@@ -117,6 +117,7 @@ _MODELS = {
 # Architecture -> type.
 # out of tree models
 _OOT_MODELS: Dict[str, Type[nn.Module]] = {}
+_OOT_MULTIMODAL_MODELS: Dict[str, Type[nn.Module]] = {}
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: List[str] = []
@@ -189,12 +190,21 @@ class ModelRegistry:
         return list(_MODELS.keys()) + list(_OOT_MODELS.keys())
 
     @staticmethod
-    def register_model(model_arch: str, model_cls: Type[nn.Module]):
+    def register_model(model_arch: str,
+                       model_cls: Type[nn.Module],
+                       is_multimodal: bool = False):
         if model_arch in _MODELS:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
                 "overwritten by the new model class %s.", model_arch,
                 model_cls.__name__)
+
+        # NOTE: This is needed to store the information if the OOT model is
+        # an multimodal model.
+        if is_multimodal:
+            global _OOT_MULTIMODAL_MODELS
+            _OOT_MULTIMODAL_MODELS[model_arch] = model_cls
+
         global _OOT_MODELS
         _OOT_MODELS[model_arch] = model_cls
 
@@ -209,7 +219,8 @@ class ModelRegistry:
         # use `supports_multimodal` to determine if a model is multimodal
         # model_cls = ModelRegistry._try_load_model_cls(model_arch)
         # from vllm.model_executor.models.interfaces import supports_multimodal
-        return model_arch in _MULTIMODAL_MODELS
+        return (model_arch in _MULTIMODAL_MODELS
+                or model_arch in _OOT_MULTIMODAL_MODELS)
 
 
 __all__ = [
