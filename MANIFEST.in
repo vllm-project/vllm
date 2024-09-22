@@ -6,8 +6,5 @@ include requirements-neuron.txt
 include requirements-cpu.txt
 include CMakeLists.txt
 
-# Include Python files in specific directories
-include vllm/vllm_flash_attn/*.py
-
 recursive-include cmake *
 recursive-include csrc *
