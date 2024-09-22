@@ -1,4 +1,3 @@
-import itertools
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -21,7 +20,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsMultiModal
-from .utils import (filter_weights, init_vllm_registered_model,
+from .utils import (group_weights_with_prefix, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 # We use this internally as placeholders since there is no image token
@@ -672,21 +671,13 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
-        (
-            vit_weights,
-            query_weights,
-            qformer_weights,
-            mlp_weights,
-            llm_weights,
-        ) = itertools.tee(weights, 5)
+        weights_group = group_weights_with_prefix(weights)
 
         # load vision encoder
-        vit_weights = filter_weights(vit_weights, "vision_model")
-        self.vision_model.load_weights(vit_weights)
+        self.vision_model.load_weights(weights_group["vision_model"])
 
         # load query tokens
-        query_weights = filter_weights(query_weights, "query_tokens")
-        for name, loaded_weight in query_weights:
+        for name, loaded_weight in weights_group["query_tokens"]:
             assert name == ""
             param = self.query_tokens
             weight_loader = getattr(param, "weight_loader",
@@ -694,23 +685,20 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             weight_loader(param, loaded_weight)
 
         # load qformer
-        qformer_weights = filter_weights(qformer_weights, "qformer")
         qformer_params_dict = dict(self.qformer.named_parameters())
-        for name, loaded_weight in qformer_weights:
+        for name, loaded_weight in weights_group["qformer"]:
             param = qformer_params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
 
         # load mlp projector
-        mlp_weights = filter_weights(mlp_weights, "language_projection")
         mlp_params_dict = dict(self.language_projection.named_parameters())
-        for name, loaded_weight in mlp_weights:
+        for name, loaded_weight in weights_group["language_projection"]:
             param = mlp_params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
 
         # load llm backbone
-        llm_weights = filter_weights(llm_weights, "language_model")
-        self.language_model.load_weights(llm_weights)
+        self.language_model.load_weights(weights_group["language_model"])
