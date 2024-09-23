@@ -14,11 +14,9 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.logger import init_logger
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -37,8 +35,6 @@ from .siglip import (SiglipVisionModel, dummy_seq_data_for_siglip,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
 from .utils import (flatten_bn, group_weights_with_prefix,
                     init_vllm_registered_model, merge_multimodal_embeddings)
-
-logger = init_logger(__name__)
 
 # Result in the max possible feature size (2x2 grid of 336x336px tiles)
 MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
@@ -253,7 +249,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
 
 
 def input_processor_when_multimodal_input_image(ctx: InputContext,
-                                                llm_inputs: LLMInputs):
+                                                llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -309,7 +305,7 @@ def input_processor_when_multimodal_input_image(ctx: InputContext,
 
 
 def input_processor_when_multimodal_input_video(ctx: InputContext,
-                                                llm_inputs: LLMInputs):
+                                                llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "video" not in multi_modal_data:
         return llm_inputs
@@ -333,9 +329,9 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
             repeat_count=video_feature_size,
         )
 
-        return LLMInputs(prompt_token_ids=new_token_ids,
-                         prompt=new_prompt,
-                         multi_modal_data=multi_modal_data)
+        return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
+                                 prompt=new_prompt,
+                                 multi_modal_data=multi_modal_data)
 
     elif is_list_of(video_data, np.ndarray):
         raise NotImplementedError(
@@ -346,7 +342,7 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
 
 
 def input_processor_for_llava_onevision(ctx: InputContext,
-                                        llm_inputs: LLMInputs):
+                                        llm_inputs: DecoderOnlyInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or ("video" not in multi_modal_data
                                     and "image" not in multi_modal_data):
