@@ -132,9 +132,20 @@ def run_vllm(
                 max_tokens=output_len,
             ))
 
-    start = time.perf_counter()
-    llm.generate(prompts, sampling_params, use_tqdm=True)
-    end = time.perf_counter()
+    use_new_beam_search = False
+
+    if not use_new_beam_search:
+        start = time.perf_counter()
+        llm.generate(prompts, sampling_params, use_tqdm=True)
+        end = time.perf_counter()
+    else:
+        assert use_beam_search
+        prompts = [prompt for prompt, _, _ in requests]
+        # output_len should be the same for all requests.
+        output_len = requests[0][2]
+        start = time.perf_counter()
+        llm.beam_search(prompts, beam_width=n, max_tokens=output_len)
+        end = time.perf_counter()
     return end - start
 
 
