@@ -3,7 +3,7 @@ from enum import Enum
 from typing import List, Mapping, Optional, Union
 
 from vllm import PoolingParams
-from vllm.inputs import PromptInputs
+from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -23,7 +23,7 @@ class MQEngineDeadError(RuntimeError):
 
 @dataclass
 class RPCProcessRequest:
-    inputs: PromptInputs
+    prompt: PromptType
     params: Union[SamplingParams, PoolingParams]
     request_id: str
     lora_request: Optional[LoRARequest] = None
