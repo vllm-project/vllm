@@ -360,6 +360,7 @@ _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
+MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
 
 def _parse_chat_message_content_parts(
@@ -370,6 +371,37 @@ def _parse_chat_message_content_parts(
     texts: List[str] = []
 
     mm_parser = mm_tracker.create_parser()
+    keep_multimodal_content = \
+        mm_tracker._model_config.hf_config.model_type in \
+            MODEL_KEEP_MULTI_MODAL_CONTENT
+
+    if keep_multimodal_content:
+        is_image = False
+        for part in parts:
+            part_type = part["type"]
+            if part_type == "text":
+                text = _TextParser(part)["text"]
+                texts.append(text)
+            elif part_type == "image_url":
+                image_url = _ImageParser(part)["image_url"]
+
+                if image_url.get("detail", "auto") != "auto":
+                    logger.warning(
+                        "'image_url.detail' is currently not supported and "
+                        "will be ignored.")
+
+                mm_parser.parse_image(image_url["url"])
+                is_image = True
+            else:
+                raise NotImplementedError(f"Unknown part type: {part_type}")
+
+        text_prompt = "\n".join(texts)
+        role_content = [{'type': 'text', 'text': text_prompt}]
+
+        if is_image:
+            role_content = [{'type': 'image'}] + role_content
+        return [ConversationMessage(role=role,
+                                    content=role_content)]  # type: ignore
 
     for part in parts:
         part_type = part["type"]
