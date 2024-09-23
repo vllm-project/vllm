@@ -114,13 +114,10 @@ Just add the following lines in your code:
     from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
 
-If your model is a multimodal model, then indicate so by setting the :code:`is_multimodal` flag.
+.. important::
+    If your model is a multimodal model, make sure the model class is implemented with 
+    the :class:`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
 
-.. code-block:: python
-
-    from vllm import ModelRegistry
-    from your_code import YourModelForConditionalGeneration
-    ModelRegistry.register_model("YourModelForConditionalGeneration", YourModelForConditionalGeneration, is_multimodal=True)
 
 If you are running api server with :code:`vllm serve <args>`, you can wrap the entrypoint with the following code:
 
