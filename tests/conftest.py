@@ -858,15 +858,16 @@ def num_gpus_available():
 
 
 temp_dir = tempfile.gettempdir()
-_dummy_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_phi3v_path = os.path.join(temp_dir, "dummy_phi3v")
 
 
 @pytest.fixture
 def dummy_opt_path():
-    json_path = os.path.join(_dummy_path, "config.json")
-    if not os.path.exists(_dummy_path):
+    json_path = os.path.join(_dummy_opt_path, "config.json")
+    if not os.path.exists(_dummy_opt_path):
         snapshot_download(repo_id="facebook/opt-125m",
-                          local_dir=_dummy_path,
+                          local_dir=_dummy_opt_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
                               "*.msgpack"
@@ -877,15 +878,15 @@ def dummy_opt_path():
         config["architectures"] = ["MyOPTForCausalLM"]
         with open(json_path, "w") as f:
             json.dump(config, f)
-    return _dummy_path
+    return _dummy_opt_path
 
 
 @pytest.fixture
 def dummy_phi3v_path():
-    json_path = os.path.join(_dummy_path, "config.json")
-    if not os.path.exists(_dummy_path):
+    json_path = os.path.join(_dummy_phi3v_path, "config.json")
+    if not os.path.exists(_dummy_phi3v_path):
         snapshot_download(repo_id="microsoft/Phi-3-vision-128k-instruct",
-                          local_dir=_dummy_path,
+                          local_dir=_dummy_phi3v_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
                               "*.msgpack"
@@ -896,4 +897,4 @@ def dummy_phi3v_path():
         config["architectures"] = ["MyPhi3VForCausalLM"]
         with open(json_path, "w") as f:
             json.dump(config, f)
-    return _dummy_path
+    return _dummy_phi3v_path
