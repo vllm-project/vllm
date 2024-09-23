@@ -1,6 +1,6 @@
 import torch
 
-from .interface import Platform, PlatformEnum, DeviceCapability
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 
 class XPUPlatform(Platform):
