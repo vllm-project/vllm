@@ -107,7 +107,7 @@ class AttentionMetadata:
 
     # Number of original input tokens (without any decoding).
     # Some models (phi3-LongRoPE) need this info to decide model settings
-    num_orig_input_tokens_tensor: torch.Tensor
+    num_orig_input_tokens_tensor: Optional[torch.Tensor]
 
     @property
     @abstractmethod

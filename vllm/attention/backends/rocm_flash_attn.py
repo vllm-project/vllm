@@ -133,6 +133,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         assert self.context_lens_tensor is not None
         assert self.block_tables is not None
         assert self.seq_start_loc is not None
+        assert self.num_orig_input_tokens_tensor is not None
 
         self._cached_prefill_metadata = ROCmFlashAttentionMetadata(
             num_prefills=self.num_prefills,
@@ -163,6 +164,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             return self._cached_decode_metadata
         assert self.block_tables is not None
         assert self.seq_lens_tensor is not None
+        assert self.num_orig_input_tokens_tensor is not None
 
         self._cached_decode_metadata = ROCmFlashAttentionMetadata(
             num_prefills=0,
