@@ -1268,6 +1268,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                         lora_request=None):
         sampling_params = SamplingParams(temperature=0)
         num_blocks = math.ceil(seq_len / self.block_size)
+        seq_len = max(seq_len, 1)
         if is_prompt:
             input_len = seq_len
             output_len = 0
