@@ -390,6 +390,7 @@ class LLM:
         prompts: List[Union[str, List[int]]],
         beam_width: int,
         max_tokens: int,
+        ignore_eos: bool = False,
     ) -> List[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -453,7 +454,8 @@ class LLM:
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob)
 
-                            if token_id == tokenizer.eos_token_id:
+                            if token_id == tokenizer.eos_token_id and \
+                                not ignore_eos:
                                 instance.completed.append(new_beam)
                             else:
                                 instance_new_beams.append(new_beam)
