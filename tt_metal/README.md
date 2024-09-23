@@ -6,7 +6,29 @@ Git-checkout the following branches in each repo separately:
 
 ## Environment Creation
 
-To setup the tt-metal environment with vLLM, follow the instructions in `setup-metal.sh`
+**To create the vLLM+tt-metal environment (first time):**
+1. Set tt-metal environment variables (see INSTALLING.md in tt-metal repo)
+2. From the main vLLM directory, run:
+    ```sh
+    export vllm_dir=$(pwd)
+    source $vllm_dir/tt_metal/setup-metal.sh
+    ```
+3. From the main tt-metal directory, build and create the environment as usual:
+    ```sh
+    ./build_metal.sh && ./create_venv.sh
+    source $PYTHON_ENV_DIR/bin/activate
+    ```
+4. Install vLLM:
+    ```sh
+    pip3 install --upgrade pip
+    cd $vllm_dir && pip install -e .
+    ```
+
+**To activate the vLLM+tt-metal environment (after the first time):**
+1. Ensure `$vllm_dir` contains the path to vLLM and run:
+    ```sh
+    source $vllm_dir/tt_metal/setup-metal.sh && source $PYTHON_ENV_DIR/bin/activate
+    ```
 
 ## Accessing the Meta-Llama-3.1 Hugging Face Model
 
