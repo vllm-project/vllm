@@ -12,11 +12,11 @@ from vllm.outputs import (CompletionOutput, EmbeddingOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
-from .version import __commit__, __version__
+from .version import __version__, __version_tuple__
 
 __all__ = [
-    "__commit__",
     "__version__",
+    "__version_tuple__",
     "LLM",
     "ModelRegistry",
     "PromptType",
