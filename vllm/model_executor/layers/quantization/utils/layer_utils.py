@@ -21,7 +21,7 @@ def replace_parameter(mod: torch.nn.Module, name: str,
                       new: Union[torch.Tensor, torch.nn.Parameter]) -> None:
 
     old = getattr(mod, name)
-    if old.dtype == new.dtype  and \
+    if type(old) is type(new) and old.dtype == new.dtype and \
         old.untyped_storage().nbytes() == new.untyped_storage().nbytes():
         # If we can just update in-place to avoid re-registering
         #   can be faster if the underlying storage is the same
@@ -29,5 +29,6 @@ def replace_parameter(mod: torch.nn.Module, name: str,
     else:
         # Fallback re-register parameter
         if not isinstance(new, torch.nn.Parameter):
-            new = torch.nn.Parameter(new)
-        mod.register_parameter(name, torch.nn.Parameter(new))
+            new = torch.nn.Parameter(new, requires_grad=False)
+        mod.register_parameter(name,
+                               torch.nn.Parameter(new, requires_grad=False))

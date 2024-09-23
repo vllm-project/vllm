@@ -416,8 +416,8 @@ if hasattr(torch.ops._C, 'gptq_marlin_24_gemm'):
     @torch.library.register_fake("_C::machete_gemm")
     def machete_gemm_fake(
         a: torch.Tensor,
-        b_q: torch.
-        Tensor,  # Should be the tensor returned by machete_prepack_B
+        # Should be the tensor returned by machete_prepack_B
+        b_q: torch.Tensor,
         b_type: ScalarType,
         b_scales: Optional[torch.Tensor] = None,
         b_zeros: Optional[torch.Tensor] = None,
@@ -613,16 +613,12 @@ def machete_prepack_B(b_q_weight: torch.Tensor,
     return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
 
 
-# TODO: has to be a better way to do this
-try:
-    torch.ops._C.permute_cols  # noqa B018
+if hasattr(torch.ops._C, 'permute_cols'):
 
     @torch.library.register_fake("_C::permute_cols")
     def _permute_cols_fake(a: torch.Tensor,
                            perm: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(a)
-except Exception:
-    pass
 
 
 def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:

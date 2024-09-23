@@ -28,13 +28,13 @@ TEST_MODELS = [
 ]
 
 # TODO: enable in pytorch 2.5
-if False and is_quant_method_supported("aqlm"):
+if False and is_quant_method_supported("aqlm"):  # noqa: SIM223
     TEST_MODELS.append(("ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf", {
         "quantization": "aqlm"
     }))
 
 # TODO: enable in pytorch 2.5
-if False and is_quant_method_supported("gguf"):
+if False and is_quant_method_supported("gguf"):  # noqa: SIM223
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", {
         "quantization": "gguf"
     }))
@@ -85,7 +85,7 @@ def test_full_graph(model_info, tp_size, backend):
 
     # Inductor doesn't support fp8/gptq_marlin_24 yet.
     quantization = model_kwargs.get("quantization")
-    if (quantization == "fp8"
+    if (quantization == "fp8" or quantization == "gptq_marlin"
             or quantization == "gptq_marlin_24") and backend != "eager":
         return
 
