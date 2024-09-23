@@ -2,13 +2,13 @@ name: mypy
 
 on:
   # Trigger the workflow on push or pull request,
-  # but only for the habana_main branch
+  # but only for the main branch
   push:
     branches:
-      - habana_main
+      - main
   pull_request:
     branches:
-      - habana_main
+      - main
 
 jobs:
   ruff:
