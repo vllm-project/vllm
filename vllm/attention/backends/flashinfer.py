@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
-
+from os.path import commonprefix
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
@@ -352,6 +352,13 @@ class FlashInferMetadata(AttentionMetadata):
                 self.second_layer_kv_indptr = self.second_layer_kv_indptr.to(self.device)
                 self.second_layer_kv_last_page_len = self.second_layer_kv_last_page_len.to(self.device)
 
+                print("SECOND LAYER KV INDICES", self.second_layer_kv_indices)
+                print("SECOND LAYER KV INDPTR", self.second_layer_kv_indptr)
+                print("FIRST LAYER KV INDPTR", self.paged_kv_indptr)
+                print("FIRST LAYER INDICES", self.paged_kv_indices)
+                print("FIRST LAYER LAST LEN", self.paged_kv_last_page_len)
+                print("SECOND LAYER LAST LEN", self.second_layer_kv_last_page_len)
+                print("PREFILL")
                 self.prefill_wrapper.plan(
                     [self.query_start_loc, self.second_level_query_start_loc],
                     [self.paged_kv_indptr, self.second_layer_kv_indptr],
@@ -379,7 +386,12 @@ class FlashInferMetadata(AttentionMetadata):
                 self.block_table_bound = self.block_table_bound.to(self.device)
             if self.seq_lens_tensor is not None:
                 self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
-
+            print("SECOND LAYER KV INDICES", self.second_layer_kv_indices)
+            print("SECOND LAYER KV INDPTR", self.second_layer_kv_indptr)
+            print("FIRST LAYER KV INDPTR", self.paged_kv_indptr)
+            print("FIRST LAYER INDICES", self.paged_kv_indices)
+            print("FIRST LAYER LAST LEN", self.paged_kv_last_page_len)
+            print("SECOND LAYER LAST LEN", self.second_layer_kv_last_page_len)
             assert self.decode_wrapper is not None
 
             self.decode_wrapper.plan(
@@ -515,7 +527,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+            chunked_prefill_enabled: bool, common_prefix):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         2. block table.
@@ -573,26 +585,62 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 return
 
             block_table = block_tables[seq_id]
-            self._update_two_level_kv_tensors(block_table, seq_len)
+            self._update_two_level_kv_tensors(block_table, seq_len, common_prefix)
 
-    def _update_two_level_kv_tensors(self, block_table: List[int], seq_len:int):
-        self.total_blocks += len(block_table)
-        block_table_bound = seq_len // self.block_size + 1 \
+    def _update_two_level_kv_tensors(self, block_table: List[int], seq_len:int, common_prefix: List[int]):
+        self.total_blocks += (len(block_table)-len(common_prefix))
+        block_table_bound = (seq_len) // self.block_size + 1 \
                             if seq_len % self.block_size != 0 \
-                            else seq_len // self.block_size
-        self.second_layer_kv_indices.extend(block_table[:block_table_bound])
+                            else (seq_len) // self.block_size
+        self.second_layer_kv_indices.extend(block_table[len(common_prefix):block_table_bound])
         self.second_layer_kv_indptr.append(self.second_layer_kv_indptr[-1] +
-                                    block_table_bound)
-
-        last_page_len = seq_len % self.block_size
+                                    (block_table_bound-len(common_prefix)))
+        
+        print(seq_len)
+        last_page_len = (seq_len) % self.block_size
         if last_page_len == 0:
             last_page_len = self.block_size
         self.second_layer_kv_last_page_len.append(last_page_len)
 
         # Set to 0 since we are not emulating beam search yet.
-        self.paged_kv_last_page_len.append(0)
-        self.paged_kv_indptr.append(self.paged_kv_indptr[-1])
+        # self.paged_kv_last_page_len.append(self.block_size)
+        # self.paged_kv_indptr.append(self.paged_kv_indptr[-1])
 
+    def get_shared_blocks_nums(self, inter_data_list):
+        block_id_lists = [
+            list(data.block_tables.values())
+            for data in inter_data_list
+            if data.block_tables
+        ]
+        flattened_lists = [item for sublist in block_id_lists for item in sublist]
+        if len(flattened_lists) == 1:
+            return []
+        
+        common_prefix = commonprefix(flattened_lists)
+
+        for i in range(1, len(common_prefix)):
+            if common_prefix[i] != common_prefix[i-1] + 1:
+                return common_prefix[:i]
+        return common_prefix
+    
+    def _update_shared_kv_tensors(self, common_prefix, batch_size):
+        print("LEN BATCHSIZE", batch_size)
+        self.total_blocks += len(common_prefix)
+        print("COMMON PRE", common_prefix)
+        if len(common_prefix) == 0:
+            for _ in range(batch_size):
+                self.paged_kv_indices.append(0)
+                self.paged_kv_indptr.append(self.paged_kv_indptr[-1])
+                self.paged_kv_last_page_len.append(0)
+        else:
+            self.paged_kv_indices.extend(common_prefix)
+
+            self.paged_kv_indptr.append(self.paged_kv_indptr[-1] + len(common_prefix))
+
+            self.paged_kv_last_page_len.append(16)
+            # self.paged_kv_indptr.append(self.paged_kv_indptr[-1])
+            # self.paged_kv_last_page_len.append(self.block_size)
+    
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
@@ -604,9 +652,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
         """
+        common_prefix = self.get_shared_blocks_nums(self.input_builder.inter_data_list)
+
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
-                                self.input_builder.chunked_prefill_enabled)
+                                self.input_builder.chunked_prefill_enabled, common_prefix)
+        
+        self._update_shared_kv_tensors(common_prefix, len(self.input_builder.inter_data_list))
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
@@ -673,20 +725,32 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
+        
+        # torch.cumsum(query_lens_tensor,
+        #              dim=0,
+        #              dtype=query_start_loc.dtype,
+        #              out=query_start_loc[1:])
+        
         torch.cumsum(query_lens_tensor,
                 dim=0,
                 dtype=query_start_loc.dtype,
                 out=second_level_query_start_loc[1:])
+        
+        if len(common_prefix) == 0:
+            torch.cumsum(query_lens_tensor,
+                        dim=0,
+                        dtype=query_start_loc.dtype,
+                        out=query_start_loc[1:])
+        else:
+            query_start_loc = torch.tensor([0, second_level_query_start_loc[-1]], dtype=torch.int32, device=device)
 
+        print("QUERY FIRST LAYER", query_start_loc)
+        print("QUERY SECOND LAYER", second_level_query_start_loc)
         if len(self.paged_kv_indptr) > 0:
             # extend to the maximum number of blocks as returned by the
             # scheduler
-            self.paged_kv_indices.extend(
-                [0] * (self.total_blocks - len(self.paged_kv_indices)))
+            # self.paged_kv_indices.extend(
+            #     [0] * (self.total_blocks - len(self.paged_kv_indices)))
             paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
                                                    device="cpu",
                                                    dtype=torch.int)
