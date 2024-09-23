@@ -44,7 +44,6 @@ except Exception:
 
 is_hpu = False
 try:
-    import os
     from importlib import util
     is_hpu = util.find_spec('habana_frameworks') is not None
 
