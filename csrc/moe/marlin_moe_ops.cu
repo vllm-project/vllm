@@ -1749,6 +1749,9 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
                                 has_act_order, is_k_full, max_shared_mem);
   }
 
+  int group_tensor_size =
+      (!is_k_full && has_act_order) ? prob_k / num_groups : group_size;
+
   TORCH_CHECK(exec_cfg.max_m_blocks > 0 &&
                   is_valid_config(exec_cfg.tb_cfg, exec_cfg.max_m_blocks,
                                   prob_m, prob_n, prob_k, num_bits, group_size,
@@ -1826,10 +1829,10 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
     const int* sorted_ids_ptr = (const int*)sorted_ids;
     const int4* s_ptr =
         (const int4*)s +
-        (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) *
-         prob_n / 8) *
+        ((group_tensor_size == -1 ? 1 : prob_k / group_tensor_size) * prob_n /
+         8) *
             expert_idx;
-    const int* g_idx_ptr = (const int*)g_idx + prob_m * expert_idx;
+    const int* g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
     const int* perm_ptr = (const int*)perm + prob_k * expert_idx;
     int* locks = (int*)workspace;
 
