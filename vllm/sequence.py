@@ -506,11 +506,9 @@ class Sequence:
         if not delta:
             return self.get_output_token_ids()
 
-        prompt_len = self.get_prompt_len()
         output_len = self.get_output_len()
 
         # Get the number of new tokens
-        output_last_offset = self._last_output_token_ids_offset
         num_new_tokens = output_len - self._last_output_token_ids_offset
         self._last_output_token_ids_offset = output_len
 
@@ -519,9 +517,8 @@ class Sequence:
             # Optimization for single decode token case
             # (which is what we have most of the time)
             return self.data._cached_all_token_ids[-1]
-        else:
-            return self.data._cached_all_token_ids[prompt_len +
-                                                   output_last_offset:]
+
+        return self.data._cached_all_token_ids[-num_new_tokens:]
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
