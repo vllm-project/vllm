@@ -757,7 +757,7 @@ def is_pin_memory_available() -> bool:
     return True
 
 
-class CudaMemoryProfiler:
+class DeviceMemoryProfiler:
 
     def __init__(self, device: Optional[torch.types.Device] = None):
         self.device = device
@@ -1243,6 +1243,12 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 def supports_dynamo() -> bool:
     base_torch_version = Version(Version(torch.__version__).base_version)
     return base_torch_version >= Version("2.4.0")
+
+
+# Some backends use pytorch version < 2.4.0 which doesn't
+# support `torch.library.custom_op`.
+def supports_custom_op() -> bool:
+    return hasattr(torch.library, "custom_op")
 
 
 class AtomicCounter:
