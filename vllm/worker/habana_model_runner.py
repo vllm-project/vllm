@@ -1295,7 +1295,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         max_seq_len = min(self.prompt_seq_bucket_cfg[-1],
                           self.max_num_batched_tokens // max_batch_size)
 
-        self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches)
+        self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches,
+                             False, True)
         return
 
     def warmup_scenario(self,
@@ -1303,7 +1304,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         seq_len,
                         is_prompt,
                         kv_caches,
-                        is_profile_run=False) -> None:
+                        is_pt_profiler_run=False,
+                        is_lora_profile_run=False) -> None:
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
         scenario_name = ("warmup_"
                          f"{'prompt' if is_prompt else 'decode'}_"
@@ -1317,7 +1319,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # passed in, which contains a lora from the lora warmup path.
         dummy_lora_requests: List[LoRARequest] = []
         dummy_lora_requests_per_seq: List[LoRARequest] = []
-        if self.lora_config and is_profile_run:
+        if self.lora_config and is_lora_profile_run:
             assert self.lora_manager is not None
             with self.lora_manager.dummy_lora_cache():
                 for idx in range(self.lora_config.max_loras):
@@ -1335,8 +1337,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     for idx in range(max_num_seqs)
                 ]
         self.profiler.start('internal', scenario_name)
-        times = 3 if use_graphs or is_profile_run else 1
-        if self.lora_config and not is_profile_run:
+        times = 3 if use_graphs or is_pt_profiler_run else 1
+        if self.lora_config and not is_lora_profile_run:
             lora_mapping = LoRAMapping(
                 [0] * batch_size * seq_len,
                 [0] * batch_size * seq_len,
@@ -1367,7 +1369,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             ]
         torch.hpu.synchronize()
         profiler = None
-        if is_profile_run and self.is_driver_worker:
+        if is_pt_profiler_run and self.is_driver_worker:
             profiler = setup_profiler()
             profiler.start()
         for _ in range(times):
