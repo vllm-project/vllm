@@ -12,6 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
@@ -153,6 +154,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        mrope_input_positions: List[List[int]] = []
+
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         multi_modal_inputs_list: List[MultiModalInputs] = []
@@ -179,6 +182,33 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             if (mm_data := seq_group_metadata.multi_modal_data):
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 multi_modal_inputs_list.append(mm_kwargs)
+                
+                # special processing for mrope position deltas.
+                if self.runner.model_is_mrope:
+                    image_grid_thw = mm_kwargs.get("image_grid_thw", None)
+                    video_grid_thw = mm_kwargs.get("video_grid_thw", None)
+                    assert image_grid_thw is not None or video_grid_thw is not None, (
+                        "mrope embedding type requires multi-modal input mapper "
+                        "returns 'image_grid_thw' or 'video_grid_thw'.")
+
+                    hf_config = self.runner.model_config.hf_config
+                    token_ids = seq_data.get_token_ids()
+
+                    mrope_positions, mrope_position_delta = \
+                        MRotaryEmbedding.get_input_positions(
+                            token_ids,
+                            image_grid_thw=image_grid_thw,
+                            video_grid_thw=video_grid_thw,
+                            image_token_id=hf_config.image_token_id,
+                            video_token_id=hf_config.video_token_id,
+                            vision_start_token_id=hf_config.vision_start_token_id,
+                            vision_end_token_id=hf_config.vision_end_token_id,
+                            spatial_merge_size=hf_config.vision_config.
+                            spatial_merge_size,
+                            context_len=computed_len,
+                        )
+                    seq_data.mrope_position_delta = mrope_position_delta
+                    mrope_input_positions.extend(mrope_positions)
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
@@ -201,6 +231,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 block_offset = i % self.block_size  # type: ignore
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
+
+        if mrope_input_positions:
+            input_positions = mrope_input_positions
 
         num_prompt_tokens = len(input_tokens)
 
@@ -431,6 +464,15 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
                                    virtual_engine=virtual_engine)
+
+    @property
+    def model_is_mrope(self) -> bool:
+        """Detect if the model has "mrope" rope_scaling type.
+        mrope requires keep "rope_deltas" between prompt and decoding phases."""
+        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
+        if rope_scaling is None:
+            return False
+        return rope_scaling.get("type", None) == "mrope"
 
     @torch.no_grad()
     def execute_model(
