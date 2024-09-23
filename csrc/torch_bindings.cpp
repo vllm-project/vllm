@@ -244,6 +244,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int size_k) -> Tensor");
   ops.impl("marlin_qqq_gemm", torch::kCUDA, &marlin_qqq_gemm);
 
+  // Quant_LLM kernel for quantization to custom
+  // irregular bit-widths.
+  ops.def(
+      "fp_eXmY_linear_forward_cuda(int EXPONENT, int MANTISSA,"
+      "                            Tensor _in_feats, Tensor _weights,"
+      "                            Tensor _scales, int splitK=1) -> Tensor");
+  ops.impl("fp_eXmY_linear_forward_cuda", torch::kCUDA,
+           &fp_eXmY_linear_forward_cuda);
+
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
   ops.def(
