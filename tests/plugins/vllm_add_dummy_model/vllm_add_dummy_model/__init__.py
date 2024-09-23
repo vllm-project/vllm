@@ -50,5 +50,4 @@ def register():
 
     # register our dummy multimodal model
     if "MyPhi3VForCausalLM" not in ModelRegistry.get_supported_archs():
-        ModelRegistry.register_model("MyPhi3VForCausalLM",
-                                     MyPhi3VForCausalLM)
+        ModelRegistry.register_model("MyPhi3VForCausalLM", MyPhi3VForCausalLM)
