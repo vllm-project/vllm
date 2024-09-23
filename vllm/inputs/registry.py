@@ -158,6 +158,10 @@ class InputRegistry:
 
         return wrapper
 
+    def _get_dummy_data_factory(self, model_cls: Type[nn.Module]):
+        return self._dummy_factories_by_model_type \
+            .get(model_cls, self._default_dummy_data_factory)
+
     def dummy_data_for_profiling(
         self,
         model_config: "ModelConfig",
@@ -180,10 +184,9 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        dummy_factory = self._dummy_factories_by_model_type \
-            .get(model_cls, self._default_dummy_data_factory)
-        mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
+        dummy_factory = self._get_dummy_data_factory(model_cls)
 
+        mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
         mm_processor_kwargs = get_allowed_kwarg_only_overrides(
             dummy_factory, overrides=model_config.mm_processor_kwargs)
 
@@ -236,6 +239,10 @@ class InputRegistry:
 
         return wrapper
 
+    def _get_model_input_processor(self, model_cls: Type[nn.Module]):
+        return self._input_processors_by_model_type \
+            .get(model_cls, self._default_input_processor)
+
     def process_input(self, model_config: "ModelConfig",
                       inputs: LLMInputs) -> LLMInputs:
         """
@@ -250,9 +257,7 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-
-        processor = self._input_processors_by_model_type \
-            .get(model_cls, self._default_input_processor)
+        processor = self._get_model_input_processor(model_cls)
 
         mm_processor_kwargs = get_allowed_kwarg_only_overrides(
             processor, overrides=model_config.mm_processor_kwargs)
