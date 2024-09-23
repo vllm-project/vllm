@@ -21,6 +21,8 @@ import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import torch
 from vllm_hpu_extension.ops import LoraMask as LoraMask
+from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
+                                         HabanaMemoryProfiler, format_bytes)
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
@@ -39,16 +41,14 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (HabanaMemoryProfiler, format_bytes, is_fake_hpu,
-                        is_pin_memory_available, make_tensor_with_pad)
+from vllm.utils import (is_fake_hpu, is_pin_memory_available,
+                        make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-
-from .profiler import Profiler
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -517,7 +517,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.prompt_adapter_config = prompt_adapter_config
         self.return_hidden_states = return_hidden_states
         self.observability_config = observability_config
-        self.profiler = Profiler()
+        self.profiler = HabanaHighLevelProfiler()
 
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
