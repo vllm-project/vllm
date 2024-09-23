@@ -52,10 +52,10 @@ class MultiModalInputs(_MultiModalInputsBase):
         """
         if isinstance(nested_tensors, torch.Tensor):
             return nested_tensors
-        
+
         if isinstance(nested_tensors, np.ndarray):
             return torch.from_numpy(nested_tensors)
-        
+
         if isinstance(nested_tensors, (int, float)):
             return torch.tensor(nested_tensors)
 

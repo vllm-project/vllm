@@ -12,7 +12,6 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.utils import FlexibleArgumentParser
 
-
 # Input image and question
 image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 question = "What is the content of this image?"

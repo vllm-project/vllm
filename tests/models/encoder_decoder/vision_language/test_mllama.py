@@ -6,12 +6,11 @@ from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
-from ...utils import check_logprobs_close
 from ....utils import multi_gpu_test
+from ...utils import check_logprobs_close
 
 _LIMIT_IMAGE_PER_PROMPT = 1
 
@@ -27,8 +26,9 @@ text_only_prompts = [
 ]
 
 models = [
-    "nltpt/Llama-3.2-11B-Vision-Instruct", # TODO: Update model path to huggingface model
+    "nltpt/Llama-3.2-11B-Vision-Instruct",
 ]
+# TODO: Update model path to huggingface model
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -113,11 +113,18 @@ def run_test(
         ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
     elif sizes is not None:
         inputs_per_image = [(
-            [prompt if size is not None else text_only_prompts[0] for size in sizes],
-            [image.resize(size) if size is not None else None for size in sizes],
+            [
+                prompt if size is not None else text_only_prompts[0]
+                for size in sizes
+            ],
+            [
+                image.resize(size) if size is not None else None
+                for size in sizes
+            ],
         ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
         if len(sizes) == 0:
-            inputs_per_image.append((text_only_prompts, [None] * len(text_only_prompts)))
+            inputs_per_image.append(
+                (text_only_prompts, [None] * len(text_only_prompts)))
     else:
         raise ValueError("You must provide either `size_factors` or `sizes`")
 
@@ -153,7 +160,6 @@ def _run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -177,13 +183,14 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-
     def process(hf_inputs: BatchEncoding):
         return hf_inputs
 
     from transformers import AutoConfig
     from transformers.models.mllama import MllamaConfig as MllamaConfigHf
-    # use transformer's MllamaConfig for hf_runner and vllm's MllamaConfig for vllm_runner
+
+    # use transformer's MllamaConfig for hf_runner
+    # and vllm's MllamaConfig for vllm_runner
     AutoConfig.register("mllama", MllamaConfigHf, exist_ok=True)
     with hf_runner(model,
                    dtype=dtype,
@@ -201,8 +208,6 @@ def _run_test(
     AutoConfig.register("mllama", MllamaConfig, exist_ok=True)
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
-        # TODO: Check whether using original CLIPVisionModel can improve
-        # consistency against HF
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
@@ -225,19 +230,20 @@ def _run_test(
         # Single-size, batched
         [(512, 512), (512, 512), (512, 512)],
         # Multi-size, batched
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), 
-         (512, 1024), (1024, 1024), (512, 1536), (512, 2028)],
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
+         (1024, 1024), (512, 1536), (512, 2028)],
         # Multi-size, batched, including text only
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), 
-         (512, 1024), (1024, 1024), (512, 1536), (512, 2028), None],
-        # mllama has 8 possible aspect ratios, carefully set the sizes to cover all of them
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
+         (1024, 1024), (512, 1536), (512, 2028), None],
+        # mllama has 8 possible aspect ratios, carefully set the sizes
+        # to cover all of them
     ],
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets, model, sizes,
-                dtype, max_tokens, num_logprobs) -> None:
+def test_models(hf_runner, vllm_runner, image_assets, model, sizes, dtype,
+                max_tokens, num_logprobs) -> None:
     run_test(
         hf_runner,
         vllm_runner,
@@ -256,15 +262,15 @@ def test_models(hf_runner, vllm_runner, image_assets, model, sizes,
 @pytest.mark.parametrize(
     "sizes",
     [
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), 
-         (512, 1024), (1024, 1024), (512, 1536), (512, 2028), None],
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
+         (1024, 1024), (512, 1536), (512, 2028), None],
     ],
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models_distributed(hf_runner, vllm_runner, image_assets, model, sizes,
-                dtype, max_tokens, num_logprobs) -> None:
+                            dtype, max_tokens, num_logprobs) -> None:
     run_test(
         hf_runner,
         vllm_runner,

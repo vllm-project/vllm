@@ -1,4 +1,8 @@
-from transformers.models.mllama.configuration_mllama import MllamaTextConfig as MllamaTextConfigHf, MllamaConfig as MllamaConfigHf
+from transformers.models.mllama.configuration_mllama import (
+    MllamaConfig as MllamaConfigHf)
+from transformers.models.mllama.configuration_mllama import (
+    MllamaTextConfig as MllamaTextConfigHf)
+
 
 class MllamaTextConfig(MllamaTextConfigHf):
     '''
@@ -6,6 +10,7 @@ class MllamaTextConfig(MllamaTextConfigHf):
     - transformers regards mllama as is_encoder_decoder=False
     - vllm needs is_encoder_decoder=True to enable cross-attention
     '''
+
     def __init__(
         self,
         **kwargs,
@@ -16,6 +21,7 @@ class MllamaTextConfig(MllamaTextConfigHf):
 
 
 class MllamaConfig(MllamaConfigHf):
+
     def __init__(
         self,
         text_config=None,

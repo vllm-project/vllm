@@ -21,10 +21,11 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
                                              GraniteConfig, InternVLChatConfig,
-                                             JAISConfig, MedusaConfig, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
-                                             NemotronConfig, RWConfig,
-                                             SolarConfig, UltravoxConfig)
+                                             JAISConfig, MedusaConfig,
+                                             MllamaConfig, MLPSpeculatorConfig,
+                                             MPTConfig, NemotronConfig,
+                                             RWConfig, SolarConfig,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
