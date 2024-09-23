@@ -155,6 +155,16 @@ static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
   return flag;
 }
 
+template <typename ArrayType_t>
+static DINLINE uint4 ldcv_packed_array_128b(ArrayType_t* ptr) {
+  static_assert(sizeof(ArrayType_t::type) * ArrayType_t::size == 16);
+  uint4 ret;
+  asm("ld.cv.v4.u32 {%0,%1,%2,%3}, [%4];"
+      : "=r"(ret.x), "=r"(ret.y), "=r"(ret.z), "=r"(ret.w)
+      : "l"(reinterpret_cast<uint4*>(ptr)));
+  return ret;
+}
+
 // is_start: whether this is the very first synchronization barrier.
 // need_fence: whether a memory fence is needed. If true, a release-acquire
 // semantic is used to enforce memory access order before and after this
@@ -252,6 +262,8 @@ __global__ void __launch_bounds__(512, 1)
   // between threads that have the same tid. If thread i computes the sum of
   // start + i in the first stage, then thread i also gathers start + i from all
   // ranks.
+  // Static check packed type is 128bit compatible
+  static_assert(sizeof(P::type) * P::size == 16);
   for (int idx = tid; idx < largest_part; idx += stride) {
 #pragma unroll
     for (int i = 0; i < ngpus; i++) {
@@ -266,8 +278,8 @@ __global__ void __launch_bounds__(512, 1)
         //   ld.v4.u32 	{%r212, %r213, %r214, %r215}, [%rd135];
         // So we use a very tricky way here to enable __ldcv, and the ptx code
         // will be:
-        //   ld.global.cv.v4.u32 {%r163,%r164,%r165,%r166}, [%rd112];
-        ((uint4*)result)[dst_idx] = __ldcv((uint4*)&tmps[i][idx]);
+        //   ld.cv.v4.u32 {%r89,%r90,%r91,%r92}, [%rd74];
+        ((uint4*)result)[dst_idx] = ldcv_packed_array_128b(&tmps[i][idx]);
       }
     }
   }
