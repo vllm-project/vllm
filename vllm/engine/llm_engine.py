@@ -29,7 +29,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
-                         InputRegistry, LLMInputs, PromptInputs)
+                         InputRegistry, LLMInputs, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -144,7 +144,7 @@ class LLMEngine:
             decoding.
         executor_class: The model executor class for managing distributed
             execution.
-        prompt_adapter_config (Optional): The configuration related to serving 
+        prompt_adapter_config (Optional): The configuration related to serving
             prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
@@ -680,7 +680,7 @@ class LLMEngine:
     def add_request(
         self,
         request_id: str,
-        inputs: PromptInputs,
+        prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -695,8 +695,7 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            inputs: The inputs to the LLM. See
-                :class:`~vllm.inputs.PromptInputs`
+            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             params: Parameters for sampling or pooling.
                 :class:`~vllm.SamplingParams` for text generation.
@@ -736,7 +735,7 @@ class LLMEngine:
             arrival_time = time.time()
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
-            inputs,
+            prompt,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
@@ -1289,6 +1288,7 @@ class LLMEngine:
             # torch.distributed ops which may otherwise timeout, and unblocks
             # the RPC thread in the workers so that they can process any other
             # queued control plane messages, such as add/remove lora adapters.
+            logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
         return ctx.request_outputs
@@ -1605,7 +1605,7 @@ class LLMEngine:
     def start_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:
+        if type(self.model_executor) == GPUExecutor:  # noqa: E721
             self.model_executor.start_profile()
         else:
             self.model_executor._run_workers("start_profile")
@@ -1613,7 +1613,7 @@ class LLMEngine:
     def stop_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:
+        if type(self.model_executor) == GPUExecutor:  # noqa: E721
             self.model_executor.stop_profile()
         else:
             self.model_executor._run_workers("stop_profile")
