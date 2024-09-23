@@ -4,6 +4,8 @@ if VLLM_USE_MODELSCOPE:
     # Patch here, before each import happens
     import modelscope
     from packaging import version
+
+    # patch_hub begins from modelscope>=1.18.1
     if version.parse(modelscope.__version__) <= version.parse('1.18.0'):
         raise ImportError(
             'Using vLLM with ModelScope needs modelscope>=1.18.1, please '
