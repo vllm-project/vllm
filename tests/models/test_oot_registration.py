@@ -55,7 +55,10 @@ def test_oot_mutlimodal_registration(dummy_phi3v_path):
               load_format="dummy",
               max_num_seqs=1,
               trust_remote_code=True,
-              limit_mm_per_prompt={"image": 2})
+              gpu_memory_utilization=0.98,
+              max_model_len=4096,
+              enforce_eager=True,
+              limit_mm_per_prompt={"image": 1})
     first_token = llm.get_tokenizer().decode(0)
     outputs = llm.generate(prompts, sampling_params)
 
