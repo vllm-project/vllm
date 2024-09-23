@@ -104,7 +104,7 @@ def _bgmv_expand_slice(
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch, An index of -1 means no lora should be
             applied.
-        slice_offst (int): output_tensor's offst
+        slice_offset (int): output_tensor's offset
         slice_size (int): current output_tensor's size
         batches (int): batch size
         add_inputs (bool, optional): Defaults to False.
