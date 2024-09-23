@@ -942,4 +942,5 @@ def pytest_addoption(parser):
     parser.addoption("--streamed-fork",
                      action="store_true",
                      default=False,
-                     help="Apply fork_new_process_for_each_test to all tests")
+                     help="Run each test in a new process. "
+                     "Output is preserved for forked processes.")
