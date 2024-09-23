@@ -3,9 +3,14 @@ from typing import Optional
 import torch
 
 from vllm import ModelRegistry
+from vllm.inputs import INPUT_REGISTRY
 from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.models.phi3v import Phi3VForCausalLM
+from vllm.model_executor.models.phi3v import (Phi3VForCausalLM,
+                                              dummy_data_for_phi3v,
+                                              get_max_phi3v_image_tokens,
+                                              input_processor_for_phi3v)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
 class MyOPTForCausalLM(OPTForCausalLM):
@@ -21,6 +26,10 @@ class MyOPTForCausalLM(OPTForCausalLM):
         return logits
 
 
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class MyPhi3VForCausalLM(Phi3VForCausalLM):
 
     def compute_logits(

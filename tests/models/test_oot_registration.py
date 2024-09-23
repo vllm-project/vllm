@@ -3,6 +3,7 @@ import os
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
 
 from ..utils import fork_new_process_for_each_test
 
@@ -31,10 +32,24 @@ def test_oot_registration(dummy_opt_path):
         assert rest == ""
 
 
+image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+
+
 @fork_new_process_for_each_test
 def test_oot_mutlimodal_registration(dummy_phi3v_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
-    prompts = ["Hello, my name is", "The text does not matter"]
+    prompts = [{
+        "prompt": "What's in the image?<|image_1|>",
+        "multi_modal_data": {
+            "image": image
+        },
+    }, {
+        "prompt": "Describe the image<|image_1|>",
+        "multi_modal_data": {
+            "image": image
+        },
+    }]
+
     sampling_params = SamplingParams(temperature=0)
     llm = LLM(model=dummy_phi3v_path,
               load_format="dummy",
