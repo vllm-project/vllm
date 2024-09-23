@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.scalar_type import scalar_types
-from vllm.utils import seed_everything, is_hip
+from vllm.utils import is_hip, seed_everything
 
 
 def torch_moe(a, w1, w2, score, topk):
