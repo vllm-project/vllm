@@ -137,7 +137,7 @@ Note to get your gfx architecture, run `rocminfo |grep gfx`.
 
         $ # Install PyTorch
         $ pip uninstall torch -y
-        $ pip install --no-cache-dir --pre torch==2.5.0 --index-url https://download.pytorch.org/whl/test/rocm6.2
+        $ pip install --no-cache-dir --pre torch==2.6.0.dev20240923 --index-url https://download.pytorch.org/whl/nightly/rocm6.2
 
         $ # Build & install AMD SMI
         $ pip install /opt/rocm/share/amd_smi
