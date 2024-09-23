@@ -1108,9 +1108,6 @@ class LLMEngine:
                 seq = seq_group.seqs[0]
                 seq.append_token_id(sample.output_token, sample.logprobs)
 
-    def finish_measurements(self):
-        self.model_executor.finish_measurements()
-
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 

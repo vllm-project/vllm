@@ -1347,29 +1347,3 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
-
-
-def migrate_to_cpu():
-    import importlib
-    from unittest.mock import MagicMock
-
-    torch.hpu = MagicMock(name="torch.hpu")
-
-    # Adding dummy submodules to habana_frameworks.torch for cpu-test,
-    # functions from dummy modules will do nothing by default
-    spec = importlib.util.spec_from_loader('habana_frameworks', loader=None)
-    sys.modules['habana_frameworks'] = MagicMock()
-    sys.modules['habana_frameworks'].__spec__ = spec
-
-    builtin_import = __builtins__['__import__']  # type: ignore
-
-    def import_wrapper(name, *args, **kwargs):
-        if 'habana_frameworks' in name:
-            sys.modules[name] = MagicMock()
-        return builtin_import(name, *args, **kwargs)
-
-    __builtins__['__import__'] = import_wrapper
-
-    # In case you want to mock a function to actually do something
-    import habana_frameworks.torch as htorch
-    htorch.utils.internal.is_lazy.return_value = False
