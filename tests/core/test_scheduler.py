@@ -90,21 +90,22 @@ def test_scheduler_schedule_simple():
     assert len(seq_group_meta) == num_seq_group
     append_new_token(out, 1)
 
-
-def test_scheduler_prefill_prioritized():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_scheduler_prefill_prioritized(use_v2_block_manager: bool):
     """Verify running batched tokens are not applied to prefill requests."""
     block_size = 4
     max_model_len = 30
     max_batched_num_tokens = 30
     scheduler_config = SchedulerConfig(max_batched_num_tokens, 2,
-                                       max_model_len)
+                                       max_model_len,
+                                       use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 2
     cache_config.num_gpu_blocks = 2
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
     # Add seq groups to scheduler.
-    _, seq_group_a = create_dummy_prompt("1", 1)
+    _, seq_group_a = create_dummy_prompt("1", 1, block_size=block_size)
     scheduler.add_seq_group(seq_group_a)
 
     # Schedule seq groups prompts.
@@ -112,7 +113,7 @@ def test_scheduler_prefill_prioritized():
     assert get_sequence_groups(out) == [seq_group_a]
 
     # Add a new prefill request B.
-    _, seq_group_b = create_dummy_prompt("2", 30)
+    _, seq_group_b = create_dummy_prompt("2", 30, block_size=block_size)
     scheduler.add_seq_group(seq_group_b)
 
     # Verify prefill requests are prioritized. Since max_batched_num_tokens
