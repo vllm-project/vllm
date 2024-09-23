@@ -2,7 +2,6 @@
 """PyTorch Ultravox model."""
 
 import math
-from array import array
 from functools import lru_cache
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union, cast)
@@ -35,7 +34,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
                              NestedTensors)
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.sequence import SequenceData
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
@@ -81,19 +80,14 @@ def dummy_seq_data_for_ultravox(
     audio_length = min(get_ultravox_max_audio_tokens(ctx),
                        seq_len // audio_count)
 
-    audio_placeholder = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                              [_AUDIO_PLACEHOLDER_TOKEN]) * audio_length
-
-    audio_token_ids = audio_placeholder * audio_count
-    other_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                            [0]) * (seq_len - len(audio_token_ids))
-
-    return SequenceData(audio_token_ids + other_token_ids), {
-        "audio": [{
-            "offset": i * audio_length,
-            "length": audio_length
-        } for i in range(audio_count)]
-    }
+    return SequenceData.from_token_counts(
+        (_AUDIO_PLACEHOLDER_TOKEN, audio_length * audio_count),
+        (0, seq_len - audio_length * audio_count)), {
+            "audio": [{
+                "offset": i * audio_length,
+                "length": audio_length
+            } for i in range(audio_count)]
+        }
 
 
 def dummy_audio_for_ultravox(
@@ -111,11 +105,10 @@ def dummy_data_for_ultravox(
     mm_counts: Mapping[str, int],
 ):
     audio_count = mm_counts["audio"]
-    seq_data, placeholders = dummy_seq_data_for_ultravox(
-        ctx, seq_len, audio_count)
+    seq_data, ranges = dummy_seq_data_for_ultravox(ctx, seq_len, audio_count)
     mm_dict = dummy_audio_for_ultravox(ctx, audio_count)
 
-    return DummyData(seq_data, mm_dict, placeholders)
+    return DummyData(seq_data, mm_dict, ranges)
 
 
 def input_mapper_for_ultravox(ctx: InputContext, data: object):
