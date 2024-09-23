@@ -199,11 +199,9 @@ class ModelRegistry:
 
         # Avoid circular import
         from vllm.model_executor.models.interfaces import supports_multimodal
-        is_multimodal: bool = supports_multimodal(model_cls)
-
-        # NOTE: This is needed to store the information if the OOT model is
-        # a multimodal model.
-        if is_multimodal:
+        if supports_multimodal(model_cls):
+            # NOTE: This map is needed to store the information if the OOT model
+            # is a multimodal model.
             global _OOT_MULTIMODAL_MODELS
             _OOT_MULTIMODAL_MODELS[model_arch] = model_cls
 
