@@ -29,7 +29,6 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.inputs.registry import DummyData
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -45,8 +44,6 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
 
 from .interfaces import SupportsMultiModal
 from .utils import merge_multimodal_embeddings
-
-logger = init_logger(__name__)
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -238,7 +235,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
         self.multimodal_config = multimodal_config
 
         self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        self.vocab_size = config.text_config.vocab_size
         self.image_token_id = _IMAGE_TOKEN_ID
         self.image_feature_size = config.patch_size**2 * config.num_channels
 
