@@ -5,9 +5,7 @@ from torch import nn
 
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.config import CacheConfig
-from typing import Iterable, List, Optional, Tuple
+from vllm.model_executor.layers.sampler import SamplerOutput
 from .llama import LlamaModel
 from vllm.sequence import IntermediateTensors
 
@@ -33,12 +31,17 @@ class LlamaForSequenceClassification(nn.Module):
         attn_metadata: "AttentionMetadata",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors=intermediate_tensors)
+        hidden_states = self.model(
+            input_ids, positions, kv_caches,
+            attn_metadata, intermediate_tensors=intermediate_tensors
+        )
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: Optional["SamplingMetadata"] = None) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: Optional["SamplingMetadata"] = None
+    ) -> torch.Tensor:
         # Use the last token hidden state for classification
         # last_hidden_state = hidden_states[:, -1]
         return hidden_states
