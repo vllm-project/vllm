@@ -794,8 +794,8 @@ class VllmRunner:
         outputs = self.model.beam_search(prompts, beam_width, max_tokens)
         returned_outputs = []
         for output in outputs:
-            token_ids = [x.token_ids for x in output]
-            texts = [x.text for x in output]
+            token_ids = [x.tokens for x in output.sequences]
+            texts = [x.text for x in output.sequences]
             returned_outputs.append((token_ids, texts))
         return returned_outputs
 
