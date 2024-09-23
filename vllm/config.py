@@ -822,6 +822,7 @@ class ParallelConfig:
         placement_group: Optional["PlacementGroup"] = None,
         distributed_executor_backend: Optional[Union[
             str, Type["ExecutorBase"]]] = None,
+        kv_transfer_driver: Optional[str] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
@@ -832,6 +833,7 @@ class ParallelConfig:
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+        self.kv_transfer_driver = kv_transfer_driver
 
         if worker_use_ray:
             if self.distributed_executor_backend is None:
@@ -908,7 +910,12 @@ class ParallelConfig:
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
-
+        if (self.kv_transfer_driver not in ("simple-buffer", None)) and \
+            (not self.kv_transfer_driver.startswith("valkey")):
+            raise ValueError(
+                "Unrecognized kv transfer driver "
+                f"{self.kv_transfer_driver}. Supported "
+                "values are 'simple-buffer', 'valkey://ip:port' or None.")
 
 class SchedulerConfig:
     """Scheduler configuration.

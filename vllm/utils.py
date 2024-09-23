@@ -6,6 +6,7 @@ import enum
 import gc
 import os
 import random
+import re
 import socket
 import subprocess
 import sys
@@ -1275,3 +1276,13 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
+def parse_url(url: str):
+    pattern = r'((?:\[[0-9a-fA-F:.]+\]|(?:\d{1,3}\.){3}\d{1,3})):(\d+)'
+    match = re.match(pattern, url)
+    if match:
+        ip = match.group(1).replace('[', '').replace(']', '')
+        port = match.group(2)
+        return ip, port
+    else:
+        return None, None

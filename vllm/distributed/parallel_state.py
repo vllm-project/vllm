@@ -1039,6 +1039,7 @@ def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     backend: Optional[str] = None,
+    kv_transfer_driver: Optional[str] = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -1153,6 +1154,7 @@ def initialize_model_parallel(
         _DISAGG = dist_kv.KV_transfer_agent(
             group_ranks=group_ranks,
             local_rank=get_world_group().local_rank,
+            kv_transfer_driver=kv_transfer_driver,
         )
         logger.debug("_DISAGG initialized for rank %d",
                      torch.distributed.get_rank())
@@ -1162,6 +1164,7 @@ def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
     backend: Optional[str] = None,
+    kv_transfer_driver: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
@@ -1171,7 +1174,8 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+                                  pipeline_model_parallel_size,
+                                  backend, kv_transfer_driver)
         return
 
     assert (

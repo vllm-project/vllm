@@ -29,14 +29,16 @@ import torch
 from torch.distributed import Backend
 
 import vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer as sklb
+from vllm.distributed.kv_transfer.kv_lookup_buffer.kv_database_transfer import KVDatabaseTransfer
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
     KVLookupBufferBase)
 from vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe import (
-    TorchDistributedPipe)
+    TorchDistributedPipe, ValkeyPipe)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
+from vllm.utils import parse_url
 
 logger = init_logger(__name__)
 
@@ -71,82 +73,98 @@ class KV_transfer_agent:
         self,
         group_ranks: List[List[int]],
         local_rank: int,
+        kv_transfer_driver: Optional[str],
         torch_distributed_backend: Union[str, Backend] = DISTRIBUTED_BACKEND,
         # FIXME(Kuntai): remove this hardcoding
         lookup_buffer_size: int = int(1e10)):
 
+        self.kv_transfer_driver = kv_transfer_driver if kv_transfer_driver is not None else "simple-buffer"
+        self.group_ranks = group_ranks
+        self.local_rank = local_rank
         self.lookup_buffer_size = lookup_buffer_size
 
-        self.send_buffer: Optional[KVLookupBufferBase] = None
-        self.recv_buffer: Optional[KVLookupBufferBase] = None
+        self.sender: Optional[KVLookupBufferBase] = None
+        self.recver: Optional[KVLookupBufferBase] = None
 
-        SimpleKVLookupBuffer = sklb.SimpleKVLookupBuffer
+        self._init_transfer_driver()
 
-        # In disaggregated prefill, the prefill vLLM only uses send pipe
-        # and the decode vLLM only uses recv pipe
-        # In remote KV cache store, vLLM will use both send pipe and recv pipe
-        # So we build both send pipe and recv pipe for simplicity.
-        if IS_KV_PRODUCER:
+    def _init_transfer_driver(self):
+        if self.kv_transfer_driver == "simple-buffer":
+            SimpleKVLookupBuffer = sklb.SimpleKVLookupBuffer
 
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                DISTRIBUTED_BACKEND,
-            )
-            self.send_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
-            self.recv_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                DISTRIBUTED_BACKEND,
-            )
-            self.recv_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
-            self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe,
-                                                    self.send_pipe,
-                                                    self.lookup_buffer_size)
-            self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe,
-                                                    self.recv_pipe,
-                                                    self.lookup_buffer_size)
-            self.tensor_device = DISTRIBUTED_DEVICE
+            # In disaggregated prefill, the prefill vLLM only uses send pipe
+            # and the decode vLLM only uses recv pipe
+            # In remote KV cache store, vLLM will use both send pipe and recv pipe
+            # So we build both send pipe and recv pipe for simplicity.
+            if IS_KV_PRODUCER:
+
+                self.send_pipe = TorchDistributedPipe(
+                    self.group_ranks,
+                    self.local_rank,
+                    DISTRIBUTED_BACKEND,
+                )
+                self.send_signal_pipe = TorchDistributedPipe(
+                    self.group_ranks,
+                    self.local_rank,
+                    "gloo",
+                )
+                self.recv_pipe = TorchDistributedPipe(
+                    self.group_ranks,
+                    self.local_rank,
+                    DISTRIBUTED_BACKEND,
+                )
+                self.recv_signal_pipe = TorchDistributedPipe(
+                    self.group_ranks,
+                    self.local_rank,
+                    "gloo",
+                )
+                self.sender = SimpleKVLookupBuffer(self.send_signal_pipe,
+                                                        self.send_pipe,
+                                                        self.lookup_buffer_size)
+                self.recver = SimpleKVLookupBuffer(self.recv_signal_pipe,
+                                                        self.recv_pipe,
+                                                        self.lookup_buffer_size)
+                self.tensor_device = DISTRIBUTED_DEVICE
+            else:
+
+                # the current vLLM instance is KV consumer, so it needs to connect
+                # its recv pipe to the send pipe of KV producder
+
+                self.recv_pipe = TorchDistributedPipe(
+                    self.group_ranks,
+                    self.local_rank,
+                    DISTRIBUTED_BACKEND,
+                )
+                self.recv_signal_pipe = TorchDistributedPipe(
+                    self.group_ranks,
+                    self.local_rank,
+                    "gloo",
+                )
+                self.send_pipe = TorchDistributedPipe(
+                    self.group_ranks,
+                    self.local_rank,
+                    DISTRIBUTED_BACKEND,
+                )
+                self.send_signal_pipe = TorchDistributedPipe(
+                    self.group_ranks,
+                    self.local_rank,
+                    "gloo",
+                )
+                self.sender = SimpleKVLookupBuffer(self.send_signal_pipe,
+                                                        self.send_pipe,
+                                                        self.lookup_buffer_size)
+                self.recver = SimpleKVLookupBuffer(self.recv_signal_pipe,
+                                                        self.recv_pipe,
+                                                        self.lookup_buffer_size)
+                self.tensor_device = DISTRIBUTED_DEVICE
+        elif self.kv_transfer_driver.startswith("valkey"):
+            url = self.kv_transfer_driver.split("://")[1]
+            ip, port = parse_url(url)
+            # TODO add PING command
+            self.sender = KVDatabaseTransfer(ip, int(port), self.local_rank, ValkeyPipe())
+            self.recver = KVDatabaseTransfer(ip, int(port), self.local_rank, ValkeyPipe())
         else:
-
-            # the current vLLM instance is KV consumer, so it needs to connect
-            # its recv pipe to the send pipe of KV producder
-
-            self.recv_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                DISTRIBUTED_BACKEND,
-            )
-            self.recv_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                DISTRIBUTED_BACKEND,
-            )
-            self.send_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
-            self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe,
-                                                    self.send_pipe,
-                                                    self.lookup_buffer_size)
-            self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe,
-                                                    self.recv_pipe,
-                                                    self.lookup_buffer_size)
-            self.tensor_device = DISTRIBUTED_DEVICE
+            raise ValueError("Invalid kv_transfer_driver")
 
     def send_kv_caches_and_hidden_states(
         self,
@@ -188,8 +206,8 @@ class KV_transfer_agent:
 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
-            if self.send_buffer is not None:
-                self.send_buffer.insert(
+            if self.sender is not None:
+                self.sender.insert(
                     current_tokens, torch.ones_like(current_tokens,
                                                     dtype=bool), keys, values,
                     hidden_or_intermediate_states[start_pos:end_pos])
@@ -197,10 +215,10 @@ class KV_transfer_agent:
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
     def destroy(self) -> None:
-        if self.send_buffer is not None:
-            self.send_buffer.close()
-        if self.recv_buffer is not None:
-            self.recv_buffer.close()
+        if self.sender is not None:
+            self.sender.close()
+        if self.recver is not None:
+            self.recver.close()
 
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
@@ -238,11 +256,11 @@ class KV_transfer_agent:
             input_tokens_list.append(current_tokens)
             start_pos_list.append(start_pos)
 
-            if self.recv_buffer is None:
+            if self.recver is None:
                 bypass_model_exec = False
                 break
 
-            ret = self.recv_buffer.drop_select(
+            ret = self.recver.drop_select(
                 current_tokens, torch.ones_like(current_tokens, dtype=bool))
             if ret[0] is None:
                 # didn't find any match.

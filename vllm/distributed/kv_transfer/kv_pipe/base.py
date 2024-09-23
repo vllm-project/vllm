@@ -7,11 +7,11 @@ import torch
 class KVPipeBase(ABC):
 
     @abstractmethod
-    def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
+    def send_tensor(self, tensor: Optional[torch.Tensor], tensor_key: str = "") -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def recv_tensor(self) -> Optional[torch.Tensor]:
+    def recv_tensor(self, tensor_key: str = "") -> Optional[torch.Tensor]:
         raise NotImplementedError
 
     @abstractmethod

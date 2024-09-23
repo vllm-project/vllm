@@ -8,6 +8,7 @@ from torch.distributed import Backend
 
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
+from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
 
@@ -148,7 +149,7 @@ class TorchDistributedPipe(KVPipeBase):
         shape = tuple(h_buffer[2:2 + ndims])
         return torch.empty(shape, dtype=dtype, device=self.device)
 
-    def _send_metadata(self, d_metadata_buffer: torch.Tensor):
+    def _send_metadata(self, d_metadata_buffer: torch.Tensor, tensor_key: str = ""):
         """
         Send the metadata buffer to the target rank.
         """
@@ -158,7 +159,7 @@ class TorchDistributedPipe(KVPipeBase):
             group=self.device_group,
         )
 
-    def _recv_metadata(self) -> torch.Tensor:
+    def _recv_metadata(self, tensor_key: str = "") -> torch.Tensor:
         """
         Receive the metadata buffer from the target rank.
 
@@ -178,7 +179,7 @@ class TorchDistributedPipe(KVPipeBase):
 
         return self.rcv_metadata_buffer
 
-    def _send_impl(self, tensor):
+    def _send_impl(self, tensor, tensor_key: str = ""):
         """
         The actual implementation of sending the tensor to the target rank.
         This function will first send the metadata, and then send the tensor.
@@ -188,14 +189,14 @@ class TorchDistributedPipe(KVPipeBase):
         """
 
         metadata = self._make_metadata(tensor)
-        self._send_metadata(metadata)
+        self._send_metadata(metadata, tensor_key)
         #logger.debug(f"Sent meta {metadata}")
         torch.distributed.send(tensor.to(self.device),
                                dst=self.target_rank_for_send,
                                group=self.device_group)
         #logger.debug(f"Sent tensor {tensor}")
 
-    def _recv_impl(self) -> torch.Tensor:
+    def _recv_impl(self, tensor_key: str = "") -> torch.Tensor:
         """
         The actual implementation of receiving the tensor from the target rank.
         This function will first receive the metadata, then receive the tensor.
@@ -205,7 +206,7 @@ class TorchDistributedPipe(KVPipeBase):
         Returns:
             - buffer: the received tensor, on self.device
         """
-        d_metadata = self._recv_metadata()
+        d_metadata = self._recv_metadata(tensor_key)
         buffer = self._prepare_recv_buffer(d_metadata)
 
         torch.distributed.recv(buffer,
@@ -214,11 +215,11 @@ class TorchDistributedPipe(KVPipeBase):
 
         return buffer
 
-    def send_tensor_wrapper(self, tensor):
+    def send_tensor_wrapper(self, tensor, tensor_key: str = ""):
         try:
             """Wrapper for send_tensor_dict"""
             tensor_size = tensor.element_size() * tensor.numel()
-            self._send_impl(tensor)
+            self._send_impl(tensor, tensor_key)
 
             with self.buffer_size_lock:
                 self.buffer_size = self.buffer_size - tensor_size
@@ -237,7 +238,7 @@ class TorchDistributedPipe(KVPipeBase):
             logger.debug("KV cache transfer pipe is full. Waiting...")
             time.sleep(0.05)
 
-    def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
+    def send_tensor(self, tensor: Optional[torch.Tensor], tensor_key: str = "") -> None:
         """
         Sends a tensor to the destination rank in a non-blocking way.
         Flow: send tensor dim -- send tensor shape -- send tensor data
@@ -264,14 +265,15 @@ class TorchDistributedPipe(KVPipeBase):
         self.transport_thread.submit(
             self.send_tensor_wrapper,
             tensor,
+            tensor_key,
         )
 
-    def recv_tensor(self) -> Optional[torch.Tensor]:
+    def recv_tensor(self, tensor_key: str = "") -> Optional[torch.Tensor]:
         """Receives a tensor from the src rank. Blocking."""
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
 
-        future = self.transport_thread.submit(self._recv_impl)
+        future = self.transport_thread.submit(self._recv_impl, tensor_key)
 
         try:
             tensor = future.result()
@@ -294,3 +296,87 @@ class TorchDistributedPipe(KVPipeBase):
         if (hasattr(self, "transport_thread")
                 and self.transport_thread is not None):
             self.transport_thread.shutdown()
+
+class ValkeyPipe(TorchDistributedPipe):
+    """
+    A pipe that uses the valkey protocol to transfer tensors between ranks.
+    """
+
+    def __init__(self):
+        self.transport_thread: Optional[ThreadPoolExecutor] = None
+        self.buffer_size = 0
+        self.buffer_size_lock = threading.Lock()
+        self.device = "cpu"
+        self.none_tensor = torch.tensor([NONE_INT], device=self.device)
+
+        self.rcv_metadata_buffer = torch.zeros(self.METADATA_LENGTH,
+                                               dtype=self.METADATA_DTYPE,
+                                               device=self.device)
+    
+    def _send_metadata(self, d_metadata_buffer: torch.Tensor, tensor_key:str = ""):
+        """
+        Send the metadata buffer to the target rank.
+        """
+
+        metadata_key = tensor_key + "/metadata"
+        ops.valkey_set(metadata_key, d_metadata_buffer.to(self.device))
+
+    def _send_impl(self, tensor, tensor_key: str = ""):
+        """
+        The actual implementation of sending the tensor to the target rank.
+        This function will first send the metadata, and then send the tensor.
+
+        Parameters:
+            - tensor: the input tensor to be sent
+        """
+
+        metadata = self._make_metadata(tensor)
+        self._send_metadata(metadata, tensor_key)
+        #logger.debug(f"Sent meta {metadata}")
+        ops.valkey_set(tensor_key, tensor.to(self.device))
+        #logger.debug(f"Sent tensor {tensor}")
+
+    # TODO: remove block
+    def wait_for_key(r, key):
+        while True:
+            if ops.valkey_key_exists(key):
+                return
+            else:
+                time.sleep(0.1)
+
+
+    def _recv_metadata(self, tensor_key: str = "") -> torch.Tensor:
+        """
+        Receive the metadata buffer from the target rank.
+
+        Returns:
+            - metadata_buffer: the metadata buffer tensor, on self.device
+
+        Note:
+            The current implementation uses the assumption that there is no
+            race conditions during sending/receiving. Therefore, the metadata
+            buffer can be reused
+        """
+
+        metadata_key = tensor_key + "/metadata"
+        self.wait_for_key(metadata_key)
+        ops.valkey_get(metadata_key, self.rcv_metadata_buffer)
+        return self.rcv_metadata_buffer
+
+
+    def _recv_impl(self, tensor_key: str = "") -> torch.Tensor:
+        """
+        The actual implementation of receiving the tensor from the target rank.
+        This function will first receive the metadata, then receive the tensor.
+
+        This function will block if there is no tensor to receive.
+
+        Returns:
+            - buffer: the received tensor, on self.device
+        """
+        d_metadata = self._recv_metadata(tensor_key)
+        buffer = self._prepare_recv_buffer(d_metadata)
+        self.wait_for_key(tensor_key)
+        ops.valkey_get(tensor_key, buffer)
+
+        return buffer

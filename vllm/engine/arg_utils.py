@@ -176,6 +176,8 @@ class EngineArgs:
     disable_async_output_proc: bool = False
     override_neuron_config: Optional[Dict[str, Any]] = None
 
+    kv_transfer_driver: Optional[str] = None
+
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
@@ -784,6 +786,12 @@ class EngineArgs:
             },
             default=None,
             help="override or set neuron device configuration.")
+        parser.add_argument(
+            '--kv-transfer-driver',
+            type=str,
+            default="simple-buffer",
+            help="Category of kv transfer driver between prefill and decode. Currently 'simple-buffer'(simple-buffer) and valkey(redis over RDMA) are supported. "
+            "Valkey driver format is: 'valkey://ip:port'. Default is 'simple-buffer'.")
 
         return parser
 
@@ -890,7 +898,8 @@ class EngineArgs:
                 self.tokenizer_pool_extra_config,
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
-            distributed_executor_backend=self.distributed_executor_backend)
+            distributed_executor_backend=self.distributed_executor_backend,
+            kv_transfer_driver=self.kv_transfer_driver)
 
         max_model_len = model_config.max_model_len
         use_long_context = max_model_len > 32768
