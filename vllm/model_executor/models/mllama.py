@@ -365,8 +365,10 @@ class MllamaVisionEncoderLayer(nn.Module):
         self.self_attn = MllamaVisionSdpaAttention(config)
         self.mlp = CLIPMLP(config)
 
-        self.input_layernorm = nn.LayerNorm(self.hidden_size, eps=config.norm_eps)
-        self.post_attention_layernorm = nn.LayerNorm(self.hidden_size, eps=config.norm_eps)
+        self.input_layernorm = nn.LayerNorm(self.hidden_size,
+                                            eps=config.norm_eps)
+        self.post_attention_layernorm = nn.LayerNorm(self.hidden_size,
+                                                     eps=config.norm_eps)
 
         # there used to be an if else here, no code path
         if is_gated:
