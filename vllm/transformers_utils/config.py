@@ -24,7 +24,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MLPSpeculatorConfig,
                                              MPTConfig, NemotronConfig,
-                                             RWConfig, UltravoxConfig)
+                                             RWConfig, SolarConfig,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
@@ -50,6 +51,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
+    "solar": SolarConfig,
     "ultravox": UltravoxConfig,
     # Granite can be removed from here once we have upgraded to
     # transformers 4.45+

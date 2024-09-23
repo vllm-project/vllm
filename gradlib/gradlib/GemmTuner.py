@@ -77,7 +77,7 @@ class Gemm:
                                    scale_a=ONE,
                                    scale_b=ONE,
                                    out_dtype=self.outdtype)
-            if type(ref) == tuple and len(ref) == 2:
+            if type(ref) is tuple and len(ref) == 2:
                 ref = ref[0]
         else:
             ref = F.linear(self.inp, self.weights, self.bias)

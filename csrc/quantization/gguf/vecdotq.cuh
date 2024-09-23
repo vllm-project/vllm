@@ -1671,6 +1671,7 @@ static __device__ __forceinline__ float vec_dot_iq3_s_q8_1(
 
 static __device__ __forceinline__ float vec_dot_iq1_s_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 610
     const block_iq1_s * bq1 = (const block_iq1_s *) vbq;
 
     const int       qs_packed = get_int_b2(bq1->qs, iqs);
@@ -1697,10 +1698,12 @@ static __device__ __forceinline__ float vec_dot_iq1_s_q8_1(
     const float  delta = -1.0f + IQ1S_DELTA - (qh & 0x8000) * (2.0f*IQ1S_DELTA/0x8000);
     const float2 ds    = __half22float2(bq8_1[iqs].ds);
     return d1q * (ds.x*sumi + ds.y*delta);
+#endif
 }
 
 static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 610
 
     const block_iq1_m * bq1 = (const block_iq1_m *) vbq;
 
@@ -1741,6 +1744,7 @@ static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
     const int sc0 = 2*((tmp >> 0) & 0x07) + 1;
     const int sc1 = 2*((tmp >> 3) & 0x07) + 1;
     return d * ((sumi[0] + sumf[0]) * sc0 + (sumi[1] + sumf[1]) * sc1);
+#endif
 }
 
 static __device__ __forceinline__ void get_int_from_table_16(const uint32_t & q4, const uint8_t * values,

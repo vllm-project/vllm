@@ -6,10 +6,8 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils import is_hip
 
-# scaled_mm in pytorch on rocm has a bug that requires always
-# providing scaling factor for result. This value is created
-# as global value to avoid multiple tensor allocations, and
-# can be removed once pytorch fixes the bug.
+# Input scaling factors are no longer optional in _scaled_mm starting
+# from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = torch.ones(1).cuda() if is_hip() else None
 
 
@@ -17,8 +15,9 @@ def cutlass_fp8_supported() -> bool:
     # cutlass is not supported on Rocm
     if is_hip():
         return False
-    capability = current_platform.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
     return ops.cutlass_scaled_mm_supports_fp8(capability)
 
@@ -135,9 +134,6 @@ def apply_fp8_linear(
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
 
-        global TORCH_DEVICE_IDENTITY
-        if TORCH_DEVICE_IDENTITY.device != weight.device:
-            TORCH_DEVICE_IDENTITY = TORCH_DEVICE_IDENTITY.to(weight.device)
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
             output = torch._scaled_mm(qinput,
@@ -168,6 +164,11 @@ def apply_fp8_linear(
             # For the scaled_mm fallback case, we break this down, since it
             # does not support s_w being a vector.
 
+            # Making sure the dummy tensor is on the same device as the weight
+            global TORCH_DEVICE_IDENTITY
+            if TORCH_DEVICE_IDENTITY.device != weight.device:
+                TORCH_DEVICE_IDENTITY = TORCH_DEVICE_IDENTITY.to(weight.device)
+
             # GEMM
             # This computes C = (X * W).
             # Output in fp32 to allow subsequent ops to happen in-place
@@ -176,6 +177,8 @@ def apply_fp8_linear(
                                       scale_a=TORCH_DEVICE_IDENTITY,
                                       scale_b=TORCH_DEVICE_IDENTITY,
                                       out_dtype=torch.float32)
+            # A fix for discrepancy in scaled_mm which returns tuple
+            # for torch < 2.5 and a single value in torch >= 2.5
             if type(output) is tuple and len(output) == 2:
                 output = output[0]
             # Unpad (undo num_token_padding)
@@ -200,7 +203,7 @@ def apply_int8_linear(
     # ops.scaled_int8_quant supports both dynamic and static quant.
     # * dynamic, layer.input_scale is None and x_scale computed from x.
     # * static, layer.input_scale is scalar and x_scale is input_scale.
-    x_q, x_scale = ops.scaled_int8_quant(input, input_scale)
+    x_q, x_scale, _ = ops.scaled_int8_quant(input, input_scale)
 
     return ops.cutlass_scaled_mm(x_q,
                                  weight,

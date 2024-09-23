@@ -392,7 +392,7 @@ class DbrxForCausalLM(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
         expert_params_mapping = [(
-            "w13_" if weight_name in ["w1", "v1"] else "w2_",
+            "w13_weight" if weight_name in ["w1", "v1"] else "w2_weight",
             f"mlp.{weight_name}.",
         ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
