@@ -292,6 +292,20 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
+# quant_llm
+def fp_eXmY_linear_forward_cuda(
+    EXPONENT: int,
+    MANTISSA: int,
+    _in_feats: torch.Tensor,
+    _weights: torch.Tensor,
+    _scales: torch.Tensor,
+    splitK: int = 1,
+) -> torch.Tensor:
+    return torch.ops._C.fp_eXmY_linear_forward_cuda(EXPONENT, MANTISSA,
+                                                    _in_feats, _weights,
+                                                    _scales, splitK)
+
+
 # TODO: has to be a better way to do this
 try:
     torch.ops._C.gptq_marlin_24_gemm  # noqa B018
@@ -416,6 +430,19 @@ try:
                               num_bits: int, size_m: int, size_n: int,
                               size_k: int) -> torch.Tensor:
         return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
+
+    @torch.library.register_fake("_C::fp_eXmY_linear_forward_cuda")
+    def _fp_eXmY_linear_forward_cuda_fake(
+        EXPONENT: int,
+        MANTISSA: int,
+        _in_feats: torch.Tensor,
+        _weights: torch.Tensor,
+        _scales: torch.Tensor,
+        splitK: int = 1,
+    ) -> torch.Tensor:
+        return torch.empty((1, 1),
+                           dtype=_in_feats.dtype,
+                           device=_in_feats.device)
 
     @torch.library.register_fake("_C::machete_gemm")
     def machete_gemm_fake(

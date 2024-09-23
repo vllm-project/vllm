@@ -239,93 +239,73 @@ torch::Tensor fp_eXmY_linear_forward_cuda(int64_t EXPONENT, int64_t MANTISSA,
 
   // FP2
   if (EXPONENT == 1 && MANTISSA == 0)
-    vllm::fpx_linear_kernel<1, 0>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<1, 0>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
 
   // FP3
   else if (EXPONENT == 1 && MANTISSA == 1)
-    vllm::fpx_linear_kernel<1, 1>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<1, 1>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 2 && MANTISSA == 0)
-    vllm::fpx_linear_kernel<2, 0>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<2, 0>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
 
   // FP4
   else if (EXPONENT == 1 && MANTISSA == 2)
-    vllm::fpx_linear_kernel<1, 2>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<1, 2>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 3 && MANTISSA == 0)
-    vllm::fpx_linear_kernel<3, 0>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<3, 0>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 2 && MANTISSA == 1)
-    vllm::fpx_linear_kernel<2, 1>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<2, 1>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   // FP5
   else if (EXPONENT == 1 && MANTISSA == 3)
-    vllm::fpx_linear_kernel<1, 3>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<1, 3>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 2 && MANTISSA == 2)
-    vllm::fpx_linear_kernel<2, 2>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<2, 2>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 3 && MANTISSA == 1)
-    vllm::fpx_linear_kernel<3, 1>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<3, 1>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 4 && MANTISSA == 0)
-    vllm::fpx_linear_kernel<4, 0>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<4, 0>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
 
   // FP6
   else if (EXPONENT == 1 && MANTISSA == 4)
-    vllm::fpx_linear_kernel<1, 4>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<1, 4>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 2 && MANTISSA == 3)
-    vllm::fpx_linear_kernel<2, 3>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<2, 3>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 3 && MANTISSA == 2)
-    vllm::fpx_linear_kernel<3, 2>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<3, 2>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 4 && MANTISSA == 1)
-    vllm::fpx_linear_kernel<4, 1>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<4, 1>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 5 && MANTISSA == 0)
-    vllm::fpx_linear_kernel<5, 0>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<5, 0>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   // FP7
   else if (EXPONENT == 1 && MANTISSA == 5)
-    vllm::fpx_linear_kernel<1, 5>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<1, 5>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 2 && MANTISSA == 4)
-    vllm::fpx_linear_kernel<2, 4>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<2, 4>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 3 && MANTISSA == 3)
-    vllm::fpx_linear_kernel<3, 3>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<3, 3>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 4 && MANTISSA == 2)
-    vllm::fpx_linear_kernel<4, 2>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<4, 2>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 5 && MANTISSA == 1)
-    vllm::fpx_linear_kernel<5, 1>(stream, weight, scales, in_feats,
-                                  out_feats, M, N, K, Reduction_Workspace,
-                                  splitK);
+    vllm::fpx_linear_kernel<5, 1>(stream, weight, scales, in_feats, out_feats,
+                                  M, N, K, Reduction_Workspace, splitK);
 
   else
     TORCH_CHECK(false, "FP", NBITS, " E", EXPONENT, "M", MANTISSA,

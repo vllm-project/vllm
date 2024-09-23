@@ -267,7 +267,8 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8"
+            "compressed-tensors", "experts_int8", "quant_llm", "fp4_weights",
+            "fp5_weights", "fp6_weights", "fp7_weights"
         ]
         tpu_supported_quantization = ["tpu_int8"]
         neuron_supported_quantization = ["neuron_quant"]
@@ -298,6 +299,32 @@ class ModelConfig:
                     f"({quant_method}) does not match the quantization "
                     f"method specified in the `quantization` argument "
                     f"({self.quantization}).")
+
+        # TODO(alpin): Tune the default exp_bits for each fp_bits
+        DEFAULT_EXP_BITS = {
+            2: 1,
+            3: 2,
+            4: 2,
+            5: 2,
+            6: 2,
+            7: 3,
+        }
+        quant_llm_methods = [
+            "fp4_weights", "fp5_weights", "fp6_weights", "fp7_weights"
+        ]
+        if self.quantization is not None and self.quantization in \
+            quant_llm_methods:
+            fp_bits = int(self.quantization[2])
+            exp_bits = DEFAULT_EXP_BITS[fp_bits]
+            self.hf_config.quantization_config = {
+                "bits": fp_bits,
+                "exp_bits": exp_bits,
+                "quant_method": self.quantization
+            }
+            # TODO(alpin): Investigate supporting bfloat16 dtype
+            self.dtype = torch.float16
+            # In some cases, CUDA graph execution breaks this quant method
+            self.enforce_eager = True
 
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
