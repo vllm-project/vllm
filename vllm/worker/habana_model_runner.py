@@ -975,10 +975,11 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 block_table = seq_group_metadata.block_tables[seq_id]
                 if len(block_table) == 0:
                     block_number = _PAD_BLOCK_ID
-                    block_table = []
-                    slot = next(dummy_slots)
                 else:
                     block_number = block_table[position // self.block_size]
+                if block_number == _PAD_BLOCK_ID:
+                    slot = next(dummy_slots)
+                else:
                     block_offset = position % self.block_size
                     slot = block_number * self.block_size + block_offset
                 slot_mapping.append([slot])
@@ -1271,6 +1272,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                         lora_request=None):
         sampling_params = SamplingParams(temperature=0)
         num_blocks = math.ceil(seq_len / self.block_size)
+        seq_len = max(seq_len, 1)
         if is_prompt:
             input_len = seq_len
             output_len = 0

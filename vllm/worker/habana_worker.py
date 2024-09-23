@@ -345,6 +345,7 @@ def init_worker_distributed_environment(
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
+    print("Initializing TP...")
     """Initialize the distributed environment."""
     backend = hpu_backend_string()
     init_distributed_environment(parallel_config.world_size,
@@ -352,12 +353,15 @@ def init_worker_distributed_environment(
                                  distributed_init_method,
                                  local_rank,
                                  backend=backend)
+    print(f"init_distributed_environment with backend {backend} and distributed_init_method {distributed_init_method} done!")
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+    print("ensure_model_parallel_initialized done!")
 
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
+        print(f"torch.distributed is already initialized, torch_world_size: {torch_world_size}")
         if torch_world_size != parallel_config.world_size:
             raise RuntimeError(
                 "torch.distributed is already initialized but the torch world "
@@ -368,6 +372,7 @@ def init_worker_distributed_environment(
             "distributed_init_method must be set if torch.distributed "
             "is not already initialized")
     else:
+        print(f"torch.distributed is not initialized, initializing world_size: {parallel_config.world_size}")
         backend = hpu_backend_string()
         torch.distributed.init_process_group(
             backend=backend,
@@ -375,14 +380,24 @@ def init_worker_distributed_environment(
             rank=rank,
             init_method=distributed_init_method,
         )
+        print(f"torch.distributed initialized!")
 
     # A small all_reduce for warmup & checking conformance.
     device = hpu_device_string()
     dummy_tensor_hpu = torch.ones(1).to(device)
+    torch.hpu.synchronize()
+    print(f"testing allreduce...")
+    htorch.core.mark_step()
+    print(f"testing allreduce...")
     torch.distributed.all_reduce(dummy_tensor_hpu)
+    htorch.core.mark_step()
+    torch.hpu.synchronize()
+    print(f"allreduce done, checking result...")
     assert dummy_tensor_hpu.item() == parallel_config.world_size
+    print(f"allreduce works fine!!")
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+    print("TP initialized successfully!!")
 
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
