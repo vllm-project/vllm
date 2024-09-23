@@ -365,7 +365,7 @@ def test_accept_tokens_partially(seed: int, device: str):
     # Next only keep the first 2 draft tokens same as the zero temperature
     # tokens. For the remaining 3 choose some other tokens. In the
     # response we will expect the first 2 tokens to be the same as the
-    # draft tokens and the rest as -1
+    # draft tokens and the recovered token and rest as -1
     draft_token_ids_to_replace = get_draft_token_ids(
         batch_size, k, vocab_size, zero_temperature_token_ids)
     draft_token_ids = torch.cat(
