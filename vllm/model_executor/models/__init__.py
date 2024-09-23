@@ -83,12 +83,14 @@ _MULTIMODAL_MODELS = {
     ("chameleon", "ChameleonForConditionalGeneration"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
-    "LlavaForConditionalGeneration":
-    ("llava", "LlavaForConditionalGeneration"),
+    "LlavaForConditionalGeneration": ("llava",
+                                      "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next",
                                           "LlavaNextForConditionalGeneration"),
     "LlavaNextVideoForConditionalGeneration":
     ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),
+    "LlavaOnevisionForConditionalGeneration":
+    ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "PaliGemmaForConditionalGeneration": ("paligemma",
                                           "PaliGemmaForConditionalGeneration"),
