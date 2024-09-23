@@ -445,8 +445,7 @@ def test_accept_tokens_set_non_default_posteriors(seed: int, device: str):
 @pytest.mark.parametrize("seed", list(range(10)))
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_get_recovered_token_ids(seed: int, disable_bonus_tokens: bool,
-                                 device: str):
+def test_get_recovered_token_ids(seed: int, device: str):
     """
     Test the TypicalAcceptanceSampler's method for generating
     replacement token IDs.
