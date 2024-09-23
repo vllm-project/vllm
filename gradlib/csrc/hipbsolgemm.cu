@@ -109,6 +109,12 @@ bool cout_print = false;
 
 torch::Tensor dTensor;
 
+std::map<at::ScalarType, hipDataType> dtype_map{
+    {at::kHalf, HIP_R_16F},
+    {at::kBFloat16, HIP_R_16BF},
+    {at::kFloat, HIP_R_32F},
+    {at::kFloat8_e4m3fnuz, HIP_R_8F_E4M3_FNUZ}};
+
 // std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult;
 }  // namespace
 
@@ -117,7 +123,8 @@ std::vector<int> hipblasLtMatmul_findallsols_wrapper(
     hipblasLtHandle_t handle, hipblasOperation_t op_A, hipblasOperation_t op_B,
     int m, int n, int k, const void* alpha, const void* a, int lda,
     const void* b, int ldb, const void* beta, void* c, int ldc,
-    hipDataType intype, hipDataType outtype, hipStream_t& stream) {
+    const void* bias, hipDataType intype, hipDataType outtype,
+    hipStream_t& stream) {
   int flag{0};
   hipblasLtMatrixLayout_t matA, matB, matC;
   hipblasLtMatmulDesc_t matmul;
@@ -138,6 +145,14 @@ std::vector<int> hipblasLtMatmul_findallsols_wrapper(
       matmul, HIPBLASLT_MATMUL_DESC_TRANSA, &op_A, sizeof(int32_t)));
   CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
       matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &op_B, sizeof(int32_t)));
+
+  if (bias) {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
+    auto epilogue = HIPBLASLT_EPILOGUE_BIAS;
+    CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(int32_t)));
+  }
 
   // std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult(10);
   // CHECK_HIPBLAS_ERROR(hipblasLtMatmulAlgoGetHeuristic(
@@ -178,8 +193,9 @@ hipblasStatus_t hipblasLtMatmul_sol_wrapper(
     hipblasLtHandle_t handle, hipblasOperation_t op_A, hipblasOperation_t op_B,
     int m, int n, int k, const void* alpha, const void* a, int lda,
     const void* scaleA, const void* b, int ldb, const void* scaleB,
-    const void* beta, void* c, int ldc, const void* scaleC, hipDataType intype,
-    hipDataType outtype, hipStream_t& stream, int solution_index = -1) {
+    const void* beta, void* c, int ldc, const void* scaleC, const void* bias,
+    hipDataType intype, hipDataType outtype, hipStream_t& stream,
+    int solution_index = -1) {
   // TODO: flag is not supported for hipblasLt yet
   int flag{0};
   // if (dtype == HIPBLAS_R_16F) {
@@ -210,15 +226,26 @@ hipblasStatus_t hipblasLtMatmul_sol_wrapper(
       matmul, HIPBLASLT_MATMUL_DESC_TRANSB, &op_B, sizeof(int32_t)));
   if (scaleA != nullptr) {
     CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
-        matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &scaleA, sizeof(scaleA)));
+        matmul, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER, &scaleA,
+        sizeof(scaleA)));
   }
   if (scaleB != nullptr) {
     CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
-        matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &scaleB, sizeof(scaleB)));
+        matmul, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER, &scaleB,
+        sizeof(scaleB)));
   }
   if (scaleC != nullptr) {
     CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
-        matmul, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &scaleC, sizeof(scaleC)));
+        matmul, HIPBLASLT_MATMUL_DESC_D_SCALE_POINTER, &scaleC,
+        sizeof(scaleC)));
+  }
+  if (bias) {
+    CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(void*)));
+    auto epilogue = HIPBLASLT_EPILOGUE_BIAS;
+    static_assert(sizeof(epilogue) == sizeof(int32_t));
+    CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescSetAttribute(
+        matmul, HIPBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(int32_t)));
   }
   // nvtxRangePop();
   //  if heuristic does not exist in the map, do search and push into the map
@@ -236,8 +263,6 @@ hipblasStatus_t hipblasLtMatmul_sol_wrapper(
                 << ", " << k << "), dtype: " << intype << ", (lda, ldb, ldc): ("
                 << lda << ", " << ldb << ", " << ldc << "), " << std::endl;
     }
-    // std::vector<hipblasLtMatmulHeuristicResult_t>
-    // heuristicResult(request_solutions);
     CHECK_HIPBLAS_ERROR(hipblasLtMatmulAlgoGetHeuristic(
         handle, matmul, matA, matB, matC, matC, preference, request_solutions,
         heuristicResult.data(), &returnedAlgoCount));
@@ -245,131 +270,36 @@ hipblasStatus_t hipblasLtMatmul_sol_wrapper(
       std::cout << "less solution found! request: " << request_solutions
                 << ", found: " << returnedAlgoCount << std::endl;
     }
-    // heuristic_map[gemm_key] = heuristicResult[0];
-    /*
-        if (returnedAlgoCount == 1) {
-          heuristic_map[gemm_key] = heuristicResult[0];
-        } else {
-          // benchmark requested solutions and pick best one
-          int bestIndex { -1 };
-          double bestMs { std::numeric_limits<double>::max() };
-          for (int sol { 0 }; sol < returnedAlgoCount; ++sol) {
-            // warm up
-            for (int iter { 0 }; iter < warmup_iters; ++iter) {
-              CHECK_HIPBLAS_ERROR(hipblasLtMatmul(handle, matmul,
-                  alpha,
-                  a, matA,
-                  b, matB,
-                  beta,
-                  c, matC,
-                  c, matC, // In case beta != 0, these runs can overwrite the
-       values in c
-                           // since c and d are the same
-                           // TODO: allocates separate d memory for these runs
-                  &heuristicResult[sol].algo,
-                  d_workspace, workspace_size,
-                  stream));
-            }
-            // performance measuring
-            double eventMs;
-            CHECK_HIP_ERROR(hipEventRecord(start, stream));
-            for (int iter { 0 }; iter < bench_iters; ++iter) {
-              CHECK_HIPBLAS_ERROR(hipblasLtMatmul(handle, matmul,
-                  alpha,
-                  a, matA,
-                  b, matB,
-                  beta,
-                  c, matC,
-                  c, matC, // In case beta != 0, these runs can overwrite the
-       values in c
-                           // since c and d are the same
-                           // TODO: allocates separate d memory for these runs
-                  &heuristicResult[sol].algo,
-                  d_workspace, workspace_size,
-                  stream));
-            }
-            CHECK_HIP_ERROR(hipEventRecord(stop, stream));
-            CHECK_HIP_ERROR(hipEventSynchronize(stop));
-            float temp;
-            CHECK_HIP_ERROR(hipEventElapsedTime(&temp, start, stop));
-            eventMs = double(temp);
-            eventMs /= bench_iters;
-
-            if (cout_print) {
-              std::cout << "    Sol " << sol << ": average time per iter " <<
-       std::to_string(eventMs) << " ms";
-            }
-            if (bestMs > eventMs) {
-              bestMs = eventMs;
-              bestIndex = sol;
-              if (cout_print) {
-                std::cout << " *" << std::endl;
-              }
-            } else {
-              if (cout_print) {
-                std::cout << std::endl;
-              }
-            }
-          }
-          heuristic_map[gemm_key] = heuristicResult[bestIndex];
-        }
-    */
-    // nvtxRangePop();
   } else {
     std::vector<int> algoIndex(1);
     algoIndex[0] = solution_index;
-    // std::vector<hipblasLtMatmulHeuristicResult_t> tmpAlgo;
     CHECK_HIPBLAS_ERROR(
         hipblaslt_ext::getAlgosFromIndex(handle, algoIndex, heuristicResult));
   }
 
-  // size_t ret_workspace_size = 0;
-
-  // auto status1 = hipblaslt_ext::matmulIsAlgoSupported(handle, matmul,
-  //       alpha,
-  //       matA,
-  //       matB,
-  //       beta,
-  //       matC,
-  //       matC,
-  //       heuristicResult[0].algo,
-  //       ret_workspace_size
-  //);
-  // if (status1 == HIPBLAS_STATUS_SUCCESS) {
-  //   std::cout << "Workspace size" << ret_workspace_size << std::endl;
-
-  //} else {
-  //  std::cout << "Algo not supported!!!" << std::endl;
-
-  //}
   hipblasStatus_t status = hipblasLtMatmul(
       handle, matmul, alpha, a, matA, b, matB, beta, c, matC, c, matC,
       &heuristicResult[0].algo, d_workspace, workspace_size, stream);
 
-  // nvtxRangePushA("hipBLASLt variables deletion");
   CHECK_HIPBLAS_ERROR(hipblasLtMatmulDescDestroy(matmul));
   CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutDestroy(matA));
   CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutDestroy(matB));
   CHECK_HIPBLAS_ERROR(hipblasLtMatrixLayoutDestroy(matC));
-  // nvtxRangePop();
 
   return status;
 }
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
-torch::Tensor HipbSolIdxBlas(
-    const torch::Tensor& mat1, const torch::Tensor& mat2,
-    const int solution_index, at::optional<py::object> Type = at::nullopt,
-    at::optional<torch::Tensor> scale1 = at::nullopt,
-    at::optional<torch::Tensor> scale2 = at::nullopt,
-    at::optional<torch::Tensor> scaleOut = at::nullopt) {
+torch::Tensor hipb_mm(const torch::Tensor& mat1, const torch::Tensor& mat2,
+                      const int solution_index,
+                      at::optional<torch::Tensor> bias = at::nullopt,
+                      at::optional<py::object> out_dtype = at::nullopt,
+                      at::optional<torch::Tensor> scale1 = at::nullopt,
+                      at::optional<torch::Tensor> scale2 = at::nullopt,
+                      at::optional<torch::Tensor> scaleOut = at::nullopt) {
   auto mat1_strides{mat1.strides()};
   auto mat2_strides{mat2.strides()};
   auto mat1_sizes{mat1.sizes()};
   auto mat2_sizes{mat2.sizes()};
-  // std::cout << " | mat1 info: size: " << mat1_sizes << " stride: " <<
-  // mat1_strides << std::endl
-  //           << " | mat2 info: size: " << mat2_sizes << " stride: " <<
-  //           mat2_strides << std::endl;
 
   TORCH_CHECK(mat1.dim() == 2 && mat2.dim() == 2, "tensors must be 2-D");
   TORCH_CHECK(mat1.dtype() == mat2.dtype(),
@@ -378,14 +308,13 @@ torch::Tensor HipbSolIdxBlas(
   TORCH_CHECK(mat1_sizes[1] == mat2_sizes[0],
               "mat1 dim 1 must match mat2 dim 0");
 
-  auto inType{mat1.options().dtype()};
-  auto outType = inType.toScalarType();
-  if (Type.has_value())
-    outType = torch::python::detail::py_object_to_dtype(Type.value());
-  auto options{at::TensorOptions().dtype(outType).device(at::kCUDA)};
+  auto inDtype{mat1.options().dtype().toScalarType()};
+  auto outDtype{
+      out_dtype.has_value()
+          ? torch::python::detail::py_object_to_dtype(out_dtype.value())
+          : inDtype};
+  auto options{at::TensorOptions().dtype(outDtype).device(at::kCUDA)};
   auto result{torch::empty({mat1_sizes[0], mat2_sizes[1]}, options)};
-  // std::cout << " | result info: size: " << result.sizes() << " stride: " <<
-  // result.strides() << std::endl;
 
   bool transpose_result = true;
   bool transpose_mat1;
@@ -420,16 +349,6 @@ torch::Tensor HipbSolIdxBlas(
     mat1_sizes = mat2.sizes();
     mat2_sizes = mat1.sizes();
   }
-  // std::cout << " | transpose_result: " << (transpose_result ? "true" :
-  // "false") << std::endl
-  //           << " | transpose_A: " << (transpose_mat1 ? "true" : "false") <<
-  //           std::endl
-  //           << " | transpose_B: " << (transpose_mat2 ? "true" : "false") <<
-  //           std::endl;
-  // std::cout << " | A matrix: size: " << mat1_sizes << " stride: " <<
-  // mat1_strides << std::endl
-  //           << " | B matrix: size: " << mat2_sizes << " stride: " <<
-  //           mat2_strides << std::endl;
 
   float one{1.0f};
   float zero{0.0f};
@@ -451,50 +370,32 @@ torch::Tensor HipbSolIdxBlas(
     d_scaleOut = static_cast<void*>(scaleOut.value().data_ptr());
   }
 
-  hipDataType hipblasInType, hipblasOutType;
-  if (inType == at::kHalf) {
-    hipblasInType = HIP_R_16F;
-  } else if (inType == at::kBFloat16) {
-    hipblasInType = HIP_R_16BF;
-  } else if (inType == at::kFloat) {
-    hipblasInType = HIP_R_32F;
-  } else if (inType == at::kFloat8_e4m3fnuz) {
-    hipblasInType = HIP_R_8F_E4M3_FNUZ;
-  } else {
-    assert(false && "Wrong datatype!");
-  }
+  auto hipblasInType = dtype_map.at(inDtype);
+  auto hipblasOutType = dtype_map.at(outDtype);
 
-  if (outType == at::kHalf) {
-    hipblasOutType = HIP_R_16F;
-  } else if (outType == at::kBFloat16) {
-    hipblasOutType = HIP_R_16BF;
-  } else if (outType == at::kFloat) {
-    hipblasOutType = HIP_R_32F;
-  } else if (outType == at::kFloat8_e4m3fnuz) {
-    hipblasOutType = HIP_R_8F_E4M3_FNUZ;
-  } else {
-    assert(false && "Wrong datatype!");
-  }
   void* ptrA{static_cast<void*>((transpose_result ? mat2 : mat1).data_ptr())};
   void* ptrB{static_cast<void*>((transpose_result ? mat1 : mat2).data_ptr())};
   void* ptrC{static_cast<void*>(result.data_ptr())};
   if (transpose_result) std::swap(d_scale1, d_scale2);
   auto current_stream{torch::hip::getCurrentHIPStream().stream()};
+  void* bias_ptr =
+      bias.has_value() ? static_cast<void*>(bias.value().data_ptr()) : nullptr;
 
   CHECK_HIPBLAS_ERROR(hipblasLtMatmul_sol_wrapper(
       hipblaslt_handle, transpose_mat1 ? HIPBLAS_OP_T : HIPBLAS_OP_N,
       transpose_mat2 ? HIPBLAS_OP_T : HIPBLAS_OP_N, m, n, k, &one, ptrA,
       mat1_ld, d_scale1, ptrB, mat2_ld, d_scale2, &zero, ptrC, result_ld,
-      d_scaleOut, hipblasInType, hipblasOutType, current_stream,
+      d_scaleOut, bias_ptr, hipblasInType, hipblasOutType, current_stream,
       solution_index));
 
   return result;
 }
 
 // find all hipblas solutions and return them to python land
-std::vector<int> HipbFindAllSolIdxBlas(
+std::vector<int> hipb_findallsols(
     const torch::Tensor& mat1, const torch::Tensor& mat2,
-    at::optional<py::object> Type = at::nullopt) {
+    at::optional<torch::Tensor> bias = at::nullopt,
+    at::optional<py::object> out_dtype = at::nullopt) {
   auto mat1_strides{mat1.strides()};
   auto mat2_strides{mat2.strides()};
   auto mat1_sizes{mat1.sizes()};
@@ -506,10 +407,12 @@ std::vector<int> HipbFindAllSolIdxBlas(
   TORCH_CHECK(mat1_sizes[1] == mat2_sizes[0],
               "mat1 dim 1 must match mat2 dim 0");
 
-  auto inType{mat1.options().dtype()};
-  auto outType = inType.toScalarType();
-  if (Type.has_value())
-    outType = torch::python::detail::py_object_to_dtype(Type.value());
+  auto inType{mat1.options().dtype().toScalarType()};
+  auto outType{
+      out_dtype.has_value()
+          ? torch::python::detail::py_object_to_dtype(out_dtype.value())
+          : inType};
+
   auto options{at::TensorOptions().dtype(outType).device(at::kCUDA)};
   auto result{torch::empty({mat1_sizes[0], mat2_sizes[1]}, options)};
   bool transpose_result = true;
@@ -552,38 +455,21 @@ std::vector<int> HipbFindAllSolIdxBlas(
   int64_t mat1_ld = mat1_strides[(transpose_mat1 == transpose_result) ? 1 : 0];
   int64_t mat2_ld = mat2_strides[(transpose_mat2 == transpose_result) ? 1 : 0];
   int64_t result_ld = result.stride(transpose_result ? 0 : 1);
-  hipDataType hipblasInType, hipblasOutType;
-  if (inType == at::kHalf) {
-    hipblasInType = HIP_R_16F;
-  } else if (inType == at::kBFloat16) {
-    hipblasInType = HIP_R_16BF;
-  } else if (inType == at::kFloat) {
-    hipblasInType = HIP_R_32F;
-  } else if (inType == at::kFloat8_e4m3fnuz) {
-    hipblasInType = HIP_R_8F_E4M3_FNUZ;
-  } else {
-    assert(false && "Wrong datatype!");
-  }
-  if (outType == at::kHalf) {
-    hipblasOutType = HIP_R_16F;
-  } else if (outType == at::kBFloat16) {
-    hipblasOutType = HIP_R_16BF;
-  } else if (outType == at::kFloat) {
-    hipblasOutType = HIP_R_32F;
-  } else if (outType == at::kFloat8_e4m3fnuz) {
-    hipblasOutType = HIP_R_8F_E4M3_FNUZ;
-  } else {
-    assert(false && "Wrong datatype!");
-  }
+  hipDataType hipblasInType = dtype_map.at(inType);
+  hipDataType hipblasOutType = dtype_map.at(outType);
+
   void* ptrA{static_cast<void*>((transpose_result ? mat2 : mat1).data_ptr())};
   void* ptrB{static_cast<void*>((transpose_result ? mat1 : mat2).data_ptr())};
   void* ptrC{static_cast<void*>(result.data_ptr())};
   auto current_stream{torch::hip::getCurrentHIPStream().stream()};
 
+  auto bias_ptr =
+      bias.has_value() ? static_cast<void*>(bias.value().data_ptr()) : nullptr;
+
   return hipblasLtMatmul_findallsols_wrapper(
       hipblaslt_handle, transpose_mat1 ? HIPBLAS_OP_T : HIPBLAS_OP_N,
       transpose_mat2 ? HIPBLAS_OP_T : HIPBLAS_OP_N, m, n, k, &one, ptrA,
-      mat1_ld, ptrB, mat2_ld, &zero, ptrC, result_ld, hipblasInType,
+      mat1_ld, ptrB, mat2_ld, &zero, ptrC, result_ld, bias_ptr, hipblasInType,
       hipblasOutType, current_stream);
 }
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -624,10 +510,11 @@ void hipb_destroy_extension() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("hipb_create_extension", &hipb_create_extension, "create_extension");
   m.def("hipb_destroy_extension", &hipb_destroy_extension, "destroy_extension");
-  m.def("hipb_mm", &HipbSolIdxBlas, "mm", py::arg("mat1"), py::arg("mat2"),
-        py::arg("solution_index"), py::arg("outType") = at::nullopt,
-        py::arg("scale1") = at::nullopt, py::arg("scale2") = at::nullopt,
-        py::arg("scaleOut") = at::nullopt);
-  m.def("hipb_findallsols", &HipbFindAllSolIdxBlas, "hipblas_find_all_sols",
-        py::arg("mat1"), py::arg("mat2"), py::arg("outType") = at::nullopt);
+  m.def("hipb_mm", &hipb_mm, "hipb_mm", py::arg("mat1"), py::arg("mat2"),
+        py::arg("solution_index"), py::arg("bias") = at::nullopt,
+        py::arg("out_dtype") = at::nullopt, py::arg("scale1") = at::nullopt,
+        py::arg("scale2") = at::nullopt, py::arg("scaleOut") = at::nullopt);
+  m.def("hipb_findallsols", &hipb_findallsols, "hipb_findallsols",
+        py::arg("mat1"), py::arg("mat2"), py::arg("bias") = at::nullopt,
+        py::arg("out_dtype") = at::nullopt);
 }
