@@ -62,7 +62,7 @@ class TunedGemm:
             return None
         if inp_view.dtype != torch.float16 or k % 8 != 0:
             return None
-        if m > 8 and n <= 4:
+        if m > 8 and 0 < n <= 4:
             out = torch.empty(inp_view.shape[0],
                               weights.shape[0],
                               dtype=inp_view.dtype,
