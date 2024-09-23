@@ -24,6 +24,7 @@ class RequestFuncInput:
     model: str
     best_of: int = 1
     use_beam_search: bool = False
+    logprobs: Optional[int] = None
 
 
 @dataclass
@@ -225,8 +226,8 @@ async def async_request_openai_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "completions"
-    ), "OpenAI Completions API URL must end with 'completions'."
+        ("completions", "profile")
+    ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -236,6 +237,7 @@ async def async_request_openai_completions(
             "temperature": 0.0,
             "best_of": request_func_input.best_of,
             "max_tokens": request_func_input.output_len,
+            "logprobs": request_func_input.logprobs,
             "stream": True,
         }
         headers = {

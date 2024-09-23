@@ -4,6 +4,7 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
 
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import CLIPVisionConfig, LlavaConfig, SiglipVisionConfig
 
 from vllm.attention import AttentionMetadata
@@ -11,10 +12,12 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
+from vllm.utils import is_list_of
 
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_max_clip_image_tokens,
@@ -23,20 +26,20 @@ from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
-from .utils import (filter_weights, init_vllm_registered_model,
+from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 
 class LlavaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: `(batch_size, num_channels, height, width)`"""
+    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
 
 
 class LlavaImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -132,7 +135,18 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
     hf_config = ctx.get_hf_config(LlavaConfig)
     vision_config = hf_config.vision_config
 
-    image_feature_size = get_max_llava_image_tokens(ctx)
+    image_data = multi_modal_data["image"]
+    if isinstance(image_data, Image.Image):
+        image_feature_size = get_max_llava_image_tokens(ctx)
+    elif is_list_of(image_data, Image.Image):
+        image_feature_size = [get_max_llava_image_tokens(ctx)
+                              ] * len(image_data)
+    elif isinstance(image_data, torch.Tensor):
+        num_images, image_feature_size, hidden_size = image_data.shape
+    elif is_list_of(image_data, torch.Tensor):
+        image_feature_size = [item.shape[1] for item in image_data]
+    else:
+        raise TypeError(f"Invalid image type: {type(image_data)}")
 
     if isinstance(vision_config, CLIPVisionConfig):
         return input_processor_for_clip(
@@ -229,21 +243,24 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, torch.Tensor):
+            if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
+
             return LlavaImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
+                data=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True)),
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
+            if not isinstance(image_embeds, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
             return LlavaImageEmbeddingInputs(
                 type="image_embeds",
-                data=image_embeds,
+                data=flatten_bn(image_embeds, concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -313,7 +330,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
         278, 2793, 310, 278, 1967, 29973, 13, 22933, 9047, 13566, 29901]`.
 
         To reserve space in KV cache, we have to insert placeholder tokens
-        before they are inputted to the model, so the input processor prepends 
+        before they are inputted to the model, so the input processor prepends
         additional image tokens (denoted as `32000`), resulting in:
         `[1, 3148, 1001, 29901, 29871, 32000, ..., 32000, 29871, 13, 5618,
         29915, 29879, 278, 2793, 310, 278, 1967, 29973, 13, 22933, 9047, 13566,
@@ -331,7 +348,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values: The pixels in each input image.
-        
+
         See also:
             :class:`LlavaImageInputs`
         """

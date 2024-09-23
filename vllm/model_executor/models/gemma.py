@@ -33,13 +33,13 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import GemmaRotaryEmbedding
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA
 
@@ -148,14 +148,12 @@ class GemmaAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        # TODO(woosuk): Use the `get_rope` interface.
-        self.rotary_emb = GemmaRotaryEmbedding(
+        self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
-            max_position_embeddings=max_position_embeddings,
+            max_position=max_position_embeddings,
             base=self.rope_theta,
             is_neox_style=True,
-            dtype=torch.get_default_dtype(),
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -333,6 +331,8 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA):
         super().__init__()
 
         self.config = config
+        # currently all existing Gemma models have `tie_word_embeddings` enabled
+        assert config.tie_word_embeddings
         self.lora_config = lora_config
 
         self.quant_config = quant_config

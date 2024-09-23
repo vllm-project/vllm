@@ -1,7 +1,10 @@
 from vllm import LLM
 
 # Sample prompts.
-prompts = ["This is an example sentence."]
+prompts = [
+    "This is an example sentence.",
+    "Another example sentence.",
+]
 
 # Create an LLM.
 model = LLM(model="bert-base-uncased", enforce_eager=True)

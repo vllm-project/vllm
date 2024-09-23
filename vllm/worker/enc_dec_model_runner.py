@@ -6,6 +6,7 @@ import torch.distributed
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
                                      get_global_forced_attn_backend,
                                      global_force_attn_backend)
@@ -15,12 +16,13 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
+from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
-from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
+from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata,
                                       TModelInputForGPU)
@@ -42,6 +44,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     """
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
+    encoder_seq_lens: Optional[List[int]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -225,7 +228,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         model_input: TEncoderDecoderModelInput,
     ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+               Optional[torch.Tensor], List[int]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs
         are used to augment an already-computed `TEncoderDecoderModelInput`
@@ -262,7 +265,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
         """
 
         if len(seq_group_metadata_list) == 0:
-            return (model_input.attn_metadata, None, None)
+            return (model_input.attn_metadata, None, None, [])
 
         # Since we are not supporting chunked prefill either the entire
         # batch is prefill or it is decode
@@ -299,7 +302,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
                     # initialized yet. In this case, we just use a dummy
                     # slot mapping.
                     # In embeddings, the block tables are {seq_id: None}.
-                    cross_slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
+                    cross_slot_mapping.extend([PAD_SLOT_ID] * seq_len)
                 else:
                     for i in range(0, seq_len):
                         block_number = seq_group_metadata.cross_block_table[
@@ -382,7 +385,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
         )
 
         return (attn_metadata, encoder_input_tokens_tensor,
-                encoder_input_positions_tensor)
+                encoder_input_positions_tensor, encoder_seq_lens)
 
 
 class EncoderDecoderModelRunner(
@@ -458,12 +461,10 @@ class EncoderDecoderModelRunner(
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
 
-        (
-            attn_metadata,
-            encoder_input_tokens_tensor,
-            encoder_input_positions_tensor,
-        ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
-                                                       model_input))
+        (attn_metadata, encoder_input_tokens_tensor,
+         encoder_input_positions_tensor,
+         _) = self._prepare_encoder_model_input_tensors(
+             seq_group_metadata_list, model_input)
 
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.

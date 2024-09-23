@@ -34,17 +34,18 @@ See  [vLLM performance dashboard](https://perf.vllm.ai) for the latest performan
 
 Performance benchmark will be triggered when:
 - A PR being merged into vllm.
-- Every commit for those PRs with `perf-benchmarks` label.
+- Every commit for those PRs with `perf-benchmarks` label AND `ready` label.
 
 Nightly benchmark will be triggered when:
-- Every commit for those PRs with `nightly-benchmarks` label.
+- Every commit for those PRs with `perf-benchmarks` label and `nightly-benchmarks` label.
 
 
 
 
 ## Performance benchmark details
 
-See [descriptions.md](tests/descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
+
+See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
 
 
 #### Latency test
@@ -68,7 +69,7 @@ Here is an example of one test inside `latency-tests.json`:
 
 In this example:
 -  The `test_name` attributes is a unique identifier for the test. In `latency-tests.json`, it must start with `latency_`.
--  The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `run-benchmarks-suite.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy --num-iters-warmup 5 --num-iters 15`
+-  The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `run-performance-benchmarks.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy --num-iters-warmup 5 --num-iters 15`
 
 Note that the performance numbers are highly sensitive to the value of the parameters. Please make sure the parameters are set correctly.
 
