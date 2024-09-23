@@ -235,7 +235,7 @@ class LLMEngine:
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
             "num_scheduler_steps=%d, enable_prefix_caching=%s, "
-            "use_async_output_proc=%s)",
+            "use_async_output_proc=%s, mm_processor_kwargs=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -268,6 +268,7 @@ class LLMEngine:
             scheduler_config.num_scheduler_steps,
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
+            model_config.mm_processor_kwargs,
         )
         # TODO(woosuk): Print more configs in debug mode.
         from vllm.plugins import load_general_plugins

@@ -138,6 +138,15 @@ class MultiModalRegistry:
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
+        # NOTE - we currently make the assumption that if a model has multiple
+        # supported modalities, they take the same kwargs. For the default,
+        # this could be an issue in the future if it falls back to two HF
+        # resources and we can't inspect the signature easily since it's
+        # getting initialized through the autoclass.
+        #
+        # If this is a problem in the future, we should revisit it, but since
+        # it potentially introduces a lot of complexity for a currently
+        # uncommon case, we do not for simplicity of both use & implementation
         return functools.partial(self.map_input, model_config)
 
     def register_max_multimodal_tokens(
