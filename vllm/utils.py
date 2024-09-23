@@ -5,6 +5,7 @@ import datetime
 import enum
 import gc
 import inspect
+import ipaddress
 import os
 import random
 import socket
@@ -531,6 +532,14 @@ def get_ip() -> str:
         " VLLM_HOST_IP or HOST_IP.",
         stacklevel=2)
     return "0.0.0.0"
+
+
+def is_valid_ipv6_address(address: str) -> bool:
+    try:
+        ipaddress.IPv6Address(address)
+        return True
+    except ValueError:
+        return False
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
