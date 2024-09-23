@@ -27,7 +27,8 @@ from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -485,10 +486,9 @@ def input_processor_for_phi3v(ctx: InputContext, inputs: DecoderOnlyInputs):
             new_token_ids.append(token_id)
 
     # NOTE: Create a defensive copy of the original inputs
-    inputs = DecoderOnlyInputs(prompt_token_ids=new_token_ids,
-                               prompt=new_prompt,
-                               multi_modal_data=multi_modal_data)
-    return inputs
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()

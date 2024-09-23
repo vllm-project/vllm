@@ -117,6 +117,22 @@ class TokenInputs(TypedDict):
     """
 
 
+def token_inputs(
+    prompt_token_ids: List[int],
+    prompt: Optional[str] = None,
+    multi_modal_data: Optional["MultiModalDataDict"] = None,
+) -> TokenInputs:
+    """Construct :class:`TokenInputs` from optional values."""
+    inputs = TokenInputs(prompt_token_ids=prompt_token_ids)
+
+    if prompt is not None:
+        inputs["prompt"] = prompt
+    if multi_modal_data is not None:
+        inputs["multi_modal_data"] = multi_modal_data
+
+    return inputs
+
+
 SingletonInputs = TokenInputs
 """
 A processed :class:`SingletonPrompt` which can be passed to

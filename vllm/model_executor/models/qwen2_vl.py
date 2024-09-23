@@ -47,7 +47,8 @@ from vllm.attention.selector import (_Backend, backend_name_to_enum,
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
@@ -814,7 +815,7 @@ def input_processor_for_qwen2_vl(
                                                             1:])
         prompt_token_ids = prompt_token_ids_with_video
 
-    return DecoderOnlyInputs(
+    return token_inputs(
         prompt_token_ids=prompt_token_ids,
         prompt=inputs["prompt"],
         multi_modal_data=multi_modal_data,

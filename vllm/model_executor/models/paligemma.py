@@ -7,7 +7,8 @@ from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -109,9 +110,9 @@ def input_processor_for_paligemma(ctx: InputContext,
     new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
 
     # NOTE: Create a defensive copy of the original inputs
-    return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
-                             prompt=new_prompt,
-                             multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 class PaliGemmaMultiModalProjector(nn.Module):

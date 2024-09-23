@@ -11,7 +11,7 @@ from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.inputs import DecoderOnlyInputs
+from vllm.inputs import DecoderOnlyInputs, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -137,9 +137,9 @@ def input_processor_for_clip(
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
-                             prompt=new_prompt,
-                             multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa

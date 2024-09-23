@@ -18,7 +18,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY
-from vllm.inputs.data import DecoderOnlyInputs
+from vllm.inputs.data import DecoderOnlyInputs, token_inputs
 from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -193,9 +193,9 @@ def input_processor_for_ultravox(ctx: InputContext, inputs: DecoderOnlyInputs):
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
-                             prompt=new_prompt,
-                             multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 class StackAudioFrames(nn.Module):

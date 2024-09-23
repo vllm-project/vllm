@@ -11,7 +11,8 @@ from transformers import ChameleonConfig, ChameleonVQVAEConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -136,9 +137,9 @@ def input_processor_for_chameleon(ctx: InputContext,
     new_token_ids += [CHAMELEON_SEP_TOKEN_ID]
 
     # NOTE: Create a defensive copy of the original inputs
-    return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
-                             prompt=new_prompt,
-                             multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 class ChameleonLayerNorm(nn.LayerNorm):

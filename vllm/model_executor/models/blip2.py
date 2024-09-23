@@ -8,7 +8,8 @@ from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionConfig,
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -466,9 +467,9 @@ def input_processor_for_blip2(ctx: InputContext, inputs: DecoderOnlyInputs):
     if new_prompt is not None:
         new_prompt = BLIP2_IMAGE_TOKEN * image_feature_size + new_prompt
 
-    return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
-                             prompt=new_prompt,
-                             multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()

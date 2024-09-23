@@ -13,7 +13,7 @@ from transformers.models.siglip.modeling_siglip import SiglipSdpaAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.inputs import DecoderOnlyInputs
+from vllm.inputs import DecoderOnlyInputs, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -142,7 +142,7 @@ def input_processor_for_siglip(
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return DecoderOnlyInputs(
+    return token_inputs(
         prompt_token_ids=new_token_ids,
         prompt=new_prompt,
         multi_modal_data=multi_modal_data,

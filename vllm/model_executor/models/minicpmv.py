@@ -36,7 +36,8 @@ from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -317,12 +318,11 @@ def input_processor_for_minicpmv(ctx: InputContext, inputs: DecoderOnlyInputs):
         new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
 
-    inputs = DecoderOnlyInputs(
+    return token_inputs(
         prompt_token_ids=new_token_ids,
         prompt=new_prompt,
         multi_modal_data=multi_modal_data,
     )
-    return inputs
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):

@@ -22,7 +22,8 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -709,9 +710,9 @@ def input_processor_for_qwen(ctx: InputContext,
 
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
-    return DecoderOnlyInputs(prompt=new_prompt,
-                             prompt_token_ids=new_prompt_token_ids,
-                             multi_modal_data=multi_modal_data)
+    return token_inputs(prompt=new_prompt,
+                        prompt_token_ids=new_prompt_token_ids,
+                        multi_modal_data=multi_modal_data)
 
 
 def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:

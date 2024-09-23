@@ -27,7 +27,8 @@ from transformers import FuyuConfig, FuyuImageProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -191,9 +192,9 @@ def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
     new_prompt_token_ids = image_input_ids + bos_token + prompt_token_ids[
         1:] + boa_token
 
-    return DecoderOnlyInputs(prompt=new_prompt,
-                             prompt_token_ids=new_prompt_token_ids,
-                             multi_modal_data=new_multi_modal_data)
+    return token_inputs(prompt=new_prompt,
+                        prompt_token_ids=new_prompt_token_ids,
+                        multi_modal_data=new_multi_modal_data)
 
 
 def input_mapper_for_fuyu(ctx: InputContext, data: object):

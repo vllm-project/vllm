@@ -14,7 +14,8 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -329,9 +330,9 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
             repeat_count=video_feature_size,
         )
 
-        return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
-                                 prompt=new_prompt,
-                                 multi_modal_data=multi_modal_data)
+        return token_inputs(prompt_token_ids=new_token_ids,
+                            prompt=new_prompt,
+                            multi_modal_data=multi_modal_data)
 
     elif is_list_of(video_data, np.ndarray):
         raise NotImplementedError(
