@@ -44,16 +44,18 @@ RUN python3 -m pip install --upgrade pip
 # Remove sccache so it doesn't interfere with ccache
 # TODO: implement sccache support across components
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
-# Install torch == 2.5.0 on ROCm
 
-RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-    *"rocm-6.2"*) \
-        python3 -m pip uninstall -y torch torchvision \
-        && python3 -m pip install --no-cache-dir --pre \
-            torch==2.5.0 \
-            torchvision \
-            --index-url https://download.pytorch.org/whl/test/rocm6.2;; \
-    *) ;; esac
+# Install torch == 2.6.0 on ROCm
+RUN --mount=type=cache,target=/root/.cache/pip \
+    case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
+        *"rocm-6.2"*) \
+            python3 -m pip uninstall -y torch torchvision \
+            && python3 -m pip install --no-cache-dir --pre \
+                torch==2.6.0.dev20240923 \
+                # cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
+                torchvision==0.20.0.dev20240923 \
+                --index-url https://download.pytorch.org/whl/nightly/rocm6.2;; \
+        *) ;; esac
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
 ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
