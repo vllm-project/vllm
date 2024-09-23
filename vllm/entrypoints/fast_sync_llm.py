@@ -8,7 +8,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.multiproc_gpu_executor import MultiprocessingGPUExecutor
 from vllm.executor.ray_gpu_executor import RayGPUExecutor
-from vllm.inputs import PromptInputs, TokensPrompt
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -40,7 +40,7 @@ class FastSyncLLM:
 
     def _add_request(
         self,
-        inputs: PromptInputs,
+        inputs: PromptType,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
     ) -> None:
