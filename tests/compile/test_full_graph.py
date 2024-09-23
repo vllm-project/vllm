@@ -85,7 +85,8 @@ def test_full_graph(model_info, tp_size, backend):
 
     # Inductor doesn't support fp8/gptq_marlin_24 yet.
     quantization = model_kwargs.get("quantization")
-    if (quantization == "fp8" or quantization == "gptq_marlin_24") and backend != "eager":
+    if (quantization == "fp8"
+            or quantization == "gptq_marlin_24") and backend != "eager":
         return
 
     set_torch_compile_backend(backend)
