@@ -84,7 +84,7 @@ Option 2: Build from source
 
 For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0`, `rocm/pytorch-nightly`.
 
-Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guild in PyTorch `Getting Started <https://pytorch.org/get-started/locally/>`_
+Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch `Getting Started <https://pytorch.org/get-started/locally/>`_
 
 
 1. Install `Triton flash attention for ROCm <https://github.com/ROCm/triton>`_
