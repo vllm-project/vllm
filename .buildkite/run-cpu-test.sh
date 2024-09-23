@@ -35,6 +35,11 @@ docker exec cpu-test bash -c "
   tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
   tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynanmic_per_token"
 
+# Run AWQ test
+docker exec cpu-test bash -c "
+  pytest -s -v \
+  tests/quantization/test_ipex_quant.py"
+
 # online inference
 docker exec cpu-test bash -c "
   export VLLM_CPU_KVCACHE_SPACE=10 
