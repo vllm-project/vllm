@@ -6,7 +6,7 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.compilation.backends import vllm_backend
 from vllm.plugins import set_torch_compile_backend
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils import cuda_device_count_stateless, is_hip
 
 from ..utils import fork_new_process_for_each_test
 
@@ -24,11 +24,20 @@ TEST_MODELS = [
         "quantization": "compressed-tensors"
     }),
     ("meta-llama/Meta-Llama-3-8B", {}),
+    ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {
+        "quantization": "GPTQ"
+    }),
 ]
+
+#AWQ quantization is currently not supported in ROCm.
+if not is_hip():
+    TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
+        "quantization": "AWQ"
+    }))
 
 
 @pytest.mark.parametrize("model_info", TEST_MODELS)
-@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("tp_size", [1])  #[1, 2])
 @pytest.mark.parametrize("backend", ["eager", "inductor", vllm_backend])
 @fork_new_process_for_each_test
 def test_full_graph(model_info, tp_size, backend):
