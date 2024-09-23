@@ -210,6 +210,21 @@ __device__ inline void scale_float(float* c, FragS& s) {
   c[1] = __fmul_rn(c[1], __half2float(s_ptr[1]));
 }
 
+// Same as above, but for act_order (each K is multiplied individually)
+__device__ inline void scale4(FragB& frag_b, FragS& frag_s_1, FragS& frag_s_2,
+                              FragS& frag_s_3, FragS& frag_s_4, int i) {
+  __half2 s_val_1_2;
+  s_val_1_2.x = reinterpret_cast<__half*>(&frag_s_1)[i];
+  s_val_1_2.y = reinterpret_cast<__half*>(&frag_s_2)[i];
+
+  __half2 s_val_3_4;
+  s_val_3_4.x = reinterpret_cast<__half*>(&frag_s_3)[i];
+  s_val_3_4.y = reinterpret_cast<__half*>(&frag_s_4)[i];
+
+  frag_b[0] = __hmul2(frag_b[0], s_val_1_2);
+  frag_b[1] = __hmul2(frag_b[1], s_val_3_4);
+}
+
 // Wait until barrier reaches `count`, then lock for current threadblock.
 __device__ inline void barrier_acquire(int* lock, int count) {
   if (threadIdx.x == 0) {
@@ -329,6 +344,7 @@ template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int thread_k_blocks,  // same for k dimension (reduction)
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
+          const bool has_act_order,    // whether act_order is enabled
           const int group_blocks = -1  // number of consecutive 16x16 blocks
                                        // with a separate quantization scale
           >
@@ -370,7 +386,7 @@ __device__ inline void MarlinMoESingle(
   int n_tiles = prob_n / 16 / thread_n_blocks;
   int iters = ceildiv(k_tiles * n_tiles * parallel, gridDim.x);
 
-  if constexpr (group_blocks != -1) {
+  if constexpr (!has_act_order && group_blocks != -1) {
     if (group_blocks >= thread_k_blocks) {
       // Ensure that the number of tiles in each stripe is a multiple of the
       // groupsize; this avoids an annoying special case where a stripe starts
@@ -466,12 +482,20 @@ __device__ inline void MarlinMoESingle(
   int s_gl_stride = prob_n / 8;
   constexpr int s_sh_stride = 16 * thread_n_blocks / 8;
   constexpr int s_tb_groups =
-      group_blocks != -1 && group_blocks < thread_k_blocks
+      !has_act_order && group_blocks != -1 && group_blocks < thread_k_blocks
           ? thread_k_blocks / group_blocks
           : 1;
   constexpr int s_sh_stage = s_tb_groups * s_sh_stride;
   int s_gl_rd_delta = s_gl_stride;
+  // Scale size/strides with act_order
   constexpr int tb_k = 16 * thread_k_blocks;
+  constexpr int g_idx_stage = has_act_order ? (tb_k * sizeof(int)) / 16 : 0;
+  // constexpr int act_s_row_stride      = 1;
+  // int           act_s_col_stride      = act_s_row_stride * num_groups;
+  int act_s_col_stride = 1;
+  int act_s_col_warp_stride = act_s_col_stride * 8;
+  int tb_n_warps = thread_n_blocks / 4;
+  int act_s_col_tb_stride = act_s_col_warp_stride * tb_n_warps;
 
   constexpr int sorted_sh_stride = threads;
   constexpr int sorted_gl_stride = threads;
@@ -495,17 +519,23 @@ __device__ inline void MarlinMoESingle(
   int b_sh_wr = threadIdx.x * b_thread_vecs;
   int b_sh_rd = threadIdx.x * b_thread_vecs;
 
+  // For act_order
   constexpr int k_iter_size = tb_k / b_sh_wr_iters;
+  int slice_k_start = tb_k * slice_row;
+  int slice_k_finish = slice_k_start + tb_k * slice_iters;
+  int slice_k_start_shared_fetch = slice_k_start;
+  int slice_n_offset = act_s_col_tb_stride * slice_col;
 
   // No act_order
   int s_gl_rd;
-  if constexpr (group_blocks == -1) {
-    s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
-  } else {
-    s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
-              s_sh_stride * slice_col + threadIdx.x;
+  if constexpr (!has_act_order) {
+    if constexpr (group_blocks == -1) {
+      s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
+    } else {
+      s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
+                s_sh_stride * slice_col + threadIdx.x;
+    }
   }
-
   int s_sh_wr = threadIdx.x;
   bool s_sh_wr_pred = threadIdx.x < s_sh_stride;
 
@@ -525,14 +555,17 @@ __device__ inline void MarlinMoESingle(
   constexpr int sh_max_num_groups = 32;
 
   int shs_size;
-  shs_size = group_blocks > 0 ? stages * s_sh_stage : threads;
+  if constexpr (has_act_order)
+    shs_size = sh_max_num_groups * s_sh_stride + threads;
+  else
+    shs_size = group_blocks > 0 ? stages * s_sh_stage : threads;
 
   extern __shared__ int4 sh[];
   // Shared memory storage for global fetch pipelines.
   int4* sh_a = sh;
   int4* sh_b = sh_a + (stages * a_sh_stage);
   int4* sh_g_idx = sh_b + (stages * b_sh_stage);
-  int4* sh_s = sh_g_idx;
+  int4* sh_s = sh_g_idx + (stages * g_idx_stage);
   int* sh_sorted = (int*)(sh_s + shs_size);
 
   // Precompute which thread should not read memory in which iterations; this is
@@ -589,7 +622,8 @@ __device__ inline void MarlinMoESingle(
   FragA frag_a[2][thread_m_blocks];
   I4 frag_b_quant[2][b_thread_vecs];
   FragC frag_c[thread_m_blocks][4][2];
-  FragS frag_s[2][4];  // No act-order
+  FragS frag_s[2][4];         // No act-order
+  FragS act_frag_s[2][4][4];  // For act-order
 
   // Zero accumulators.
   auto zero_accums = [&]() {
@@ -598,6 +632,39 @@ __device__ inline void MarlinMoESingle(
       reinterpret_cast<float*>(frag_c)[i] = 0;
   };
 
+  auto fetch_scales_to_shared = [&](bool is_async, int first_group_id,
+                                    int last_group_id) {
+    sh_first_group_id = first_group_id;
+    sh_num_groups = last_group_id - first_group_id + 1;
+
+    if (sh_num_groups < sh_max_num_groups) {
+      sh_num_groups = sh_max_num_groups;
+    }
+
+    if (sh_first_group_id + sh_num_groups > num_groups) {
+      sh_num_groups = num_groups - sh_first_group_id;
+    }
+
+    int row_offset = first_group_id * s_gl_stride;
+
+    if (is_async) {
+      for (int i = 0; i < sh_num_groups; i++) {
+        if (threadIdx.x < s_sh_stride) {
+          cp_async4_pred(&sh_s[(i * s_sh_stride) + threadIdx.x],
+                         &scales_ptr[row_offset + (i * s_gl_stride) +
+                                     slice_n_offset + threadIdx.x]);
+        }
+      }
+    } else {
+      for (int i = 0; i < sh_num_groups; i++) {
+        if (threadIdx.x < s_sh_stride) {
+          sh_s[(i * s_sh_stride) + threadIdx.x] =
+              scales_ptr[row_offset + (i * s_gl_stride) + slice_n_offset +
+                         threadIdx.x];
+        }
+      }
+    }
+  };
   // Asynchronously fetch the next A, B and s tile from global to the next
   // shared memory pipeline location.
   auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true) {
@@ -626,24 +693,41 @@ __device__ inline void MarlinMoESingle(
         B_ptr[i] += b_gl_rd_delta_o;
       }
 
-      if constexpr (group_blocks != -1) {
-        int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+      if constexpr (has_act_order) {
+        // Fetch g_idx thread-block portion
+        int full_pipe = a_off;
+        int cur_k = slice_k_start_shared_fetch + tb_k * full_pipe;
+        if (cur_k < prob_k && cur_k < slice_k_finish) {
+          int4* sh_g_idx_stage = sh_g_idx + g_idx_stage * pipe;
 
-        if constexpr (group_blocks >= thread_k_blocks) {
-          // Only fetch scales if this tile starts a new group
-          if (pipe % (group_blocks / thread_k_blocks) == 0) {
-            if (s_sh_wr_pred) {
-              cp_async4(&sh_s_stage[s_sh_wr], &scales_ptr[s_gl_rd]);
-            }
-            s_gl_rd += s_gl_rd_delta;
+          int4 const* cur_g_idx_stage_ptr =
+              reinterpret_cast<int4 const*>(&g_idx[cur_k]);
+
+          if (threadIdx.x < g_idx_stage) {
+            cp_async4_pred(&sh_g_idx_stage[threadIdx.x],
+                           &cur_g_idx_stage_ptr[threadIdx.x]);
           }
-        } else {
-          for (int i = 0; i < s_tb_groups; i++) {
-            if (s_sh_wr_pred) {
-              cp_async4(&sh_s_stage[i * s_sh_stride + s_sh_wr],
-                        &scales_ptr[s_gl_rd]);
+        }
+      } else {
+        if constexpr (group_blocks != -1) {
+          int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+
+          if constexpr (group_blocks >= thread_k_blocks) {
+            // Only fetch scales if this tile starts a new group
+            if (pipe % (group_blocks / thread_k_blocks) == 0) {
+              if (s_sh_wr_pred) {
+                cp_async4(&sh_s_stage[s_sh_wr], &scales_ptr[s_gl_rd]);
+              }
+              s_gl_rd += s_gl_rd_delta;
             }
-            s_gl_rd += s_gl_rd_delta;
+          } else {
+            for (int i = 0; i < s_tb_groups; i++) {
+              if (s_sh_wr_pred) {
+                cp_async4(&sh_s_stage[i * s_sh_stride + s_sh_wr],
+                          &scales_ptr[s_gl_rd]);
+              }
+              s_gl_rd += s_gl_rd_delta;
+            }
           }
         }
       }
@@ -691,35 +775,125 @@ __device__ inline void MarlinMoESingle(
     }
   };
 
+  bool is_same_group[stages];
+  int same_group_id[stages];
+
+  auto init_same_group = [&](int pipe) {
+    if constexpr (!has_act_order) {
+      is_same_group[pipe] = false;
+      same_group_id[pipe] = 0;
+      return;
+    }
+
+    int4* sh_g_idx_stage = sh_g_idx + g_idx_stage * pipe;
+    int* sh_g_idx_int_ptr = reinterpret_cast<int*>(sh_g_idx_stage);
+
+    int group_id_1 = sh_g_idx_int_ptr[0];
+    int group_id_2 = sh_g_idx_int_ptr[tb_k - 1];
+
+    is_same_group[pipe] = group_id_1 == group_id_2;
+    same_group_id[pipe] = group_id_1;
+  };
+
   auto fetch_scales_to_registers = [&](int k, int full_pipe) {
     int pipe = full_pipe % stages;
 
-    if constexpr (group_blocks != -1) {
-      if constexpr (group_blocks >= thread_k_blocks) {
-        int4* sh_s_stage =
-            sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
-                                 (pipe / (group_blocks / thread_k_blocks)));
-        reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
-      } else {
-        int warp_id = threadIdx.x / 32;
-        int n_warps = thread_n_blocks / 4;
+    if constexpr (!has_act_order) {
+      // No act-order case
+      if constexpr (group_blocks != -1) {
+        if constexpr (group_blocks >= thread_k_blocks) {
+          int4* sh_s_stage =
+              sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
+                                   (pipe / (group_blocks / thread_k_blocks)));
+          reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
+        } else {
+          int warp_id = threadIdx.x / 32;
+          int n_warps = thread_n_blocks / 4;
 
-        int warp_row = warp_id / n_warps;
+          int warp_row = warp_id / n_warps;
 
-        int cur_k = warp_row * 16;
-        cur_k += k_iter_size * (k % b_sh_wr_iters);
+          int cur_k = warp_row * 16;
+          cur_k += k_iter_size * (k % b_sh_wr_iters);
 
-        int k_blocks = cur_k / 16;
-        int cur_group_id = k_blocks / group_blocks;
+          int k_blocks = cur_k / 16;
+          int cur_group_id = k_blocks / group_blocks;
 
-        int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+          int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
-        reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
-            sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
+          reinterpret_cast<int4*>(&frag_s[k % 2])[0] =
+              sh_s_stage[s_sh_rd + cur_group_id * s_sh_stride];
+        }
       }
+
+      return;
     }
 
-    return;
+    // Act-order case
+
+    // Determine K of the "current" thread-block
+    int cur_k = slice_k_start + tb_k * full_pipe;
+    if (cur_k >= prob_k || cur_k >= slice_k_finish) {
+      return;
+    }
+
+    // Reset (to current thread-block) since we read g_idx portion from the
+    // shared memory
+    cur_k = 0;
+
+    // Progress to current iteration
+    cur_k += k_iter_size * (k % b_sh_wr_iters);
+
+    // Determine "position" inside the thread-block (based on warp and
+    // thread-id)
+    int warp_id = threadIdx.x / 32;
+    int n_warps =
+        thread_n_blocks / 4;  // Each warp processes 4 16-size tiles over N
+
+    int warp_row = warp_id / n_warps;
+    int warp_col = warp_id % n_warps;
+
+    cur_k += warp_row * 16;
+
+    int th_id = threadIdx.x % 32;
+    cur_k += (th_id % 4) * 2;  // Due to tensor-core layout for fp16 B matrix
+
+    int s_col_shift =
+        /*slice_n_offset +*/ (act_s_col_warp_stride * warp_col) +
+        (th_id / 4) * act_s_col_stride;
+
+    if (is_same_group[pipe]) {
+      if (k % 2 == 0) {
+        *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][0][0]))) =
+            sh_s[(same_group_id[pipe] - sh_first_group_id) * s_sh_stride +
+                 s_col_shift];
+      } else {
+        *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][0][0]))) =
+            *(reinterpret_cast<int4*>(&(act_frag_s[(k - 1) % 2][0][0])));
+      }
+
+      for (int i = 1; i < 4; i++) {
+        *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][i][0]))) =
+            *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][0][0])));
+      }
+      return;
+    }
+
+    int4* sh_g_idx_stage = sh_g_idx + g_idx_stage * pipe;
+    int* sh_g_idx_int_ptr = reinterpret_cast<int*>(sh_g_idx_stage);
+
+    constexpr int k_frag_offsets[4] = {0, 1, 8,
+                                       9};  // Tensor core offsets per thread
+
+  #pragma unroll
+    for (int i = 0; i < 4; i++) {
+      int actual_k = cur_k + k_frag_offsets[i];
+
+      int group_id = sh_g_idx_int_ptr[actual_k];
+      int rel_group_id = group_id - sh_first_group_id;
+
+      *(reinterpret_cast<int4*>(&(act_frag_s[k % 2][i][0]))) =
+          sh_s[rel_group_id * s_sh_stride + s_col_shift];
+    }
   };
 
   // Execute the actual tensor core matmul of a sub-tile.
@@ -742,10 +916,25 @@ __device__ inline void MarlinMoESingle(
       FragB frag_b0 = dequant<w_type_id>(b_quant_0);
       FragB frag_b1 = dequant<w_type_id>(b_quant_1);
 
-      // Apply scale to frag_b0 and frag_b1
-      if constexpr (group_blocks != -1) {
-        scale(frag_b0, frag_s[k % 2][j], 0);
-        scale(frag_b1, frag_s[k % 2][j], 1);
+      // Apply scale to frag_b0
+      if constexpr (has_act_order) {
+        scale4(frag_b0, act_frag_s[k % 2][0][j], act_frag_s[k % 2][1][j],
+               act_frag_s[k % 2][2][j], act_frag_s[k % 2][3][j], 0);
+      } else {
+        if constexpr (group_blocks != -1) {
+          scale(frag_b0, frag_s[k % 2][j], 0);
+        }
+      }
+
+      // Apply scale to frag_b1
+      if constexpr (has_act_order) {
+        scale4(frag_b1, act_frag_s[k % 2][0][j], act_frag_s[k % 2][1][j],
+               act_frag_s[k % 2][2][j], act_frag_s[k % 2][3][j], 1);
+
+      } else {
+        if constexpr (group_blocks != -1) {
+          scale(frag_b1, frag_s[k % 2][j], 1);
+        }
       }
 
   #pragma unroll
@@ -917,7 +1106,8 @@ __device__ inline void MarlinMoESingle(
 
       // For per-column quantization we finally apply the scale here (only for
       // 4-bit)
-      if constexpr (group_blocks == -1 && w_type.size_bits() == 4) {
+      if constexpr (!has_act_order && group_blocks == -1 &&
+                    w_type.size_bits() == 4) {
         res = __hmul2(res, s[0]);
       }
 
@@ -975,14 +1165,23 @@ __device__ inline void MarlinMoESingle(
 
   #pragma unroll
     for (int i = 0; i < stages - 1; i++) {
+      if (has_act_order && i == 0) {
+        int last_g_idx = slice_k_start + stages * tb_k * 2;
+        if (last_g_idx >= prob_k) {
+          last_g_idx = prob_k - 1;
+        }
+        fetch_scales_to_shared(true, g_idx[slice_k_start], g_idx[last_g_idx]);
+      }
       fetch_to_shared(i, i, i < slice_iters);
     }
 
     zero_accums();
     wait_for_stage();
+    init_same_group(0);
     fetch_to_registers(0, 0);
     fetch_scales_to_registers(0, 0);
     a_gl_rd += a_gl_rd_delta_o * (stages - 1);
+    slice_k_start_shared_fetch += tb_k * (stages - 1);
   };
   if (slice_iters) {
     start_pipes();
@@ -1005,6 +1204,7 @@ __device__ inline void MarlinMoESingle(
                           slice_iters >= stages);
           pipe++;
           wait_for_stage();
+          init_same_group(pipe % stages);
         }
         matmul(k);
       }
@@ -1015,6 +1215,21 @@ __device__ inline void MarlinMoESingle(
     }
 
     a_gl_rd += a_gl_rd_delta_o * stages;
+    slice_k_start += tb_k * stages;
+    slice_k_start_shared_fetch += tb_k * stages;
+
+    if constexpr (has_act_order) {
+      int first_group_id = g_idx[slice_k_start];
+      int last_g_idx = slice_k_start + stages * tb_k * 2;
+      if (last_g_idx >= prob_k) {
+        last_g_idx = prob_k - 1;
+      }
+      int last_group_id = g_idx[last_g_idx];
+      if (last_group_id >= sh_first_group_id + sh_num_groups) {
+        fetch_scales_to_shared(false, first_group_id, last_group_id);
+        __syncthreads();
+      }
+    }
 
     // Process results and, if necessary, proceed to the next column slice.
     // While this pattern may not be the most readable, other ways of writing
@@ -1022,7 +1237,7 @@ __device__ inline void MarlinMoESingle(
     if (slice_iters == 0) {
       cp_async_wait<0>();
       bool last = slice_idx == slice_count - 1;
-      if constexpr (group_blocks == -1) {
+      if constexpr (!has_act_order && group_blocks == -1) {
         if constexpr (w_type.size_bits() == 8) {
           if (s_sh_wr_pred) {
             cp_async4(&sh_s[s_sh_wr], &scales_ptr[s_gl_rd]);
@@ -1041,7 +1256,7 @@ __device__ inline void MarlinMoESingle(
       }
 
       thread_block_reduce();
-      if constexpr (group_blocks == -1) {
+      if constexpr (!has_act_order && group_blocks == -1) {
         if constexpr (w_type.size_bits() == 8) {
           cp_async_wait<0>();
           __syncthreads();
@@ -1065,7 +1280,8 @@ __device__ inline void MarlinMoESingle(
       // For 8-bit channelwise, we apply the scale before the global reduction
       // that converts the fp32 results to fp16 (so that we avoid possible
       // overflow in fp16)
-      if constexpr (group_blocks == -1 && w_type.size_bits() == 8) {
+      if constexpr (!has_act_order && group_blocks == -1 &&
+                    w_type.size_bits() == 8) {
         if (threadIdx.x / 32 < thread_n_blocks / 4) {
   #pragma unroll
           for (int i = 0; i < thread_m_blocks; i++) {
@@ -1108,7 +1324,16 @@ __device__ inline void MarlinMoESingle(
           for (int i = 0; i < b_sh_wr_iters; i++) B_ptr[i] -= b_gl_stride;
         }
 
-        s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
+        // Update slice k/n for scales loading
+        if constexpr (has_act_order) {
+          slice_k_start = tb_k * slice_row;
+          slice_k_finish = slice_k_start + tb_k * slice_iters;
+          slice_k_start_shared_fetch = slice_k_start;
+          slice_n_offset = act_s_col_tb_stride * slice_col;
+
+        } else {
+          s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
+        }
         start_pipes();
       }
     }
@@ -1121,6 +1346,7 @@ template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int thread_k_blocks,  // same for k dimension (reduction)
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
+          const bool has_act_order,    // whether act_order is enabled
           const int group_blocks = -1  // number of consecutive 16x16 blocks
                                        // with a separate quantization scale
           >
@@ -1180,28 +1406,28 @@ __global__ void MarlinMoE(
 
   if (max_block == 1) {
     MarlinMoESingle<w_type_id, threads, 1, thread_n_blocks, thread_k_blocks,
-                    stages, group_blocks>(
+                    stages, has_act_order, group_blocks>(
         A, B, C, sorted_ids_expert, topk_weights, scales_ptr, g_idx,
         expert_offsets, num_groups, expert_idx, num_experts, topk, prob_m,
         prob_n, prob_k, tot_m, locks, replicate_input, apply_weights,
         current_m_block);
   } else if (max_block == 2) {
     MarlinMoESingle<w_type_id, threads, 2, thread_n_blocks, thread_k_blocks,
-                    stages, group_blocks>(
+                    stages, has_act_order, group_blocks>(
         A, B, C, sorted_ids_expert, topk_weights, scales_ptr, g_idx,
         expert_offsets, num_groups, expert_idx, num_experts, topk, prob_m,
         prob_n, prob_k, tot_m, locks, replicate_input, apply_weights,
         current_m_block);
   } else if (max_block == 3) {
     MarlinMoESingle<w_type_id, threads, 3, thread_n_blocks, thread_k_blocks,
-                    stages, group_blocks>(
+                    stages, has_act_order, group_blocks>(
         A, B, C, sorted_ids_expert, topk_weights, scales_ptr, g_idx,
         expert_offsets, num_groups, expert_idx, num_experts, topk, prob_m,
         prob_n, prob_k, tot_m, locks, replicate_input, apply_weights,
         current_m_block);
   } else {
     MarlinMoESingle<w_type_id, threads, 4, thread_n_blocks, thread_k_blocks,
-                    stages, group_blocks>(
+                    stages, has_act_order, group_blocks>(
         A, B, C, sorted_ids_expert, topk_weights, scales_ptr, g_idx,
         expert_offsets, num_groups, expert_idx, num_experts, topk, prob_m,
         prob_n, prob_k, tot_m, locks, replicate_input, apply_weights,
@@ -1234,6 +1460,7 @@ template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int thread_k_blocks,  // same for k dimension (reduction)
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
+          const bool has_act_order,    // whether act_order is enabled
           const int group_blocks = -1  // number of consecutive 16x16 blocks
                                        // with a separate quantization scale
           >
@@ -1282,23 +1509,24 @@ const int STAGES = 4;  // 4 pipeline stages fit into shared memory
 static constexpr int min_thread_n = 64;
 static constexpr int min_thread_k = 64;
 
-#define __CALL_IF_MOE(W_TYPE, THREAD_N_BLOCKS, THREAD_K_BLOCKS, GROUP_BLOCKS, \
-                      NUM_THREADS)                                            \
-  else if (q_type == W_TYPE && thread_n_blocks == THREAD_N_BLOCKS &&          \
-           thread_k_blocks == THREAD_K_BLOCKS &&                              \
-           group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS) {      \
-    cudaFuncSetAttribute(MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_N_BLOCKS, \
-                                   THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>,    \
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,         \
-                         max_shared_mem);                                     \
-    MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,     \
-              STAGES, GROUP_BLOCKS>                                           \
-        <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                    \
-            A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,     \
-            g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx,            \
-            num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,          \
-            replicate_input, apply_weights, m_block, max_par,                 \
-            exec_cfg.max_m_blocks);                                           \
+#define __CALL_IF_MOE(W_TYPE, THREAD_N_BLOCKS, THREAD_K_BLOCKS, HAS_ACT_ORDER, \
+                      GROUP_BLOCKS, NUM_THREADS)                               \
+  else if (q_type == W_TYPE && thread_n_blocks == THREAD_N_BLOCKS &&           \
+           thread_k_blocks == THREAD_K_BLOCKS &&                               \
+           has_act_order == HAS_ACT_ORDER && group_blocks == GROUP_BLOCKS &&   \
+           num_threads == NUM_THREADS) {                                       \
+    cudaFuncSetAttribute(                                                      \
+        MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,  \
+                  STAGES, HAS_ACT_ORDER, GROUP_BLOCKS>,                        \
+        cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);          \
+    MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,      \
+              STAGES, HAS_ACT_ORDER, GROUP_BLOCKS>                             \
+        <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                     \
+            A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,      \
+            g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx,             \
+            num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,           \
+            replicate_input, apply_weights, m_block, max_par,                  \
+            exec_cfg.max_m_blocks);                                            \
   }
 
 typedef struct {
@@ -1333,8 +1561,10 @@ thread_config_t large_batch_thread_configs[] = {
 };
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
-                          int prob_n, int prob_k, int num_bits,
-                          int group_size) {
+                          int prob_n, int prob_k, int num_bits, int group_size,
+                          bool has_act_order, bool is_k_full) {
+  bool cache_scales_chunk = has_act_order && !is_k_full;
+
   int tb_n = th_config.thread_n;
   int tb_k = th_config.thread_k;
 
@@ -1348,9 +1578,17 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
     tb_groups = ceildiv(tb_k, group_size);
   }
 
-  int tb_scales = tb_groups * tb_n * 2;
+  if (cache_scales_chunk) {
+    int load_groups =
+        tb_groups * STAGES * 2;          // Chunk size is 2x pipeline over dim K
+    load_groups = max(load_groups, 32);  // We load at least 32 scale groups
+    return load_groups * tb_n * 2;
 
-  return tb_scales * STAGES;
+  } else {
+    int tb_scales = tb_groups * tb_n * 2;
+
+    return tb_scales * STAGES;
+  }
 }
 
 bool is_valid_cache_size(thread_config_t const& th_config, int max_m_blocks,
@@ -1391,7 +1629,8 @@ bool is_valid_cache_size(thread_config_t const& th_config, int max_m_blocks,
 
 bool is_valid_config(thread_config_t const& th_config, int max_m_blocks,
                      int prob_m, int prob_n, int prob_k, int num_bits,
-                     int group_size, int max_shared_mem) {
+                     int group_size, bool has_act_order, bool is_k_full,
+                     int max_shared_mem) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {
@@ -1420,8 +1659,9 @@ bool is_valid_config(thread_config_t const& th_config, int max_m_blocks,
   }
 
   //  Determine cache for scales
-  int scales_cache_size = get_scales_cache_size(th_config, prob_m, prob_n,
-                                                prob_k, num_bits, group_size);
+  int scales_cache_size =
+      get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
+                            group_size, has_act_order, is_k_full);
 
   // Check that pipeline fits into cache
   if (!is_valid_cache_size(th_config, max_m_blocks, prob_m, prob_n, prob_k,
@@ -1434,20 +1674,23 @@ bool is_valid_config(thread_config_t const& th_config, int max_m_blocks,
 
 exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
                                       int num_bits, int group_size,
+                                      bool has_act_order, bool is_k_full,
                                       int max_shared_mem) {
   int max_m_blocks = 4;
   while (max_m_blocks > 0) {
     if (prob_m <= 16) {
       for (auto th_config : small_batch_thread_configs) {
         if (is_valid_config(th_config, max_m_blocks, prob_m, prob_n, prob_k,
-                            num_bits, group_size, max_shared_mem)) {
+                            num_bits, group_size, has_act_order, is_k_full,
+                            max_shared_mem)) {
           return exec_config_t{max_m_blocks, th_config};
         }
       }
     } else {
       for (auto th_config : large_batch_thread_configs) {
         if (is_valid_config(th_config, max_m_blocks, prob_m, prob_n, prob_k,
-                            num_bits, group_size, max_shared_mem)) {
+                            num_bits, group_size, has_act_order, is_k_full,
+                            max_shared_mem)) {
           return exec_config_t{max_m_blocks, th_config};
         }
       }
@@ -1460,22 +1703,28 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   return exec_config_t{0, {-1, -1, -1}};
 }
 
-#define CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS) \
-  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, -1, NUM_THREADS) \
-  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, 2, NUM_THREADS)  \
-  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, 4, NUM_THREADS)  \
-  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, 8, NUM_THREADS)
+#define CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
+  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
+  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
+  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
+  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
+                                                                    \
+  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
+  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
+  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
+  __CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)
 
-void marlin_mm_moe(const void* A, const void* B, void* C,
-                   const void* sorted_ids, const void* topk_weights,
-                   const void* topk_ids, const void* s, const void* g_idx,
-                   const void* perm, void* a_tmp, void* expert_offsets,
-                   int prob_m, int prob_n, int prob_k, void* workspace,
-                   vllm::ScalarType const& q_type, bool has_act_order,
-                   int num_groups, int group_size, int num_experts, int topk,
-                   int moe_block_size, int dev, cudaStream_t stream,
-                   int thread_k, int thread_n, int sms, int max_par,
-                   bool replicate_input, bool apply_weights) {
+void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
+                         const void* sorted_ids, const void* topk_weights,
+                         const void* topk_ids, const void* s, const void* g_idx,
+                         const void* perm, void* a_tmp, void* expert_offsets,
+                         int prob_m, int prob_n, int prob_k, void* workspace,
+                         vllm::ScalarType const& q_type, bool has_act_order,
+                         bool is_k_full, int num_groups, int group_size,
+                         int num_experts, int topk, int moe_block_size, int dev,
+                         cudaStream_t stream, int thread_k, int thread_n,
+                         int sms, int max_par, bool replicate_input,
+                         bool apply_weights) {
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
               ", ", prob_n, ", ", prob_k, "]");
 
@@ -1498,20 +1747,23 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
         exec_config_t{4, thread_config_t{thread_k, thread_n, USER_THREADS}};
   } else {
     // Auto config
-    exec_cfg = determine_thread_config(prob_m, prob_n, prob_k, num_bits,
-                                       group_size, max_shared_mem);
+    exec_cfg =
+        determine_thread_config(prob_m, prob_n, prob_k, num_bits, group_size,
+                                has_act_order, is_k_full, max_shared_mem);
   }
 
-  TORCH_CHECK(
-      exec_cfg.max_m_blocks > 0 &&
-          is_valid_config(exec_cfg.tb_cfg, exec_cfg.max_m_blocks, prob_m,
-                          prob_n, prob_k, num_bits, group_size, max_shared_mem),
-      "Invalid thread config: max_m_blocks = ", exec_cfg.max_m_blocks,
-      ", thread_k = ", exec_cfg.tb_cfg.thread_k,
-      ", thread_n = ", exec_cfg.tb_cfg.thread_n,
-      ", num_threads = ", exec_cfg.tb_cfg.num_threads, " for MKN = [", prob_m,
-      ", ", prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
-      ", group_size = ", group_size, ", max_shared_mem = ", max_shared_mem);
+  TORCH_CHECK(exec_cfg.max_m_blocks > 0 &&
+                  is_valid_config(exec_cfg.tb_cfg, exec_cfg.max_m_blocks,
+                                  prob_m, prob_n, prob_k, num_bits, group_size,
+                                  has_act_order, is_k_full, max_shared_mem),
+              "Invalid thread config: max_m_blocks = ", exec_cfg.max_m_blocks,
+              ", thread_k = ", exec_cfg.tb_cfg.thread_k,
+              ", thread_n = ", exec_cfg.tb_cfg.thread_n,
+              ", num_threads = ", exec_cfg.tb_cfg.num_threads, " for MKN = [",
+              prob_m, ", ", prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
+              ", group_size = ", group_size,
+              ", has_act_order = ", has_act_order, ", is_k_full = ", is_k_full,
+              ", max_shared_mem = ", max_shared_mem);
 
   int num_threads = exec_cfg.tb_cfg.num_threads;
   thread_k = exec_cfg.tb_cfg.thread_k;
@@ -1529,10 +1781,16 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
 
   int group_blocks = 0;
   if (has_act_order) {
-    TORCH_CHECK(group_size != -1);
-    group_blocks = group_size / 16;
-    TORCH_CHECK(prob_k % group_blocks == 0, "prob_k = ", prob_k,
-                " is not divisible by group_blocks = ", group_blocks);
+    if (is_k_full) {
+      TORCH_CHECK(group_size != -1);
+      group_blocks = group_size / 16;
+      TORCH_CHECK(prob_k % group_blocks == 0, "prob_k = ", prob_k,
+                  " is not divisible by group_blocks = ", group_blocks);
+    } else {
+      TORCH_CHECK(group_size == 0);
+      group_blocks = 0;
+    }
+
   } else {
     if (group_size == -1) {
       group_blocks = -1;
@@ -1550,6 +1808,15 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
   compute_expert_offsets<<<1, num_experts, 0, stream>>>(
       topk_ids_ptr, expert_offsets_ptr, tot_m * topk, moe_block_size);
 
+  bool do_permute_a = has_act_order;
+
+  // If we have a full K, then we can run the non-act-order version of Marlin
+  // (since the weight rows are reordered by increasing group ids, and by
+  // having a full K, we have full original groups)
+  if (is_k_full) {
+    has_act_order = false;
+  }
+
   int pack_factor = 32 / q_type.size_bits();
 
   for (int expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
@@ -1565,13 +1832,11 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
         (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) *
          prob_n / 8) *
             expert_idx;
-    const int* g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
+    const int* g_idx_ptr = (const int*)g_idx + prob_m * expert_idx;
     const int* perm_ptr = (const int*)perm + prob_k * expert_idx;
     int* locks = (int*)workspace;
 
-    // Since k is always full, we only use has_act_order here and treat it as
-    // false in the kernel,
-    if (has_act_order) {
+    if (do_permute_a) {
       // Permute A columns
       int topk_rows = replicate_input ? tot_m : tot_m * topk;
       int block_rows = ceildiv(topk_rows, blocks);
@@ -1599,6 +1864,7 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
       else {
         TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
                                str(prob_n) + ", " + str(prob_k) + "]" +
+                               ", has_act_order = " + str(has_act_order) +
                                ", num_groups = " + str(num_groups) +
                                ", group_size = " + str(group_size) +
                                ", thread_m_blocks = " + str(thread_m_blocks) +
@@ -1622,8 +1888,7 @@ torch::Tensor marlin_gemm_moe(
     bool replicate_input, bool apply_weights) {
   TORCH_CHECK(*b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,
               "b_q_type must be uint4b8 or uint8b128. Got = ", b_q_type->str());
-  TORCH_CHECK(is_k_full,
-              "The MoE kernel currently supports only is_k_full == true");
+
   int pack_factor = 32 / b_q_type->size_bits();
 
   int max_par = 4;
@@ -1661,10 +1926,15 @@ torch::Tensor marlin_gemm_moe(
   num_groups = b_scales.size(1);
 
   if (has_act_order) {
-    TORCH_CHECK(num_groups > 1, "For act_order, num_groups must be > 1");
-    TORCH_CHECK(size_k % num_groups == 0, "size_k = ", size_k,
-                ", is not divisible by num_groups = ", num_groups);
-    group_size = size_k / num_groups;
+    if (is_k_full) {
+      TORCH_CHECK(num_groups > 1, "For act_order, num_groups must be > 1");
+      TORCH_CHECK(size_k % num_groups == 0, "size_k = ", size_k,
+                  ", is not divisible by num_groups = ", num_groups);
+      group_size = size_k / num_groups;
+    } else {
+      group_size = 0;
+    }
+
   } else {
     if (num_groups > 1) {
       TORCH_CHECK(
@@ -1676,13 +1946,13 @@ torch::Tensor marlin_gemm_moe(
     }
   }
 
-  marlin_moe::marlin_mm_moe(
+  marlin_moe::marlin_mm_moe_f16i4(
       a.data_ptr(), b_q_weights.data_ptr(), c.data_ptr(), sorted_ids.data_ptr(),
       topk_weights.data_ptr(), topk_ids.data_ptr(), b_scales.data_ptr(),
       g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr(),
       expert_offsets.data_ptr(), size_m, size_n, size_k, workspace.data_ptr(),
-      *b_q_type, has_act_order, num_groups, group_size, num_experts, topk,
-      moe_block_size, dev, at::cuda::getCurrentCUDAStream(dev), thread_k,
+      *b_q_type, has_act_order, is_k_full, num_groups, group_size, num_experts,
+      topk, moe_block_size, dev, at::cuda::getCurrentCUDAStream(dev), thread_k,
       thread_n, sms, max_par, replicate_input, apply_weights);
   return c;
 }
