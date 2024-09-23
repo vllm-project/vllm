@@ -428,8 +428,12 @@ class LLM:
                 TokensPrompt(prompt_token_ids=beam.tokens)
                 for beam in all_beams
             ]
+
+            # only runs for one step
+            # we don't need to use tqdm here
             output = self.generate(prompts_batch,
-                                   sampling_params=beam_search_params)
+                                   sampling_params=beam_search_params,
+                                   use_tqdm=False)
 
             for (start, end), instance in zip(instance_start_and_end,
                                               instances):
