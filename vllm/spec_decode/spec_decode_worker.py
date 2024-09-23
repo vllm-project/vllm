@@ -16,7 +16,6 @@ from vllm.model_executor.layers.typical_acceptance_sampler import (
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SequenceGroupMetadata,
-                           get_all_seq_data_entries,
                            get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
@@ -469,8 +468,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             if any(seq_output_prompt_logprobs) else \
                 sampler_output.sampled_token_ids).tolist()
 
-        seq_data_entries = get_all_seq_data_entries(
-            execute_model_req.seq_group_metadata_list)
+        seq_data_entries = (
+            (seq_id, seq_data) for sg in \
+            execute_model_req.seq_group_metadata_list \
+            for seq_id, seq_data in sg.seq_data.items()
+        )
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
         for index, ((seq_id, seq_data), needs_prompt_logprobs) in \
