@@ -175,6 +175,7 @@ class EngineArgs:
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
     override_neuron_config: Optional[Dict[str, Any]] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -513,6 +514,12 @@ class EngineArgs:
                   'e.g.: `image=16,video=2` allows a maximum of 16 '
                   'images and 2 videos per prompt. Defaults to 1 for '
                   'each modality.'))
+        parser.add_argument(
+            '--mm-processor-kwargs',
+            default=None,
+            type=json.loads,
+            help=('Overrides for the multimodal input mapping/processing,'
+                  'e.g., image processor. For example: {"num_crops": 4}.'))
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
@@ -822,6 +829,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
+            mm_processor_kwargs=self.mm_processor_kwargs,
         )
 
     def create_load_config(self) -> LoadConfig:

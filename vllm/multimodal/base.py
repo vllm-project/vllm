@@ -14,7 +14,8 @@ from typing_extensions import TypeAlias
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import JSONTree, is_list_of, json_map_leaves
+from vllm.utils import (JSONTree, get_allowed_kwarg_only_overrides, is_list_of,
+                        json_map_leaves)
 
 logger = init_logger(__name__)
 
@@ -256,11 +257,20 @@ class MultiModalPlugin(ABC):
         model_cls, _ = get_model_architecture(model_config)
 
         mapper = self._input_mappers.get(model_cls)
+        # Only get processor kwargs at mapping time if we are not using the
+        # input mapper; no overrides are used on the default here because they
+        # should be passed to the huggingface resource at initialization time.
+        if mapper is not None and mapper != self._default_input_mapper:
+            mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+                mapper, overrides=model_config.mm_processor_kwargs)
+        else:
+            mm_processor_kwargs = {}
+
         if mapper is None:
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
 
-        return mapper(InputContext(model_config), data)
+        return mapper(InputContext(model_config), data, **mm_processor_kwargs)
 
     @abstractmethod
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
@@ -333,7 +343,10 @@ class MultiModalPlugin(ABC):
                            f"for model class {model_cls.__name__} in {self}.")
 
         if callable(max_mm_tokens):
-            max_mm_tokens = max_mm_tokens(InputContext(model_config))
+            mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+                max_mm_tokens, overrides=model_config.mm_processor_kwargs)
+            max_mm_tokens = max_mm_tokens(InputContext(model_config),
+                                          **mm_processor_kwargs)
 
         self._validate_max_multimodal_tokens(max_mm_tokens)
 

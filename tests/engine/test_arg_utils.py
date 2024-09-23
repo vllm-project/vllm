@@ -40,3 +40,24 @@ def test_limit_mm_per_prompt_parser(arg, expected):
 def test_bad_nullable_kvs(arg):
     with pytest.raises(ArgumentTypeError):
         nullable_kvs(arg)
+
+
+@pytest.mark.parametrize(("arg", "expected"), [
+    (None, None),
+    ("{}", {}),
+    ('{"num_crops": 4}', {
+        "num_crops": 4
+    }),
+    ('{"foo": {"bar": "baz"}}', {
+        "foo": {
+            "bar": "baz"
+        }
+    }),
+])
+def test_mm_processor_kwargs_prompt_parser(arg, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    if arg is None:
+        args = parser.parse_args([])
+    else:
+        args = parser.parse_args(["--mm-processor-kwargs", arg])
+    assert args.mm_processor_kwargs == expected
