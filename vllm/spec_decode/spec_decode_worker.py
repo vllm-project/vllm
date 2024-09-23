@@ -164,11 +164,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
-            spec_decode_sampler = RejectionSampler(
-                disable_bonus_tokens=False, )
+            spec_decode_sampler = RejectionSampler()
         elif draft_token_acceptance_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
-                disable_bonus_tokens=False,
                 posterior_threshold=\
                     typical_acceptance_sampler_posterior_threshold,
                 posterior_alpha=typical_acceptance_sampler_posterior_alpha,

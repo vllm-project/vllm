@@ -27,7 +27,7 @@ The :class:`~vllm.LLM` class can be instantiated in much the same way as languag
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
     the above snippet. Specifically, ``image_feature_size`` can no longer be specified as we now calculate that internally for each model.
 
-To pass an image to the model, note the following in :class:`vllm.inputs.PromptInputs`:
+To pass an image to the model, note the following in :class:`vllm.inputs.PromptType`:
 
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 

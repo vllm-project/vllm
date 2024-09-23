@@ -165,10 +165,9 @@ class MistralTokenizer:
                             messages: List["ChatCompletionMessageParam"],
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
-        assert tools is None, "`tools` are not yet supported."
 
-        request = ChatCompletionRequest(
-            messages=messages)  # type: ignore[type-var]
+        request = ChatCompletionRequest(messages=messages,
+                                        tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt
@@ -176,9 +175,29 @@ class MistralTokenizer:
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         if isinstance(self.tokenizer, Tekkenizer):
-            return "".join(tokens)
+            tokens = [
+                t for t in tokens
+                if t not in self.tokenizer._all_special_tokens
+            ]
+
+            if any(isinstance(t, bytes) for t in tokens):
+                # we need to encode and decode all tokens again
+                shift = self.tokenizer.num_special_tokens
+                byte_tokens = [
+                    t.encode("utf-8") if not isinstance(t, bytes) else t
+                    for t in tokens
+                ]
+                ids = [
+                    self.tokenizer._tekken_token2id_nospecial[t] + shift
+                    for t in byte_tokens
+                ]
+                decoded = self.tokenizer.decode(ids)
+            else:
+                decoded = "".join(tokens)
         else:
-            return self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+            decoded = self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+
+        return decoded
 
     def decode(self, ids: Union[List[int], int]) -> str:
         if isinstance(ids, int):
@@ -200,4 +219,11 @@ class MistralTokenizer:
                               self.tokenizer)
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
+
+        if any(t.strip() == "�" for t in tokens):
+            # if any stripped decoded token is undefined
+            # because it's invalid unicode then pass bytes
+            # See: https://github.com/vllm-project/vllm/pull/8640
+            tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
+
         return tokens

@@ -44,22 +44,36 @@ def nullable_str(val: str):
 
 
 def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
+    """Parses a string containing comma separate key [str] to value [int]
+    pairs into a dictionary.
+
+    Args:
+        val: String value to be parsed.
+
+    Returns:
+        Dictionary with parsed values.
+    """
     if len(val) == 0:
         return None
 
     out_dict: Dict[str, int] = {}
     for item in val.split(","):
-        try:
-            key, value = item.split("=")
-        except TypeError as exc:
-            msg = "Each item should be in the form KEY=VALUE"
-            raise ValueError(msg) from exc
+        kv_parts = [part.lower().strip() for part in item.split("=")]
+        if len(kv_parts) != 2:
+            raise argparse.ArgumentTypeError(
+                "Each item should be in the form KEY=VALUE")
+        key, value = kv_parts
 
         try:
-            out_dict[key] = int(value)
+            parsed_value = int(value)
         except ValueError as exc:
             msg = f"Failed to parse value of item {key}={value}"
-            raise ValueError(msg) from exc
+            raise argparse.ArgumentTypeError(msg) from exc
+
+        if key in out_dict and out_dict[key] != parsed_value:
+            raise argparse.ArgumentTypeError(
+                f"Conflicting values specified for key: {key}")
+        out_dict[key] = parsed_value
 
     return out_dict
 
@@ -161,6 +175,7 @@ class EngineArgs:
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
     override_neuron_config: Optional[Dict[str, Any]] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -458,7 +473,10 @@ class EngineArgs:
                             default=EngineArgs.max_seq_len_to_capture,
                             help='Maximum sequence length covered by CUDA '
                             'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode.')
+                            'larger than this, we fall back to eager mode. '
+                            'Additionally for encoder-decoder models, if the '
+                            'sequence length of the encoder input is larger '
+                            'than this, we fall back to the eager mode.')
         parser.add_argument('--disable-custom-all-reduce',
                             action='store_true',
                             default=EngineArgs.disable_custom_all_reduce,
@@ -496,6 +514,12 @@ class EngineArgs:
                   'e.g.: `image=16,video=2` allows a maximum of 16 '
                   'images and 2 videos per prompt. Defaults to 1 for '
                   'each modality.'))
+        parser.add_argument(
+            '--mm-processor-kwargs',
+            default=None,
+            type=json.loads,
+            help=('Overrides for the multimodal input mapping/processing,'
+                  'e.g., image processor. For example: {"num_crops": 4}.'))
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
@@ -805,6 +829,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
+            mm_processor_kwargs=self.mm_processor_kwargs,
         )
 
     def create_load_config(self) -> LoadConfig:

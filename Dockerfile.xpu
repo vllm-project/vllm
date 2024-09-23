@@ -24,25 +24,22 @@ RUN apt-get update -y && \
     # vim \
     wget
 
-RUN git clone https://github.com/intel/pti-gpu && \
-    cd pti-gpu/sdk && \
-    mkdir build && \
-    cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/icpx_toolchain.cmake -DBUILD_TESTING=OFF .. && \
-    make -j && \
-    cmake --install . --config Release --prefix "/usr/local"
-
 WORKDIR /workspace/vllm
 COPY requirements-xpu.txt /workspace/vllm/requirements-xpu.txt
 COPY requirements-common.txt /workspace/vllm/requirements-common.txt
 
-RUN pip install --no-cache-dir -r requirements-xpu.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir \
+    cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
+    -r requirements-xpu.txt
 
 COPY ./ /workspace/vllm
 
 ENV VLLM_TARGET_DEVICE=xpu
 
-RUN python3 setup.py install
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=.git,target=.git \
+    python3 setup.py install
 
 FROM vllm-base AS vllm-openai
 
