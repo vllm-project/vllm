@@ -145,6 +145,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
+    multi_step_stream_outputs: bool = False
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
@@ -596,6 +597,10 @@ class EngineArgs:
                                   'scheduler call.'))
 
         parser.add_argument(
+            '--multi-step-stream-outputs',
+            action='store_true',
+            help='If True, then multi-step will stream outputs for every step')
+        parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
             default=EngineArgs.scheduler_delay_factor,
@@ -999,6 +1004,7 @@ class EngineArgs:
             is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
+            multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
         )

@@ -960,6 +960,7 @@ class SchedulerConfig:
                  is_multimodal_model: bool = False,
                  preemption_mode: Optional[str] = None,
                  num_scheduler_steps: int = 1,
+                 multi_step_stream_outputs: bool = False,
                  send_delta_data: bool = False) -> None:
         if max_num_batched_tokens is None:
             if enable_chunked_prefill:
@@ -1000,6 +1001,7 @@ class SchedulerConfig:
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
         self.num_scheduler_steps = num_scheduler_steps
+        self.multi_step_stream_outputs = multi_step_stream_outputs
         self.send_delta_data = send_delta_data
         self._verify_args()
 

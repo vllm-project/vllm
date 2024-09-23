@@ -19,7 +19,11 @@ FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.58
 DEFAULT_ARGS = ["--max-model-len", "4096", "--disable-log-requests"]
-MORE_ARGS_LIST = [["--enable-chunked-prefill"], ["--num-scheduler-steps", "8"]]
+MORE_ARGS_LIST = [
+    ["--enable-chunked-prefill"],  # Chunked
+    ["--num-scheduler-steps", "8"],  # MS
+    ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"]  # MS+Stream
+]
 
 
 @pytest.mark.parametrize("more_args", MORE_ARGS_LIST)

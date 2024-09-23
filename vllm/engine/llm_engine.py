@@ -95,13 +95,15 @@ class OutputData(NamedTuple):
 
 class SchedulerContext:
 
-    def __init__(self):
+    def __init__(self, multi_step_stream_outputs: bool = False):
         self.output_queue: Deque[OutputData] = deque()
         self.request_outputs: List[Union[RequestOutput,
                                          EmbeddingRequestOutput]] = []
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
+
+        self.multi_step_stream_outputs: bool = multi_step_stream_outputs
 
     def append_output(self, outputs: List[SamplerOutput],
                       seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -219,6 +221,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        use_cached_outputs: bool = False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -234,8 +237,9 @@ class LLMEngine:
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
-            "num_scheduler_steps=%d, enable_prefix_caching=%s, "
-            "use_async_output_proc=%s, mm_processor_kwargs=%s)",
+            "num_scheduler_steps=%d, multi_step_stream_outputs=%s, "
+            "enable_prefix_caching=%s, use_async_output_proc=%s, "
+            "use_cached_outputs=%s, mm_processor_kwargs=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -266,8 +270,10 @@ class LLMEngine:
             model_config.served_model_name,
             scheduler_config.use_v2_block_manager,
             scheduler_config.num_scheduler_steps,
+            scheduler_config.multi_step_stream_outputs,
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
+            use_cached_outputs,
             model_config.mm_processor_kwargs,
         )
         # TODO(woosuk): Print more configs in debug mode.
@@ -287,6 +293,7 @@ class LLMEngine:
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
+        self.use_cached_outputs = use_cached_outputs
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -379,7 +386,8 @@ class LLMEngine:
         ]
 
         self.scheduler_contexts = [
-            SchedulerContext()
+            SchedulerContext(multi_step_stream_outputs=self.scheduler_config.
+                             multi_step_stream_outputs)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
@@ -998,7 +1006,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutputFactory.create(seq_group)
+            request_output = RequestOutputFactory.create(
+                seq_group, use_cache=self.use_cached_outputs)
             if request_output:
                 ctx.request_outputs.append(request_output)
 
@@ -1019,8 +1028,8 @@ class LLMEngine:
             for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
 
-        # For multi-step, do not create outputs each iteration
-        if not is_last_step:
+        # For multi-step without streaming, don't create outputs each iteration
+        if not is_last_step and not ctx.multi_step_stream_outputs:
             # Immediately process request outputs here (if callback is given)
             if (finished_now
                     and self.process_request_outputs_callback is not None):
@@ -1037,9 +1046,18 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutputFactory.create(seq_group)
+            request_output = RequestOutputFactory.create(
+                seq_group, use_cache=self.use_cached_outputs)
             if request_output:
                 ctx.request_outputs.append(request_output)
+
+        # For multi-step with streaming, create outputs each iteration
+        if not is_last_step and ctx.multi_step_stream_outputs:
+            # Immediately process request outputs here (if callback is given)
+            if self.process_request_outputs_callback is not None:
+                self.process_request_outputs_callback(ctx.request_outputs)
+                ctx.request_outputs.clear()
+            return
 
         for seq_group in scheduler_outputs.ignored_seq_groups:
             params = seq_group.sampling_params
@@ -1047,7 +1065,8 @@ class LLMEngine:
                     RequestOutputKind.DELTA) and not seq_group.is_finished():
                 continue
 
-            request_output = RequestOutputFactory.create(seq_group)
+            request_output = RequestOutputFactory.create(
+                seq_group, use_cache=self.use_cached_outputs)
             if request_output:
                 ctx.request_outputs.append(request_output)
 
