@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.utils import get_allowed_kwarg_only_overrides
 
 from .data import LLMInputs
 
@@ -68,12 +69,17 @@ class DummyDataFactory(Protocol):
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        **mm_processor_kwargs: Any,
     ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data to be inputted into the model.
 
         Note:
             :data:`InputProcessor` is not applied to the dummy data.
+
+            The :code:`mm_processor_kwargs` are overrides provided at
+            initialization time to values in the config whose values
+            may affect the number of tokens per instance.
         """
         ...
 
@@ -152,6 +158,10 @@ class InputRegistry:
 
         return wrapper
 
+    def _get_dummy_data_factory(self, model_cls: Type[nn.Module]):
+        return self._dummy_factories_by_model_type \
+            .get(model_cls, self._default_dummy_data_factory)
+
     def dummy_data_for_profiling(
         self,
         model_config: "ModelConfig",
@@ -174,15 +184,15 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        dummy_factory = self._dummy_factories_by_model_type \
-            .get(model_cls, self._default_dummy_data_factory)
-        mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
+        dummy_factory = self._get_dummy_data_factory(model_cls)
 
-        seq_data, mm_data = dummy_factory(
-            InputContext(model_config),
-            seq_len,
-            _MultiModalCounts(mm_counts),
-        )
+        mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
+        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+            dummy_factory, overrides=model_config.mm_processor_kwargs)
+
+        seq_data, mm_data = dummy_factory(InputContext(model_config), seq_len,
+                                          _MultiModalCounts(mm_counts),
+                                          **mm_processor_kwargs)
 
         # Having more tokens is over-conservative but otherwise fine
         num_tokens = seq_data.prompt_token_ids
@@ -229,6 +239,10 @@ class InputRegistry:
 
         return wrapper
 
+    def _get_model_input_processor(self, model_cls: Type[nn.Module]):
+        return self._input_processors_by_model_type \
+            .get(model_cls, self._default_input_processor)
+
     def process_input(self, model_config: "ModelConfig",
                       inputs: LLMInputs) -> LLMInputs:
         """
@@ -243,15 +257,17 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
+        processor = self._get_model_input_processor(model_cls)
 
-        processor = self._input_processors_by_model_type \
-            .get(model_cls, self._default_input_processor)
+        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+            processor, overrides=model_config.mm_processor_kwargs)
 
-        return processor(InputContext(model_config), inputs)
+        return processor(InputContext(model_config), inputs,
+                         **mm_processor_kwargs)
 
     def create_input_processor(self, model_config: "ModelConfig"):
         """
-        Create an input processor (see :meth:`process_input`) for a
+        Create an input processor (see :meth:`_process_input`) for a
         specific model.
         """
         return functools.partial(self.process_input, model_config)
