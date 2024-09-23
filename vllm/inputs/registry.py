@@ -158,6 +158,10 @@ class InputRegistry:
 
         return wrapper
 
+    def _get_dummy_data_factory(self, model_cls: Type[nn.Module]):
+        return self._dummy_factories_by_model_type \
+            .get(model_cls, self._default_dummy_data_factory)
+
     def dummy_data_for_profiling(
         self,
         model_config: "ModelConfig",
@@ -180,12 +184,11 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        dummy_factory = self._dummy_factories_by_model_type \
-            .get(model_cls, self._default_dummy_data_factory)
-        mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
+        dummy_factory = self._get_dummy_data_factory(model_cls)
 
+        mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
         mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-            callable=dummy_factory, overrides=model_config.mm_processor_kwargs)
+            dummy_factory, overrides=model_config.mm_processor_kwargs)
 
         seq_data, mm_data = dummy_factory(InputContext(model_config), seq_len,
                                           _MultiModalCounts(mm_counts),
@@ -236,19 +239,29 @@ class InputRegistry:
 
         return wrapper
 
-    def _process_input(self, inputs: LLMInputs, model_config: "ModelConfig",
-                       processor: InputProcessor,
-                       **mm_processor_kwargs: Any) -> LLMInputs:
+    def _get_model_input_processor(self, model_cls: Type[nn.Module]):
+        return self._input_processors_by_model_type \
+            .get(model_cls, self._default_input_processor)
+
+    def process_input(self, model_config: "ModelConfig",
+                      inputs: LLMInputs) -> LLMInputs:
         """
-        Apply an input processor to an instance of model inputs. This will
-        usually not be invoked be directly, and instead will be wrapped in
-        a functools partial once the processor is created.
+        Apply an input processor to an instance of model inputs.
 
         The model is identified by ``model_config``.
 
         See also:
             :ref:`input_processing_pipeline`
         """
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_architecture
+
+        model_cls, _ = get_model_architecture(model_config)
+        processor = self._get_model_input_processor(model_cls)
+
+        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+            processor, overrides=model_config.mm_processor_kwargs)
+
         return processor(InputContext(model_config), inputs,
                          **mm_processor_kwargs)
 
@@ -257,34 +270,4 @@ class InputRegistry:
         Create an input processor (see :meth:`_process_input`) for a
         specific model.
         """
-        # Determine which kwargs can be leveraged for the input processor
-        # and drop + warn for kwargs that are unimplemented.
-        # NOTE: we don't allow override values for ctx/inputs, since doing
-        # so can lead to value collisions etc.
-        processor = self._get_model_input_processor(model_config)
-        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-            callable=processor, overrides=model_config.mm_processor_kwargs)
-        return functools.partial(self._process_input,
-                                 model_config=model_config,
-                                 processor=processor,
-                                 **mm_processor_kwargs)
-
-    def _get_model_input_processor(self, model_config: "ModelConfig"):
-        """
-        Grabs the input processor for the provided model.
-        
-        Args:
-            model_config: Config whose model architecture we can leverage to
-            grab the callable input processor.
-        
-        Returns:
-            Callable input processor for this model.
-        """
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
-
-        model_cls, _ = get_model_architecture(model_config)
-
-        processor = self._input_processors_by_model_type \
-            .get(model_cls, self._default_input_processor)
-        return processor
+        return functools.partial(self.process_input, model_config)

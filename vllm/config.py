@@ -122,8 +122,8 @@ class ModelConfig:
             can not be gathered from the vllm arguments. 
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
-        mm_processor_kwargs: Arguments to be forwarded to the model's processor,
-            e.g., tokenizer, image processor, or custom processor callable.
+        mm_processor_kwargs: Arguments to be forwarded to the model's processor
+            for multi-modal data, e.g., image processor.
     """
 
     def __init__(self,

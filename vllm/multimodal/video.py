@@ -6,7 +6,7 @@ import numpy as np
 from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.image_processor import get_video_processor
+from vllm.transformers_utils.processor import get_video_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import is_list_of
 

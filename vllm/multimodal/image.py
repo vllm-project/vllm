@@ -6,7 +6,7 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.image_processor import get_image_processor
+from vllm.transformers_utils.processor import get_image_processor
 from vllm.utils import is_list_of
 
 from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
