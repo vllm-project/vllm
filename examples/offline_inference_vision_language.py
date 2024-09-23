@@ -232,7 +232,7 @@ def run_qwen2_vl(question, modality):
 def run_mllama(question, modality):
     assert modality == "image"
 
-    model_name = "/data/zhang-chen/Llama-3.2-11B-Vision-Instruct"
+    model_name = "nltpt/Llama-3.2-11B-Vision-Instruct"
 
     llm = LLM(
         model=model_name,
