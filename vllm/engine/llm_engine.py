@@ -269,7 +269,7 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
         )
-
+        # TODO(woosuk): Print more configs in debug mode.
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
