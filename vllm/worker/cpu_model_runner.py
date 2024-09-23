@@ -36,7 +36,7 @@ _PAD_SLOT_ID = -1
 @dataclass(frozen=True)
 class ModelInputForCPU(ModelRunnerInputBase):
     """
-    Used by the CPUModelRunner.
+    Base class contains metadata needed for the base model forward pass on CPU
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
@@ -176,8 +176,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
 
-            mm_data = seq_group_metadata.multi_modal_data
-            if mm_data:
+            if (mm_data := seq_group_metadata.multi_modal_data):
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 multi_modal_inputs_list.append(mm_kwargs)
 
