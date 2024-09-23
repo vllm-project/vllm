@@ -481,6 +481,8 @@ class FlashAttentionMetadataBuilder(
         Args:
             seq_lens: The maybe padded sequence lengths of the input sequences.
             query_lens: The query lengths of the input sequences.
+            num_orig_input_tokens_list (List[int]): The original number of
+                                             input tokens for each sequence.
             cuda_graph_pad_size: The padding size for cuda graph.
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.

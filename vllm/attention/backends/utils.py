@@ -195,6 +195,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         Args:
             seq_lens: The maybe padded sequence lengths of the input sequences.
             query_lens: The query lengths of the input sequences.
+            num_orig_input_tokens_list (List[int]): The original number of 
+                                                 input tokens for each sequence.
             cuda_graph_pad_size: The padding size for cuda graph.
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
@@ -257,9 +259,9 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
-        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
-                                                    dtype=torch.long,
-                                                    device=device)
+        num_orig_input_tokens_tensor = async_tensor_h2d(
+            num_orig_input_tokens_list, torch.long, device,
+            self.runner.pin_memory)
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
