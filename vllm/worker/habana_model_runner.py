@@ -12,6 +12,7 @@ import math
 import operator
 import os
 import time
+from array import array
 from enum import IntEnum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
                     Optional, Set, Tuple, Type, TypeVar, Union)
@@ -23,19 +24,20 @@ from vllm_hpu_extension.ops import LoraMask as LoraMask
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SamplerOutput, SequenceData,
+from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
 from vllm.utils import (HabanaMemoryProfiler, format_bytes, is_fake_hpu,
                         is_pin_memory_available, make_tensor_with_pad)
@@ -336,7 +338,7 @@ class PreparePromptMetadata(NamedTuple):
     lora_index_mapping: List[List[int]]
     lora_prompt_mapping: List[List[int]]
     lora_requests: Set[LoRARequest]
-    multi_modal_kwargs: Optional[Dict[str, BatchedTensors]]
+    multi_modal_kwargs: Optional[Dict[str, BatchedTensorInputs]]
     slot_mapping: List[List[int]]
     lora_mask: Optional[torch.Tensor]
     lora_logits_mask: Optional[torch.Tensor]
@@ -495,20 +497,26 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
-        load_config: LoadConfig,
         cache_config: CacheConfig,
+        load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        multimodal_config: Optional[MultiModalConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        return_hidden_states: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
         self.load_config = load_config
-        self.cache_config = cache_config
         self.is_driver_worker = is_driver_worker
+        self.prompt_adapter_config = prompt_adapter_config
+        self.return_hidden_states = return_hidden_states
+        self.observability_config = observability_config
         self.profiler = Profiler()
 
         self.sliding_window = (model_config.get_sliding_window()
@@ -528,7 +536,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
-        self.multimodal_config = multimodal_config
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
@@ -583,15 +590,13 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             htcore.hpu_set_env()
         with HabanaMemoryProfiler() as m:
             with HabanaMemoryProfiler() as m_getmodel:
-                self.model = get_model(
-                    model_config=self.model_config,
-                    device_config=self.device_config,
-                    load_config=self.load_config,
-                    lora_config=self.lora_config,
-                    multimodal_config=self.multimodal_config,
-                    parallel_config=self.parallel_config,
-                    scheduler_config=self.scheduler_config,
-                    cache_config=self.cache_config)
+                self.model = get_model(model_config=self.model_config,
+                                       device_config=self.device_config,
+                                       load_config=self.load_config,
+                                       lora_config=self.lora_config,
+                                       parallel_config=self.parallel_config,
+                                       scheduler_config=self.scheduler_config,
+                                       cache_config=self.cache_config)
             msg = ("Pre-loading model weights on "
                    f"{next(self.model.parameters()).device} "
                    f"took {m_getmodel.get_summary_string()}")
@@ -897,8 +902,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
         )
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.device)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         return PreparePromptMetadata(
             input_tokens=input_tokens,
@@ -1284,7 +1288,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_tables = {group_id: [_PAD_BLOCK_ID] * num_blocks}
         prompt_token_ids = [0] * input_len
         output_token_ids = [1] * output_len
-        seq_data = SequenceData(prompt_token_ids)
+        prompt_token_ids_array = array('l', prompt_token_ids)  # noqa: F821
+        seq_data = SequenceData(prompt_token_ids_array)
         seq_data.output_token_ids = output_token_ids
         return SequenceGroupMetadata(request_id=str(group_id),
                                      is_prompt=(output_len == 0),
@@ -1882,8 +1887,8 @@ class HabanaModelRunner(
             modules = unwrap_model(self.model.model)
             for module in modules:
                 if isinstance(module, VocabParallelEmbeddingWithLoRA):
-                    for i in range(0, len(module.indices_len)):
-                        module.indices_len[
+                    for i in range(0, len(module.punica_wrapper.indices_len)):
+                        module.punica_wrapper.indices_len[
                             i] = sampling_metadata.selected_token_indices.numel(
                             )
             lora_logits_mask: torch.Tensor = model_input.lora_logits_mask

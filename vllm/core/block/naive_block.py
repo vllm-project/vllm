@@ -307,9 +307,8 @@ class NaiveBlockAllocator(BlockAllocator):
         # TODO(cade): make sure the logic is correct and clean it up.
         for block in blocks:
             if not block.is_full and num_lookahead_slots != 0:
-                if block.num_empty_slots >= num_lookahead_slots:
-                    new_block_count += 1
-                else:
+                new_block_count += 1
+                if num_lookahead_slots > block.num_empty_slots:
                     new_block_count += cdiv(
                         num_lookahead_slots - block.num_empty_slots,
                         self._block_size)
@@ -341,6 +340,9 @@ class NaiveBlockAllocator(BlockAllocator):
             self._block_pool.free_block(tmp_block)
 
             block.block_id = block_id  # Assign block_id
+
+    def get_prefix_cache_hit_rate(self) -> float:
+        return -1
 
 
 class NaiveBlock(Block):

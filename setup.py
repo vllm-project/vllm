@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import warnings
+from pathlib import Path
 from shutil import which
 from typing import Dict, List
 
@@ -61,9 +62,12 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-# vLLM only supports Linux platform
-assert sys.platform.startswith(
-    "linux"), "vLLM only supports Linux platform (including WSL)."
+if not sys.platform.startswith("linux"):
+    logger.warning(
+        "vLLM only supports Linux platform (including WSL). "
+        "Building on %s, "
+        "so vLLM may not be able to run correctly", sys.platform)
+    VLLM_TARGET_DEVICE = "empty"
 
 MAIN_CUDA_VERSION = "12.1"
 
@@ -149,15 +153,8 @@ class cmake_build_ext(build_ext):
         default_cfg = "Debug" if self.debug else "RelWithDebInfo"
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
-        # where .so files will be written, should be the same for all extensions
-        # that use the same CMakeLists.txt.
-        outdir = os.path.abspath(
-            os.path.dirname(self.get_ext_fullpath(ext.name)))
-
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
-            '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
-            '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
@@ -167,22 +164,26 @@ class cmake_build_ext(build_ext):
 
         if is_sccache_available():
             cmake_args += [
+                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
+                '-DCMAKE_HIP_COMPILER_LAUNCHER=sccache',
             ]
         elif is_ccache_available():
             cmake_args += [
+                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
+                '-DCMAKE_HIP_COMPILER_LAUNCHER=ccache',
             ]
 
         # Pass the python executable to cmake so it can find an exact
         # match.
         cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
 
-        if _install_punica():
-            cmake_args += ['-DVLLM_INSTALL_PUNICA_KERNELS=ON']
+        # Pass the python path to cmake so it can reuse the build dependencies
+        # on subsequent calls to python.
+        cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
 
         #
         # Setup parallelism and build tool
@@ -217,10 +218,12 @@ class cmake_build_ext(build_ext):
             os.makedirs(self.build_temp)
 
         targets = []
+        target_name = lambda s: remove_prefix(remove_prefix(s, "vllm."),
+                                              "vllm_flash_attn.")
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
-            targets.append(remove_prefix(ext.name, "vllm."))
+            targets.append(target_name(ext.name))
 
         num_jobs, _ = self.compute_num_jobs()
 
@@ -232,6 +235,43 @@ class cmake_build_ext(build_ext):
         ]
 
         subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+
+        # Install the libraries
+        for ext in self.extensions:
+            # Install the extension into the proper location
+            outdir = Path(self.get_ext_fullpath(ext.name)).parent.absolute()
+
+            # Skip if the install directory is the same as the build directory
+            if outdir == self.build_temp:
+                continue
+
+            # CMake appends the extension prefix to the install path,
+            # and outdir already contains that prefix, so we need to remove it.
+            prefix = outdir
+            for i in range(ext.name.count('.')):
+                prefix = prefix.parent
+
+            # prefix here should actually be the same for all components
+            install_args = [
+                "cmake", "--install", ".", "--prefix", prefix, "--component",
+                target_name(ext.name)
+            ]
+            subprocess.check_call(install_args, cwd=self.build_temp)
+
+    def run(self):
+        # First, run the standard build_ext command to compile the extensions
+        super().run()
+
+        # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
+        # directory so that they can be included in the editable build
+        import glob
+        files = glob.glob(
+            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
+        for file in files:
+            dst_file = os.path.join("vllm/vllm_flash_attn",
+                                    os.path.basename(file))
+            print(f"Copying {file} to {dst_file}")
+            self.copy_file(file, dst_file)
 
 
 def _is_hpu() -> bool:
@@ -250,6 +290,10 @@ def _is_hpu() -> bool:
                     subprocess.CalledProcessError):
                 is_hpu_available = False
     return is_hpu_available or VLLM_TARGET_DEVICE == "hpu"
+
+
+def _no_device() -> bool:
+    return VLLM_TARGET_DEVICE == "empty"
 
 
 def _is_cuda() -> bool:
@@ -292,8 +336,9 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def _install_punica() -> bool:
-    return envs.VLLM_INSTALL_PUNICA_KERNELS
+def _build_core_ext() -> bool:
+    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu()
+                or _is_hpu())
 
 
 def get_hipcc_rocm_version():
@@ -388,11 +433,16 @@ def get_gaudi_sw_version():
 def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "version.py"))
 
-    if _is_cuda():
+    if _no_device():
+        if envs.VLLM_TARGET_DEVICE == "empty":
+            version += "+empty"
+    elif _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
-            version += f"+cu{cuda_version_str}"
+            # skip this for source tarball, required for pypi
+            if "sdist" not in sys.argv:
+                version += f"+cu{cuda_version_str}"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
@@ -448,7 +498,9 @@ def get_requirements() -> List[str]:
                 resolved_requirements.append(line)
         return resolved_requirements
 
-    if _is_cuda():
+    if _no_device():
+        requirements = _read_requirements("requirements-cuda.txt")
+    elif _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
@@ -483,14 +535,21 @@ def get_requirements() -> List[str]:
 
 ext_modules = []
 
+if _build_core_ext():
+    ext_modules.append(CMakeExtension(name="vllm._core_C"))
+
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
+if _is_hip():
+    ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
+
+if _is_cuda():
+    ext_modules.append(
+        CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
+
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
-
-    if _install_punica():
-        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
@@ -498,6 +557,9 @@ package_data = {
 if envs.VLLM_USE_PRECOMPILED:
     ext_modules = []
     package_data["vllm"].append("*.so")
+
+if _no_device():
+    ext_modules = []
 
 setup(
     name="vllm",
@@ -518,6 +580,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
@@ -528,8 +591,10 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "video": ["opencv-python"],  # Required for video processing
+        "audio": ["librosa", "soundfile"]  # Required for audio processing
     },
-    cmdclass={"build_ext": cmake_build_ext} if _build_custom_ops() else {},
+    cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
     package_data=package_data,
     entry_points={
         "console_scripts": [

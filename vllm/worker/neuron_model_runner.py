@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
-                    Union)
+from importlib.util import find_spec
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -9,11 +9,11 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
@@ -32,7 +32,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     input_positions: Optional[torch.Tensor] = None
     input_block_ids: Optional[torch.Tensor] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
+    multi_modal_kwargs: Optional[BatchedTensorInputs] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -77,15 +77,20 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.model: nn.Module  # initialize after load_model.
 
     def load_model(self) -> None:
-        self.model = get_neuron_model(self.model_config,
-                                      parallel_config=self.parallel_config,
-                                      scheduler_config=self.scheduler_config)
+        if find_spec("transformers_neuronx") is not None:
+            self.model = get_neuron_model(
+                self.model_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config)
+        else:
+            raise NotImplementedError(
+                "Supports only Transformer-NeuronX based models.")
 
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int], Mapping[
-            str, BatchedTensors]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[int],
+               BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
@@ -134,8 +139,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                        dtype=torch.long,
                                        device=self.device)
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
-                                                    device=self.device)
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
         return (input_tokens, input_positions, input_block_ids, seq_lens,
                 multi_modal_kwargs)
@@ -199,6 +203,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForNeuron:
+        multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
@@ -219,7 +224,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             # just use seq_lens instead.
             seq_lens,
             self.device,
-            self.pin_memory)
+            self.pin_memory,
+            generators=self.get_generators(finished_requests_ids))
 
         return ModelInputForNeuron(input_tokens=input_tokens,
                                    input_positions=input_positions,
@@ -243,7 +249,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             input_block_ids=model_input.input_block_ids,
-            **(model_input.multi_modal_kwargs or {}),
+            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+                                         device=self.device),
         )
 
         # Compute the logits.

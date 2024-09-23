@@ -1,20 +1,20 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               set_weight_attrs)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_awq_marlin_linear, awq_to_marlin_zero_points,
-    check_awq_marlin_supported, marlin_make_empty_g_idx, marlin_make_workspace,
-    marlin_permute_scales, replace_tensor, verify_awq_marlin_supported,
-    verify_marlin_supports_shape)
+    apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
+    marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
+    replace_tensor, verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.parameter import (GroupQuantScaleParameter,
+                                           PackedvLLMParameter)
+from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
@@ -22,20 +22,31 @@ logger = init_logger(__name__)
 class AWQMarlinConfig(QuantizationConfig):
     """Config class for AWQ Marlin"""
 
+    # num_bits -> type
+    TYPE_MAP = {
+        4: scalar_types.uint4,
+        8: scalar_types.uint8,
+    }
+
     def __init__(self, weight_bits: int, group_size: int, has_zp: bool,
                  lm_head_quantized: bool) -> None:
-        self.weight_bits = weight_bits
-        self.pack_factor = 32 // self.weight_bits  # packed into 32bits
+        self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
         self.has_zp = has_zp
         self.lm_head_quantized = lm_head_quantized
 
-        verify_awq_marlin_supported(num_bits=self.weight_bits,
-                                    group_size=self.group_size,
-                                    has_zp=self.has_zp)
+        if weight_bits not in self.TYPE_MAP:
+            raise ValueError(f"Unsupported num_bits = {weight_bits}. "
+                             f"Supported num_bits = {self.TYPE_MAP.keys()}")
+
+        self.quant_type = self.TYPE_MAP[weight_bits]
+
+        verify_marlin_supported(self.quant_type,
+                                group_size=self.group_size,
+                                has_zp=self.has_zp)
 
     def __repr__(self) -> str:
-        return (f"AWQMarlinConfig(weight_bits={self.weight_bits}, "
+        return (f"AWQMarlinConfig(quant_type={self.quant_type}, "
                 f"group_size={self.group_size}, "
                 f"has_zp={self.has_zp}, "
                 f"lm_head_quantized={self.lm_head_quantized})")
@@ -99,9 +110,9 @@ class AWQMarlinConfig(QuantizationConfig):
     def is_awq_marlin_compatible(cls, quant_config: Dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
-        num_bits = quant_config.get("bits", None)
-        group_size = quant_config.get("group_size", None)
-        has_zp = quant_config.get("zero_point", None)
+        num_bits = quant_config.get("bits")
+        group_size = quant_config.get("group_size")
+        has_zp = quant_config.get("zero_point")
 
         if quant_method != "awq":
             return False
@@ -110,11 +121,12 @@ class AWQMarlinConfig(QuantizationConfig):
         if (num_bits is None or group_size is None or has_zp is None):
             return False
 
-        return check_awq_marlin_supported(
-            num_bits=num_bits,
-            group_size=group_size,
-            has_zp=has_zp,
-            min_capability=cls.get_min_capability())
+        if num_bits not in cls.TYPE_MAP:
+            return False
+
+        return check_marlin_supported(quant_type=cls.TYPE_MAP[num_bits],
+                                      group_size=group_size,
+                                      has_zp=has_zp)
 
 
 class AWQMarlinLinearMethod(LinearMethodBase):
@@ -139,6 +151,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
     ) -> None:
         del output_size
         output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
 
         # Normalize group_size
         if self.quant_config.group_size != -1:
@@ -152,59 +165,44 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             input_size=input_size,
             group_size=group_size)
 
-        qweight = Parameter(
-            torch.empty(
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
                 input_size_per_partition,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qweight, {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
-            })
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader)
 
         num_groups = input_size_per_partition // group_size
 
-        qzeros = Parameter(
-            torch.empty(
+        qzeros = PackedvLLMParameter(
+            data=torch.empty(
                 num_groups,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qzeros, {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
-            })
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader)
 
-        scales = Parameter(
-            torch.empty(
-                num_groups,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(scales, {
-            "input_dim": 0,
-            "output_dim": 1,
-        })
+        scales = GroupQuantScaleParameter(data=torch.empty(
+            num_groups,
+            output_size_per_partition,
+            dtype=params_dtype,
+        ),
+                                          input_dim=0,
+                                          output_dim=1,
+                                          weight_loader=weight_loader)
 
         layer.register_parameter("qweight", qweight)
-        set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qzeros", qzeros)
-        set_weight_attrs(qzeros, extra_weight_attrs)
         layer.register_parameter("scales", scales)
-        set_weight_attrs(scales, extra_weight_attrs)
 
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
@@ -216,6 +214,12 @@ class AWQMarlinLinearMethod(LinearMethodBase):
     # Here, we handle the repacking
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
+        layer.qweight = torch.nn.Parameter(layer.qweight.data,
+                                           requires_grad=False)
+        layer.qzeros = torch.nn.Parameter(layer.qzeros.data,
+                                          requires_grad=False)
+        layer.scales = torch.nn.Parameter(layer.scales.data,
+                                          requires_grad=False)
 
         # Allocate marlin workspace
         layer.workspace = marlin_make_workspace(
@@ -226,7 +230,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             layer.qweight,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
-            num_bits=self.quant_config.weight_bits)
+            num_bits=self.quant_config.quant_type.size_bits)
         replace_tensor(layer, "qweight", marlin_qweight)
 
         # Permute scales from AWQ format to marlin format.
@@ -242,7 +246,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             layer.qzeros,
             size_k=layer.num_groups,
             size_n=layer.output_size_per_partition,
-            num_bits=self.quant_config.weight_bits)
+            num_bits=self.quant_config.quant_type.size_bits)
         replace_tensor(layer, "qzeros", marlin_zp)
 
         # Not-used
@@ -263,7 +267,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             g_idx=layer.g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,
-            num_bits=self.quant_config.weight_bits,
+            quant_type=self.quant_config.quant_type,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
             bias=bias)

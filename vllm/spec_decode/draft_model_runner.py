@@ -2,7 +2,7 @@ from typing import List, Optional
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm.model_executor.layers.sampler import SamplerOutput
 
 try:
     from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -12,11 +12,11 @@ except ModuleNotFoundError:
         ROCmFlashAttentionMetadata as FlashAttentionMetadata)
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
-                           SamplerOutput)
+from vllm.multimodal import MultiModalInputs
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 
@@ -54,9 +54,9 @@ class TP1DraftModelRunner(ModelRunner):
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        multimodal_config: Optional[MultiModalConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         return_hidden_states: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
         if return_hidden_states:
             raise ValueError(
@@ -73,42 +73,10 @@ class TP1DraftModelRunner(ModelRunner):
             lora_config=lora_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
-            multimodal_config=multimodal_config,
             prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
+            observability_config=observability_config,
         )
-
-    def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
-                                    num_queries):
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
-
-        if num_seqs != num_queries:
-            assert num_seqs > num_queries
-            assert attn_metadata.use_cuda_graph
-
-        assert attn_metadata.num_prefills == 0
-        assert attn_metadata.num_prefill_tokens == 0
-        assert attn_metadata.num_decode_tokens == num_seqs
-        assert attn_metadata.slot_mapping.shape == (num_seqs, )
-
-        assert len(attn_metadata.seq_lens) == num_seqs
-        assert attn_metadata.seq_lens_tensor.shape == (num_seqs, )
-        assert attn_metadata.max_query_len == 1
-        assert attn_metadata.max_prefill_seq_len == 0
-        assert attn_metadata.max_decode_seq_len == max(attn_metadata.seq_lens)
-
-        assert attn_metadata.query_start_loc.shape == (num_queries + 1, )
-        assert attn_metadata.seq_start_loc.shape == (num_seqs + 1, )
-
-        assert attn_metadata.context_lens_tensor.shape == (num_queries, )
-
-        assert attn_metadata.block_tables.shape[0] == num_seqs
-
-        # Update query lengths. Note that we update only queries and not seqs,
-        # since tensors may be padded due to captured cuda graph batch size
-        for i in range(num_queries):
-            attn_metadata.seq_lens[i] += 1
-        attn_metadata.max_decode_seq_len = max(attn_metadata.seq_lens)
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
                                   num_queries):
@@ -147,18 +115,9 @@ class TP1DraftModelRunner(ModelRunner):
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        self._update_flash_attn_metadata(attn_metadata, num_seqs, num_queries)
 
-        # Update GPU tensors
-        ops.advance_step(num_seqs=num_seqs,
-                         num_queries=num_queries,
-                         block_size=self.block_size,
-                         input_tokens=model_input.input_tokens,
-                         sampled_token_ids=sampled_token_ids,
-                         input_positions=model_input.input_positions,
-                         seq_lens=attn_metadata.seq_lens_tensor,
-                         slot_mapping=attn_metadata.slot_mapping,
-                         block_tables=attn_metadata.block_tables)
+        attn_metadata.advance_step(model_input, sampled_token_ids,
+                                   self.block_size, num_seqs, num_queries)
 
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
@@ -224,16 +183,14 @@ class TP1DraftModelRunner(ModelRunner):
             return False
 
         # TODO: Add soft-tuning prompt adapter support
-        if self.prompt_adapter_config:
-            return False
-
-        return True
+        return not self.prompt_adapter_config
 
     @torch.inference_mode()
     def execute_model(
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
+        previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
@@ -285,6 +242,8 @@ class TP1DraftModelRunner(ModelRunner):
                     model_input.prompt_adapter_requests,
                     model_input.prompt_adapter_mapping)
 
+            self.attn_state.begin_forward(model_input)
+
         # Detect exec mode
         assert model_input.attn_metadata is not None
         use_cuda_graph = False
@@ -309,12 +268,29 @@ class TP1DraftModelRunner(ModelRunner):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = (self.graph_runners[model_input.virtual_engine]
                                 [graph_batch_size])
+
+            if previous_hidden_states is not None:
+                hidden_states = torch.cat([
+                    previous_hidden_states,
+                    torch.empty([
+                        graph_batch_size - previous_hidden_states.shape[0],
+                        *previous_hidden_states.shape[1:]
+                    ],
+                                dtype=previous_hidden_states.dtype,
+                                device=previous_hidden_states.device)
+                ])
+            else:
+                hidden_states = None
         else:
             model_executable = self.model
+            hidden_states = previous_hidden_states
 
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+
+            kwargs = {"previous_hidden_states": hidden_states} \
+                if previous_hidden_states is not None else {}
 
             # Run model
             hidden_states = model_executable(
@@ -323,7 +299,9 @@ class TP1DraftModelRunner(ModelRunner):
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
-                **multi_modal_kwargs,
+                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                             device=self.device),
+                **kwargs,
             )
 
             # Compute the logits.

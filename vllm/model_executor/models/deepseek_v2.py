@@ -43,12 +43,12 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
@@ -505,8 +505,11 @@ class DeepseekV2ForCausalLM(nn.Module):
                                    attn_metadata, intermediate_tensors)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
@@ -590,7 +593,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
-                                  weight_name,
+                                  name,
                                   shard_id=shard_id,
                                   expert_id=expert_id)
                     break

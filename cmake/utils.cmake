@@ -181,7 +181,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     #
     # The torch cmake setup hardcodes the detected architecture flags in
     # `CMAKE_CUDA_FLAGS`.  Since `CMAKE_CUDA_FLAGS` is a "global" variable, it
-    # can't modified on a per-target basis, e.g. for the `punica` extension.
+    # can't modified on a per-target basis.
     # So, all the `-gencode` flags need to be extracted and removed from
     # `CMAKE_CUDA_FLAGS` for processing so they can be passed by another method.
     # Since it's not possible to use `target_compiler_options` for adding target
@@ -350,17 +350,19 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
     ${GPU_INCLUDE_DIRECTORIES})
 
-  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${torch_python_LIBRARY}
-    ${GPU_LIBRARIES})
+  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
 
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
   if (GPU_LANGUAGE STREQUAL "CUDA")
+    if ("${CUDA_CUDA_LIB}" STREQUAL "")
+      set(CUDA_CUDA_LIB "${CUDA_CUDA_LIBRARY}")
+    endif()
     target_link_libraries(${GPU_MOD_NAME} PRIVATE ${CUDA_CUDA_LIB}
       ${CUDA_LIBRARIES})
   else()
     target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
   endif()
 
-  install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION})
+  install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION} COMPONENT ${GPU_MOD_NAME})
 endfunction()

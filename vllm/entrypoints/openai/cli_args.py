@@ -7,6 +7,7 @@ purposes.
 import argparse
 import json
 import ssl
+from typing import List, Optional, Sequence, Union
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
@@ -16,18 +17,55 @@ from vllm.utils import FlexibleArgumentParser
 
 class LoRAParserAction(argparse.Action):
 
-    def __call__(self, parser, namespace, values, option_string=None):
-        lora_list = []
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Optional[Union[str, Sequence[str]]],
+        option_string: Optional[str] = None,
+    ):
+        if values is None:
+            values = []
+        if isinstance(values, str):
+            raise TypeError("Expected values to be a list")
+
+        lora_list: List[LoRAModulePath] = []
         for item in values:
-            name, path = item.split('=')
-            lora_list.append(LoRAModulePath(name, path))
+            if item in [None, '']:  # Skip if item is None or empty string
+                continue
+            if '=' in item and ',' not in item:  # Old format: name=path
+                name, path = item.split('=')
+                lora_list.append(LoRAModulePath(name, path))
+            else:  # Assume JSON format
+                try:
+                    lora_dict = json.loads(item)
+                    lora = LoRAModulePath(**lora_dict)
+                    lora_list.append(lora)
+                except json.JSONDecodeError:
+                    parser.error(
+                        f"Invalid JSON format for --lora-modules: {item}")
+                except TypeError as e:
+                    parser.error(
+                        f"Invalid fields for --lora-modules: {item} - {str(e)}"
+                    )
         setattr(namespace, self.dest, lora_list)
 
 
 class PromptAdapterParserAction(argparse.Action):
 
-    def __call__(self, parser, namespace, values, option_string=None):
-        adapter_list = []
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Optional[Union[str, Sequence[str]]],
+        option_string: Optional[str] = None,
+    ):
+        if values is None:
+            values = []
+        if isinstance(values, str):
+            raise TypeError("Expected values to be a list")
+
+        adapter_list: List[PromptAdapterPath] = []
         for item in values:
             name, path = item.split('=')
             adapter_list.append(PromptAdapterPath(name, path))
@@ -72,8 +110,12 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=None,
         nargs='+',
         action=LoRAParserAction,
-        help="LoRA module configurations in the format name=path. "
-        "Multiple modules can be specified.")
+        help="LoRA module configurations in either 'name=path' format"
+        "or JSON format. "
+        "Example (old format): 'name=path' "
+        "Example (new format): "
+        "'{\"name\": \"name\", \"local_path\": \"path\", "
+        "\"base_model_name\": \"id\"}'")
     parser.add_argument(
         "--prompt-adapters",
         type=nullable_str,
@@ -131,9 +173,32 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument(
         "--return-tokens-as-token-ids",
         action="store_true",
-        help="When --max-logprobs is specified, represents single tokens as"
-        "strings of the form 'token_id:{token_id}' so that tokens that"
+        help="When --max-logprobs is specified, represents single tokens as "
+        "strings of the form 'token_id:{token_id}' so that tokens that "
         "are not JSON-encodable can be identified.")
+    parser.add_argument(
+        "--disable-frontend-multiprocessing",
+        action="store_true",
+        help="If specified, will run the OpenAI frontend server in the same "
+        "process as the model serving engine.")
+
+    parser.add_argument(
+        "--enable-auto-tool-choice",
+        action="store_true",
+        default=False,
+        help=
+        "Enable auto tool choice for supported models. Use --tool-call-parser"
+        "to specify which parser to use")
+
+    parser.add_argument(
+        "--tool-call-parser",
+        type=str,
+        choices=["mistral", "hermes"],
+        default=None,
+        help=
+        "Select the tool call parser depending on the model that you're using."
+        " This is used to parse the model-generated tool call into OpenAI API "
+        "format. Required for --enable-auto-tool-choice.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 
@@ -143,6 +208,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         help='Max number of prompt characters or prompt '
                         'ID numbers being printed in log.'
                         '\n\nDefault: Unlimited')
+
+    parser.add_argument(
+        "--disable-fastapi-docs",
+        action='store_true',
+        default=False,
+        help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint"
+    )
 
     return parser
 

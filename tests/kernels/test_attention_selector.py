@@ -3,9 +3,9 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from tests.kernels.utils import (STR_FLASH_ATTN_VAL, STR_INVALID_VAL,
-                                 override_backend_env_variable)
+from tests.kernels.utils import override_backend_env_variable
 from vllm.attention.selector import which_attn_to_use
+from vllm.utils import STR_FLASH_ATTN_VAL, STR_INVALID_VAL
 
 
 @pytest.mark.parametrize(
@@ -45,7 +45,7 @@ def test_flash_attn(monkeypatch):
     override_backend_env_variable(monkeypatch, STR_FLASH_ATTN_VAL)
 
     # Unsupported CUDA arch
-    with patch("torch.cuda.get_device_capability", return_value=[7, 5]):
+    with patch("torch.cuda.get_device_capability", return_value=(7, 5)):
         backend = which_attn_to_use(8, 16, 8, None, torch.float16, None, 16)
         assert backend.name != STR_FLASH_ATTN_VAL
 

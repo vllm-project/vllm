@@ -2,7 +2,7 @@ import pytest
 import torch
 from vllm_hpu_extension.ops import LoraMask
 
-from vllm.lora.layers import _apply_lora, _apply_lora_packed_nslice
+from vllm.hpu.punica_hpu import GaudiPunicaWrapper
 
 from .utils import DummyLoRAManager
 
@@ -74,8 +74,9 @@ def test_apply_lora(m, n, k, rank, dtype) -> None:
                             device="hpu")
     mask = createLoraMask(indices, k, 1, 8, rank, dtype)
     LoraMask.setLoraMask(mask)
+    punica_wrapper = GaudiPunicaWrapper(4096, max_batches=256, device="hpu")
 
-    _apply_lora(input, lora_a_stack, lora_b_stack, indices, output)
+    punica_wrapper.add_lora(output, input, lora_a_stack, lora_b_stack, 1.0)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
@@ -85,7 +86,7 @@ def test_apply_lora(m, n, k, rank, dtype) -> None:
     mask = createLoraMask(indices, k, 1, 8, rank, dtype)
     LoraMask.setLoraMask(mask)
 
-    _apply_lora(input, lora_a_stack, lora_b_stack, indices, output)
+    punica_wrapper.add_lora(output, input, lora_a_stack, lora_b_stack, 1.0)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -148,8 +149,9 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
     mask = createLoraMask(indices, k, 1, 8, rank, dtype)
     LoraMask.setLoraMask(mask)
 
-    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks, indices,
-                              output, (m // 2, m // 2))
+    punica_wrapper = GaudiPunicaWrapper(4096, max_batches=256, device="hpu")
+    punica_wrapper.add_lora_packed_nslice(output, input, lora_a_stacks,
+                                          lora_b_stacks, 1.0, (m // 2, m // 2))
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
@@ -159,8 +161,8 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
     mask = createLoraMask(indices, k, 1, 8, rank, dtype)
     LoraMask.setLoraMask(mask)
 
-    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks, indices,
-                              output, (m // 2, m // 2))
+    punica_wrapper.add_lora_packed_nslice(output, input, lora_a_stacks,
+                                          lora_b_stacks, 1.0, (m // 2, m // 2))
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()
@@ -238,8 +240,10 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
     mask = createLoraMask(indices, k, 1, 8, rank, dtype)
     LoraMask.setLoraMask(mask)
 
-    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks, indices,
-                              output, (qkv[0], qkv[1], qkv[2]))
+    punica_wrapper = GaudiPunicaWrapper(4096, max_batches=256, device="hpu")
+    qkvs = (qkv[0], qkv[1], qkv[2])
+    punica_wrapper.add_lora_packed_nslice(output, input, lora_a_stacks,
+                                          lora_b_stacks, 1.0, qkvs)
 
     rtol, atol = TOLERANCES[dtype]
     assert torch.allclose(expected, output, rtol=rtol, atol=atol)
@@ -248,9 +252,9 @@ def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
     indices = torch.full((len(input), ), -1, device="hpu")
     mask = createLoraMask(indices, k, 1, 8, rank, dtype)
     LoraMask.setLoraMask(mask)
-
-    _apply_lora_packed_nslice(input, lora_a_stacks, lora_b_stacks, indices,
-                              output, (qkv[0], qkv[1], qkv[2]))
+    qkvs = (qkv[0], qkv[1], qkv[2])
+    punica_wrapper.add_lora_packed_nslice(output, input, lora_a_stacks,
+                                          lora_b_stacks, 1.0, qkvs)
     assert torch.allclose(torch.zeros_like(output), output)
 
     manager.reset_lora()

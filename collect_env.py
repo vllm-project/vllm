@@ -65,6 +65,9 @@ DEFAULT_CONDA_PATTERNS = {
     "optree",
     "nccl",
     "transformers",
+    "zmq",
+    "nvidia",
+    "pynvml",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -77,6 +80,9 @@ DEFAULT_PIP_PATTERNS = {
     "onnx",
     "nccl",
     "transformers",
+    "zmq",
+    "nvidia",
+    "pynvml",
 }
 
 
@@ -263,8 +269,9 @@ def get_neuron_sdk_version(run_lambda):
 def get_vllm_version():
     try:
         import vllm
-        return vllm.__version__
-    except ImportError:
+        return vllm.__version__ + "@" + vllm.__commit__
+    except Exception:
+        # old version of vllm does not have __commit__
         return 'N/A'
 
 
@@ -278,9 +285,14 @@ def summarize_vllm_build_flags():
 
 
 def get_gpu_topo(run_lambda):
+    output = None
+
     if get_platform() == 'linux':
-        return run_and_read_all(run_lambda, 'nvidia-smi topo -m')
-    return None
+        output = run_and_read_all(run_lambda, 'nvidia-smi topo -m')
+        if output is None:
+            output = run_and_read_all(run_lambda, 'rocm-smi --showtopo')
+
+    return output
 
 
 # example outputs of CPU infos

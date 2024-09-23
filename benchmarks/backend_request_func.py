@@ -24,6 +24,8 @@ class RequestFuncInput:
     model: str
     best_of: int = 1
     use_beam_search: bool = False
+    logprobs: Optional[int] = None
+    multi_modal_content: Optional[dict] = None
 
 
 @dataclass
@@ -225,8 +227,8 @@ async def async_request_openai_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "completions"
-    ), "OpenAI Completions API URL must end with 'completions'."
+        ("completions", "profile")
+    ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -236,6 +238,7 @@ async def async_request_openai_completions(
             "temperature": 0.0,
             "best_of": request_func_input.best_of,
             "max_tokens": request_func_input.output_len,
+            "logprobs": request_func_input.logprobs,
             "stream": True,
         }
         headers = {
@@ -276,8 +279,9 @@ async def async_request_openai_completions(
                                     output.ttft = ttft
 
                                 # Decoding phase
-                                output.itl.append(timestamp -
-                                                  most_recent_timestamp)
+                                else:
+                                    output.itl.append(timestamp -
+                                                      most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
                                 generated_text += data["choices"][0]["text"]
@@ -309,12 +313,15 @@ async def async_request_openai_chat_completions(
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
+        content = [{"type": "text", "text": request_func_input.prompt}]
+        if request_func_input.multi_modal_content:
+            content.append(request_func_input.multi_modal_content)
         payload = {
             "model": request_func_input.model,
             "messages": [
                 {
                     "role": "user",
-                    "content": request_func_input.prompt,
+                    "content": content
                 },
             ],
             "temperature": 0.0,
