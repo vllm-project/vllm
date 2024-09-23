@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import torch
 
 from .interface import Platform, PlatformEnum, DeviceCapability
