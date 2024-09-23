@@ -5,7 +5,6 @@ import os
 import re
 import subprocess
 import sys
-import warnings
 from pathlib import Path
 from shutil import which
 from typing import Dict, List
@@ -14,6 +13,7 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
+from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME
 
 
@@ -27,34 +27,6 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
-
-
-def embed_commit_hash():
-    try:
-        if "BUILDKITE_COMMIT" in os.environ:
-            # ci build
-            commit_id = os.environ["BUILDKITE_COMMIT"]
-        else:
-            commit_id = subprocess.check_output(["git", "rev-parse", "HEAD"],
-                                                encoding="utf-8").strip()
-
-        commit_contents = f'__commit__ = "{commit_id}"\n'
-
-        version_file = os.path.join(ROOT_DIR, "vllm", "commit_id.py")
-        with open(version_file, "w", encoding="utf-8") as f:
-            f.write(commit_contents)
-
-    except subprocess.CalledProcessError as e:
-        warnings.warn(f"Failed to get commit hash:\n{e}",
-                      RuntimeWarning,
-                      stacklevel=2)
-    except Exception as e:
-        warnings.warn(f"Failed to embed commit hash:\n{e}",
-                      RuntimeWarning,
-                      stacklevel=2)
-
-
-embed_commit_hash()
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -381,21 +353,9 @@ def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
 
-def find_version(filepath: str) -> str:
-    """Extract version information from the given filepath.
-
-    Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
-    """
-    with open(filepath) as fp:
-        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
-                                  fp.read(), re.M)
-        if version_match:
-            return version_match.group(1)
-        raise RuntimeError("Unable to find version string.")
-
-
 def get_vllm_version() -> str:
-    version = find_version(get_path("vllm", "version.py"))
+    version = get_version()
+    sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
@@ -406,27 +366,27 @@ def get_vllm_version() -> str:
             cuda_version_str = cuda_version.replace(".", "")[:3]
             # skip this for source tarball, required for pypi
             if "sdist" not in sys.argv:
-                version += f"+cu{cuda_version_str}"
+                version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
-            version += f"+rocm{rocm_version_str}"
+            version += f"{sep}rocm{rocm_version_str}"
     elif _is_neuron():
         # Get the Neuron version
         neuron_version = str(get_neuronxcc_version())
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
-            version += f"+neuron{neuron_version_str}"
+            version += f"{sep}neuron{neuron_version_str}"
     elif _is_openvino():
-        version += "+openvino"
+        version += f"{sep}openvino"
     elif _is_tpu():
-        version += "+tpu"
+        version += f"{sep}tpu"
     elif _is_cpu():
-        version += "+cpu"
+        version += f"{sep}cpu"
     elif _is_xpu():
-        version += "+xpu"
+        version += f"{sep}xpu"
     else:
         raise RuntimeError("Unknown runtime environment")
 
