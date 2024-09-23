@@ -365,8 +365,8 @@ class MllamaVisionEncoderLayer(nn.Module):
         self.self_attn = MllamaVisionSdpaAttention(config)
         self.mlp = CLIPMLP(config)
 
-        self.input_layernorm = nn.LayerNorm(self.hidden_size)
-        self.post_attention_layernorm = nn.LayerNorm(self.hidden_size)
+        self.input_layernorm = nn.LayerNorm(self.hidden_size, eps=config.norm_eps)
+        self.post_attention_layernorm = nn.LayerNorm(self.hidden_size, eps=config.norm_eps)
 
         # there used to be an if else here, no code path
         if is_gated:
@@ -447,14 +447,14 @@ class MllamaVisionModel(nn.Module):
         self.patch_size = config.patch_size
         self.max_num_tiles = config.max_num_tiles
         self.hidden_size = config.hidden_size
-        self.in_channels = config.in_channels
+        self.in_channels = config.num_channels
         self.intermediate_layers_indices = config.intermediate_layers_indices
 
         self.num_patches = (self.image_size // self.patch_size)**2 + 1
         self.scale = config.hidden_size**-0.5
 
         self.patch_embedding = ColumnParallelConv2dPatch(
-            in_channels=config.in_channels,
+            in_channels=config.num_channels,
             out_channels=self.hidden_size,
             kernel_size=self.patch_size,
             stride=self.patch_size,
@@ -495,7 +495,7 @@ class MllamaVisionModel(nn.Module):
 
     def forward(self, pixel_values: torch.Tensor,
                 aspect_ratio_ids: torch.Tensor,
-                attention_mask: torch.Tensor) -> torch.Tensor:
+                aspect_ratio_mask: torch.Tensor) -> torch.Tensor:
         batch_size, num_concurrent_media, num_tiles, num_channels, \
             height, width = pixel_values.shape
 
@@ -543,15 +543,14 @@ class MllamaVisionModel(nn.Module):
         hidden_state = F.pad(hidden_state, padding, mode="constant", value=0)
         slice_index = -num_padding_patches if num_padding_patches > 0 else None
 
-        if attention_mask is not None:
-            attention_mask = attention_mask.reshape(
-                batch_size * num_concurrent_media, -1)
-            attention_mask = _prepare_aspect_ratio_attention_mask(
-                aspect_ratio_mask=attention_mask,
-                num_patches=self.num_patches,
-                target_length=hidden_state.shape[2],
-                dtype=self.layernorm_pre.weight.dtype,
-            )
+        attention_mask = aspect_ratio_mask.reshape(
+            batch_size * num_concurrent_media, -1)
+        attention_mask = _prepare_aspect_ratio_attention_mask(
+            aspect_ratio_mask=attention_mask,
+            num_patches=self.num_patches,
+            target_length=hidden_state.shape[2],
+            dtype=self.layernorm_pre.weight.dtype,
+        )
 
         hidden_state = hidden_state.view(batch_size * num_concurrent_media, -1,
                                          dim)
@@ -787,6 +786,7 @@ class MllamaTextModel(nn.Module):
                 layers.append(
                     MllamaCrossAttentionDecoderLayer(config, layer_idx))
             else:
+                # TODO: force LlamaDecoderLayer to config.attention_bias=False
                 layers.append(
                     LlamaDecoderLayer(config,
                                       cache_config=cache_config,
