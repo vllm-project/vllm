@@ -54,10 +54,21 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
-void advance_step(int64_t num_seqs, int64_t num_queries, int64_t block_size,
-                  torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
-                  torch::Tensor& input_positions, torch::Tensor& seq_lens,
-                  torch::Tensor& slot_mapping, torch::Tensor& block_tables);
+void advance_step_flashattn(int64_t num_seqs, int64_t num_queries,
+                            int64_t block_size, torch::Tensor& input_tokens,
+                            torch::Tensor& sampled_token_ids,
+                            torch::Tensor& input_positions,
+                            torch::Tensor& seq_lens,
+                            torch::Tensor& slot_mapping,
+                            torch::Tensor& block_tables);
+
+void advance_step_flashinfer(
+    int64_t num_seqs, int64_t num_queries, int64_t block_size,
+    torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
+    torch::Tensor& input_positions, torch::Tensor& seq_lens,
+    torch::Tensor& slot_mapping, torch::Tensor& block_tables,
+    torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
+    torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
 
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
@@ -123,8 +134,16 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
 
+torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                      torch::Tensor& perm, c10::SymInt size_k,
+                                      c10::SymInt size_n, int64_t num_bits);
+
 torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
                                 int64_t size_n, int64_t num_bits);
+
+torch::Tensor awq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                     c10::SymInt size_k, c10::SymInt size_n,
+                                     int64_t num_bits);
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
@@ -165,10 +184,12 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& scale);
+                              torch::Tensor const& scale,
+                              c10::optional<torch::Tensor> const& azp);
 
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
-                               torch::Tensor& scales);
+                               torch::Tensor& scales,
+                               c10::optional<torch::Tensor> const& azp);
 
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
@@ -201,11 +222,10 @@ std::vector<torch::Tensor> selective_scan_fwd(
     const c10::optional<torch::Tensor>& index_,
     const c10::optional<torch::Tensor>& x);
 
-at::Tensor causal_conv1d_update(const at::Tensor& x,
-                                const at::Tensor& conv_state,
-                                const at::Tensor& weight,
-                                const c10::optional<at::Tensor>& bias_,
-                                bool silu_activation);
+at::Tensor causal_conv1d_update(
+    const at::Tensor& x, const at::Tensor& conv_state, const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias, bool silu_activation,
+    const c10::optional<at::Tensor>& conv_state_indices);
 
 at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
                              const c10::optional<at::Tensor>& bias_,
@@ -219,8 +239,6 @@ using fptr_t = int64_t;
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
                       const std::vector<std::string>& handles,
                       const std::vector<int64_t>& offsets, int64_t rank,
-                      bool full_nvlink);
-bool should_custom_ar(torch::Tensor& inp, int64_t max_size, int64_t world_size,
                       bool full_nvlink);
 void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out);
 void all_reduce_unreg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& reg_buffer,

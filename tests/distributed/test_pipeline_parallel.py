@@ -8,6 +8,8 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import os
 
 import pytest
+from packaging import version
+from transformers import __version__ as transformers_version
 
 from vllm.logger import init_logger
 
@@ -32,7 +34,12 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
         (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
         (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
         (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-        (2, 2, 1, 1, 1, "internlm/internlm2_5-7b-chat", "ray"),
+        # NOTE: InternVL2 multi-node tests are flaky,
+        # use mp backend to skip the multi-node tests
+        (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-1B", "mp"),
+        (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-2B", "mp"),
+        (1, 2, 1, 0, 1, "OpenGVLab/InternVL2-4B", "mp"),
+        (1, 2, 0, 1, 0, "Qwen/Qwen2-VL-2B-Instruct", "mp")
     ],
 )
 @fork_new_process_for_each_test
@@ -42,10 +49,17 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
 
+    # Skip tests that require transformers>=4.45.0
+    if "Qwen2-VL" in MODEL_NAME and version.parse(
+            transformers_version) < version.parse("4.45.0.dev0"):
+        pytest.skip("This test requires transformers>=4.45.0")
+
     pp_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "float16",
+        "--max-model-len",
+        "8192",
         "--pipeline-parallel-size",
         str(PP_SIZE),
         "--tensor-parallel-size",
@@ -62,7 +76,9 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
     tp_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        "float16",
+        "--max-model-len",
+        "8192",
         "--tensor-parallel-size",
         str(max(TP_SIZE, 2)),  # We only use 2 GPUs in the CI.
         "--distributed-executor-backend",

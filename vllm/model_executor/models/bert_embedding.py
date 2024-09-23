@@ -6,7 +6,7 @@ from transformers import BertConfig
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
@@ -17,7 +17,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
-
+from vllm.sequence import IntermediateTensors
 
 class BertModel(nn.Module):
 
@@ -37,13 +37,29 @@ class BertModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embeddings(input_ids=input_ids,
+                                position_ids=position_ids,
+                                inputs_embeds=inputs_embeds)
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+
         hidden_states = self.embeddings(input_ids=input_ids,
                                         position_ids=position_ids,
                                         inputs_embeds=inputs_embeds)
-        output = self.encoder(hidden_states, kv_caches, attn_metadata)
-        return output
+        hidden_states = self.encoder(hidden_states, kv_caches, attn_metadata)\
+        
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
+        return hidden_states
 
 
 class BertEmbedding(nn.Module):
@@ -369,12 +385,14 @@ class BertEmbeddingModel(nn.Module):
         encoder_positions: Optional[torch.Tensor],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.model(input_ids=encoder_input_ids,
                           position_ids=encoder_positions,
                           kv_caches=kv_caches,
                           inputs_embeds=inputs_embeds,
+                          intermediate_tensors=intermediate_tensors,
                           attn_metadata=attn_metadata)
 
     def pooler(
