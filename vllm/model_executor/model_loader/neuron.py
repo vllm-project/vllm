@@ -14,8 +14,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput, SequenceOutput, CompletionSequenceGroupOutput, Logprob
-from transformers_neuronx.config import GenerationConfig
+from vllm.sequence import SequenceOutput, CompletionSequenceGroupOutput, Logprob
+from vllm.model_executor.layers.sampler import SamplerOutput
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",
