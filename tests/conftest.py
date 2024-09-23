@@ -859,7 +859,7 @@ def num_gpus_available():
 
 temp_dir = tempfile.gettempdir()
 _dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
-_dummy_phi3v_path = os.path.join(temp_dir, "dummy_phi3v")
+_dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
 
 
 @pytest.fixture
@@ -882,11 +882,11 @@ def dummy_opt_path():
 
 
 @pytest.fixture
-def dummy_phi3v_path():
-    json_path = os.path.join(_dummy_phi3v_path, "config.json")
-    if not os.path.exists(_dummy_phi3v_path):
-        snapshot_download(repo_id="microsoft/Phi-3-vision-128k-instruct",
-                          local_dir=_dummy_phi3v_path,
+def dummy_llava_path():
+    json_path = os.path.join(_dummy_llava_path, "config.json")
+    if not os.path.exists(_dummy_llava_path):
+        snapshot_download(repo_id="llava-hf/llava-1.5-7b-hf",
+                          local_dir=_dummy_llava_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
                               "*.msgpack"
@@ -894,7 +894,7 @@ def dummy_phi3v_path():
         assert os.path.exists(json_path)
         with open(json_path, "r") as f:
             config = json.load(f)
-        config["architectures"] = ["MyPhi3VForCausalLM"]
+        config["architectures"] = ["MyLlava"]
         with open(json_path, "w") as f:
             json.dump(config, f)
-    return _dummy_phi3v_path
+    return _dummy_llava_path

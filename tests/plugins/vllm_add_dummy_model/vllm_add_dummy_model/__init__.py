@@ -4,11 +4,11 @@ import torch
 
 from vllm import ModelRegistry
 from vllm.inputs import INPUT_REGISTRY
+from vllm.model_executor.models.llava import (LlavaForConditionalGeneration,
+                                              dummy_data_for_llava,
+                                              get_max_llava_image_tokens,
+                                              input_processor_for_llava)
 from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.models.phi3v import (Phi3VForCausalLM,
-                                              dummy_data_for_phi3v,
-                                              get_max_phi3v_image_tokens,
-                                              input_processor_for_phi3v)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -27,10 +27,10 @@ class MyOPTForCausalLM(OPTForCausalLM):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
-class MyPhi3VForCausalLM(Phi3VForCausalLM):
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
+class MyLlava(LlavaForConditionalGeneration):
 
     def compute_logits(
             self, hidden_states: torch.Tensor,
@@ -49,5 +49,5 @@ def register():
         ModelRegistry.register_model("MyOPTForCausalLM", MyOPTForCausalLM)
 
     # register our dummy multimodal model
-    if "MyPhi3VForCausalLM" not in ModelRegistry.get_supported_archs():
-        ModelRegistry.register_model("MyPhi3VForCausalLM", MyPhi3VForCausalLM)
+    if "MyLlava" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model("MyLlava", MyLlava)

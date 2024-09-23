@@ -36,22 +36,22 @@ image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
 
 @fork_new_process_for_each_test
-def test_oot_mutlimodal_registration(dummy_phi3v_path):
+def test_oot_mutlimodal_registration(dummy_llava_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = [{
-        "prompt": "What's in the image?<|image_1|>",
+        "prompt": "What's in the image?<image>",
         "multi_modal_data": {
             "image": image
         },
     }, {
-        "prompt": "Describe the image<|image_1|>",
+        "prompt": "Describe the image<image>",
         "multi_modal_data": {
             "image": image
         },
     }]
 
     sampling_params = SamplingParams(temperature=0)
-    llm = LLM(model=dummy_phi3v_path,
+    llm = LLM(model=dummy_llava_path,
               load_format="dummy",
               max_num_seqs=1,
               trust_remote_code=True,
