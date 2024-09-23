@@ -21,12 +21,11 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+import transformers.models.mllama.configuration_mllama as config_mllama
 from PIL import Image
 from torch import nn
 from transformers.modeling_outputs import (BaseModelOutput,
                                            CausalLMOutputWithPast)
-from transformers.models.mllama.configuration_mllama import (
-    MllamaConfig, MllamaTextConfig, MllamaVisionConfig)
 from transformers.models.mllama.image_processing_mllama import (
     get_optimal_tiled_canvas)
 
@@ -240,7 +239,9 @@ class ColumnParallelConv2dPatch(torch.nn.Module):
 
 class MllamaPrecomputedAspectRatioEmbedding(nn.Module):
 
-    def __init__(self, config: MllamaVisionConfig, is_gated: bool = True):
+    def __init__(self,
+                 config: config_mllama.MllamaVisionConfig,
+                 is_gated: bool = True):
         super().__init__()
         self.max_num_tiles = config.max_num_tiles
         self.hidden_size = config.hidden_size
@@ -267,7 +268,7 @@ class MllamaPrecomputedAspectRatioEmbedding(nn.Module):
 
 class MllamaPrecomputedPositionEmbedding(nn.Module):
 
-    def __init__(self, config: MllamaVisionConfig):
+    def __init__(self, config: config_mllama.MllamaVisionConfig):
         super().__init__()
         self.max_num_tiles = config.max_num_tiles
         self.max_aspect_ratio_id = config.max_aspect_ratio_id
@@ -307,7 +308,7 @@ class MllamaPrecomputedPositionEmbedding(nn.Module):
 
 class MllamaVisionSdpaAttention(nn.Module):
 
-    def __init__(self, config: MllamaVisionConfig):
+    def __init__(self, config: config_mllama.MllamaVisionConfig):
         super().__init__()
 
         model_parallel_size = get_tensor_model_parallel_world_size()
@@ -413,7 +414,7 @@ class MllamaVisionEncoder(nn.Module):
     """
 
     def __init__(self,
-                 config: MllamaVisionConfig,
+                 config: config_mllama.MllamaVisionConfig,
                  num_layers=32,
                  is_gated=False,
                  output_hidden_states=None):
@@ -448,7 +449,7 @@ class MllamaVisionEncoder(nn.Module):
 
 class MllamaVisionModel(nn.Module):
 
-    def __init__(self, config: MllamaVisionConfig):
+    def __init__(self, config: config_mllama.MllamaVisionConfig):
         super().__init__()
         self.image_size = config.image_size
         self.patch_size = config.patch_size
@@ -631,7 +632,7 @@ class MllamaTextCrossAttention(nn.Module):
 
     def __init__(
         self,
-        config: Optional[MllamaTextConfig] = None,
+        config: Optional[config_mllama.MllamaTextConfig] = None,
         layer_idx: Optional[int] = None,
     ):
         super().__init__()
@@ -717,7 +718,8 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
     """Cross-attention transformer block with tanh-gated attention
     and feedforward."""
 
-    def __init__(self, config: MllamaTextConfig, layer_idx: int) -> None:
+    def __init__(self, config: config_mllama.MllamaTextConfig, layer_idx: int) \
+        -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.cross_attn = MllamaTextCrossAttention(
@@ -771,13 +773,13 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
 
 
 class MllamaTextModel(nn.Module):
-    config_class = MllamaTextConfig
+    config_class = config_mllama.MllamaTextConfig
     base_model_prefix = "model"
     _no_split_modules = [
         "MllamaCrossAttentionDecoderLayer", "MllamaSelfAttentionDecoderLayer"
     ]
 
-    def __init__(self, config: MllamaTextConfig,
+    def __init__(self, config: config_mllama.MllamaTextConfig,
                  cache_config: Optional[CacheConfig],
                  quant_config: Optional[QuantizationConfig]):
         super().__init__()
@@ -845,13 +847,13 @@ class MllamaTextModel(nn.Module):
 
 
 class MllamaForCausalLM(nn.Module):
-    config_class = MllamaTextConfig
+    config_class = config_mllama.MllamaTextConfig
     base_model_prefix = "language_model"
     _no_split_modules = [
         "MllamaCrossAttentionDecoderLayer", "MllamaSelfAttentionDecoderLayer"
     ]
 
-    def __init__(self, config: MllamaTextConfig,
+    def __init__(self, config: config_mllama.MllamaTextConfig,
                  cache_config: Optional[CacheConfig],
                  quant_config: Optional[QuantizationConfig]):
         super().__init__()
@@ -898,7 +900,7 @@ class MllamaForCausalLM(nn.Module):
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
-                 config: MllamaConfig,
+                 config: config_mllama.MllamaConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
