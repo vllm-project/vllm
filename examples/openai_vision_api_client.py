@@ -28,7 +28,7 @@ models = client.models.list()
 model = models.data[0].id
 
 # Single-image input inference
-image_url = "https://llava-vl.github.io/static/images/view.jpg"
+image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
 ## Use image url in the payload
 chat_completion_from_url = client.chat.completions.create(
@@ -38,7 +38,7 @@ chat_completion_from_url = client.chat.completions.create(
         "content": [
             {
                 "type": "text",
-                "text": "Describe image in two sentences"
+                "text": "What's in this image?"
             },
             {
                 "type": "image_url",
@@ -50,33 +50,10 @@ chat_completion_from_url = client.chat.completions.create(
     }],
     model=model,
     max_tokens=64,
-    temperature=0.0,
 )
 
 result = chat_completion_from_url.choices[0].message.content
-print("Text + image output:", result)
-
-chat_completion_text_only = client.chat.completions.create(
-    messages=[{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "text",
-                "text": "what is the recipe of mayonnaise in two sentences?"
-            },
-        ]
-    }],
-    model=model,
-    max_tokens=64,
-    temperature=0.0,
-)
-
-result = chat_completion_text_only.choices[0].message.content
-print("Text-only output output:", result)
-
-print("remove me: testing done, exiting...")
-exit(0)
+print("Chat completion output:", result)
 
 
 ## Use base64 encoded image in the payload
@@ -98,7 +75,7 @@ chat_completion_from_base64 = client.chat.completions.create(
         "content": [
             {
                 "type": "text",
-                "text": "What’s in this image?"
+                "text": "What's in this image?"
             },
             {
                 "type": "image_url",

@@ -12,10 +12,6 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.utils import FlexibleArgumentParser
 
-# Input image and question
-image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
-question = "What is the content of this image?"
-
 
 # LLaVA-1.5
 def run_llava(question, modality):
@@ -232,6 +228,23 @@ def run_qwen2_vl(question, modality):
     return llm, prompt, stop_token_ids
 
 
+# LLama
+def run_mllama(question, modality):
+    assert modality == "image"
+
+    model_name = "/data/zhang-chen/Llama-3.2-11B-Vision-Instruct"
+
+    llm = LLM(
+        model=model_name,
+        max_num_seqs=16,
+        enforce_eager=True,
+    )
+
+    prompt = f"<|image|><|begin_of_text|>{question}"
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -246,6 +259,7 @@ model_example_map = {
     "internvl_chat": run_internvl,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
+    "mllama": run_mllama,
 }
 
 
