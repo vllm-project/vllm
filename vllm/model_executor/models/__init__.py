@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.utils import is_hip
 
 logger = init_logger(__name__)
@@ -198,7 +197,9 @@ class ModelRegistry:
                 "overwritten by the new model class %s.", model_arch,
                 model_cls.__name__)
 
-        is_multimodal: bool = issubclass(model_cls, SupportsMultiModal)
+        # Avoid circular import
+        from vllm.model_executor.models.interfaces import supports_multimodal
+        is_multimodal: bool = supports_multimodal(model_cls)
 
         # NOTE: This is needed to store the information if the OOT model is
         # a multimodal model.
