@@ -260,9 +260,9 @@ class MultiModalPlugin(ABC):
         # Only get processor kwargs at mapping time if we are not using the
         # input mapper; no overrides are used on the default here because they
         # should be passed to the huggingface resource at initialization time.
-        if mapper != self._default_input_mapper:
+        if mapper is not None and mapper != self._default_input_mapper:
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                callable=mapper, overrides=model_config.mm_processor_kwargs)
+                mapper, overrides=model_config.mm_processor_kwargs)
         else:
             mm_processor_kwargs = {}
 
@@ -344,8 +344,7 @@ class MultiModalPlugin(ABC):
 
         if callable(max_mm_tokens):
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                callable=max_mm_tokens,
-                overrides=model_config.mm_processor_kwargs)
+                max_mm_tokens, overrides=model_config.mm_processor_kwargs)
             max_mm_tokens = max_mm_tokens(InputContext(model_config),
                                           **mm_processor_kwargs)
 
