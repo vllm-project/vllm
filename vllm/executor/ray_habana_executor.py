@@ -2,7 +2,8 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Type)
 
 import msgspec
 
@@ -15,8 +16,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
-                        get_ip, get_open_port, get_vllm_instance_id, is_fake_hpu,
-                        make_async)
+                        get_ip, get_open_port, get_vllm_instance_id,
+                        is_fake_hpu, make_async)
 from vllm.worker.worker_base import WorkerBase
 
 if ray is not None:
@@ -78,12 +79,16 @@ class RayHabanaExecutor(DistributedGPUExecutor):
             self.forward_dag = None
 
     def _get_worker_module_and_class(
-            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:  # noqa: F821
+        self
+    ) -> Tuple[str, str, Optional[Callable[[],
+                                           Type[WorkerBase]]]]:  # noqa: F821
         worker_class_fn = None
         if self.scheduler_config.is_multi_step:
-            raise NotImplementedError("Multi-step execution is not implemented for HPU")
+            raise NotImplementedError(
+                "Multi-step execution is not implemented for HPU")
         elif self.speculative_config:
-            raise NotImplementedError("Speculative decoding is not implemented for HPU")
+            raise NotImplementedError(
+                "Speculative decoding is not implemented for HPU")
         else:
             worker_module_name = "vllm.worker.habana_worker"
             worker_class_name = "HabanaWorker"
@@ -100,10 +105,6 @@ class RayHabanaExecutor(DistributedGPUExecutor):
             trust_remote_code=self.model_config.trust_remote_code,
         )
 
-    # child class could overwrite this to return actual env vars.
-    def _get_env_vars_to_be_updated(self):
-        return self._env_vars_for_all_workers
-
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         # Otherwise, the ray workers are allocated with a full GPU.
@@ -119,10 +120,6 @@ class RayHabanaExecutor(DistributedGPUExecutor):
         # and then TP rank. In other words, the inner list is
         # the TP group of workers for a PP rank.
         self.pp_tp_workers: List[List[RayWorkerWrapper]] = []
-
-        if self.parallel_config.ray_workers_use_nsight:
-            ray_remote_kwargs = self._configure_ray_workers_use_nsight(
-                ray_remote_kwargs)
 
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
 
@@ -443,8 +440,6 @@ class RayHabanaExecutor(DistributedGPUExecutor):
         from ray.dag import InputNode, MultiOutputNode
         from ray.experimental.channel.torch_tensor_type import TorchTensorType
 
-        logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
-                    envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
             # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
@@ -469,9 +464,7 @@ class RayHabanaExecutor(DistributedGPUExecutor):
                     # Specify how intermediate tensors should be passed
                     # between pp stages, no need to specify for the last
                     # pp stage.
-                    transport = "nccl" \
-                        if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL \
-                        else "auto"
+                    transport = "auto"
                     outputs = [
                         output.with_type_hint(
                             TorchTensorType(transport=transport))
