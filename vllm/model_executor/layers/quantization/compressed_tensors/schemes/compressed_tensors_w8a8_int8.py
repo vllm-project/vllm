@@ -48,18 +48,33 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                                            requires_grad=False)
         # INPUT SCALE
         if self.is_static_input_scheme:
-            layer.input_scale = Parameter(layer.input_scale.max(),
-                                          requires_grad=False)
-            if not self.input_symmetric:
-                layer.input_zero_point = Parameter(layer.input_zero_point,
-                                                   requires_grad=False)
+            if self.input_symmetric:
+                layer.input_scale = Parameter(layer.input_scale.max(),
+                                              requires_grad=False)
             else:
-                layer.input_zero_point = None
+                raise NotImplementedError(
+                    "static input asymmetric quantization not supported yet")
+                # reconstruct the ranges
+                int8_traits = torch.iinfo(torch.int8)
+                range_max = (layer.input_scale *
+                             (int8_traits.max - layer.input_zero_point)).max()
+                range_min = (layer.input_scale *
+                             (int8_traits.min - layer.input_zero_point)).min()
+
+                scale = (range_max - range_min) / (int8_traits.max -
+                                                   int8_traits.min)
+                layer.input_scale = Parameter(scale, requires_grad=False)
+
+                azp = int8_traits.min - range_min / scale
+                layer.input_zero_point = Parameter(azp, requires_grad=False)
+
         else:
             layer.input_scale = None
             layer.input_zero_point = None
 
         if not self.input_symmetric:
+            # azp_adj is the AZP adjustment term, used to account for weights.
+            # For more details, see csrc/quantization/cutlass_w8a8/Epilogues.md
             layer.azp_adj = layer.weight.sum(dim=0,
                                              keepdim=True,
                                              dtype=torch.int32)
@@ -108,7 +123,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             if not self.input_symmetric:
                 raise NotImplementedError(
                     "static input asymmetric quantization not supported yet")
-                input_zero_point = Parameter(torch.zeros(1, dtype=torch.int8))
+                input_zero_point = Parameter(torch.zeros(1, dtype=torch.int32))
                 layer.register_parameter("input_zero_point", input_zero_point)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
