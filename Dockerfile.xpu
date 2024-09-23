@@ -1,4 +1,4 @@
-FROM intel/oneapi-basekit:2024.2.1.0-devel-ubuntu22.04 AS vllm-base
+FROM intel/oneapi-basekit:2024.2.1-0-devel-ubuntu22.04 AS vllm-base
 
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/intel-oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/intel-oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main " | tee /etc/apt/sources.list.d/oneAPI.list && \
@@ -30,7 +30,6 @@ COPY requirements-common.txt /workspace/vllm/requirements-common.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
-    cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
     -r requirements-xpu.txt
 
 COPY ./ /workspace/vllm
