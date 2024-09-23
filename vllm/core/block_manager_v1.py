@@ -13,7 +13,7 @@ from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
-from vllm.utils import Device
+from vllm.utils import Device, is_hpu
 
 logger = init_logger(__name__)
 
@@ -171,7 +171,9 @@ class UncachedBlockAllocator(BlockAllocatorBase):
 
         # Initialize the free blocks.
         self.free_blocks: BlockTable = []
-        for i in range(num_blocks):
+        # For HPU, block id 0 is used only for padding
+        reserved_blocks = 1 if is_hpu() else 0
+        for i in range(reserved_blocks, num_blocks):
             block = PhysicalTokenBlock(device=device,
                                        block_number=i,
                                        block_size=block_size,
