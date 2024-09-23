@@ -151,10 +151,6 @@ class ModelConfig:
                  use_async_output_proc: bool = True,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  config_format: ConfigFormat = ConfigFormat.AUTO) -> None:
-
-        from vllm.plugins import load_general_plugins
-        load_general_plugins()
-
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
