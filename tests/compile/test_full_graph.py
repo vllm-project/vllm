@@ -3,6 +3,7 @@ import os
 import pytest
 import torch
 
+from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.compilation.backends import vllm_backend
 from vllm.plugins import set_torch_compile_backend
@@ -24,20 +25,31 @@ TEST_MODELS = [
         "quantization": "compressed-tensors"
     }),
     ("meta-llama/Meta-Llama-3-8B", {}),
-    ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {
-        "quantization": "GPTQ"
-    }),
 ]
 
-#AWQ quantization is currently not supported in ROCm.
-if not is_hip():
+if is_quant_method_supported("gptq"):
+    TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {
+        "quantization": "GPTQ"
+    }))
+
+if is_quant_method_supported("gptq_marlin_24"):
+    TEST_MODELS.append(("alexm-nm/tinyllama-24-marlin24-4bit-g128", {
+        "quantization": "gptq_marlin_24"
+    }))
+
+if is_quant_method_supported("marlin"):
+    TEST_MODELS.append(("robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin", {
+        "quantization": "marlin"
+    }))
+
+if not is_hip() and is_quant_method_supported("awq"):
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
         "quantization": "AWQ"
     }))
 
 
 @pytest.mark.parametrize("model_info", TEST_MODELS)
-@pytest.mark.parametrize("tp_size", [1])  #[1, 2])
+@pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("backend", ["eager", "inductor", vllm_backend])
 @fork_new_process_for_each_test
 def test_full_graph(model_info, tp_size, backend):
