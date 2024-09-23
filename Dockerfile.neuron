@@ -11,7 +11,7 @@ RUN apt-get update && \
         git \
         python3 \
         python3-pip \
-        ffmpeglibsm6 libxext6 libgl1
+        ffmpeg libsm6 libxext6 libgl1
 
 ### Mount Point ###
 # When launching the container, mount the code directory to /app
