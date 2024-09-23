@@ -404,6 +404,8 @@ def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     assert torch.all(output_token_ids[:, :2] == draft_token_ids[:, :2])
+    assert torch.all(
+        output_token_ids[:, 2] == target_with_bonus_probs.argmax(-1)[:, 2])
     assert torch.all(output_token_ids[:, -3:] == -1)
 
 
@@ -488,7 +490,7 @@ def test_get_recovered_token_ids(seed: int, disable_bonus_tokens: bool,
 
     This test verifies that the `_get_recovered_token_ids` method of the 
     TypicalAcceptanceSampler correctly identifies the token IDs to be used
-    as replacements based on the target probability distribution.
+    as recovered token IDs based on the target probability distribution.
     Specifically, it ensures that the method correctly identifies the
     tokens with the highest probability for each sequence in the batch.
     """
