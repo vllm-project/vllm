@@ -438,7 +438,8 @@ try:
     @torch.library.register_fake("_C::machete_prepack_B")
     def machete_prepack_B_fake(b_q_weight: torch.Tensor,
                                b_type: ScalarType) -> torch.Tensor:
-        return torch.empty_like(b_q_weight)
+        return torch.empty_like(b_q_weight,
+                                memory_format=torch.contiguous_format)
 
     @torch.library.register_fake("_C::causal_conv1d_fwd")
     def causal_conv1d_fwd_fake(x: torch.Tensor, weight: torch.Tensor,
@@ -623,6 +624,22 @@ def machete_gemm(
 def machete_prepack_B(b_q_weight: torch.Tensor,
                       b_type: ScalarType) -> torch.Tensor:
     return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
+
+
+# TODO: has to be a better way to do this
+try:
+    torch.ops._C.permute_cols  # noqa B018
+
+    @torch.library.register_fake("_C::permute_cols")
+    def _permute_cols_fake(a: torch.Tensor,
+                           perm: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(a)
+except Exception:
+    pass
+
+
+def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.permute_cols(a, perm)
 
 
 # fp8

@@ -152,7 +152,8 @@ struct MacheteKernelTemplate {
 
     int M = size<0>(layout_A), N = size<1>(layout_D), K = size<1>(layout_A);
 
-    int const group_size = maybe_group_size.value_or(K);
+    int const group_size =
+        maybe_group_size == -1 ? K : maybe_group_size.value_or(K);
     int const scale_k = (K + group_size - 1) / group_size;
 
     TORCH_CHECK(size<0>(layout_A) == M && size<1>(layout_A) == K);

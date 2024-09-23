@@ -120,6 +120,19 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
             "with --quantization gptq.")
 
 
+def check_marlin_supports_shape(output_size_per_partition: int,
+                                input_size_per_partition: int,
+                                input_size: int, group_size: int) \
+                                    -> Tuple[bool, Optional[str]]:
+    try:
+        verify_marlin_supports_shape(output_size_per_partition,
+                                     input_size_per_partition, input_size,
+                                     group_size)
+    except ValueError as e:
+        return False, e.__str__()
+    return True, None
+
+
 def marlin_make_workspace(output_size_per_partition: int,
                           device: torch.device) -> torch.Tensor:
     max_workspace_size = (output_size_per_partition //
@@ -144,6 +157,11 @@ def marlin_repeat_scales_on_all_ranks(act_order: bool, group_size: int,
 
 
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
+    return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
+                              requires_grad=False)
+
+
+def marlin_make_empty_zp(device: torch.device) -> torch.Tensor:
     return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
                               requires_grad=False)
 
@@ -238,17 +256,6 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
 
     marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
     return marlin_zp
-
-
-# Newly generated tensors need to replace existing tensors that are
-# already registered as parameters by vLLM (and won't be freed)
-def replace_tensor(layer: torch.nn.Module, name: str,
-                   new_t: torch.Tensor) -> None:
-    # It is important to use resize_() here since it ensures
-    # the same buffer is reused
-    getattr(layer, name).resize_(new_t.shape)
-    getattr(layer, name).copy_(new_t)
-    del new_t
 
 
 def apply_gptq_marlin_linear(

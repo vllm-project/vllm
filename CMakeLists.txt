@@ -223,6 +223,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/gguf/gguf_kernel.cu"
     "csrc/quantization/fp8/fp8_marlin.cu"
     "csrc/custom_all_reduce.cu"
+    "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
