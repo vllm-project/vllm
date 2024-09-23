@@ -101,8 +101,6 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-add_dependencies(default _core_C)
-
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "cpu")
