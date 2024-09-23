@@ -1,10 +1,7 @@
-from transformers.models.mllama.configuration_mllama import (
-    MllamaConfig as MllamaConfigHf)
-from transformers.models.mllama.configuration_mllama import (
-    MllamaTextConfig as MllamaTextConfigHf)
+from transformers.models.mllama import configuration_mllama as mllama_hf_config
 
 
-class MllamaTextConfig(MllamaTextConfigHf):
+class MllamaTextConfig(mllama_hf_config.MllamaTextConfig):
     '''
     Use this class to override is_encoder_decoder:
     - transformers regards mllama as is_encoder_decoder=False
@@ -20,7 +17,7 @@ class MllamaTextConfig(MllamaTextConfigHf):
         self.is_encoder_decoder = True
 
 
-class MllamaConfig(MllamaConfigHf):
+class MllamaConfig(mllama_hf_config.MllamaConfig):
 
     def __init__(
         self,
