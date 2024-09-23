@@ -456,6 +456,8 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             model_input.attn_metadata,
             **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
+            "intermediate_tensors":
+            intermediate_tensors,
         }
 
         hidden_states = model_executable(**execute_model_kwargs)
