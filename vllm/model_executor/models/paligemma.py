@@ -152,7 +152,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.unpadded_vocab_size = config.text_config.vocab_size
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size, logit_scale)
+                                                config.text_config.vocab_size,
+                                                logit_scale)
         self.sampler = Sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
