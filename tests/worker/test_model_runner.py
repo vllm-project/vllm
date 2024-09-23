@@ -46,7 +46,7 @@ def test_prepare_prompt(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(list(range(seq_len)))
+        seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -163,7 +163,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        seq_data = SequenceData(list(range(context_len)))
+        seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -237,10 +237,8 @@ def test_prepare_decode_cuda_graph(batch_size):
 
     # Verify Sampling
     expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for _ in context_lens:
+    for selected_token_start_idx, _ in enumerate(context_lens):
         expected_selected_token_indices.append(selected_token_start_idx)
-        selected_token_start_idx += 1
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
         seq_lens,
@@ -324,7 +322,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(list(range(seq_len)))
+        seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -340,8 +338,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     for i in range(prefill_batch_size, batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
-        prompt_toks = list(range(context_len))
-        seq_data = SequenceData(prompt_toks)
+        seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.append_token_id(1, 0)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(

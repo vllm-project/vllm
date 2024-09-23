@@ -9,7 +9,8 @@ from vllm.config import CacheConfig, ModelConfig
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (GiB_bytes, get_distributed_init_method, get_ip,
                         get_open_port, make_async)
 
@@ -49,7 +50,6 @@ class OpenVINOExecutor(ExecutorBase):
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )

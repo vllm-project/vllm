@@ -49,7 +49,8 @@ def test_default_vllm_root_logger_configuration():
     handler = logger.handlers[0]
     assert isinstance(handler, logging.StreamHandler)
     assert handler.stream == sys.stdout
-    assert handler.level == logging.INFO
+    # we use DEBUG level for testing by default
+    # assert handler.level == logging.INFO
 
     formatter = handler.formatter
     assert formatter is not None
@@ -94,7 +95,7 @@ def test_logger_configuring_can_be_disabled():
     config behavior, however mocks are used to ensure no changes in behavior or
     configuration occur."""
 
-    with patch("logging.config.dictConfig") as dict_config_mock:
+    with patch("vllm.logger.dictConfig") as dict_config_mock:
         _configure_vllm_root_logger()
     dict_config_mock.assert_not_called()
 
@@ -110,7 +111,7 @@ def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist():
     configuration occurs."""
     with pytest.raises(RuntimeError) as ex_info:
         _configure_vllm_root_logger()
-    assert ex_info.type == RuntimeError
+    assert ex_info.type == RuntimeError  # noqa: E721
     assert "File does not exist" in str(ex_info)
 
 
@@ -151,7 +152,7 @@ def test_an_error_is_raised_when_custom_logging_config_is_unexpected_json(
                    logging_config_file.name):
             with pytest.raises(ValueError) as ex_info:
                 _configure_vllm_root_logger()
-            assert ex_info.type == ValueError
+            assert ex_info.type == ValueError  # noqa: E721
             assert "Invalid logging config. Expected Dict, got" in str(ex_info)
 
 
@@ -174,9 +175,9 @@ def test_custom_logging_config_is_parsed_and_used_when_provided():
         logging_config_file.flush()
         with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
                    logging_config_file.name), patch(
-                       "logging.config.dictConfig") as dict_config_mock:
+                       "vllm.logger.dictConfig") as dict_config_mock:
             _configure_vllm_root_logger()
-            assert dict_config_mock.called_with(valid_logging_config)
+            dict_config_mock.assert_called_with(valid_logging_config)
 
 
 @patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 0)

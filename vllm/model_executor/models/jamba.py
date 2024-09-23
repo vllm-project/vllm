@@ -4,9 +4,6 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
-from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
-from mamba_ssm.ops.triton.selective_state_update import selective_state_update
 from torch import nn
 from torch.nn.parameter import Parameter
 from transformers import JambaConfig
@@ -24,18 +21,24 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    causal_conv1d_fn, causal_conv1d_update)
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    selective_scan_fn, selective_state_update)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import HasInnerState
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
+
+from .interfaces import SupportsLoRA
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -161,7 +164,7 @@ class JambaMambaMixer(nn.Module):
                     (self.conv_kernel_size - hidden_states.shape[-1], 0))
                 cache_params.conv_state.copy_(conv_states)
 
-            hidden_states = causal_conv1d_fn(
+            hidden_states, _ = causal_conv1d_fn(
                 hidden_states,
                 conv_weights,
                 self.conv1d.bias,
@@ -538,7 +541,7 @@ class JambaModel(nn.Module):
         return hidden_states
 
 
-class JambaForCausalLM(nn.Module, HasInnerState):
+class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -730,7 +733,7 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                                   indices_for_current_run: List[int]):
         # move out all of the occupied but currently not running blocks
         # outside of the first n blocks
-        destination_indices = set([range(batch_size)])
+        destination_indices = range(batch_size)
         max_possible_batch_size = self.mamba_cache[0].shape[1]
         for destination_index in destination_indices:
             if destination_index in self._get_all_occupied_indices() and  \
@@ -920,7 +923,7 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
-                                  weight_name,
+                                  name,
                                   shard_id=shard_id,
                                   expert_id=expert_id)
                     break
