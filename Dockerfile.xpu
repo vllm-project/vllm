@@ -16,7 +16,7 @@ WORKDIR /workspace/vllm
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -v --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ \
-        cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2
+        cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
         -r requirements-xpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
