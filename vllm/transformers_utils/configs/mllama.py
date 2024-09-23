@@ -1,7 +1,9 @@
-from transformers.models.mllama.configuration_mllama import (
-    MllamaConfig as MllamaConfigHf)
-from transformers.models.mllama.configuration_mllama import (
-    MllamaTextConfig as MllamaTextConfigHf)
+from transformers.models.mllama.configuration_mllama import (MllamaConfig as
+                                                             MllamaConfigHf)
+from transformers.models.mllama.configuration_mllama import (MllamaTextConfig
+                                                             as
+                                                             MllamaTextConfigHf
+                                                             )
 
 
 class MllamaTextConfig(MllamaTextConfigHf):
