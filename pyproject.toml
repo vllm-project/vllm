@@ -4,7 +4,8 @@ requires = [
     "cmake>=3.26",
     "ninja",
     "packaging",
-    "setuptools >= 49.4.0",
+    "setuptools>=61",
+    "setuptools-scm>=8.0",
     "torch == 2.4.0",
     "wheel",
     "jinja2",
@@ -18,6 +19,10 @@ exclude = [
     # External file, leaving license intact
     "examples/fp8/quantizer/quantize.py"
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"vllm/version.py" = ["F401"]
+"vllm/_version.py" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
@@ -45,6 +50,9 @@ ignore = [
     # f-string format
     "UP032",
 ]
+
+[tool.setuptools_scm]
+version_file = "vllm/_version.py"
 
 [tool.mypy]
 python_version = "3.8"
