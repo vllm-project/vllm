@@ -574,6 +574,9 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
             .create_input_mapper(self.model_config)
 
+        self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
+                                          'false').lower() == 'true'
+
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
         if self.model_config.quantization == 'inc':
@@ -647,6 +650,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def _use_graphs(self, batch_size, seq_len, is_prompt):
         if self.enforce_eager:
             return False
+        if self.skip_warmup:
+            return True
         return (batch_size, seq_len, is_prompt) in self.graphed_buckets
 
     def _is_valid_bucket(self, bucket):
@@ -1501,7 +1506,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
                                  True)
             raise AssertionError("Finished profiling")
-        if os.environ.get('VLLM_SKIP_WARMUP', 'false').lower() == 'true':
+        if self.skip_warmup:
             logger.info("Skipping warmup...")
             return
         self.profiler.start('internal', 'warmup')
