@@ -4,50 +4,51 @@ from typing import Any, Dict, List, Optional, Type
 import torch
 
 from vllm.wde.core.layers.attention.abstract import AttentionType
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend, EncodeOnlyAttentionImpl,
-    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionMetadataBuilder)
+from vllm.wde.prefill_only.layers.attention.backends.abstract import (
+    PrefillOnlyAttentionBackend, PrefillOnlyAttentionImpl,
+    PrefillOnlyAttentionMetadata, PrefillOnlyAttentionMetadataBuilder)
 
 
-class EncodeOnlyFlashInferBackend(EncodeOnlyAttentionBackend):
+class PrefillOnlyFlashInferBackend(PrefillOnlyAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
         return "flashinfer"
 
     @staticmethod
-    def get_impl_cls() -> Type["EncodeOnlyFlashInferImpl"]:
-        return EncodeOnlyFlashInferImpl
+    def get_impl_cls() -> Type["PrefillOnlyFlashInferImpl"]:
+        return PrefillOnlyFlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["EncodeOnlyAttentionMetadata"]:
-        return EncodeOnlyFlashInferMetadata
+    def get_metadata_cls() -> Type["PrefillOnlyAttentionMetadata"]:
+        return PrefillOnlyFlashInferMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["EncodeOnlyFlashInferMetadataBuilder"]:
-        return EncodeOnlyFlashInferMetadataBuilder
+    def get_builder_cls() -> Type["PrefillOnlyFlashInferMetadataBuilder"]:
+        return PrefillOnlyFlashInferMetadataBuilder
 
 
 @dataclass
-class EncodeOnlyFlashInferMetadata(EncodeOnlyAttentionMetadata):
+class PrefillOnlyFlashInferMetadata(PrefillOnlyAttentionMetadata):
     pass
 
 
-class EncodeOnlyFlashInferMetadataBuilder(
-        EncodeOnlyAttentionMetadataBuilder[EncodeOnlyFlashInferMetadata]):
+class PrefillOnlyFlashInferMetadataBuilder(
+        PrefillOnlyAttentionMetadataBuilder[PrefillOnlyFlashInferMetadata]):
     pass
 
 
-class EncodeOnlyFlashInferImpl(EncodeOnlyAttentionImpl):
+class PrefillOnlyFlashInferImpl(PrefillOnlyAttentionImpl):
 
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
+        num_kv_heads: Optional[int] = None,
+        alibi_slopes: Optional[List[float]] = None,
+        sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
@@ -75,7 +76,8 @@ class EncodeOnlyFlashInferImpl(EncodeOnlyAttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: EncodeOnlyFlashInferMetadata,
+        attn_metadata: PrefillOnlyFlashInferMetadata,
+        kv_cache: Optional[torch.Tensor] = None,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.ENCODER,
@@ -83,11 +85,14 @@ class EncodeOnlyFlashInferImpl(EncodeOnlyAttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashInfer.")
 
-        if attn_type != AttentionType.ENCODER:
-            raise NotImplementedError("Decoder self-attention and "
-                                      "encoder/decoder cross-attention "
+        if attn_type == AttentionType.ENCODER:
+            causal = False
+        elif attn_type == AttentionType.DECODER:
+            causal = True
+        else:
+            raise NotImplementedError("Encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "EncodeOnlyFlashInferImpl")
+                                      "PrefillOnlyFlashInferImpl")
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
@@ -107,7 +112,7 @@ class EncodeOnlyFlashInferImpl(EncodeOnlyAttentionImpl):
             max_seqlen_q=attn_metadata.max_seq_len,
             max_seqlen_k=attn_metadata.max_seq_len,
             softmax_scale=self.scale,
-            causal=False,
+            causal=causal,
             window_size=self.sliding_window,
             alibi_slopes=self.alibi_slopes,
         )

@@ -4,12 +4,12 @@ from typing import Any, Dict, List, Optional, Type
 import torch
 
 from vllm.wde.core.layers.attention.abstract import AttentionType
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend, EncodeOnlyAttentionImpl,
-    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionMetadataBuilder)
+from vllm.wde.prefill_only.layers.attention.backends.abstract import (
+    PrefillOnlyAttentionBackend, PrefillOnlyAttentionImpl,
+    PrefillOnlyAttentionMetadata, PrefillOnlyAttentionMetadataBuilder)
 
 
-class EncodeOnlyFlashAttentionBackend(EncodeOnlyAttentionBackend):
+class PrefillOnlyFlashAttentionBackend(PrefillOnlyAttentionBackend):
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -20,38 +20,40 @@ class EncodeOnlyFlashAttentionBackend(EncodeOnlyAttentionBackend):
         return "flash_attn"
 
     @staticmethod
-    def get_impl_cls() -> Type["EncodeOnlyFlashAttentionImpl"]:
-        return EncodeOnlyFlashAttentionImpl
+    def get_impl_cls() -> Type["PrefillOnlyFlashAttentionImpl"]:
+        return PrefillOnlyFlashAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["EncodeOnlyFlashAttentionMetadata"]:
-        return EncodeOnlyFlashAttentionMetadata
+    def get_metadata_cls() -> Type["PrefillOnlyFlashAttentionMetadata"]:
+        return PrefillOnlyFlashAttentionMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["EncodeOnlyAttentionMetadataBuilder"]:
-        return EncodeOnlyFlashAttentionMetadataBuilder
+    def get_builder_cls() -> Type["PrefillOnlyAttentionMetadataBuilder"]:
+        return PrefillOnlyFlashAttentionMetadataBuilder
 
 
 @dataclass
-class EncodeOnlyFlashAttentionMetadata(EncodeOnlyAttentionMetadata):
+class PrefillOnlyFlashAttentionMetadata(PrefillOnlyAttentionMetadata):
     pass
 
 
-class EncodeOnlyFlashAttentionMetadataBuilder(
-        EncodeOnlyAttentionMetadataBuilder[EncodeOnlyFlashAttentionMetadata]):
+class PrefillOnlyFlashAttentionMetadataBuilder(
+        PrefillOnlyAttentionMetadataBuilder[PrefillOnlyFlashAttentionMetadata]
+):
     pass
 
 
-class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
+class PrefillOnlyFlashAttentionImpl(PrefillOnlyAttentionImpl):
 
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
+        num_kv_heads: Optional[int] = None,
+        alibi_slopes: Optional[List[float]] = None,
+        sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
@@ -86,7 +88,7 @@ class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
                 "Sliding window is not supported in FlashAttention.")
 
         support_head_sizes = (
-            EncodeOnlyFlashAttentionBackend.get_supported_head_sizes())
+            PrefillOnlyFlashAttentionBackend.get_supported_head_sizes())
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
@@ -97,7 +99,8 @@ class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: EncodeOnlyFlashAttentionMetadata,
+        attn_metadata: PrefillOnlyFlashAttentionMetadata,
+        kv_cache: Optional[torch.Tensor] = None,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.ENCODER,
@@ -112,11 +115,15 @@ class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if attn_type != AttentionType.ENCODER:
-            raise NotImplementedError("Decoder self-attention and "
-                                      "encoder/decoder cross-attention "
+
+        if attn_type == AttentionType.ENCODER:
+            causal = False
+        elif attn_type == AttentionType.DECODER:
+            causal = True
+        else:
+            raise NotImplementedError("Encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "EncodeOnlyFlashAttentionImpl")
+                                      "PrefillOnlyFlashAttentionImpl")
 
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert k_scale == 1.0 and v_scale == 1.0, (
@@ -137,7 +144,7 @@ class EncodeOnlyFlashAttentionImpl(EncodeOnlyAttentionImpl):
             max_seqlen_q=attn_metadata.max_seq_len,
             max_seqlen_k=attn_metadata.max_seq_len,
             softmax_scale=self.scale,
-            causal=False,
+            causal=causal,
             window_size=self.sliding_window,
             alibi_slopes=self.alibi_slopes,
             softcap=self.logits_soft_cap,

@@ -5,11 +5,11 @@ import torch
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.processor.output_processor import OutputProcessor
 from vllm.wde.core.schema.engine_io import ValidationError
-from vllm.wde.encode_only.schema.engine_io import (EncodeOnlyRequestOutput,
-                                                   EncodeOnlySchedulerOutput)
+from vllm.wde.prefill_only.schema.engine_io import (PrefillOnlyRequestOutput,
+                                                    PrefillOnlySchedulerOutput)
 
 
-class EncodeOnlyModelOutputProcessor(OutputProcessor):
+class PrefillOnlyModelOutputProcessor(OutputProcessor):
 
     def __init__(self):
         pass
@@ -19,9 +19,9 @@ class EncodeOnlyModelOutputProcessor(OutputProcessor):
         return cls()
 
     def __call__(
-        self, scheduler_output: EncodeOnlySchedulerOutput,
+        self, scheduler_output: PrefillOnlySchedulerOutput,
         execute_output: Union[torch.Tensor, Sequence[torch.Tensor]]
-    ) -> List[EncodeOnlyRequestOutput]:
+    ) -> List[PrefillOnlyRequestOutput]:
         if isinstance(execute_output, torch.Tensor):
             request_outputs = []
             offset = 0
@@ -29,7 +29,7 @@ class EncodeOnlyModelOutputProcessor(OutputProcessor):
                 prompt_token_ids = request.inputs.prompt_token_ids
                 n_tokens = len(prompt_token_ids)
                 request_outputs.append(
-                    EncodeOnlyRequestOutput(
+                    PrefillOnlyRequestOutput(
                         request_id=request.request_id,
                         prompt_token_ids=prompt_token_ids,
                         finished=True,
@@ -43,10 +43,10 @@ class EncodeOnlyModelOutputProcessor(OutputProcessor):
                                         pooled_output):
                 prompt_token_ids = request.inputs.prompt_token_ids
                 request_outputs.append(
-                    EncodeOnlyRequestOutput(request_id=request.request_id,
-                                            prompt_token_ids=prompt_token_ids,
-                                            finished=True,
-                                            outputs=outputs))
+                    PrefillOnlyRequestOutput(request_id=request.request_id,
+                                             prompt_token_ids=prompt_token_ids,
+                                             finished=True,
+                                             outputs=outputs))
             return request_outputs
         else:
             raise ValidationError("Output format not supported")

@@ -6,52 +6,53 @@ from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.utils import is_pin_memory_available
 from vllm.wde.core.layers.attention.abstract import AttentionType
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend, EncodeOnlyAttentionImpl,
-    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionMetadataBuilder)
+from vllm.wde.prefill_only.layers.attention.backends.abstract import (
+    PrefillOnlyAttentionBackend, PrefillOnlyAttentionImpl,
+    PrefillOnlyAttentionMetadata, PrefillOnlyAttentionMetadataBuilder)
 
 pin_memory = is_pin_memory_available()
 
 
-class EncodeOnlyTorchSDPABackend(EncodeOnlyAttentionBackend):
+class PrefillOnlyTorchSDPABackend(PrefillOnlyAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
         return "torch_sdpa"
 
     @staticmethod
-    def get_impl_cls() -> Type["EncodeOnlyTorchSDPABackendImpl"]:
-        return EncodeOnlyTorchSDPABackendImpl
+    def get_impl_cls() -> Type["PrefillOnlyTorchSDPABackendImpl"]:
+        return PrefillOnlyTorchSDPABackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["EncodeOnlyTorchSDPAMetadata"]:
-        return EncodeOnlyTorchSDPAMetadata
+    def get_metadata_cls() -> Type["PrefillOnlyTorchSDPAMetadata"]:
+        return PrefillOnlyTorchSDPAMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["EncodeOnlyAttentionMetadataBuilder"]:
-        return EncodeOnlyTorchSDPAMetadataBuilder
+    def get_builder_cls() -> Type["PrefillOnlyAttentionMetadataBuilder"]:
+        return PrefillOnlyTorchSDPAMetadataBuilder
 
 
 @dataclass
-class EncodeOnlyTorchSDPAMetadata(EncodeOnlyAttentionMetadata):
+class PrefillOnlyTorchSDPAMetadata(PrefillOnlyAttentionMetadata):
     pass
 
 
-class EncodeOnlyTorchSDPAMetadataBuilder(
-        EncodeOnlyAttentionMetadataBuilder[EncodeOnlyTorchSDPAMetadata]):
+class PrefillOnlyTorchSDPAMetadataBuilder(
+        PrefillOnlyAttentionMetadataBuilder[PrefillOnlyTorchSDPAMetadata]):
     pass
 
 
-class EncodeOnlyTorchSDPABackendImpl(EncodeOnlyAttentionImpl):
+class PrefillOnlyTorchSDPABackendImpl(PrefillOnlyAttentionImpl):
 
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
+        num_kv_heads: Optional[int] = None,
+        alibi_slopes: Optional[List[float]] = None,
+        sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
@@ -80,19 +81,23 @@ class EncodeOnlyTorchSDPABackendImpl(EncodeOnlyAttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: EncodeOnlyTorchSDPAMetadata,  # type: ignore
+        attn_metadata: PrefillOnlyTorchSDPAMetadata,
+        kv_cache: Optional[torch.Tensor] = None,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: AttentionType = AttentionType.ENCODER,
     ) -> torch.Tensor:
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in TorchSDPA.")
 
-        if attn_type != AttentionType.ENCODER:
-            raise NotImplementedError("Decoder self-attention and "
-                                      "encoder/decoder cross-attention "
+        if attn_type == AttentionType.ENCODER:
+            causal = False
+        elif attn_type == AttentionType.DECODER:
+            causal = True
+        else:
+            raise NotImplementedError("Encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "EncodeOnlyTorchSDPABackendImpl")
+                                      "PrefillOnlyTorchSDPABackendImpl")
 
         num_tokens, hidden_size = query.shape
 
@@ -121,7 +126,7 @@ class EncodeOnlyTorchSDPABackendImpl(EncodeOnlyAttentionImpl):
                 key[None, :, start:end, :],
                 value[None, :, start:end, :],
                 dropout_p=0.0,
-                is_causal=False,
+                is_causal=causal,
                 scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
             output[start:end, :, :] = sub_out
             start = end

@@ -3,56 +3,57 @@ from typing import Any, Dict, List, Optional, Type
 
 import torch
 from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import BlockDiagonalMask
+from xformers.ops.fmha.attn_bias import BlockDiagonalMask, LowerTriangularMask
 
 from vllm.logger import init_logger
 from vllm.wde.core.layers.attention.abstract import AttentionType
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend, EncodeOnlyAttentionImpl,
-    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionMetadataBuilder)
+from vllm.wde.prefill_only.layers.attention.backends.abstract import (
+    PrefillOnlyAttentionBackend, PrefillOnlyAttentionImpl,
+    PrefillOnlyAttentionMetadata, PrefillOnlyAttentionMetadataBuilder)
 
 logger = init_logger(__name__)
 
 
-class EncodeOnlyXFormersBackend(EncodeOnlyAttentionBackend):
+class PrefillOnlyXFormersBackend(PrefillOnlyAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
         return "xformers"
 
     @staticmethod
-    def get_impl_cls() -> Type["EncodeOnlyXFormersImpl"]:
-        return EncodeOnlyXFormersImpl
+    def get_impl_cls() -> Type["PrefillOnlyXFormersImpl"]:
+        return PrefillOnlyXFormersImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["EncodeOnlyAttentionMetadata"]:
-        return EncodeOnlyXFormersMetadata
+    def get_metadata_cls() -> Type["PrefillOnlyAttentionMetadata"]:
+        return PrefillOnlyXFormersMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["EncodeOnlyXFormersMetadataBuilder"]:
-        return EncodeOnlyXFormersMetadataBuilder
+    def get_builder_cls() -> Type["PrefillOnlyXFormersMetadataBuilder"]:
+        return PrefillOnlyXFormersMetadataBuilder
 
 
 @dataclass
-class EncodeOnlyXFormersMetadata(EncodeOnlyAttentionMetadata):
+class PrefillOnlyXFormersMetadata(PrefillOnlyAttentionMetadata):
     pass
 
 
-class EncodeOnlyXFormersMetadataBuilder(
-        EncodeOnlyAttentionMetadataBuilder[EncodeOnlyXFormersMetadata]):
+class PrefillOnlyXFormersMetadataBuilder(
+        PrefillOnlyAttentionMetadataBuilder[PrefillOnlyXFormersMetadata]):
     pass
 
 
-class EncodeOnlyXFormersImpl(EncodeOnlyAttentionImpl):
+class PrefillOnlyXFormersImpl(PrefillOnlyAttentionImpl):
 
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
+        num_kv_heads: Optional[int] = None,
+        alibi_slopes: Optional[List[float]] = None,
+        sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
@@ -77,19 +78,23 @@ class EncodeOnlyXFormersImpl(EncodeOnlyAttentionImpl):
     def forward(
         self,
         query: torch.Tensor,
-        key: Optional[torch.Tensor],
-        value: Optional[torch.Tensor],
-        attn_metadata: "EncodeOnlyXFormersMetadata",
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: PrefillOnlyXFormersMetadata,
+        kv_cache: Optional[torch.Tensor] = None,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.ENCODER,
     ) -> torch.Tensor:
 
-        if attn_type != AttentionType.ENCODER:
-            raise NotImplementedError("Decoder self-attention and "
-                                      "encoder/decoder cross-attention "
+        if attn_type == AttentionType.ENCODER:
+            causal = False
+        elif attn_type == AttentionType.DECODER:
+            causal = True
+        else:
+            raise NotImplementedError("Encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "EncodeOnlyXFormersImpl")
+                                      "PrefillOnlyXFormersImpl")
         original_query = query
 
         # Reshape the query, key, and value tensors.
@@ -97,8 +102,12 @@ class EncodeOnlyXFormersImpl(EncodeOnlyAttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        attn_bias = BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens,
-                                                   attn_metadata.seq_lens)
+        if causal:
+            attn_bias = LowerTriangularMask.from_seqlens(
+                attn_metadata.seq_lens, attn_metadata.seq_lens)
+        else:
+            attn_bias = BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens,
+                                                       attn_metadata.seq_lens)
 
         # Add the batch dimension.
         query = query.unsqueeze(0)

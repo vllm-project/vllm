@@ -2,6 +2,7 @@ class Workflow:
     EngineArgs: str
     Scheduler: str
     AttnBackend: str
+    attn_type: str
     Tokenizer: str = "vllm.wde.core.inputs.tokenizer:Tokenizer"
     InputProcessor: str
     RequestProcessor: str

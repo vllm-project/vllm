@@ -3,11 +3,10 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.utils import CudaMemoryProfiler, is_pin_memory_available
-from vllm.wde.core.config import DeviceConfig, LoadConfig
-from vllm.wde.encode_only.config import EncodeOnlySchedulerConfig, ModelConfig
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend)
-from vllm.wde.encode_only.schema.execute_io import ModelInputForGPU
+from vllm.wde.core.config import DeviceConfig, LoadConfig, ModelConfig
+from vllm.wde.core.layers.attention import AttentionBackend
+from vllm.wde.prefill_only.config import PrefillOnlySchedulerConfig
+from vllm.wde.prefill_only.schema.execute_io import ModelInputForGPU
 
 logger = init_logger(__name__)
 
@@ -17,10 +16,10 @@ class ModelRunner:
     def __init__(
         self,
         model_config: ModelConfig,
-        scheduler_config: EncodeOnlySchedulerConfig,
+        scheduler_config: PrefillOnlySchedulerConfig,
         device_config: DeviceConfig,
         load_config: LoadConfig,
-        attn_backend: EncodeOnlyAttentionBackend,
+        attn_backend: AttentionBackend,
     ):
         self.model_config = model_config
         self.scheduler_config = scheduler_config

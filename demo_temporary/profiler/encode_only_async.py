@@ -3,7 +3,7 @@ import time
 
 
 def patch():
-    from vllm.wde.encode_only.executor.gpu_executor import GPUAsyncExecutor
+    from vllm.wde.prefill_only.executor.gpu_executor import GPUAsyncExecutor
 
     simple_execute_loop = GPUAsyncExecutor.simple_execute_loop
 

@@ -4,7 +4,7 @@ import torch
 
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.processor.output_processor import OutputProcessor
-from vllm.wde.encode_only.schema.engine_io import EncodeOnlySchedulerOutput
+from vllm.wde.prefill_only.schema.engine_io import PrefillOnlySchedulerOutput
 from vllm.wde.reranker.schema.engine_io import RerankerRequestOutput
 
 
@@ -17,7 +17,7 @@ class RerankerOutputProcessor(OutputProcessor):
     def from_engine(cls, engine: LLMEngine):
         return cls()
 
-    def __call__(self, scheduler_output: EncodeOnlySchedulerOutput,
+    def __call__(self, scheduler_output: PrefillOnlySchedulerOutput,
                  execute_output: torch.Tensor) -> List[RerankerRequestOutput]:
         execute_output = execute_output.view(-1, ).cpu().numpy().tolist()
         request_outputs = []

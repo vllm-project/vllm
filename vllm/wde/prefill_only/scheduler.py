@@ -4,10 +4,10 @@ from typing import Set
 from vllm.logger import init_logger
 from vllm.wde.core.scheduler import Scheduler
 from vllm.wde.core.schema.engine_io import SchedulableRequest
-from vllm.wde.encode_only.config import EncodeOnlySchedulerConfig
-from vllm.wde.encode_only.processor.input_processor import (
-    EncodeOnlyModelRequestProcessor)
-from vllm.wde.encode_only.schema.engine_io import EncodeOnlySchedulerOutput
+from vllm.wde.prefill_only.config import PrefillOnlySchedulerConfig
+from vllm.wde.prefill_only.processor.input_processor import (
+    PrefillOnlyModelRequestProcessor)
+from vllm.wde.prefill_only.schema.engine_io import PrefillOnlySchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -42,13 +42,13 @@ class SchedulingBudget:
         return len(self._curr_requests)
 
 
-class EncodeOnlyScheduler(Scheduler):
+class PrefillOnlyScheduler(Scheduler):
     support_scheduling = ["sync_scheduling", "async_scheduling"]
 
     def __init__(
         self,
-        scheduler_config: EncodeOnlySchedulerConfig,
-        request_processor: EncodeOnlyModelRequestProcessor,
+        scheduler_config: PrefillOnlySchedulerConfig,
+        request_processor: PrefillOnlyModelRequestProcessor,
     ) -> None:
         super().__init__(scheduler_config, request_processor)
 
@@ -86,4 +86,4 @@ class EncodeOnlyScheduler(Scheduler):
             waiting_queue.popleft()
             scheduler_outputs.append(request)
 
-        return EncodeOnlySchedulerOutput(requests=scheduler_outputs)
+        return PrefillOnlySchedulerOutput(requests=scheduler_outputs)

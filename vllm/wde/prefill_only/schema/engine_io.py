@@ -9,17 +9,17 @@ from vllm.wde.core.schema.engine_io import (PromptInput, Request,
 
 
 @dataclass
-class EncodeOnlyInput(TextOnlyInputs):
+class PrefillOnlyInput(TextOnlyInputs):
     pass
 
 
 @dataclass
-class EncodeOnlyRequest(Request):
+class PrefillOnlyRequest(Request):
     inputs: PromptInput
 
 
 @dataclass
-class EncodeOnlySchedulableRequest(SchedulableRequest):
+class PrefillOnlySchedulableRequest(SchedulableRequest):
     inputs: TextOnlyInputs
 
     @property
@@ -28,14 +28,14 @@ class EncodeOnlySchedulableRequest(SchedulableRequest):
 
 
 @dataclass
-class EncodeOnlySchedulerOutput(SchedulerOutput):
-    requests: Iterable[EncodeOnlyRequest]
+class PrefillOnlySchedulerOutput(SchedulerOutput):
+    requests: Iterable[PrefillOnlyRequest]
 
     def is_empty(self) -> bool:
         return not self.requests
 
 
-class EncodeOnlyRequestOutput(RequestOutput):
+class PrefillOnlyRequestOutput(RequestOutput):
 
     def __init__(self, request_id: str, outputs: torch.Tensor,
                  prompt_token_ids: List[int], finished: bool):
@@ -45,7 +45,7 @@ class EncodeOnlyRequestOutput(RequestOutput):
         self.outputs = outputs
 
     def __repr__(self):
-        return (f"EncodeOnlyRequestOutput(request_id='{self.request_id}', "
+        return (f"PrefillOnlyRequestOutput(request_id='{self.request_id}', "
                 f"outputs={repr(self.outputs)}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"finished={self.finished})")

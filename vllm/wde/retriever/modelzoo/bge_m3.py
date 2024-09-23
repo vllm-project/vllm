@@ -9,8 +9,7 @@ from torch import nn
 
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.wde.encode_only.layers.attention import (EncodeOnlyAttentionBackend,
-                                                   EncodeOnlyAttentionMetadata)
+from vllm.wde.core.layers.attention import AttentionBackend, AttentionMetadata
 from vllm.wde.encode_only.modelzoo.xlm_roberta import (LoadWeightsMixin,
                                                        XLMRobertaConfig,
                                                        XLMRobertaModel)
@@ -25,7 +24,7 @@ class BGEM3Model(nn.Module, LoadWeightsMixin):
 
     def __init__(self,
                  config: XLMRobertaConfig,
-                 attn_backend: EncodeOnlyAttentionBackend,
+                 attn_backend: AttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None,
                  sentence_pooling_method="cls",
                  normalized=True,
@@ -43,7 +42,7 @@ class BGEM3Model(nn.Module, LoadWeightsMixin):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        attn_metadata: EncodeOnlyAttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
 
         sequence_output = self.roberta(

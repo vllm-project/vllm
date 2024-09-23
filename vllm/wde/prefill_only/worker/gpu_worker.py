@@ -6,26 +6,24 @@ import torch
 from vllm.config import ParallelConfig
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
-from vllm.wde.core.config import DeviceConfig, LoadConfig
+from vllm.wde.core.config import (DeviceConfig, EngineConfig, LoadConfig,
+                                  ModelConfig)
+from vllm.wde.core.layers.attention import AttentionBackend
 from vllm.wde.core.worker import WorkerBase
-from vllm.wde.encode_only.config import (EncodeOnlyEngineConfig,
-                                         EncodeOnlySchedulerConfig,
-                                         ModelConfig)
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend)
-from vllm.wde.encode_only.runner.model_runner import ModelRunner
-from vllm.wde.encode_only.schema.execute_io import EncodeOnlyExecuteInput
+from vllm.wde.prefill_only.config import PrefillOnlySchedulerConfig
+from vllm.wde.prefill_only.runner.model_runner import ModelRunner
+from vllm.wde.prefill_only.schema.execute_io import PrefillOnlyExecuteInput
 
 
 class Worker(WorkerBase):
 
     def __init__(
         self,
-        engine_config: EncodeOnlyEngineConfig,
-        attn_backend: EncodeOnlyAttentionBackend,
+        engine_config: EngineConfig,
+        attn_backend: AttentionBackend,
     ) -> None:
         self.model_config: ModelConfig = engine_config.model_config
-        self.scheduler_config: EncodeOnlySchedulerConfig = (
+        self.scheduler_config: PrefillOnlySchedulerConfig = (
             engine_config.scheduler_config)
         self.device_config: DeviceConfig = engine_config.device_config
         self.load_config: LoadConfig = engine_config.load_config
@@ -97,7 +95,7 @@ class Worker(WorkerBase):
         self.model_runner.load_model()
 
     @torch.inference_mode
-    def __call__(self, execute_input: EncodeOnlyExecuteInput):
+    def __call__(self, execute_input: PrefillOnlyExecuteInput):
         output = self.model_runner.execute_model(execute_input.model_input)
         return output
 

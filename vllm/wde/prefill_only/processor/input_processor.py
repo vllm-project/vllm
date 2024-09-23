@@ -7,13 +7,11 @@ from vllm.wde.core.processor.input_processor import (InputProcessor,
                                                      RequestProcessor)
 from vllm.wde.core.schema.engine_io import (Params, PromptInput, TextPrompt,
                                             TokensPrompt)
-from vllm.wde.encode_only.schema.engine_io import (EncodeOnlyInput,
-                                                   EncodeOnlyRequest,
-                                                   EncodeOnlySchedulableRequest
-                                                   )
+from vllm.wde.prefill_only.schema.engine_io import (
+    PrefillOnlyInput, PrefillOnlyRequest, PrefillOnlySchedulableRequest)
 
 
-class EncodeOnlyModelInputProcessor(InputProcessor):
+class PrefillOnlyModelInputProcessor(InputProcessor):
 
     @classmethod
     def from_engine(cls, engine: LLMEngine):
@@ -23,16 +21,16 @@ class EncodeOnlyModelInputProcessor(InputProcessor):
                  request_id: str,
                  inputs: Optional[PromptInput] = None,
                  params: Optional[Params] = None,
-                 arrival_time: Optional[float] = None) -> EncodeOnlyRequest:
+                 arrival_time: Optional[float] = None) -> PrefillOnlyRequest:
         if not arrival_time:
             arrival_time = time.time()
-        request = EncodeOnlyRequest(request_id=str(request_id),
-                                    inputs=inputs,
-                                    arrival_time=arrival_time)
+        request = PrefillOnlyRequest(request_id=str(request_id),
+                                     inputs=inputs,
+                                     arrival_time=arrival_time)
         return request
 
 
-class EncodeOnlyModelRequestProcessor(RequestProcessor):
+class PrefillOnlyModelRequestProcessor(RequestProcessor):
 
     def __init__(self, tokenizer: Tokenizer):
         self.tokenizer = tokenizer
@@ -42,7 +40,7 @@ class EncodeOnlyModelRequestProcessor(RequestProcessor):
         return cls(engine.tokenizer)
 
     def __call__(self,
-                 request: EncodeOnlyRequest) -> EncodeOnlySchedulableRequest:
+                 request: PrefillOnlyRequest) -> PrefillOnlySchedulableRequest:
         inputs = request.inputs
 
         if isinstance(inputs, str):
@@ -59,10 +57,10 @@ class EncodeOnlyModelRequestProcessor(RequestProcessor):
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
 
-        schedulable_request = EncodeOnlySchedulableRequest(
+        schedulable_request = PrefillOnlySchedulableRequest(
             request_id=request.request_id,
-            inputs=EncodeOnlyInput(prompt_token_ids=prompt_token_ids,
-                                   prompt=inputs.get("prompt")),
+            inputs=PrefillOnlyInput(prompt_token_ids=prompt_token_ids,
+                                    prompt=inputs.get("prompt")),
             arrival_time=request.arrival_time)
 
         return schedulable_request

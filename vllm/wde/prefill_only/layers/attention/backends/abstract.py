@@ -13,16 +13,16 @@ from vllm.wde.core.layers.attention.abstract import (AttentionBackend,
 pin_memory = is_pin_memory_available()
 
 
-class EncodeOnlyAttentionBackend(AttentionBackend, ABC):
+class PrefillOnlyAttentionBackend(AttentionBackend, ABC):
     pass
 
 
-class EncodeOnlyAttentionImpl(AttentionImpl, ABC):
+class PrefillOnlyAttentionImpl(AttentionImpl, ABC):
     pass
 
 
 @dataclass
-class EncodeOnlyAttentionMetadata(AttentionMetadata):
+class PrefillOnlyAttentionMetadata(AttentionMetadata):
     max_seq_len: int
     seq_lens: list[int]
 
@@ -35,7 +35,8 @@ class EncodeOnlyAttentionMetadata(AttentionMetadata):
 T = TypeVar("T", bound=AttentionMetadata)
 
 
-class EncodeOnlyAttentionMetadataBuilder(AttentionMetadataBuilder, Generic[T]):
+class PrefillOnlyAttentionMetadataBuilder(AttentionMetadataBuilder,
+                                          Generic[T]):
 
     def __init__(self):
         pass
@@ -53,6 +54,6 @@ class EncodeOnlyAttentionMetadataBuilder(AttentionMetadataBuilder, Generic[T]):
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        return EncodeOnlyAttentionMetadata(seq_lens=seq_lens,
-                                           max_seq_len=max(seq_lens),
-                                           seq_start_loc=seq_start_loc)
+        return PrefillOnlyAttentionMetadata(seq_lens=seq_lens,
+                                            max_seq_len=max(seq_lens),
+                                            seq_start_loc=seq_start_loc)

@@ -6,52 +6,53 @@ import torch
 
 from vllm.utils import is_pin_memory_available
 from vllm.wde.core.layers.attention.abstract import AttentionType
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend, EncodeOnlyAttentionImpl,
-    EncodeOnlyAttentionMetadata, EncodeOnlyAttentionMetadataBuilder)
+from vllm.wde.prefill_only.layers.attention.backends.abstract import (
+    PrefillOnlyAttentionBackend, PrefillOnlyAttentionImpl,
+    PrefillOnlyAttentionMetadata, PrefillOnlyAttentionMetadataBuilder)
 
 pin_memory = is_pin_memory_available()
 
 
-class EncodeOnlyTorchNAIVEBackend(EncodeOnlyAttentionBackend):
+class PrefillOnlyTorchNAIVEBackend(PrefillOnlyAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
         return "torch_naive"
 
     @staticmethod
-    def get_impl_cls() -> Type["EncodeOnlyTorchNaiveBackendImpl"]:
-        return EncodeOnlyTorchNaiveBackendImpl
+    def get_impl_cls() -> Type["PrefillOnlyTorchNaiveBackendImpl"]:
+        return PrefillOnlyTorchNaiveBackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["EncodeOnlyTorchNaiveMetadata"]:
-        return EncodeOnlyTorchNaiveMetadata
+    def get_metadata_cls() -> Type["PrefillOnlyTorchNaiveMetadata"]:
+        return PrefillOnlyTorchNaiveMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["EncodeOnlyAttentionMetadataBuilder"]:
-        return EncodeOnlyTorchNaiveMetadataBuilder
+    def get_builder_cls() -> Type["PrefillOnlyAttentionMetadataBuilder"]:
+        return PrefillOnlyTorchNaiveMetadataBuilder
 
 
 @dataclass
-class EncodeOnlyTorchNaiveMetadata(EncodeOnlyAttentionMetadata):
+class PrefillOnlyTorchNaiveMetadata(PrefillOnlyAttentionMetadata):
     pass
 
 
-class EncodeOnlyTorchNaiveMetadataBuilder(
-        EncodeOnlyAttentionMetadataBuilder[EncodeOnlyTorchNaiveMetadata]):
+class PrefillOnlyTorchNaiveMetadataBuilder(
+        PrefillOnlyAttentionMetadataBuilder[PrefillOnlyTorchNaiveMetadata]):
     pass
 
 
-class EncodeOnlyTorchNaiveBackendImpl(EncodeOnlyAttentionImpl):
+class PrefillOnlyTorchNaiveBackendImpl(PrefillOnlyAttentionImpl):
 
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
+        num_kv_heads: Optional[int] = None,
+        alibi_slopes: Optional[List[float]] = None,
+        sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
@@ -80,19 +81,23 @@ class EncodeOnlyTorchNaiveBackendImpl(EncodeOnlyAttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: EncodeOnlyTorchNaiveMetadata,  # type: ignore
+        attn_metadata: PrefillOnlyTorchNaiveMetadata,
+        kv_cache: Optional[torch.Tensor] = None,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: AttentionType = AttentionType.ENCODER,
     ) -> torch.Tensor:
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in TorchNaive.")
 
-        if attn_type != AttentionType.ENCODER:
-            raise NotImplementedError("Decoder self-attention and "
-                                      "encoder/decoder cross-attention "
+        if attn_type == AttentionType.ENCODER:
+            causal = False
+        elif attn_type == AttentionType.DECODER:
+            causal = True
+        else:
+            raise NotImplementedError("Encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "EncodeOnlyTorchNaiveBackendImpl")
+                                      "PrefillOnlyTorchNaiveBackendImpl")
 
         num_tokens, hidden_size = query.shape
 
@@ -121,7 +126,7 @@ class EncodeOnlyTorchNaiveBackendImpl(EncodeOnlyAttentionImpl):
                 key[None, :, start:end, :],
                 value[None, :, start:end, :],
                 dropout_p=0.0,
-                is_causal=False,
+                is_causal=causal,
                 scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
             output[start:end, :, :] = sub_out
             start = end

@@ -32,10 +32,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.utils import is_pp_missing_parameter
-from vllm.wde.encode_only.layers.attention import (EncodeOnlyAttention,
-                                                   EncodeOnlyAttentionMetadata)
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend)
+from vllm.wde.core.layers.attention import (Attention, AttentionBackend,
+                                            AttentionMetadata)
 
 logger = logging.get_logger(__name__)
 
@@ -151,7 +149,7 @@ class XLMRobertaSelfAttention(nn.Module):
 
     def __init__(self,
                  config: XLMRobertaConfig,
-                 attn_backend: EncodeOnlyAttentionBackend,
+                 attn_backend: AttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         hidden_size = config.hidden_size
@@ -175,17 +173,17 @@ class XLMRobertaSelfAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        self.attn = EncodeOnlyAttention(self.num_heads,
-                                        self.head_dim,
-                                        self.scaling,
-                                        num_kv_heads=self.num_kv_heads,
-                                        quant_config=quant_config,
-                                        attn_backend=attn_backend)
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              quant_config=quant_config,
+                              attn_backend=attn_backend)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: EncodeOnlyAttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -216,7 +214,7 @@ class XLMRobertaAttention(nn.Module):
 
     def __init__(self,
                  config: XLMRobertaConfig,
-                 attn_backend: EncodeOnlyAttentionBackend,
+                 attn_backend: AttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.self = XLMRobertaSelfAttention(config, attn_backend)
@@ -225,7 +223,7 @@ class XLMRobertaAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: EncodeOnlyAttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         self_outputs = self.self(hidden_states, attn_metadata)
         attention_output = self.output(self_outputs, hidden_states)
@@ -274,7 +272,7 @@ class XLMRobertaLayer(nn.Module):
 
     def __init__(self,
                  config: XLMRobertaConfig,
-                 attn_backend: EncodeOnlyAttentionBackend,
+                 attn_backend: AttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.attention = XLMRobertaAttention(config, attn_backend,
@@ -285,7 +283,7 @@ class XLMRobertaLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: EncodeOnlyAttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         attention_output = self.attention(hidden_states, attn_metadata)
         intermediate_output = self.intermediate(attention_output)
@@ -297,7 +295,7 @@ class XLMRobertaEncoder(nn.Module):
 
     def __init__(self,
                  config: XLMRobertaConfig,
-                 attn_backend: EncodeOnlyAttentionBackend,
+                 attn_backend: AttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.layer = nn.ModuleList([
@@ -308,7 +306,7 @@ class XLMRobertaEncoder(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: EncodeOnlyAttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         for i, layer_module in enumerate(self.layer):
             hidden_states = layer_module(hidden_states, attn_metadata)
@@ -319,7 +317,7 @@ class XLMRobertaModel(nn.Module):
 
     def __init__(self,
                  config: XLMRobertaConfig,
-                 attn_backend: EncodeOnlyAttentionBackend,
+                 attn_backend: AttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
@@ -330,7 +328,7 @@ class XLMRobertaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        attn_metadata: EncodeOnlyAttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         positions += self.config.pad_token_id + 1
 
@@ -379,7 +377,7 @@ class XLMRobertaForMaskedLM(nn.Module, LoadWeightsMixin):
 
     def __init__(self,
                  config: XLMRobertaConfig,
-                 attn_backend: EncodeOnlyAttentionBackend,
+                 attn_backend: AttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None,
                  *args,
                  **kwargs):
@@ -394,7 +392,7 @@ class XLMRobertaForMaskedLM(nn.Module, LoadWeightsMixin):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        attn_metadata: EncodeOnlyAttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         sequence_output = self.roberta(
             input_ids,
@@ -437,7 +435,7 @@ class XLMRobertaForSequenceClassification(nn.Module, LoadWeightsMixin):
 
     def __init__(self,
                  config: XLMRobertaConfig,
-                 attn_backend: EncodeOnlyAttentionBackend,
+                 attn_backend: AttentionBackend,
                  quant_config: Optional[QuantizationConfig] = None,
                  *args,
                  **kwargs):
@@ -453,7 +451,7 @@ class XLMRobertaForSequenceClassification(nn.Module, LoadWeightsMixin):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        attn_metadata: EncodeOnlyAttentionMetadata,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
 
         sequence_output = self.roberta(

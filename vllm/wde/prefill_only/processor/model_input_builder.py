@@ -4,19 +4,19 @@ from vllm.utils import is_pin_memory_available
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.processor.model_input_builder import ModelInputBuilder
 from vllm.wde.core.schema.execute_io import ExecuteInput
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionMetadataBuilder)
-from vllm.wde.encode_only.schema.engine_io import EncodeOnlySchedulerOutput
-from vllm.wde.encode_only.schema.execute_io import ModelInputForGPU
+from vllm.wde.prefill_only.layers.attention.backends.abstract import (
+    PrefillOnlyAttentionMetadataBuilder)
+from vllm.wde.prefill_only.schema.engine_io import PrefillOnlySchedulerOutput
+from vllm.wde.prefill_only.schema.execute_io import ModelInputForGPU
 
 pin_memory = is_pin_memory_available()
 
 
-class EncodeOnlyModelInputBuilder(ModelInputBuilder):
+class PrefillOnlyModelInputBuilder(ModelInputBuilder):
 
     def __init__(
             self,
-            attention_metadata_builder: EncodeOnlyAttentionMetadataBuilder):
+            attention_metadata_builder: PrefillOnlyAttentionMetadataBuilder):
         self.attention_metadata_builder = attention_metadata_builder
 
     @classmethod
@@ -24,7 +24,7 @@ class EncodeOnlyModelInputBuilder(ModelInputBuilder):
         return cls(engine.attn_backend.get_builder_cls()())
 
     def __call__(self,
-                 scheduler_output: EncodeOnlySchedulerOutput) -> ExecuteInput:
+                 scheduler_output: PrefillOnlySchedulerOutput) -> ExecuteInput:
         input_tokens = []
         input_positions = []
         seq_lens = []

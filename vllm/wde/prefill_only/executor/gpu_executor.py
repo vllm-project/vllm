@@ -7,12 +7,11 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.wde.core.config import EngineConfig
+from vllm.wde.core.layers.attention import AttentionBackend
 from vllm.wde.core.llm_engine import LLMEngine
 from vllm.wde.core.schema.execute_io import ExecuteInput, ExecuteOutput
 from vllm.wde.core.worker import WorkerWrapperBase
 from vllm.wde.core.workflow import Workflow
-from vllm.wde.encode_only.layers.attention.backends.abstract import (
-    EncodeOnlyAttentionBackend)
 
 logger = init_logger(__name__)
 
@@ -34,7 +33,7 @@ class GPUExecutor:
         self,
         engine_config: EngineConfig,
         workflow: Workflow,
-        attn_backend: EncodeOnlyAttentionBackend,
+        attn_backend: AttentionBackend,
     ) -> None:
         self.engine_config = engine_config
         self.workflow = workflow
@@ -78,7 +77,7 @@ class GPUAsyncExecutor(GPUExecutor):
     support_scheduling = ["async_scheduling"]
 
     def __init__(self, engine_config: EngineConfig, workflow: Workflow,
-                 attn_backend: EncodeOnlyAttentionBackend, executor_in: Queue,
+                 attn_backend: AttentionBackend, executor_in: Queue,
                  executor_out: Queue) -> None:
         super().__init__(engine_config, workflow, attn_backend)
         self.executor_in = executor_in
