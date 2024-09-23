@@ -144,7 +144,10 @@ def run_vllm(
         # output_len should be the same for all requests.
         output_len = requests[0][2]
         start = time.perf_counter()
-        llm.beam_search(prompts, beam_width=n, max_tokens=output_len)
+        llm.beam_search(prompts,
+                        beam_width=n,
+                        max_tokens=output_len,
+                        ignore_eos=True)
         end = time.perf_counter()
     return end - start
 
