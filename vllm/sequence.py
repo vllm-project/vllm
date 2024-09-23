@@ -5,8 +5,10 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
-                    Optional, Set, Tuple, Union, cast)
+from functools import cached_property, reduce
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
+from typing import Sequence as GenericSequence
+from typing import Set, Tuple, Union, cast
 
 import msgspec
 import torch
@@ -165,6 +167,38 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
+    # It is used to compute mrope_position_ids.
+    _mrope_position_delta: Optional[int] = None
+
+    @staticmethod
+    def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+        if len(token_counts) == 0:
+            return SequenceData.from_seqs([])
+
+        arrs = [
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
+            for token_id, count in token_counts
+        ]
+
+        return SequenceData(reduce(array.__add__, arrs))
+
+    @staticmethod
+    def from_seqs(
+        prompt_token_ids: GenericSequence[int],
+        output_token_ids: Optional[GenericSequence[int]] = None,
+    ) -> "SequenceData":
+        prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                     prompt_token_ids)
+
+        if output_token_ids is None:
+            return SequenceData(prompt_token_ids_arr)
+
+        output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                     output_token_ids)
+
+        return SequenceData(prompt_token_ids_arr,
+                            _output_token_ids=output_token_ids_arr)
+
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
         assert self._output_token_ids.typecode == "l"
@@ -218,6 +252,14 @@ class SequenceData(msgspec.Struct,
         """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
+
+    @property
+    def mrope_position_delta(self) -> Optional[int]:
+        return self._mrope_position_delta
+
+    @mrope_position_delta.setter
+    def mrope_position_delta(self, new_mrope_position_delta):
+        self._mrope_position_delta = new_mrope_position_delta
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
@@ -358,8 +400,6 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
         self.from_decoder_prompt = from_decoder_prompt
-        self._prompt: Optional[str] = None
-        self._prompt_token_ids: Optional[List[int]] = None
 
         # For decoder-only models, a Sequence is constructed
         # from an LLMInputs instance (the `inputs` arg.)
@@ -388,13 +428,16 @@ class Sequence:
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
 
-        self.data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids))
+        self.data = SequenceData.from_seqs(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
         self.status = SequenceStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
+
+        # These are used to keep track of delta outputs
+        self._last_token_ids_offset: int = 0
+        self._last_output_text_offset: int = 0
 
         # Used for incremental detokenization
         self.prefix_offset = 0
@@ -406,37 +449,23 @@ class Sequence:
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
 
-    @property
+    @cached_property
     def prompt(self) -> Optional[str]:
-        if self._prompt is not None:
-            # Reuse precomputed prompt string
-            return self._prompt
-
-        # Select decoder or encoder input prompt str,
-        # as appropriate
+        # Select decoder or encoder input prompt str, as appropriate
         prompt_key: str = ("prompt"
                            if self.from_decoder_prompt else "encoder_prompt")
 
-        # Cache prompt
-        self._prompt = cast(Optional[str], self.inputs.get(prompt_key))
-        return self._prompt
+        return cast(Optional[str], self.inputs.get(prompt_key))
 
-    @property
+    @cached_property
     def prompt_token_ids(self) -> List[int]:
-        if self._prompt_token_ids is not None:
-            # Reuse precomputed prompt token ids
-            return self._prompt_token_ids
-
-        # Select decoder or encoder input prompt
-        # token ids, as appropriate
+        # Select decoder or encoder input prompt token ids, as appropriate
         prompt_token_ids_key: str = ("prompt_token_ids"
                                      if self.from_decoder_prompt else
                                      "encoder_prompt_token_ids")
 
         # Cache computed prompt token ids
-        self._prompt_token_ids = cast(List[int],
-                                      self.inputs.get(prompt_token_ids_key))
-        return self._prompt_token_ids
+        return cast(List[int], self.inputs.get(prompt_token_ids_key))
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
@@ -451,11 +480,37 @@ class Sequence:
         return self.prompt_adapter_request.prompt_adapter_id \
                         if self.prompt_adapter_request else 0
 
-    def get_output_text_to_return(self, buffer_length: int):
+    def get_output_text_to_return(self, buffer_length: int,
+                                  delta: bool) -> str:
+        """If delta is True, only new text since the last call to
+        this method is returned"""
+
         # We return the full output text if the sequence is finished.
         truncate = buffer_length and not self.is_finished()
-        return self.output_text[:-buffer_length] if truncate else (
-            self.output_text)
+        if not delta:
+            return self.output_text[:-buffer_length] if truncate else (
+                self.output_text)
+        length = len(self.output_text)
+        if truncate:
+            length -= buffer_length
+        last_offset = self._last_output_text_offset
+        if last_offset < length:
+            self._last_output_text_offset = length
+            return self.output_text[last_offset:length]
+        return ""
+
+    def get_output_token_ids_to_return(self,
+                                       delta: bool) -> GenericSequence[int]:
+        """If delta is True, only new tokens since the last call to
+        this method are returned"""
+        if not delta:
+            return self.get_output_token_ids()
+        length = self.get_output_len()
+        last_offset = self._last_token_ids_offset
+        if last_offset < length:
+            self._last_token_ids_offset = length
+            return self.data._output_token_ids[last_offset:]
+        return ()
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size

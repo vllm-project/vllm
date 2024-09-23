@@ -1,4 +1,5 @@
 import dataclasses
+import itertools
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, cast
 
 import torch
@@ -25,7 +26,7 @@ from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata,
-                                      TModelInputForGPU)
+                                      TModelInputForGPU, _get_graph_batch_size)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
@@ -168,7 +169,6 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
     def _empty_long_tensor(self) -> torch.Tensor:
         return self._list_to_long_tensor([])
 
-    @torch.inference_mode()
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
@@ -329,24 +329,42 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
             encoder_input_tokens_tensor = self._empty_long_tensor()
             encoder_input_positions_tensor = self._empty_long_tensor()
             cross_slot_mapping_tensor = self._empty_long_tensor()
-
             # Extract cross-attention block tables &
             # seq len from each sequence group metadata.
             # Cross-attention block tables are empty
             # during vLLM memory profiling.
             cross_block_tables = []
             for seq_group_metadata in seq_group_metadata_list:
-                encoder_seq_lens.append(
-                    seq_group_metadata.encoder_seq_data.get_len())
-                cross_block_table = seq_group_metadata.cross_block_table
-                cross_block_tables.append([] if (
-                    cross_block_table is None) else cross_block_table)
+                for _ in range(len(seq_group_metadata.seq_data)):
+                    encoder_seq_lens.append(
+                        seq_group_metadata.encoder_seq_data.get_len())
+                    cross_block_table = seq_group_metadata.cross_block_table
+                    cross_block_tables.append([] if (
+                        cross_block_table is None) else cross_block_table)
 
-            # Convert cross-attention block tables to encoder input tensor
+            if (model_input.attn_metadata is not None
+                    and model_input.attn_metadata.use_cuda_graph):
+                # We will be using CUDA graph replay for this decode.
+                max_len_of_block_table = self.get_max_block_per_batch()
+                batch_size = len(encoder_seq_lens)
+                graph_batch_size = _get_graph_batch_size(batch_size)
+                assert graph_batch_size >= batch_size
+                cuda_graph_pad_size = graph_batch_size - batch_size
+                # extend the cross_block_tables and encoder_seq_lens to match
+                # the graph_batch_size.
+                cross_block_tables.extend([[]
+                                           for _ in range(cuda_graph_pad_size)
+                                           ])
+                encoder_seq_lens.extend(
+                    itertools.repeat(1, cuda_graph_pad_size))
+
+            else:
+                max_len_of_block_table = max(
+                    len(block_table) for block_table in cross_block_tables)
+
             cross_block_tables = make_tensor_with_pad(
                 cross_block_tables,
-                max_len=max(
-                    len(block_table) for block_table in cross_block_tables),
+                max_len=max_len_of_block_table,
                 pad=0,
                 dtype=torch.int32,
                 device=self.device,
@@ -414,8 +432,15 @@ class EncoderDecoderModelRunner(
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
 
-        model_executable = self.model
-
+        if (model_input.attn_metadata is not None
+                and model_input.attn_metadata.prefill_metadata is None
+                and model_input.attn_metadata.decode_metadata.use_cuda_graph):
+            assert model_input.input_tokens is not None
+            graph_batch_size = model_input.input_tokens.shape[0]
+            model_executable = self.graph_runners[
+                model_input.virtual_engine][graph_batch_size]
+        else:
+            model_executable = self.model
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
@@ -435,6 +460,9 @@ class EncoderDecoderModelRunner(
 
         if not self.is_driver_worker:
             return []
+
+        if model_input.async_callback is not None:
+            model_input.async_callback()
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(

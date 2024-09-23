@@ -242,6 +242,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
             VLLM_INSTANCE_ID,
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
+            **({
+                "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
+            } if envs.VLLM_ATTENTION_BACKEND is not None else {})
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
 
         self._env_vars_for_all_workers = (
@@ -434,8 +437,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
         required_version = version.parse("2.35")
         current_version = version.parse(
             pkg_resources.get_distribution("ray").version)
-        if current_version < required_version:
-            raise ValueError(f"Ray version {required_version} or greater is "
+        # TODO: update the constraint once we adapt to the backward
+        # incompatible API change from ray 2.36
+        if current_version != required_version:
+            raise ValueError(f"Ray version {required_version} is "
                              f"required, but found {current_version}")
 
         import importlib.util
