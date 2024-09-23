@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.utils import is_hip
 
 logger = init_logger(__name__)
@@ -190,14 +191,14 @@ class ModelRegistry:
         return list(_MODELS.keys()) + list(_OOT_MODELS.keys())
 
     @staticmethod
-    def register_model(model_arch: str,
-                       model_cls: Type[nn.Module],
-                       is_multimodal: bool = False):
+    def register_model(model_arch: str, model_cls: Type[nn.Module]):
         if model_arch in _MODELS:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
                 "overwritten by the new model class %s.", model_arch,
                 model_cls.__name__)
+
+        is_multimodal: bool = issubclass(model_cls, SupportsMultiModal)
 
         # NOTE: This is needed to store the information if the OOT model is
         # a multimodal model.
