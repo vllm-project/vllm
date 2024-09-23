@@ -27,9 +27,26 @@ TEST_MODELS = [
     ("meta-llama/Meta-Llama-3-8B", {}),
 ]
 
+# TODO: enable in pytorch 2.5
+if False and is_quant_method_supported("aqlm"):
+    TEST_MODELS.append(("ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf", {
+        "quantization": "aqlm"
+    }))
+
+# TODO: enable in pytorch 2.5
+if False and is_quant_method_supported("gguf"):
+    TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", {
+        "quantization": "gguf"
+    }))
+
 if is_quant_method_supported("gptq"):
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {
-        "quantization": "GPTQ"
+        "quantization": "gptq"
+    }))
+
+if is_quant_method_supported("gptq_marlin"):
+    TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", {
+        "quantization": "gptq_marlin"
     }))
 
 if is_quant_method_supported("gptq_marlin_24"):
@@ -66,9 +83,9 @@ def test_full_graph(model_info, tp_size, backend):
     model = model_info[0]
     model_kwargs = model_info[1]
 
-    # Inductor doesn't support fp8 yet.
-    if "quantization" in model_kwargs and model_kwargs[
-            "quantization"] == "fp8" and backend != "eager":
+    # Inductor doesn't support fp8/gptq_marlin_24 yet.
+    quantization = model_kwargs.get("quantization")
+    if (quantization == "fp8" or quantization == "gptq_marlin_24") and backend != "eager":
         return
 
     set_torch_compile_backend(backend)
