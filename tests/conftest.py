@@ -22,6 +22,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from tests.models.utils import (TokensTextLogprobs,
                                 TokensTextLogprobsPromptLogprobs)
+from tests.utils import fork_new_process_for_each_test
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
@@ -929,3 +930,16 @@ def dummy_gemma2_embedding_path():
         with open(json_path, "w") as f:
             json.dump(config, f)
     return _dummy_gemma2_embedding_path
+
+
+@pytest.fixture(autouse=True)
+def apply_fork_decorator(request):
+    if request.config.getoption("--streamed-fork"):
+        request.node.obj = fork_new_process_for_each_test(request.node.obj)
+
+
+def pytest_addoption(parser):
+    parser.addoption("--streamed-fork",
+                     action="store_true",
+                     default=False,
+                     help="Apply fork_new_process_for_each_test to all tests")
