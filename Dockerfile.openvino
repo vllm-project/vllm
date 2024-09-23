@@ -4,8 +4,9 @@
 FROM ubuntu:22.04 AS dev
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git && \
-    apt-get install -y ffmpeg libsm6 libxext6 libgl1 
+    apt-get install -y \
+        git python3-pip \
+        ffmpeg libsm6 libxext6 libgl1
 WORKDIR /workspace
 
 # copy requirements

@@ -56,7 +56,7 @@ Build from source
 .. code-block:: console
 
     $ pip install --upgrade pip
-    $ pip install wheel packaging ninja "setuptools>=49.4.0" numpy
+    $ pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
     $ pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 - Third, build and install oneDNN library from source:
