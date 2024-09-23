@@ -120,4 +120,3 @@ define_gpu_extension_target(
 )
 
 message(STATUS "Enabling C extension.")
-add_dependencies(default _C)
