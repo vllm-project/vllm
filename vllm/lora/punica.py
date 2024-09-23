@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 import torch
 
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils import get_device
 
 if HAS_TRITON:
     from vllm.lora.ops.bgmv_expand import bgmv_expand
@@ -105,7 +104,7 @@ def convert_mapping(
     long_lora_offsets: Optional[torch.Tensor] = None
     if long_lora_context:
         long_lora_offsets = torch.zeros(len(index_mapping_indices),
-                                        device=get_device(),
+                                        device="cuda",
                                         dtype=torch.long)
     prompt_mapping: List[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
@@ -132,9 +131,9 @@ def convert_mapping(
     if long_lora_context:
         assert long_lora_offsets is not None
         indices_list.append(long_lora_offsets)
-    indices = torch.tensor(indices_list, dtype=torch.long, device=get_device())
+    indices = torch.tensor(indices_list, dtype=torch.long, device="cuda")
     prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device=get_device(),
+                                         device="cuda",
                                          dtype=torch.long)
     embeddings_indices = torch.stack([
         indices[2] * extra_vocab_size,
@@ -146,9 +145,8 @@ def convert_mapping(
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
     sampler_indices_padded = torch.arange(
-        0, len(sampler_indices_padded), device=get_device(),
-        dtype=torch.long) + (sampler_indices_padded *
-                             len(sampler_indices_padded))
+        0, len(sampler_indices_padded), device="cuda", dtype=torch.long) + (
+            sampler_indices_padded * len(sampler_indices_padded))
     long_lora_indices = None
     long_lora_indices_len: Optional[int] = None
     if long_lora_context:

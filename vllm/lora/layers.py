@@ -28,10 +28,6 @@ from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.platforms import current_platform
-
-if current_platform.is_hpu():
-    from vllm_hpu_extension.punica_hpu import GaudiPunicaWrapper
 
 if TYPE_CHECKING:
     pass
@@ -228,7 +224,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
-        embeddings_indices = None
         embeddings_indices = self.punica_wrapper.embeddings_indices
         indices = embeddings_indices[1].view_as(x)
         full_lora_a_embeddings = F.embedding(
@@ -246,19 +241,15 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         if full_lora_a_embeddings.ndim == 3:
             full_lora_a_embeddings = full_lora_a_embeddings.view(
                 full_lora_a_embeddings.shape[0] *
-                full_lora_a_embeddings.shape[1], -1)
+                full_lora_a_embeddings.shape[1],
+                -1,
+            )
+
         # Embedding layer only need expand op
-        if current_platform.is_hpu():
-            assert isinstance(self.punica_wrapper, GaudiPunicaWrapper)
-            self.punica_wrapper.add_lora_embedding(full_output,
-                                                   full_lora_a_embeddings,
-                                                   self.lora_b_stacked,
-                                                   add_input=True)
-        else:
-            self.punica_wrapper.add_expand(full_output,
-                                           full_lora_a_embeddings,
-                                           self.lora_b_stacked,
-                                           add_input=True)
+        self.punica_wrapper.add_expand(full_output,
+                                       full_lora_a_embeddings,
+                                       self.lora_b_stacked,
+                                       add_input=True)
         return full_output.view_as(full_output_org)
 
     @classmethod

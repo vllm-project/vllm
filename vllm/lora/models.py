@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type
 
 import safetensors.torch
 import torch
@@ -26,11 +26,7 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
-
-if current_platform.is_hpu():
-    from vllm_hpu_extension.punica_hpu import GaudiPunicaWrapper
 
 logger = init_logger(__name__)
 
@@ -47,116 +43,6 @@ class LongContextLoRAContext:
     # offsets to the sin_cos_cache for each lora_id loaded.
     # This value is dynamically modified.
     offsets_by_lora_id: Dict[int, int] = field(default_factory=dict)
-
-
-def convert_mapping(
-    mapping: LoRAMapping,
-    lora_index_to_id: List[Optional[int]],
-    max_loras: int,
-    vocab_size: int,
-    extra_vocab_size: int,
-    long_lora_context: Optional[LongContextLoRAContext] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor], List[int]]:
-    """Converts LoRAMapping to index tensors.
-
-    Args:
-        mapping: LoRAMapping mapping rows in a batch to LoRA ids.
-        lora_index_to_id: List mapping LoRA ids to LoRA indices.
-        max_loras: Maximum number of LoRAs.
-        vocab_size: Model vocab size.
-        extra_vocab_size: Extra vocab size each LoRA can have.
-        long_lora_context: Passed if there are long context lora in a batch.
-
-    Returns:
-        A tuple of tensors:
-            base_indices: Tensor of shape [batch_size] mapping batch rows to
-                LoRA indices.
-            sampler_indices: Tensor of shape [batch_size] mapping requests to
-                LoRA indices for sampler. For generation, this will be the
-                same as base_indicies. For prefill, this will map requests
-                to LoRA indices.
-            sampler_indices_padded: Tensor of shape [batch_size] mapping
-                requests to LoRA indices for sampler with padding.
-                Same as sampler_indicies, but -1 is replaced with
-                max_loras.
-            embeddings_indices: Tensor of shape [2, batch_size] mapping
-                requests to embedding indices. First row is for embeddings
-                added by the LoRAs, second row is for the LoRA.lora_a
-                embeddings.
-            long_lora_indices: Tensor of shape [batch_size] mapping
-                requests to RoPE offsets and rot dims for long LoRAs.
-                None if long context lora doesn't exist.
-            indices_len: List of lengths of the above tensors.
-                Used to index into each tensor. It contains length for
-                (base_indices, sampler_indices, sampler_indices_padded,
-                embeddings_indices, long_lora_indices). If long_lora doesn't
-                exist, it only contains first 4 entries.
-    """
-    index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
-    embedding_indices = index_mapping_indices.copy()
-    lora_indices = index_mapping_indices.copy()
-    long_lora_offsets: Optional[torch.Tensor] = None
-    device = "hpu" if current_platform.is_hpu() else "cuda"
-    if long_lora_context:
-        long_lora_offsets = torch.zeros(len(index_mapping_indices),
-                                        device=device,
-                                        dtype=torch.long)
-    prompt_mapping: List[int] = [
-        lora_index_to_id.index(x) if x > 0 else -1
-        for x in mapping.prompt_mapping
-    ]
-    lora_idx = None
-    for i in range(len(index_mapping_indices)):
-        # TODO index can be slow. optimize
-        lora_idx = (lora_index_to_id.index(index_mapping_indices[i])
-                    if index_mapping_indices[i] > 0 else -1)
-        embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
-        lora_indices[i] = lora_idx
-        if long_lora_context:
-            assert long_lora_offsets is not None
-            lora_offset: int = long_lora_context.offsets_by_lora_id.get(
-                index_mapping_indices[i], 0)
-            long_lora_offsets[i] = lora_offset
-
-    indices_list: List[Union[List[int], torch.Tensor]] = [
-        index_mapping_indices, lora_indices, embedding_indices
-    ]
-    if long_lora_context:
-        assert long_lora_offsets is not None
-        indices_list.append(long_lora_offsets)
-    indices = torch.tensor(indices_list, dtype=torch.long, device=device)
-    prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device=device,
-                                         dtype=torch.long)
-    embeddings_indices = torch.stack([
-        indices[2] * extra_vocab_size,
-        indices[2] * (vocab_size + extra_vocab_size)
-    ])
-    embeddings_indices[embeddings_indices == -1] = max_loras - 1
-    base_indices = indices[1]
-    sampler_indices = prompt_mapping_tensor
-    sampler_indices_padded = sampler_indices.clone()
-    sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
-    sampler_indices_padded = (
-        torch.arange(
-            0, len(sampler_indices_padded), device=device, dtype=torch.long) +
-        (sampler_indices_padded * len(sampler_indices_padded)))
-    long_lora_indices = None
-    long_lora_indices_len: Optional[int] = None
-    if long_lora_context:
-        long_lora_indices = indices[3]
-        long_lora_indices_len = long_lora_indices.shape[-1]
-    # Contain length of indices tensors. Used to index into each tensor.
-    indices_len = [
-        base_indices.shape[-1], sampler_indices.shape[-1],
-        sampler_indices_padded.shape[-1], embeddings_indices.shape[-1]
-    ]
-    if long_lora_indices_len is not None:
-        indices_len.append(long_lora_indices_len)
-
-    return (base_indices, sampler_indices, sampler_indices_padded,
-            embeddings_indices, long_lora_indices, indices_len)
 
 
 def get_lora_id():
@@ -430,15 +316,9 @@ class LoRAModelManager(AdapterModelManager):
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
-        if current_platform.is_hpu():
-            self.punica_wrapper = GaudiPunicaWrapper(
-                max_num_batched_tokens,
-                max_batches=self.max_num_seqs,
-                device="hpu")
-        else:
-            self.punica_wrapper = PunicaWrapper(max_num_batched_tokens,
-                                                max_batches=self.max_num_seqs,
-                                                device="cuda")
+        self.punica_wrapper = PunicaWrapper(max_num_batched_tokens,
+                                            max_batches=self.max_num_seqs,
+                                            device="cuda")
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
