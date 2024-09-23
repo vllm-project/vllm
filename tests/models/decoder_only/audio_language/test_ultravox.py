@@ -2,8 +2,10 @@ from typing import List, Optional, Tuple, Type
 
 import numpy as np
 import pytest
+import pytest_asyncio
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
 
+from tests.utils import RemoteOpenAIServer
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -35,6 +37,26 @@ def audio_assets():
 def audio(request):
     from vllm.assets.audio import AudioAsset
     return AudioAsset(request.param)
+
+
+@pytest.fixture(params=({}, CHUNKED_PREFILL_KWARGS))
+def server(request, audio_assets):
+    args = [
+        "--dtype=bfloat16", "--max-model-len=4096", "--enforce-eager",
+        f"--limit-mm-per-prompt=audio={len(audio_assets)}"
+    ] + [
+        f"--{key.replace('_','-')}={value}"
+        for key, value in request.param.items()
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 def _get_prompt(audio_count, question, placeholder):
@@ -201,3 +223,33 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
         num_logprobs=num_logprobs,
         **vllm_kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_online_inference(client, audio_assets):
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            *[{
+                "type": "audio_url",
+                "audio_url": {
+                    "url": audio.url
+                }
+            } for audio in audio_assets],
+            {
+                "type":
+                "text",
+                "text":
+                f"What's happening in these {len(audio_assets)} audio clips?"
+            },
+        ],
+    }]
+
+    chat_completion = await client.chat.completions.create(model=MODEL_NAME,
+                                                           messages=messages,
+                                                           max_tokens=10)
+
+    assert len(chat_completion.choices) == 1
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
