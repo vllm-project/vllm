@@ -120,24 +120,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                              inplace=True)
 
     def forward_hpu(
-        self,
-        x: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool,
-        num_expert_group: Optional[int],
-        topk_group: Optional[int],
-        layer: Optional[torch.nn.Module],
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            use_grouped_topk: bool,
+            top_k: int,
+            router_logits: torch.Tensor,
+            renormalize: bool,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            custom_routing_function: Optional[Callable] = None
     ):
         assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
         assert num_expert_group is None, ('num_expert_group is '
                                           'not supported on HPU')
         assert topk_group is None, 'topk_group is not supported on HPU'
         if layer is not None:
-            return layer.hpu_static_fused_moe(x, w1, w2, router_logits, top_k)
+            return layer.hpu_static_fused_moe(x, layer.w13_weight, layer.w2_weight, router_logits, top_k)
 
     def forward_cpu(self, *args, **kwargs):
         raise NotImplementedError(
