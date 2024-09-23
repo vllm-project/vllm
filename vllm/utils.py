@@ -339,28 +339,6 @@ def is_neuron() -> bool:
 
 @lru_cache(maxsize=None)
 def is_hpu() -> bool:
-    return _is_habana_frameworks_installed() or _is_built_for_hpu()
-
-
-@lru_cache(maxsize=None)
-def is_fake_hpu() -> bool:
-    return os.environ.get('VLLM_USE_FAKE_HPU', '0') != '0'
-
-
-@lru_cache(maxsize=None)
-def hpu_device_string():
-    device_string = 'hpu' if not is_fake_hpu() else 'cpu'
-    return device_string
-
-
-@lru_cache(maxsize=None)
-def hpu_backend_string():
-    backend_string = 'hccl' if not is_fake_hpu() else 'gloo'
-    return backend_string
-
-
-@lru_cache(maxsize=None)
-def _is_habana_frameworks_installed() -> bool:
     from importlib import util
     return util.find_spec('habana_frameworks') is not None
 

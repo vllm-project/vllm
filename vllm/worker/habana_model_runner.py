@@ -41,7 +41,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (is_fake_hpu, is_pin_memory_available,
+from vllm.utils import (is_pin_memory_available,
                         make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
@@ -253,8 +253,7 @@ class HpuModelAdapter():
                                                '0').lower() in ['1', 'true']
         self.block_size = block_size
         self.dtype = dtype
-        if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
-        ) and not enforce_eager:
+        if not htorch.utils.internal.is_lazy() and not enforce_eager:
             self.model = torch.compile(self.model,
                                        backend='hpu_backend',
                                        dynamic=False)
@@ -523,9 +522,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                if model_config is not None else None)
         self.device_config = (device_config
                               if device_config is not None else DeviceConfig())
-        if is_fake_hpu():
-            device_config.device = torch.device('cpu')
-            device_config.device_type = 'cpu'
+
         self.device = self.device_config.device
         self.enforce_eager = self.model_config.enforce_eager
         self.max_num_seqs = self.scheduler_config.max_num_seqs
@@ -634,7 +631,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                           mark_only_scales_as_const=True)
                 logger.info("Preparing model with INC took %s",
                             m_inc.get_summary_string())
-            elif not is_fake_hpu():
+            else:
                 self.model = self.model.to("hpu")
                 htcore.mark_step()
             torch.hpu.synchronize()

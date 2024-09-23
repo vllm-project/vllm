@@ -44,7 +44,7 @@ from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_fake_hpu, is_pin_memory_available
+from vllm.utils import is_pin_memory_available
 
 
 @contextmanager
@@ -356,10 +356,7 @@ class DefaultModelLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            _device = torch.device(
-                device_config.device) if is_fake_hpu() else torch.device(
-                    self.load_config.device)
-            with _device:
+            with torch.device(self.load_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)

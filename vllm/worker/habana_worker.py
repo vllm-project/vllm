@@ -22,7 +22,6 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import hpu_backend_string, hpu_device_string, is_fake_hpu
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.habana_model_runner import HabanaModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
@@ -110,8 +109,6 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
         if self.device_config.device.type == "hpu":
             self.device = torch.device("hpu")
             torch.hpu.set_device(self.device)
-        elif self.device_config.device_type == "cpu":
-            self.device = torch.device("cpu")
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -145,10 +142,6 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        if is_fake_hpu():
-            cache_block_size = self.get_cache_block_size_bytes()
-            fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
-            return fake_hpu_cache_alloc // cache_block_size, 0
         with HabanaMemoryProfiler() as m:
             self.model_runner.profile_run()
             torch.hpu.synchronize()
@@ -346,12 +339,11 @@ def init_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
-    backend = hpu_backend_string()
     init_distributed_environment(parallel_config.world_size,
                                  rank,
                                  distributed_init_method,
                                  local_rank,
-                                 backend=backend)
+                                 backend='hccl')
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
@@ -368,17 +360,15 @@ def init_worker_distributed_environment(
             "distributed_init_method must be set if torch.distributed "
             "is not already initialized")
     else:
-        backend = hpu_backend_string()
         torch.distributed.init_process_group(
-            backend=backend,
+            backend="hccl",
             world_size=parallel_config.world_size,
             rank=rank,
             init_method=distributed_init_method,
         )
 
     # A small all_reduce for warmup & checking conformance.
-    device = hpu_device_string()
-    dummy_tensor_hpu = torch.ones(1).to(device)
+    dummy_tensor_hpu = torch.ones(1).to('hpu')
     torch.distributed.all_reduce(dummy_tensor_hpu)
     assert dummy_tensor_hpu.item() == parallel_config.world_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
