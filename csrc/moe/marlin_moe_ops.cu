@@ -1918,10 +1918,7 @@ torch::Tensor marlin_gemm_moe(
               " is not size_n = ", size_n);
   num_groups = b_scales.size(1);
 
-  if (!is_k_full) {
-    TORCH_CHECK(has_act_order,
-                "if is_k_full is false, has_act_order must be true");
-  }
+TORCH_CHECK(VLLM_IMPLIES(!is_k_full, has_act_order), "if is_k_full is false, has_act_order must be true");
 
   if (has_act_order) {
     if (is_k_full) {
