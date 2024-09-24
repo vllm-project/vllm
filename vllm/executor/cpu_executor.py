@@ -323,11 +323,6 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
 
 
 def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
-    if config.dtype == torch.float16:
-        logger.warning("float16 is not supported on CPU, casting to bfloat16.")
-        config.dtype = torch.bfloat16
-    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
-    # If the feature combo become valid
     if not config.enforce_eager:
         logger.warning(
             "CUDA graph is not supported on CPU, fallback to the eager "
