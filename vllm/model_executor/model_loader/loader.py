@@ -395,13 +395,13 @@ class DefaultModelLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            load_device = torch.device(self.load_config.device) if \
+            load_device : torch.device = self.load_config.device if \
                 self.load_config.device is not None else target_device
             with load_device:
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
-            logger.info("Loading weights on %s...", self.load_config.device)
+            logger.info("Loading weights on %s...", target_device)
             model.load_weights(self._get_all_weights(model_config, model))
 
             for _, module in model.named_modules():
