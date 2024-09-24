@@ -1,8 +1,8 @@
 
 ## vLLM and tt-metal Branches
 Git-checkout the following branches in each repo separately:
-- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev)
-- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal)
+- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [d8bc06f](https://github.com/tenstorrent/vllm/tree/d8bc06fbc2129fe9b3b90111ee7f60a0db1fedc7))
+- tt-metal branch: [vllm_dev](https://github.com/tenstorrent/tt-metal/tree/vllm_dev) (last verified commit: [3ddd7f4](https://github.com/tenstorrent/tt-metal/commit/3ddd7f47e7f7fbd48ec7eb3941a14e50f99703dc))
 
 ## Environment Creation
 
@@ -42,13 +42,14 @@ Steps:
     notebook_login()
     ```
 
-## Importing the tt-metal models
+## Preparing the tt-metal models
 
-Create a symbolic link to the tt-metal models folder inside vLLM:
-```sh
-cd tt_metal
-ln -s <path/to/tt-metal>/models ./models
-```
+1. Create a symbolic link to the tt-metal models folder inside vLLM:
+    ```sh
+    cd tt_metal
+    ln -s <path/to/tt-metal>/models ./models
+    ```
+2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1-70B, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b) for preparing the weights and environment variables.
 
 ## Running the offline inference example
 ```python
