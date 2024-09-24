@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    CompressionFormat)
+    CompressionFormat, QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
@@ -29,7 +29,24 @@ __all__ = [
 
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
-    pass
+
+    @staticmethod
+    def get_moe_method(
+        quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
+    ) -> "CompressedTensorsMoEMethod":
+        # TODO: @dsikka: refactor this to use schemes as other kernels
+        # are supported + check if the layer is being ignored.
+        weight_quant = quant_config.target_scheme_map["Linear"].get("weights")
+        input_quant = quant_config.target_scheme_map["Linear"].get(
+            "input_activations")
+
+        if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
+            return CompressedTensorsWNA16MoEMethod(quant_config)
+        elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
+            return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
+        else:
+            raise RuntimeError(
+                f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
@@ -39,18 +56,17 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
             "weights")
         self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
             "input_activations")
 
-        assert self.weight_quant.symmetric and self.input_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE")
-        assert self.weight_quant.strategy.value == "tensor"
-        assert self.input_quant.strategy.value == "tensor"
-        assert not self.weight_quant.dynamic
+        if not (self.weight_quant.strategy == QuantizationStrategy.TENSOR
+                and self.input_quant.strategy == QuantizationStrategy.TENSOR):
+            raise ValueError(
+                "For FP8 Fused MoE layers, only per-tensor scales"
+                "for weights and activations are supported. Found "
+                f"{self.weight_quant}, {self.input_quant}")
 
         self.static_input_scales = not self.input_quant.dynamic
 
