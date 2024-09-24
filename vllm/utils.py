@@ -551,8 +551,8 @@ def get_open_port(force: bool = False) -> int:
         # This flag will only be True in disaggregated prefill scenario
         # and it has to be set so that vLLM can connect prefill vLLM instance
         # and decode vLLM instance.
-        assert port is not None, "Please set VLLM_PORT in order to use "
-        "disaggregated prefill and distributed KV cache transfer."
+        assert port is not None, "Please set environment variable VLLM_PORT in"
+        " order to use disaggregated prefill and distributed KV cache transfer"
         
         # For prefill vLLM instance (KV producer) this port must be empty.
         # For decode vLLM instance this port can be non-empty.
@@ -573,7 +573,7 @@ def get_open_port(force: bool = False) -> int:
     if port is not None:
         while True:
             try:
-                logger.debug('Trying port %d', port)
+                logger.info('Trying port %d', port)
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.bind(("", port))
                     return port
