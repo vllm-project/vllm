@@ -67,11 +67,10 @@ _KEYS_TO_MODIFY_MAPPING = {
 
 
 class MiniCPMVImageInput(TypedDict):
-    """Image input to MiniCPM-V model with image bound auxiliary data."""
-
+    """Input mapper input with auxiliary data for computing image bounds."""
     image: Image.Image
 
-    # If provided, contains image_bounds data for the whole prompt.
+    # Image bounds token ids in 0-dim scaler tensor.
     im_start_id: torch.Tensor
     im_end_id: torch.Tensor
     slice_start_id: NotRequired[torch.Tensor]
@@ -101,8 +100,6 @@ class MiniCPMVImagePixelInputs(TypedDict):
     This should be in `(height, width)` format.
     """
 
-
-MiniCPMVImageInputs = MiniCPMVImagePixelInputs
 
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
 
@@ -248,6 +245,25 @@ class Resampler2_5(BaseResampler):
         return x
 
 
+def _build_image_input(ctx: InputContext,
+                       image: Image.Image) -> MiniCPMVImageInput:
+    tokenizer = cached_get_tokenizer(
+        ctx.model_config.tokenizer,
+        trust_remote_code=ctx.model_config.trust_remote_code)
+    if hasattr(tokenizer, "slice_start_id"):
+        return MiniCPMVImageInput(
+            image=image,
+            im_start_id=torch.tensor(tokenizer.im_start_id),
+            im_end_id=torch.tensor(tokenizer.im_end_id),
+            slice_start_id=torch.tensor(tokenizer.slice_start_id),
+            slice_end_id=torch.tensor(tokenizer.slice_end_id))
+    else:
+        return MiniCPMVImageInput(image=image,
+                                  im_start_id=torch.tensor(
+                                      tokenizer.im_start_id),
+                                  im_end_id=torch.tensor(tokenizer.im_end_id))
+
+
 def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
     version_float = getattr(config, "version", None)
 
@@ -273,15 +289,10 @@ def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
 
 def dummy_image_for_minicpmv(ctx: InputContext, hf_config: PretrainedConfig,
                              num_images: int):
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.tokenizer,
-        trust_remote_code=ctx.model_config.trust_remote_code)
-
     width = height = hf_config.image_size
-    image = MiniCPMVImageInput(image=Image.new("RGB", (width, height),
-                                               color=0),
-                               im_start_id=torch.tensor(tokenizer.im_start_id),
-                               im_end_id=torch.tensor(tokenizer.im_end_id))
+    image = _build_image_input(ctx,
+                               image=Image.new("RGB", (width, height),
+                                               color=0))
     return {"image": [image] if num_images == 1 else [image] * num_images}
 
 
@@ -289,6 +300,7 @@ def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
                             mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config()
     num_images = mm_counts["image"]
+
     seq_data = dummy_seq_data_for_minicpmv(seq_len, num_images)
     mm_data = dummy_image_for_minicpmv(ctx, hf_config, num_images)
 
@@ -339,21 +351,10 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
 
-    multi_modal_data["image"] = []
-    for image in images:
-        if hasattr(tokenizer, "slice_start_id"):
-            multi_modal_data["image"].append(MiniCPMVImageInput(
-                image=image,
-                im_start_id=torch.tensor(tokenizer.im_start_id),
-                im_end_id=torch.tensor(tokenizer.im_end_id),
-                slice_start_id=torch.tensor(tokenizer.slice_start_id),
-                slice_end_id=torch.tensor(tokenizer.slice_end_id)))
-        else:
-            multi_modal_data["image"].append(MiniCPMVImageInput(
-                image=image,
-                im_start_id=torch.tensor(tokenizer.im_start_id),
-                im_end_id=torch.tensor(tokenizer.im_end_id)))
-    print("multi_modal_data", multi_modal_data)
+    multi_modal_data["image"] = [
+        _build_image_input(ctx, image) for image in images
+    ]
+
     llm_inputs = LLMInputs(
         prompt_token_ids=new_token_ids,
         prompt=new_prompt,
@@ -432,7 +433,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     def get_embedding(
         self,
         input_ids: torch.Tensor,
-        image_inputs: Optional[MiniCPMVImageInputs],
+        image_inputs: Optional[MiniCPMVImagePixelInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
         if hasattr(self.config, "scale_emb"):
@@ -460,14 +461,14 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
 
         return vlm_embedding, vision_hidden_states
 
-    def _get_image_bounds(self,
-                          input_ids: torch.Tensor,
-                          im_start_id: int,
-                          im_end_id: int,
-                          slice_start_id: Optional[int] = None,
-                          slice_end_id: Optional[int] = None) -> torch.Tensor:
-        print("im_start_id", im_start_id)
-        start_cond = input_ids == im_start_id[0]
+    def _get_image_bounds(
+            self,
+            input_ids: torch.Tensor,
+            im_start_id: torch.Tensor,
+            im_end_id: torch.Tensor,
+            slice_start_id: Optional[torch.Tensor] = None,
+            slice_end_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+        start_cond = input_ids == im_start_id.item()
         end_cond = input_ids == im_end_id[0]
         if slice_start_id is not None:
             start_cond |= (input_ids == slice_start_id)
@@ -490,7 +491,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         **kwargs: object,
-    ) -> Optional[MiniCPMVImageInputs]:
+    ) -> Optional[MiniCPMVImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
         im_start_id = kwargs.pop("im_start_id", None)
@@ -534,7 +535,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         if len(pixel_values_flat) == 0:
             return None
 
-        return MiniCPMVImageInputs(
+        return MiniCPMVImagePixelInputs(
             image_bounds=self._get_image_bounds(input_ids, im_start_id,
                                                 im_end_id),
             pixel_values=pixel_values_flat,
@@ -643,8 +644,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def get_vision_hidden_states(self,
-                                 data: MiniCPMVImageInputs) -> torch.Tensor:
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         raise NotImplementedError
 
     def is_default_weight_loading(self, name: str) -> bool:
@@ -733,8 +734,8 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
             res.append(self.resampler(vision_embedding, tgt_size))
         return torch.vstack(res)
 
-    def get_vision_hidden_states(self,
-                                 data: MiniCPMVImageInputs) -> torch.Tensor:
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
 
         return self.get_vision_embedding(pixel_values)
@@ -792,8 +793,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         vision_embedding = self.resampler(vision_embedding, tgt_sizes)
         return vision_embedding
 
-    def get_vision_hidden_states(self,
-                                 data: MiniCPMVImageInputs) -> torch.Tensor:
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
         tgt_sizes = data["tgt_sizes"]
 
@@ -886,8 +887,8 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
         ).last_hidden_state
         return vision_embedding
 
-    def get_vision_hidden_states(self,
-                                 data: MiniCPMVImageInputs) -> torch.Tensor:
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
         tgt_sizes = data["tgt_sizes"]
 
