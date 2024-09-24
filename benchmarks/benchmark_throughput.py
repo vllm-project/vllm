@@ -90,6 +90,7 @@ def run_vllm(
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
+    use_new_beam_search_impl: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -132,9 +133,7 @@ def run_vllm(
                 max_tokens=output_len,
             ))
 
-    use_new_beam_search = False
-
-    if not use_new_beam_search:
+    if not use_new_beam_search_impl:
         start = time.perf_counter()
         llm.generate(prompts, sampling_params, use_tqdm=True)
         end = time.perf_counter()
@@ -143,6 +142,8 @@ def run_vllm(
         prompts = [prompt for prompt, _, _ in requests]
         # output_len should be the same for all requests.
         output_len = requests[0][2]
+        for prompt, input_len, _output_len in requests:
+            assert _output_len == output_len
         start = time.perf_counter()
         llm.beam_search(prompts,
                         beam_width=n,
@@ -350,7 +351,7 @@ def main(args: argparse.Namespace):
             run_args.append(args.disable_frontend_multiprocessing)
             elapsed_time = uvloop.run(run_vllm_async(*run_args))
         else:
-            elapsed_time = run_vllm(*run_args)
+            elapsed_time = run_vllm(*run_args, args.use_new_beam_search_impl)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -410,6 +411,7 @@ if __name__ == "__main__":
                         default=1,
                         help="Number of generated sequences per prompt.")
     parser.add_argument("--use-beam-search", action="store_true")
+    parser.add_argument("--use-new-beam-search-impl", action="store_true")
     parser.add_argument("--num-prompts",
                         type=int,
                         default=1000,
