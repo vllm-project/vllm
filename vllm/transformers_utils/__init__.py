@@ -15,3 +15,4 @@
 #
 #     # Patch hub to download models from modelscope to speed up.
 #     patch_hub()
+#     Test again!
