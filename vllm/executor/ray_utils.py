@@ -18,7 +18,6 @@ PG_WAIT_TIMEOUT = 1800
 
 try:
     import ray
-    from ray._private.state import available_resources_per_node
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
     try:
