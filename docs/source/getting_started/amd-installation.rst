@@ -162,7 +162,7 @@ Note to get your gfx architecture, run `rocminfo |grep gfx`.
         $ python3 setup.py develop
 
 
-    This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
+    This may take 5-10 minutes. Currently, :code:`pip install .` does not work for ROCm installation.
 
 
 .. tip::
