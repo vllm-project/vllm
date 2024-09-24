@@ -67,11 +67,24 @@ def load_qwenvl_chat(question: str, image_urls: List[str]) -> ModelRequestData:
 
 
 def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
+    # num_crops is an override kwarg to the multimodal image processor;
+    # For some models, e.g., Phi-3.5-vision-instruct, it is recommended
+    # to use 16 for single frame scenarios, and 4 for multi-frame.
+    #
+    # Generally speaking, a larger value for num_crops results in more
+    # tokens per image instance, because it may scale the image more in
+    # the image preprocessing. Some references in the model docs and the
+    # formula for image tokens after the preprocessing
+    # transform can be found below.
+    #
+    # https://huggingface.co/microsoft/Phi-3.5-vision-instruct#loading-the-model-locally
+    # https://huggingface.co/microsoft/Phi-3.5-vision-instruct/blob/main/processing_phi3_v.py#L194
     llm = LLM(
         model="microsoft/Phi-3.5-vision-instruct",
         trust_remote_code=True,
         max_model_len=4096,
         limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={"num_crops": 4},
     )
     placeholders = "\n".join(f"<|image_{i}|>"
                              for i, _ in enumerate(image_urls, start=1))
