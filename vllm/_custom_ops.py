@@ -146,12 +146,14 @@ def paged_attention_rocm(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
                                       block_size, max_seq_len, alibi_slopes,
-                                      kv_cache_dtype)
+                                      kv_cache_dtype, k_scale, v_scale)
 
 
 # pos encoding ops
@@ -436,7 +438,8 @@ try:
     @torch.library.register_fake("_C::machete_prepack_B")
     def machete_prepack_B_fake(b_q_weight: torch.Tensor,
                                b_type: ScalarType) -> torch.Tensor:
-        return torch.empty_like(b_q_weight)
+        return torch.empty_like(b_q_weight,
+                                memory_format=torch.contiguous_format)
 
     @torch.library.register_fake("_C::causal_conv1d_fwd")
     def causal_conv1d_fwd_fake(x: torch.Tensor, weight: torch.Tensor,
@@ -621,6 +624,22 @@ def machete_gemm(
 def machete_prepack_B(b_q_weight: torch.Tensor,
                       b_type: ScalarType) -> torch.Tensor:
     return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
+
+
+# TODO: has to be a better way to do this
+try:
+    torch.ops._C.permute_cols  # noqa B018
+
+    @torch.library.register_fake("_C::permute_cols")
+    def _permute_cols_fake(a: torch.Tensor,
+                           perm: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(a)
+except Exception:
+    pass
+
+
+def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.permute_cols(a, perm)
 
 
 # fp8
