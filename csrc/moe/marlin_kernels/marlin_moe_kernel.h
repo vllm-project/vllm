@@ -38,7 +38,7 @@ using FragA = Vec<half2, 4>;
 using FragB = Vec<half2, 2>;
 using FragC = Vec<float, 4>;
 using FragS = Vec<half2, 1>;  // quantization scales
-using FragZP = Vec<half2, 1>;
+using FragZP = Vec<half2, 4>;
 
 // Predicated asynchronous global->shared copy; used for inputs A where we apply
 // predication to handle batchsizes that are not multiples of 16.
@@ -230,13 +230,6 @@ __device__ inline void sub_zp(FragB& frag_b, half2& frag_zp, int i) {
   frag_b[1] = __hsub2(frag_b[1], zp);
 }
 
-// Given 2 floats multiply by 2 scales (halves)
-__device__ inline void scale_float(float* c, FragS& s) {
-  __half* s_ptr = reinterpret_cast<__half*>(&s);
-  c[0] = __fmul_rn(c[0], __half2float(s_ptr[0]));
-  c[1] = __fmul_rn(c[1], __half2float(s_ptr[1]));
-}
-
 // Same as above, but for act_order (each K is multiplied individually)
 __device__ inline void scale4(FragB& frag_b, FragS& frag_s_1, FragS& frag_s_2,
                               FragS& frag_s_3, FragS& frag_s_4, int i) {
@@ -250,6 +243,13 @@ __device__ inline void scale4(FragB& frag_b, FragS& frag_s_1, FragS& frag_s_2,
 
   frag_b[0] = __hmul2(frag_b[0], s_val_1_2);
   frag_b[1] = __hmul2(frag_b[1], s_val_3_4);
+}
+
+// Given 2 floats multiply by 2 scales (halves)
+__device__ inline void scale_float(float* c, FragS& s) {
+  __half* s_ptr = reinterpret_cast<__half*>(&s);
+  c[0] = __fmul_rn(c[0], __half2float(s_ptr[0]));
+  c[1] = __fmul_rn(c[1], __half2float(s_ptr[1]));
 }
 
 // Wait until barrier reaches `count`, then lock for current threadblock.
@@ -440,6 +440,7 @@ __device__ void MarlinMoESingle(
           : 1;
   constexpr int s_sh_stage = s_tb_groups * s_sh_stride;
   int s_gl_rd_delta = s_gl_stride;
+
   // Scale size/strides with act_order
   constexpr int tb_k = 16 * thread_k_blocks;
   constexpr int g_idx_stage = has_act_order ? (tb_k * sizeof(int)) / 16 : 0;
@@ -535,12 +536,6 @@ __device__ void MarlinMoESingle(
   int sh_first_group_id = -1;
   int sh_num_groups = -1;
   constexpr int sh_max_num_groups = 32;
-
-  int shs_size;
-  if constexpr (has_act_order)
-    shs_size = sh_max_num_groups * s_sh_stride + threads;
-  else
-    shs_size = group_blocks > 0 ? stages * s_sh_stage : threads;
 
   extern __shared__ int4 sh[];
   // Shared memory storage for global fetch pipelines.
@@ -674,6 +669,7 @@ __device__ void MarlinMoESingle(
         for (int j = 0; j < b_thread_vecs; j++) {
           cp_async4(&sh_b_stage[b_sh_wr_delta * i + b_sh_wr + j], B_ptr[i] + j);
         }
+
         B_ptr[i] += b_gl_rd_delta_o;
       }
 
@@ -990,6 +986,10 @@ __device__ void MarlinMoESingle(
 
       FragB frag_b0 = dequant<w_type_id>(b_quant_0);
       FragB frag_b1 = dequant<w_type_id>(b_quant_1);
+      // Apply zero-point to frag_b0
+      if constexpr (has_zp) {
+        sub_zp(frag_b0, frag_zp[j], 0);
+      }
 
       // Apply scale to frag_b0
       if constexpr (has_act_order) {
@@ -1193,6 +1193,7 @@ __device__ void MarlinMoESingle(
 
       ((half2*)sh)[idx] = res;
     };
+
     if (threadIdx.x / 32 < thread_n_blocks / 4) {
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
@@ -1277,6 +1278,7 @@ __device__ void MarlinMoESingle(
     // ensure all shared memory accesses are static. Note that both pipelines
     // have even length meaning that the next iteration will always start at
     // index 0.
+
   #pragma unroll
     for (int pipe = 0; pipe < stages;) {
   #pragma unroll
@@ -1420,6 +1422,7 @@ __device__ void MarlinMoESingle(
           s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
           zp_gl_rd = zp_sh_stride * slice_col + threadIdx.x;
         }
+
         start_pipes();
       }
     }

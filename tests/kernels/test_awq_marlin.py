@@ -8,22 +8,23 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe, single_marlin_moe)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.scalar_type import scalar_types
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
-    awq_marlin_quantize
-)
+    awq_marlin_quantize)
+from vllm.scalar_type import scalar_types
+
 
 def stack_and_dev(tensors: List[torch.Tensor]):
     dev = tensors[0].device
     return torch.stack(tensors, dim=0).to(dev)
 
+
 def compute_max_diff(output, output_ref):
     return torch.mean(torch.abs(output - output_ref)) / torch.mean(
         torch.abs(output_ref))
+
 
 def torch_moe(a, w1, w2, score, topk):
     B, D = a.shape
@@ -55,7 +56,7 @@ def torch_moe_single(a, w, score, topk):
             out[mask] = a[mask] @ w[i].transpose(0, 1)
     return (out.view(B, -1, w.shape[1])).sum(dim=1)
 
-@pytest.mark.skip("TODO")
+
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
@@ -77,8 +78,7 @@ def test_fused_marlin_moe_awq(
     if topk > e:
         return
 
-    quant_type = (scalar_types.uint4b8
-                  if num_bits == 4 else scalar_types.uint8b128)
+    quant_type = (scalar_types.uint4 if num_bits == 4 else scalar_types.uint8)
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -123,15 +123,6 @@ def test_fused_marlin_moe_awq(
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
     topk_weights, topk_ids = fused_topk(a, score, topk, False)
-
-    triton_output = fused_moe(
-        a,
-        w_ref1.transpose(1, 2).contiguous(),
-        w_ref2.transpose(1, 2).contiguous(),
-        score,
-        topk,
-        renormalize=False,
-    )
     marlin_output = fused_marlin_moe(
         a,
         qweight1,
@@ -146,25 +137,26 @@ def test_fused_marlin_moe_awq(
         num_bits=num_bits,
     )
 
-    assert compute_max_diff(marlin_output, triton_output) < 4e-2
+    torch_output = torch_moe(
+        a,
+        w_ref1.transpose(1, 2),
+        w_ref2.transpose(1, 2),
+        score,
+        topk,
+    )
+
+    assert compute_max_diff(marlin_output, torch_output) < 4e-2
 
 
 # @pytest.mark.skip("This test is here for the sake of debugging, "
 #                   "don't run it in automated tests.")
-# @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
-# @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
-# @pytest.mark.parametrize("k", [128, 1024, 512])
-# @pytest.mark.parametrize("e", [4, 8, 64])
-# @pytest.mark.parametrize("topk", [2, 6])
-# @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
-# @pytest.mark.parametrize("num_bits", [4, 8])
-@pytest.mark.parametrize("m", [1])
-@pytest.mark.parametrize("n", [128])
-@pytest.mark.parametrize("k", [128])
-@pytest.mark.parametrize("e", [4])
-@pytest.mark.parametrize("topk", [2])
-@pytest.mark.parametrize("group_size", [-1])
-@pytest.mark.parametrize("num_bits", [4])
+@pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
+@pytest.mark.parametrize("n", [128, 2048, 256, 1024])
+@pytest.mark.parametrize("k", [128, 1024, 512])
+@pytest.mark.parametrize("e", [4, 8, 64])
+@pytest.mark.parametrize("topk", [2, 6])
+@pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+@pytest.mark.parametrize("num_bits", [4, 8])
 def test_single_marlin_moe_multiply_awq(
     m: int,
     n: int,
@@ -174,11 +166,12 @@ def test_single_marlin_moe_multiply_awq(
     group_size: int,
     num_bits: int,
 ):
+    torch.manual_seed(7)
+
     if topk > e:
         return
 
-    quant_type = (scalar_types.uint4b8
-                  if num_bits == 4 else scalar_types.uint8b128)
+    quant_type = (scalar_types.uint4 if num_bits == 4 else scalar_types.uint8)
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
@@ -198,11 +191,8 @@ def test_single_marlin_moe_multiply_awq(
 
     w_ref = stack_and_dev(w_ref_l)
     qweight = stack_and_dev(qweights_l).contiguous()
-    scales = stack_and_dev(scales_l)
-    zp = stack_and_dev(zp_l)
-
-    print(scales.dtype)
-    print(zp.dtype)
+    scales = stack_and_dev(scales_l).contiguous()
+    zp = stack_and_dev(zp_l).contiguous()
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 

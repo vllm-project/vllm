@@ -436,16 +436,9 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
     int4* C_ptr = (int4*)C;
     const float* topk_weights_ptr = (const float*)topk_weights;
     const int* sorted_ids_ptr = (const int*)sorted_ids;
-    const int4* s_ptr =
-        (const int4*)s +
-        (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) *
-         prob_n / 8) *
-            expert_idx;
+    const int4* s_ptr = (const int4*)s + num_groups * prob_n / 8 * expert_idx;
     const int4* zp_ptr =
-        (const int4*)zp +
-        (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) *
-         prob_n / 4) *
-            expert_idx;
+        (const int4*)zp + num_groups * prob_n / (pack_factor * 4) * expert_idx;
     const int* g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
     const int* perm_ptr = (const int*)perm + prob_k * expert_idx;
     int* locks = (int*)workspace;
@@ -570,7 +563,7 @@ torch::Tensor marlin_gemm_moe(
                 "b_zeros dim 1 = ", b_zeros.size(1),
                 " is not num_groups = ", num_groups);
     TORCH_CHECK(b_zeros.size(2) == size_n / pack_factor,
-                "b_zeros dim 2 = ", b_scales.size(2),
+                "b_zeros dim 2 = ", b_zeros.size(2),
                 " is not size_n / pack_factor = ", size_n / pack_factor);
   }
 
