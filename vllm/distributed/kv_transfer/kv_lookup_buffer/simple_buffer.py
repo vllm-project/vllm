@@ -82,8 +82,8 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
             return 0
         if isinstance(data, torch.Tensor):
             return data.element_size() * data.numel()
-        else:
-            raise AssertionError("Unknown data type %s" % type(data))
+
+        raise AssertionError("Unknown data type %s" % type(data))
 
     def _add_to_buffer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                        key: torch.Tensor, value: torch.Tensor,
