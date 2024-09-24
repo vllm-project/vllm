@@ -129,10 +129,10 @@ Gaudi2 devices. Configurations that are not listed may or may not work.
    with tensor parallelism on 2x HPU, BF16 datatype with random or greedy sampling
 
 Performance Tuning
-================
+==================
 
 Execution modes
-------------
+---------------
 
 Currently in vLLM for HPU we support four execution modes, depending on selected HPU PyTorch Bridge backend (via ``PT_HPU_LAZY_MODE`` environment variable), and ``--enforce-eager`` flag.  
 
@@ -161,7 +161,7 @@ Currently in vLLM for HPU we support four execution modes, depending on selected
 
 
 Bucketing mechanism
-------------
+-------------------
 
 Intel Gaudi accelerators work best when operating on models with fixed tensor shapes. `Intel Gaudi Graph Compiler <https://docs.habana.ai/en/latest/Gaudi_Overview/Intel_Gaudi_Software_Suite.html#graph-compiler-and-runtime>`__ is responsible for generating optimized binary code that implements the given model topology on Gaudi. In its default configuration, the produced binary code may be heavily dependent on input and output tensor shapes, and can require graph recompilation when encountering differently shaped tensors within the same topology. While the resulting binaries utilize Gaudi efficiently, the compilation itself may introduce a noticeable overhead in end-to-end execution.
 In a dynamic inference serving scenario, there is a need to minimize the number of graph compilations and reduce the risk of graph compilation occurring during server runtime. Currently it is achieved by "bucketing" model's forward pass across two dimensions - ``batch_size`` and ``sequence_length``. 
@@ -234,7 +234,7 @@ This example uses the same buckets as in *Bucketing mechanism* section. Each out
    Compiling all the buckets might take some time and can be turned off with ``VLLM_SKIP_WARMUP=true`` environment variable. Keep in mind that if you do that, you may face graph compilations once executing a given bucket for the first time. It is fine to disable warmup for development, but it's highly recommended to enable it in deployment.
 
 HPU Graph capture
-------------
+-----------------
 
 `HPU Graphs <https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html>`__ are currently the most performant execution method of vLLM on Intel Gaudi. When HPU Graphs are enabled, execution graphs will be traced (recorded) ahead of time (after performing warmup), to be later replayed during inference, significantly reducing host overheads. Recording can take large amounts of memory, which needs to be taken into account when allocating KV cache. Enabling HPU Graphs will impact the number of available KV cache blocks, but vLLM provides user-configurable variables to control memory management.
 
@@ -298,7 +298,7 @@ Each described step is logged by vLLM server, as follows (negative values corres
 
 
 Recommended vLLM Parameters
-------------
+---------------------------
 
 -  We recommend running inference on Gaudi 2 with ``block_size`` of 128
    for BF16 data type. Using default values (16, 32) might lead to
@@ -310,7 +310,7 @@ Recommended vLLM Parameters
    If you encounter out-of-memory issues, see troubleshooting section.
 
 Environment variables
-------------
+---------------------
 
 **Diagnostic and profiling knobs:**
 
