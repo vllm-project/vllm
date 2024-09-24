@@ -162,6 +162,7 @@ class cmake_build_ext(build_ext):
             '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
             '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
+            "-DCMAKE_CXX_STANDARD=17",
         ]
 
         verbose = envs.VERBOSE
@@ -248,7 +249,7 @@ def _no_device() -> bool:
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu()))
+            and not (_is_neuron() or _is_tpu() or _is_xpu()))
 
 
 def _is_hip() -> bool:
@@ -282,7 +283,7 @@ def _is_xpu() -> bool:
 
 
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu()
+    return _is_cuda() or _is_hip() or _is_cpu() or _is_xpu()
 
 
 def _build_core_ext() -> bool:
