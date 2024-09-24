@@ -131,8 +131,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
 
             if not self.input_symmetric:
                 # Static asymmetric quantization has not been tested yet
-                logger.warning(
-                    "Static asymmetric quantization currently untested")
+                # See comment in process_weights_after_loading
                 input_zero_point = Parameter(torch.zeros(1, dtype=torch.int32))
                 layer.register_parameter("input_zero_point", input_zero_point)
 
