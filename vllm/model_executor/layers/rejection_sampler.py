@@ -31,15 +31,11 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
     """
 
     def __init__(self,
-                 disable_bonus_tokens: bool = True,
                  strict_mode: bool = False,
                  use_flashinfer: Optional[bool] = None):
         """Create a rejection sampler.
 
         Args:
-            disable_bonus_tokens: Whether or not to disable the bonus token.
-            Require when bonus tokens will cause corrupt KV cache for
-            proposal methods that require KV cache.
             strict_mode: Whether or not to perform shape/device/dtype checks
             during sampling. This catches correctness issues but adds
             nontrivial latency.
@@ -48,8 +44,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             None, we will use the default value from the environment variable.
             This parameter is only used for testing purposes.
         """
-        super().__init__(disable_bonus_tokens=disable_bonus_tokens,
-                         strict_mode=strict_mode)
+        super().__init__(strict_mode=strict_mode)
         if use_flashinfer is None:
             self.use_flashinfer = envs.VLLM_USE_FLASHINFER_SAMPLER and (
                 chain_speculative_sampling is not None)
@@ -57,8 +52,6 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             self.use_flashinfer = use_flashinfer
 
         if self.use_flashinfer:
-            assert not disable_bonus_tokens, \
-                "flashinfer will enable bonus token by default"
             logger.info("Use flashinfer for rejection sampling.")
         else:
             logger.info("Use pytorch for rejection sampling.")

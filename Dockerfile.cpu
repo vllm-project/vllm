@@ -24,6 +24,8 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 
 RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.4.0%2Bgitfbaa4bc-cp310-cp310-linux_x86_64.whl
 
+WORKDIR /workspace
+
 ENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,src=requirements-build.txt,target=requirements-build.txt \
@@ -60,8 +62,10 @@ ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
-    pip install dist/*.whl
+    pip install dist/*.whl && \
+    rm -rf dist
 
 WORKDIR /workspace/
 

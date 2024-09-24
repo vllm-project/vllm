@@ -257,11 +257,13 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
 // static-per-tensor quantization.
 void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
                               const torch::Tensor& input,  // [..., hidden_size]
-                              const torch::Tensor& scale) {
+                              const torch::Tensor& scale,
+                              c10::optional<torch::Tensor> const& azp) {
   CPU_KERNEL_GUARD_IN(static_scaled_int8_quant)
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(scale.numel() == 1);
+  TORCH_CHECK(!azp.has_value(), "Zero point is not supported on CPU.");
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
@@ -277,11 +279,12 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
 void dynamic_scaled_int8_quant(
     torch::Tensor& out,          // [..., hidden_size]
     const torch::Tensor& input,  // [..., hidden_size]
-    torch::Tensor& scale         // [..., 1]
-) {
+    torch::Tensor& scale,        // [..., 1]
+    c10::optional<torch::Tensor> const& azp) {
   CPU_KERNEL_GUARD_IN(dynamic_scaled_int8_quant)
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
+  TORCH_CHECK(!azp.has_value(), "Zero point is not supported on CPU.");
 
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;

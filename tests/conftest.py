@@ -20,6 +20,8 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
                           BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
+from tests.models.utils import (TokensTextLogprobs,
+                                TokensTextLogprobsPromptLogprobs)
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
@@ -33,7 +35,6 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.sequence import SampleLogprobs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
 
@@ -158,10 +159,7 @@ def should_do_global_cleanup_after_test(request) -> bool:
     to initialize torch.
     """
 
-    if request.node.get_closest_marker("skip_global_cleanup"):
-        return False
-
-    return True
+    return not request.node.get_closest_marker("skip_global_cleanup")
 
 
 @pytest.fixture(autouse=True)
@@ -472,7 +470,7 @@ class HfRunner:
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
-    ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
+    ) -> List[TokensTextLogprobs]:
         all_logprobs: List[List[Dict[int, float]]] = []
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
@@ -528,7 +526,7 @@ class HfRunner:
         max_tokens: int,
         num_logprobs: int,
         **kwargs: Any,
-    ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
+    ) -> List[TokensTextLogprobs]:
         '''
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
@@ -656,14 +654,16 @@ class VllmRunner:
     @staticmethod
     def _final_steps_generate_w_logprobs(
         req_outputs: List[RequestOutput],
-    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
-        outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
+    ) -> List[TokensTextLogprobsPromptLogprobs]:
+        outputs: List[TokensTextLogprobsPromptLogprobs] = []
         for req_output in req_outputs:
+            assert len(req_output.outputs) > 0
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 output_logprobs = sample.logprobs
-            outputs.append((output_ids, output_str, output_logprobs))
+            outputs.append((output_ids, output_str, output_logprobs,
+                            req_output.prompt_logprobs))
         return outputs
 
     def generate_w_logprobs(
@@ -673,7 +673,8 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
-    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
+    ) -> Union[List[TokensTextLogprobs],
+               List[TokensTextLogprobsPromptLogprobs]]:
         assert sampling_params.logprobs is not None
 
         if images is not None:
@@ -698,13 +699,20 @@ class VllmRunner:
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
-        return self._final_steps_generate_w_logprobs(req_outputs)
+
+        toks_str_logsprobs_prompt_logprobs = (
+            self._final_steps_generate_w_logprobs(req_outputs))
+        # Omit prompt logprobs if not required by sampling params
+        return ([x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
+                if sampling_params.prompt_logprobs is None else
+                toks_str_logsprobs_prompt_logprobs)
 
     def generate_encoder_decoder_w_logprobs(
         self,
         encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         sampling_params: SamplingParams,
-    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
+    ) -> Union[List[TokensTextLogprobs],
+               List[TokensTextLogprobsPromptLogprobs]]:
         '''
         Logprobs generation for vLLM encoder/decoder models
         '''
@@ -712,7 +720,12 @@ class VllmRunner:
         assert sampling_params.logprobs is not None
         req_outputs = self.model.generate(encoder_decoder_prompts,
                                           sampling_params=sampling_params)
-        return self._final_steps_generate_w_logprobs(req_outputs)
+        toks_str_logsprobs_prompt_logprobs = (
+            self._final_steps_generate_w_logprobs(req_outputs))
+        # Omit prompt logprobs if not required by sampling params
+        return ([x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
+                if sampling_params.prompt_logprobs is None else
+                toks_str_logsprobs_prompt_logprobs)
 
     def generate_greedy(
         self,
@@ -730,43 +743,47 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
+        num_prompt_logprobs: Optional[int] = None,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
         stop_token_ids: Optional[List[int]] = None,
-    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
-        greedy_logprobs_params = SamplingParams(temperature=0.0,
-                                                max_tokens=max_tokens,
-                                                logprobs=num_logprobs,
-                                                stop_token_ids=stop_token_ids)
-        outputs = self.generate_w_logprobs(prompts,
-                                           greedy_logprobs_params,
-                                           images=images,
-                                           audios=audios,
-                                           videos=videos)
+    ) -> Union[List[TokensTextLogprobs],
+               List[TokensTextLogprobsPromptLogprobs]]:
+        greedy_logprobs_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=max_tokens,
+            logprobs=num_logprobs,
+            prompt_logprobs=(num_prompt_logprobs),
+            stop_token_ids=stop_token_ids)
 
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
+        return self.generate_w_logprobs(prompts,
+                                        greedy_logprobs_params,
+                                        images=images,
+                                        audios=audios,
+                                        videos=videos)
 
     def generate_encoder_decoder_greedy_logprobs(
         self,
         encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
         num_logprobs: int,
-    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
-        greedy_logprobs_params = SamplingParams(temperature=0.0,
-                                                use_beam_search=False,
-                                                max_tokens=max_tokens,
-                                                logprobs=num_logprobs)
+        num_prompt_logprobs: Optional[int] = None,
+    ) -> Union[List[TokensTextLogprobs],
+               List[TokensTextLogprobsPromptLogprobs]]:
+        greedy_logprobs_params = SamplingParams(
+            temperature=0.0,
+            use_beam_search=False,
+            max_tokens=max_tokens,
+            logprobs=num_logprobs,
+            prompt_logprobs=(num_prompt_logprobs),
+        )
         '''
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
 
-        outputs = self.generate_encoder_decoder_w_logprobs(
+        return self.generate_encoder_decoder_w_logprobs(
             encoder_decoder_prompts, greedy_logprobs_params)
-
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
 
     def generate_beam_search(
         self,
@@ -780,6 +797,20 @@ class VllmRunner:
                                             max_tokens=max_tokens)
         outputs = self.generate(prompts, beam_search_params)
         return outputs
+
+    def generate_beam_search_new(
+        self,
+        prompts: Union[List[str], List[List[int]]],
+        beam_width: int,
+        max_tokens: int,
+    ) -> List[Tuple[List[List[int]], List[str]]]:
+        outputs = self.model.beam_search(prompts, beam_width, max_tokens)
+        returned_outputs = []
+        for output in outputs:
+            token_ids = [x.tokens for x in output.sequences]
+            texts = [x.text for x in output.sequences]
+            returned_outputs.append((token_ids, texts))
+        return returned_outputs
 
     def encode(self, prompts: List[str]) -> List[List[float]]:
         req_outputs = self.model.encode(prompts)

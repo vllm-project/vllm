@@ -106,6 +106,7 @@ class CPUExecutor(ExecutorBase):
                         )) for rank in range(1, world_size)
                 ]
 
+        self.worker_monitor = None
         if world_size != 1 or is_async:
             if is_async:
                 async_worker_list = self.workers + [self.driver_worker]

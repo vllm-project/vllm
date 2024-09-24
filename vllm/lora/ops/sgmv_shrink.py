@@ -110,6 +110,7 @@ def _sgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     batches: int,
     max_seq_length: int,
+    token_nums: int,
     scaling: float,
 ) -> None:
     """
@@ -120,17 +121,19 @@ def _sgmv_shrink(
         output_tensor (torch.Tensor): output tensor
         b_seq_start_loc (torch.Tensor): (batch_size,). The cumulative
             sequence lengths of the sequences in the batch, used to index
-            into sequence. E.g.,if the sequence length is [4, 6], it is
+            into sequence. E.g., if the sequence length is [4, 6], it is
             [0, 4].
-        seq_len_tensor (torch.Tensor): (batch_size,). record the sequence
-            length of the sequences  in the batch
+        seq_len_tensor (torch.Tensor): (batch_size,). Record the sequence
+            length of the sequences in the batch.
         lora_indices_tensor (torch.Tensor): (batch_size,). The LoRA index
             corresponding to each batch. An index of -1 means no lora should be
             applied.
         batches (int): batch size
-        max_seq_length (int):  The max sequence lengths of the sequences
-            in the batch
-        scaling (float):  Scaling factor.
+        max_seq_length (int): The max sequence lengths of the sequences in the 
+            batch.
+        token_nums (int): The token numbers in the batch. Used to verify if the 
+            token numbers in the inputs matches the one in the metadata.
+        scaling (float): Scaling factor.
     """
     assert inputs.dtype == lora_a_weights.dtype
     assert inputs.dtype in [torch.float16, torch.bfloat16]
@@ -138,6 +141,7 @@ def _sgmv_shrink(
         torch.float16,
         torch.bfloat16,
     ]
+    assert inputs.size(0) == token_nums
     assert inputs.size(1) == lora_a_weights.size(-1)
     assert b_seq_start_loc.size(0) == batches
     assert lora_indices_tensor.size(0) == batches

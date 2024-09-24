@@ -45,8 +45,7 @@ if __name__ == "__main__":
     rows = int(math.ceil(len(results) / 2))
     fig, axs = plt.subplots(rows, 2, figsize=(12, 5 * rows))
     axs = axs.flatten()
-    axs_idx = 0
-    for shape, data in results.items():
+    for axs_idx, (shape, data) in enumerate(results.items()):
         plt.sca(axs[axs_idx])
         df = pd.DataFrame(data)
         sns.lineplot(data=df,
@@ -59,6 +58,5 @@ if __name__ == "__main__":
                      palette="Dark2")
         plt.title(f"Shape: {shape}")
         plt.ylabel("time (median, s)")
-        axs_idx += 1
     plt.tight_layout()
     plt.savefig("graph_machete_bench.pdf")

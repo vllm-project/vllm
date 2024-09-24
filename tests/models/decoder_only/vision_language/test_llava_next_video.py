@@ -105,9 +105,6 @@ def run_test(
         for asset in video_assets
     ]
 
-    for video in videos:
-        print(video.shape)
-
     if size_factors is not None:
         inputs_per_video = [(
             [prompt for _ in size_factors],

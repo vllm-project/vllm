@@ -8,8 +8,7 @@ steps:
           containers:
           - image: badouralix/curl-jq
             command:
-            - sh
-            - .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
+            - sh .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
   - wait
   - label: "A100"
     agents:

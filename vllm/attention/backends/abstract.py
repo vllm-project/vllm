@@ -156,18 +156,27 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def graph_capture_get_metadata_for_batch(self, batch_size: int) -> T:
+    def graph_capture_get_metadata_for_batch(
+            self,
+            batch_size: int,
+            is_encoder_decoder_model: bool = False) -> T:
         """Get attention metadata for CUDA graph capture of batch_size."""
         ...
 
     @abstractmethod
-    def get_graph_input_buffers(self, attn_metadata: T) -> Dict[str, Any]:
+    def get_graph_input_buffers(
+            self,
+            attn_metadata: T,
+            is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
         """Get attention-specific input buffers for CUDA graph capture."""
         ...
 
     @abstractmethod
-    def prepare_graph_input_buffers(self, input_buffers: Dict[str, Any],
-                                    attn_metadata: T) -> None:
+    def prepare_graph_input_buffers(
+            self,
+            input_buffers: Dict[str, Any],
+            attn_metadata: T,
+            is_encoder_decoder_model: bool = False) -> None:
         """In-place modify input buffers dict for CUDA graph replay."""
         ...
 
