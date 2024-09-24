@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+from transformers_neuronx.config import GenerationConfig
 
 from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -17,7 +18,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
-from transformers_neuronx.config import GenerationConfig
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -77,15 +78,14 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
         self.model_config.generation_config = GenerationConfig(
-                   max_length=self.scheduler_config.max_model_len,
-                   do_sample=True,
-                   per_batch_line=True,
-                   top_k = [1] * self.scheduler_config.max_num_seqs,
-                   top_p = [1] * self.scheduler_config.max_num_seqs,
-                   temperature = [1] * self.scheduler_config.max_num_seqs,
-                   dynamic=True,
-                   global_top_k=256
-            )
+            max_length=self.scheduler_config.max_model_len,
+            do_sample=True,
+            per_batch_line=True,
+            top_k=[1] * self.scheduler_config.max_num_seqs,
+            top_p=[1] * self.scheduler_config.max_num_seqs,
+            temperature=[1] * self.scheduler_config.max_num_seqs,
+            dynamic=True,
+            global_top_k=256)
 
     def load_model(self) -> None:
         if find_spec("transformers_neuronx") is not None:
@@ -246,27 +246,35 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
     def _update_neuron_generation_config(self, sampling_metadata):
         # Update Neuron Genetation Config
-        assert self.model_config.generation_config is not None, f"Failed to update generation_config, \
-            current generation config is {self.model_config.generation_config}"
-
         current_generation_config = self.model_config.generation_config
+        assert current_generation_config is not None, (
+            f"Failed to update generation_config, "
+            f"current generation config is {current_generation_config}")
+
         top_k = current_generation_config.top_k.copy()
         top_p = current_generation_config.top_p.copy()
         temperature = current_generation_config.temperature.copy()
-        for index, sequence_group_to_sample in enumerate(sampling_metadata.seq_groups):
+        for index, sequence_group_to_sample in enumerate(
+                sampling_metadata.seq_groups):
             top_k[index] = sequence_group_to_sample.sampling_params.top_k
             top_p[index] = sequence_group_to_sample.sampling_params.top_p
-            temperature[index] = sequence_group_to_sample.sampling_params.temperature
+            temperature[index] = \
+                sequence_group_to_sample.sampling_params.temperature
 
-        # We only call update the generation config is the new config is different
-        # This avoids calling update_generation_config for every token within the same sequence
-        if top_k != current_generation_config.top_k or top_p != current_generation_config.top_p or temperature != current_generation_config.temperature:
+        # Only call update the generation config is the new config is different.
+        # This avoids calling update_generation_config for every token within
+        # the same sequence.
+        if (top_k != current_generation_config.top_k
+                or top_p != current_generation_config.top_p
+                or temperature != current_generation_config.temperature):
             current_generation_config.top_k = top_k
             current_generation_config.top_p = top_p
             current_generation_config.temperature = temperature
-            self.model_config.generation_config = copy.deepcopy(current_generation_config)
+            self.model_config.generation_config = copy.deepcopy(
+                current_generation_config)
 
-            self.model.model.update_generation_config(current_generation_config)
+            self.model.model.update_generation_config(
+                current_generation_config)
 
     @torch.inference_mode()
     def execute_model(
