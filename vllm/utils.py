@@ -739,12 +739,6 @@ def print_warning_once(msg: str) -> None:
     logger.warning(msg)
 
 
-def get_device() -> str:
-    if current_platform.is_hpu():
-        return "hpu"
-    return "cuda"
-
-
 @lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
 
