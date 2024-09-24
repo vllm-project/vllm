@@ -71,8 +71,7 @@ class KVLookupBufferBase(ABC):
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
-        """
-        Select and *drop* KV cache entries from the lookup buffer.
+        """Select and *drop* KV cache entries from the lookup buffer.
         
         The functionality is similar to the following python statements
         ```
@@ -98,8 +97,7 @@ class KVLookupBufferBase(ABC):
 
     @abstractmethod
     def close(self) -> None:
-        """
-        Close the buffer and release resources.
+        """Close the buffer and release resources.
 
         This method is responsible for cleaning up resources related to the 
         lookup buffer when it is no longer needed.
