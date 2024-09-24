@@ -1,22 +1,7 @@
 import importlib
 import traceback
-from functools import wraps
-from typing import Callable, TypeVar
+from typing import Callable
 from unittest.mock import patch
-
-from typing_extensions import ParamSpec
-
-_P, _R_co = ParamSpec("_P"), TypeVar("_R_co", covariant=True)
-
-
-def print_stack(f: Callable[_P, _R_co]) -> Callable[_P, _R_co]:
-
-    @wraps(f)
-    def wrapper(*args: _P.args, **kwargs: _P.kwargs):
-        traceback.print_stack()
-        return f(*args, **kwargs)
-
-    return wrapper
 
 
 def find_cuda_init(fn: Callable[[], object]) -> None:
@@ -27,8 +12,20 @@ def find_cuda_init(fn: Callable[[], object]) -> None:
     """
     from torch.cuda import _lazy_init
 
-    with patch("torch.cuda._lazy_init", print_stack(_lazy_init)):
+    stack = None
+
+    def wrapper():
+        nonlocal stack
+        stack = traceback.extract_stack()
+        return _lazy_init()
+
+    with patch("torch.cuda._lazy_init", wrapper):
         fn()
+
+    if stack is not None:
+        print("==== CUDA Initialized ====")
+        print("".join(traceback.format_list(stack)).strip())
+        print("==========================")
 
 
 if __name__ == "__main__":
