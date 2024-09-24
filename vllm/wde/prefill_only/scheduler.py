@@ -22,8 +22,9 @@ class SchedulingBudget:
     def can_schedule(self, *, num_new_tokens: int, num_new_request: int = 1):
         assert num_new_tokens != 0
         assert num_new_request != 0
-        return (self.num_batched_tokens + num_new_tokens <= self.token_budget
-                and self.num_curr_request + num_new_request <= self.max_num_requests)  # noqa: E501
+        a = self.num_batched_tokens + num_new_tokens <= self.token_budget
+        b = self.num_curr_request + num_new_request <= self.max_num_requests
+        return a and b
 
     def add_num_batched_tokens(self, req_id: str, num_batched_tokens: int):
         if req_id in self._curr_requests:
