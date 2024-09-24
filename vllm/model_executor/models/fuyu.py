@@ -41,6 +41,7 @@ from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
+from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal
 from .utils import merge_multimodal_embeddings
@@ -133,7 +134,7 @@ def dummy_data_for_fuyu(ctx: InputContext, seq_len: int,
 
 
 def _fuyu_image_preprocess(image_processor: FuyuImageProcessor,
-                           data: Image.Image):
+                           data: List[Image.Image]):
     image_encoding = image_processor.preprocess(data, return_tensors="pt")
     batch_images = torch.stack([img[0] for img in image_encoding["images"]
                                 ]).unsqueeze(1)
@@ -164,8 +165,10 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
     model_config = ctx.model_config
     image_data = multi_modal_data["image"]
     new_multi_modal_data = {}
+    image_list = image_data if isinstance(image_data, list) else [image_data]
+
     # process image data
-    if isinstance(image_data, Image.Image):
+    if is_list_of(image_list, Image.Image):
         # Fuyu's image_processor can also finish token padding
         image_processor: FuyuImageProcessor = cached_get_image_processor(
             model_config.model)
@@ -177,7 +180,7 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
         ])
         new_multi_modal_data["image"] = image_patches
 
-    elif isinstance(image_data, torch.Tensor):
+    elif is_list_of(image_list, torch.Tensor):
         raise NotImplementedError("Embeddings input is not supported yet")
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
@@ -204,12 +207,13 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
 
 def input_mapper_for_fuyu(ctx: InputContext, data: object):
     model_config = ctx.model_config
-    if isinstance(data, Image.Image):
+    data_list = data if isinstance(data, list) else [data]
+    if is_list_of(data_list, Image.Image):
         # Fuyu's image_processor can also finish token padding
         image_processor: FuyuImageProcessor = cached_get_image_processor(
             model_config.model)
 
-        model_image_input = _fuyu_image_preprocess(image_processor, data)
+        model_image_input = _fuyu_image_preprocess(image_processor, data_list)
         data = torch.stack([
             image_patch[0]
             for image_patch in model_image_input["image_patches"]
