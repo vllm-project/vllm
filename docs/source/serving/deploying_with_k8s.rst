@@ -18,105 +18,110 @@ Deployment Steps
 
 1.  **Create a PVC , Secret and Deployment for vLLM**
 
-Create a Kubernetes deployment file that includes a PersistentVolumeClaim (PVC) and a Secret necessary for pulling the Hugging Face token. Here is an example deployment file:
+
+PVC is used to store the model cache and it is optional, you can use hostPath or other storage options
 
 .. code-block:: yaml
 
-    apiVersion: v1
-    kind: PersistentVolumeClaim
-    metadata:
-      name: mistral-7b
-      namespace: llm
-    spec:
-      accessModes:
-      - ReadWriteOnce
-      resources:
-        requests:
-          storage: 50Gi
-      storageClassName: default
-      volumeMode: Filesystem
-    ---
-    apiVersion: v1
-    kind: Secret
-    metadata:
-      name: hf-token-secret
-      namespace: llm
-    type: Opaque
-    data:
-      token: *******
-    ---
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: mistral-7b
-      namespace: llm
-      labels:
+  apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: mistral-7b
+    namespace: default
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: 50Gi
+    storageClassName: default
+    volumeMode: Filesystem
+
+Secret is optional and only required for accessing gated models, you can skip this step if you are not using gated models
+
+.. code-block:: yaml
+
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    name: hf-token-secret
+    namespace: default
+  type: Opaque
+  data:
+    token: "REPLACE_WITH_TOKEN"
+
+
+Create a deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model:
+
+.. code-block:: yaml
+
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: mistral-7b
+    namespace: default
+    labels:
+      app: mistral-7b
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
         app: mistral-7b
-    spec:
-      replicas: 1
-      revisionHistoryLimit: 1
-      selector:
-        matchLabels:
+    template:
+      metadata:
+        labels:
           app: mistral-7b
-      template:
-        metadata:
-          labels:
-            app: mistral-7b
-        spec:
-          volumes:
-          - name: cache-volume
-            persistentVolumeClaim:
-              claimName: mistral-7b
+      spec:
+        volumes:
+        - name: cache-volume
+          persistentVolumeClaim:
+            claimName: mistral-7b
+        # vLLM needs to access the host's shared memory for tensor parallel inference.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "2Gi"
+        containers:
+        - name: mistral-7b
+          image: vllm/vllm-openai:latest
+          command: ["/bin/sh", "-c"]
+          args: [
+            "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
+          ]
+          env:
+          - name: HUGGING_FACE_HUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-token-secret
+                key: token
+          ports:
+          - containerPort: 8000
+          resources:
+            limits:
+              cpu: "10"
+              memory: 20G
+              nvidia.com/gpu: "1"
+            requests:
+              cpu: "2"
+              memory: 6G
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /root/.cache/huggingface
+            name: cache-volume
           - name: shm
-            emptyDir:
-              medium: Memory
-              sizeLimit: "2Gi"
-          containers:
-          - name: mistral-7b
-            image: vllm/vllm-openai:latest
-            command: ["/bin/sh", "-c"]
-            args: [
-              "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
-            ]
-            env:
-            - name: HUGGING_FACE_HUB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: token
-            - name: VLLM_NO_USAGE_STATS
-              value: "1"
-            - name: DO_NOT_TRACK
-              value: "1"
-            ports:
-            - containerPort: 8000
-            resources:
-              limits:
-                cpu: "10"
-                memory: 20G
-                nvidia.com/gpu: "1"
-              requests:
-                cpu: "2"
-                memory: 6G
-                nvidia.com/gpu: "1"
-            volumeMounts:
-            - mountPath: /root/.cache/huggingface
-              name: cache-volume
-            - name: shm
-              mountPath: /dev/shm
-            livenessProbe:
-              httpGet:
-                path: /health
-                port: 8000
-              initialDelaySeconds: 60
-              periodSeconds: 10
-            readinessProbe:
-              httpGet:
-                path: /health
-                port: 8000
-              initialDelaySeconds: 60
-              periodSeconds: 5
-    ---
+            mountPath: /dev/shm
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 5
 
 2. **Create a Kubernetes Service for vLLM**
 
@@ -128,17 +133,14 @@ Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
     kind: Service
     metadata:
       name: mistral-7b
-      namespace: llm
+      namespace: default
     spec:
-      internalTrafficPolicy: Cluster
-      ipFamilies:
-      - IPv4
-      ipFamilyPolicy: SingleStack
       ports:
       - name: http-mistral-7b
         port: 80
         protocol: TCP
         targetPort: 8000
+      # The label selector should match the deployment labels & it is useful for prefix caching feature
       selector:
         app: mistral-7b
       sessionAffinity: None
@@ -157,7 +159,7 @@ To test the deployment, run the following ``curl`` command:
 
 .. code-block:: console
 
-    curl http://mistral-7b.llm.svc.cluster.local/v1/completions \
+    curl http://mistral-7b.default.svc.cluster.local/v1/completions \
       -H "Content-Type: application/json" \
       -d '{
             "model": "facebook/opt-125m",
