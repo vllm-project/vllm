@@ -4,10 +4,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-
-logger = init_logger(__name__)
 
 
 class RMSNorm(CustomOp):
