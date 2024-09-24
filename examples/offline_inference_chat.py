@@ -59,9 +59,11 @@ conversation = [
     },
 ]
 conversations = [conversation for _ in range(10)]
+
+# We turn on tqdm progress bar to verify it's indeed running batch inference
 outputs = llm.chat(messages=conversations,
                    sampling_params=sampling_params,
-                   use_tqdm=False)
+                   use_tqdm=True)
 print_outputs(outputs)
 
 # A chat template can be optionally supplied.
