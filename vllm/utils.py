@@ -338,21 +338,6 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_hpu() -> bool:
-    from importlib import util
-    return util.find_spec('habana_frameworks') is not None
-
-
-@lru_cache(maxsize=None)
-def _is_built_for_hpu() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        return "gaudi" in version("vllm")
-    except PackageNotFoundError:
-        return False
-
-
-@lru_cache(maxsize=None)
 def is_xpu() -> bool:
     from importlib.metadata import PackageNotFoundError, version
     try:
@@ -755,7 +740,7 @@ def print_warning_once(msg: str) -> None:
 
 
 def get_device() -> str:
-    if is_hpu():
+    if current_platform.is_hpu():
         return "hpu"
     return "cuda"
 
@@ -775,7 +760,7 @@ def is_pin_memory_available() -> bool:
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif is_hpu():
+    elif current_platform.is_hpu():
         print_warning_once("Pin memory is not supported on HPU.")
         return False
     elif is_cpu() or is_openvino():
