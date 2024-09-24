@@ -116,15 +116,19 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _check_scheme_supported(self,
                                 min_capability: int,
                                 error: bool = True) -> bool:
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        supported = capability >= min_capability
-        if error and not supported:
-            raise RuntimeError(
-                "Quantization scheme is not supported for ",
-                f"the current GPU. Min capability: {min_capability}. ",
-                f"Current capability: {capability}.")
-        return supported
+        capability = current_platform.get_device_capability()  # type: ignore
+
+        if capability is not None:
+            capability = capability[0] * 10 + capability[1]
+            supported = capability >= min_capability
+            if error and not supported:
+                raise RuntimeError(
+                    "Quantization scheme is not supported for ",
+                    f"the current GPU. Min capability: {min_capability}. ",
+                    f"Current capability: {capability}.")
+            return supported
+        else:
+            return False
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -232,7 +236,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
-                    group_size=weight_quant.group_size)
+                    group_size=weight_quant.group_size,
+                    actorder=weight_quant.actorder)
 
         # Detect If Activation Quantization.
         # TODO @dsikka: clean-up conditions

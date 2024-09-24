@@ -82,6 +82,9 @@ STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
                                        "currently supported with encoder/"
                                        "decoder models.")
 
+STR_NOT_IMPL_ENC_DEC_CPU = ("CPU is not currently supported with "
+                            "encoder/decoder models.")
+
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -97,6 +100,7 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_CUDA_GRAPH": STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
     "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
+    "STR_NOT_IMPL_ENC_DEC_CPU": STR_NOT_IMPL_ENC_DEC_CPU
 }
 
 # Constants related to forcing the attention backend selection
@@ -1224,3 +1228,28 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 def supports_dynamo() -> bool:
     base_torch_version = Version(Version(torch.__version__).base_version)
     return base_torch_version >= Version("2.4.0")
+
+
+class AtomicCounter:
+    """An atomic, thread-safe counter"""
+
+    def __init__(self, initial=0):
+        """Initialize a new atomic counter to given initial value"""
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def inc(self, num=1):
+        """Atomically increment the counter by num and return the new value"""
+        with self._lock:
+            self._value += num
+            return self._value
+
+    def dec(self, num=1):
+        """Atomically decrement the counter by num and return the new value"""
+        with self._lock:
+            self._value -= num
+            return self._value
+
+    @property
+    def value(self):
+        return self._value

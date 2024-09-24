@@ -6,28 +6,18 @@ prefill requests are chunked.
 
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
+import os
 from contextlib import nullcontext
 
 import pytest
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
+from ..utils import multi_gpu_test
 
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
-E5M2_KV_MODELS = [
-    "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-chat-hf",
-]
-E4M3_KV_MODELS = [
-    "meta-llama/Llama-2-7b-chat-hf", "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
-    "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
-]
-KV_CACHE_QUANTIZATION_PATHS = {
-    "meta-llama/Llama-2-7b-chat-hf":
-    "./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json"
-}
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -78,10 +68,63 @@ def test_models(
     )
 
 
-@pytest.mark.parametrize("kv_cache_dtype,model",
-                         [("fp8_e5m2", m)
-                          for m in E5M2_KV_MODELS] + [("fp8_e4m3", m)
-                                                      for m in E4M3_KV_MODELS])
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
+@pytest.mark.parametrize("model", MODELS)
+def test_models_distributed(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    distributed_executor_backend: str,
+) -> None:
+    if (model == "meta-llama/Llama-2-7b-hf"
+            and distributed_executor_backend == "ray"):
+        # test ray adag
+        os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
+        os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
+
+    dtype = "half"
+    max_tokens = 5
+    chunked_prefill_token_size = 16
+
+    # Add a chunked prefill config.
+    max_num_seqs = min(chunked_prefill_token_size, 256)
+    assert chunked_prefill_token_size != -1
+    enable_chunked_prefill = True
+    max_num_batched_tokens = chunked_prefill_token_size
+
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
+
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tensor_parallel_size=2,
+            max_num_seqs=max_num_seqs,
+            enable_chunked_prefill=enable_chunked_prefill,
+            max_num_batched_tokens=max_num_batched_tokens,
+            distributed_executor_backend=distributed_executor_backend,
+    ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype,model",
+    [("fp8_e4m3",
+      "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme")])
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("chunked_prefill_token_size", [4, 16])
@@ -104,29 +147,14 @@ def test_models_with_fp8_kv_cache(
     disable_async_output_proc: bool,
 ) -> None:
     """
-    Only checks log probs match between chunked-prefill and
-    non-chunked-prefill version of vLLM model runner.
-    
-    This test is used when there is discrepancy in kernels
-    / numerics (e.g. when using lower-precision types like FP8).
+    Check output logprobs match between no_chunked_prefill and chunked_prefill
+    with fp8 kv cache. General fp8 kv-cache tests are covered in test_fp8.py,
+    so here we only check chunked prefill.
     """
     NUM_LOG_PROBS = 8
 
-    if model == "facebook/opt-125m":
-        pytest.skip(
-            "#7378: CUDA illegal memory access (undiagnosed) facebook/opt-125m"
-        )
-    if ((model, kv_cache_dtype, chunked_prefill_token_size) == (
-            "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V", "fp8_e4m3", 4)):
-        pytest.skip("flakey test, see: #7874 #8051")
-
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
-
-    extra_kwargs = {}
-    if model in KV_CACHE_QUANTIZATION_PATHS:
-        extra_kwargs["quantization_param_path"] = KV_CACHE_QUANTIZATION_PATHS[
-            model]
 
     with vllm_runner(
             model,
@@ -135,7 +163,6 @@ def test_models_with_fp8_kv_cache(
             max_num_seqs=max_num_seqs,
             kv_cache_dtype=kv_cache_dtype,
             disable_async_output_proc=disable_async_output_proc,
-            **extra_kwargs,
     ) as vllm_model:
         no_chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)
@@ -149,7 +176,6 @@ def test_models_with_fp8_kv_cache(
             max_num_seqs=max_num_seqs,
             kv_cache_dtype=kv_cache_dtype,
             disable_async_output_proc=disable_async_output_proc,
-            **extra_kwargs,
     ) as vllm_model:
         chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)

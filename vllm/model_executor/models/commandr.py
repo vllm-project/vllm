@@ -49,6 +49,7 @@ from vllm.sequence import IntermediateTensors
 
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
+from .interfaces import SupportsLoRA
 
 
 @torch.compile
@@ -308,8 +309,7 @@ class CohereModel(nn.Module):
         return hidden_states
 
 
-class CohereForCausalLM(nn.Module):
-
+class CohereForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
