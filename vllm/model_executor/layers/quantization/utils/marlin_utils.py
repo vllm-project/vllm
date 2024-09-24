@@ -6,6 +6,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils import is_hip
 
 from .quant_utils import pack_cols, unpack_cols
 
@@ -60,6 +61,8 @@ def _check_marlin_supported(
     supported_types = query_marlin_supported_quant_types(
         has_zp, device_capability)
 
+    if is_hip():
+        return (False, "ROCm does not yet support AWQ Marlin.")
     if quant_type not in supported_types:
         return (False, f"Marlin does not support weight_bits = {quant_type}. "
                 f"Only types = {supported_types} "
