@@ -1749,9 +1749,6 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
                                 has_act_order, is_k_full, max_shared_mem);
   }
 
-  int group_tensor_size =
-      (!is_k_full && has_act_order) ? prob_k / num_groups : group_size;
-
   TORCH_CHECK(exec_cfg.max_m_blocks > 0 &&
                   is_valid_config(exec_cfg.tb_cfg, exec_cfg.max_m_blocks,
                                   prob_m, prob_n, prob_k, num_bits, group_size,
@@ -1827,11 +1824,7 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
     int4* C_ptr = (int4*)C;
     const float* topk_weights_ptr = (const float*)topk_weights;
     const int* sorted_ids_ptr = (const int*)sorted_ids;
-    const int4* s_ptr =
-        (const int4*)s +
-        ((group_tensor_size == -1 ? 1 : prob_k / group_tensor_size) * prob_n /
-         8) *
-            expert_idx;
+    const int4* s_ptr = (const int4*)s + num_groups * prob_n / 8 * expert_idx;
     const int* g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
     const int* perm_ptr = (const int*)perm + prob_k * expert_idx;
     int* locks = (int*)workspace;
@@ -1924,6 +1917,11 @@ torch::Tensor marlin_gemm_moe(
   TORCH_CHECK(b_scales.size(2) == size_n, "b_scales dim 2 = ", b_scales.size(2),
               " is not size_n = ", size_n);
   num_groups = b_scales.size(1);
+
+  if (!is_k_full) {
+    TORCH_CHECK(has_act_order,
+                "if is_k_full is false, has_act_order must be true");
+  }
 
   if (has_act_order) {
     if (is_k_full) {
