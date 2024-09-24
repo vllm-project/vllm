@@ -2,9 +2,11 @@ import pytest
 
 from .utils import TEST_MODELS_SMOKE, check_full_graph_support
 
+from vllm.compilation.backends import vllm_backend
+
 
 @pytest.mark.parametrize("model_info", TEST_MODELS_SMOKE)
-@pytest.mark.parametrize("backend", ["eager", "inductor"])
+@pytest.mark.parametrize("backend", ["eager", vllm_backend])
 def test_full_graph(model_info, backend):
     model = model_info[0]
     model_kwargs = model_info[1]
