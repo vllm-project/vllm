@@ -85,7 +85,7 @@ class DecodeOnlyEngineArgs(EngineArgs):
             output_last_hidden_states=self.output_last_hidden_states,
             enable_bidirectional=self.enable_bidirectional)
 
-        if self.output_last_hidden_states:
+        if model_config.output_last_hidden_states:
             scheduler_config = DecodeOnlyEmbeddingSchedulerConfig(
                 max_num_batched_tokens=self.max_num_batched_tokens,
                 max_num_seqs=self.max_num_seqs,

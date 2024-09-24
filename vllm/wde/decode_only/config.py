@@ -14,15 +14,21 @@ class DecodeOnlyModelConfig(ModelConfig):
 
     def __init__(self,
                  output_last_hidden_states: bool = False,
-                 enable_bidirectional: bool = False,
+                 enable_bidirectional: bool = None,
                  **kwargs) -> None:
         super().__init__(**kwargs)
         self.output_last_hidden_states = output_last_hidden_states
         self.enable_bidirectional = enable_bidirectional
 
-        self._verify_output_last_hidden_states()
+        self._verify_parameters()
 
-    def _verify_output_last_hidden_states(self) -> None:
+    def _verify_parameters(self) -> None:
+        if self.enable_bidirectional is None:
+            if hasattr(self.hf_config, "enable_bidirectional"):
+                self.enable_bidirectional = self.hf_config.enable_bidirectional
+            else:
+                self.enable_bidirectional = False
+
         if self.enable_bidirectional:
             self.output_last_hidden_states = True
 
