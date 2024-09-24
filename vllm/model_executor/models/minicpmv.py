@@ -373,17 +373,13 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
                            "to process the image object")
 
     if not isinstance(data, list):
-        raise ValueError("Invalid image input (%s)", data)
+        raise ValueError(
+            "Image input must be list of MiniCPMVImageInput, got (%s)", data)
+    batch_data = image_processor \
+        .preprocess([img["image"] for img in data], return_tensors="pt") \
+        .data
 
-    try:
-        batch_data = image_processor \
-            .preprocess([img["image"] for img in data], return_tensors="pt") \
-            .data
-    except Exception:
-        #logger.error("Failed to process image (%s)", data)
-        raise
-
-    if len(data) > 0 and "im_start_id" in data[0]:
+    if len(data) > 0:
         batch_data["im_start_id"] = data[0]["im_start_id"]
         batch_data["im_end_id"] = data[0]["im_end_id"]
         if "slice_start_id" in data[0]:
@@ -461,18 +457,17 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
 
         return vlm_embedding, vision_hidden_states
 
-    def _get_image_bounds(
-            self,
-            input_ids: torch.Tensor,
-            im_start_id: torch.Tensor,
-            im_end_id: torch.Tensor,
-            slice_start_id: Optional[torch.Tensor] = None,
-            slice_end_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _get_image_bounds(self,
+                          input_ids: torch.Tensor,
+                          im_start_id: torch.Tensor,
+                          im_end_id: torch.Tensor,
+                          slice_start_id: Optional[torch.Tensor] = None,
+                          slice_end_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         start_cond = input_ids == im_start_id.item()
-        end_cond = input_ids == im_end_id[0]
+        end_cond = input_ids == im_end_id.item()
         if slice_start_id is not None:
-            start_cond |= (input_ids == slice_start_id)
-            end_cond |= (input_ids == slice_end_id)
+            start_cond |= (input_ids == slice_start_id.item())
+            end_cond |= (input_ids == slice_end_id.item())
 
         image_start_tokens, = torch.where(start_cond)
         image_start_tokens += 1
@@ -494,8 +489,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     ) -> Optional[MiniCPMVImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
-        im_start_id = kwargs.pop("im_start_id", None)
-        im_end_id = kwargs.pop("im_end_id", None)
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
@@ -508,11 +501,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         if len(pixel_values) != len(tgt_sizes):
             raise ValueError("Inconsistent batch lengths, found: "
                              f"{len(pixel_values)} vs. {len(tgt_sizes)}")
-
-        #if not isinstance(image_bounds, torch.Tensor):
-        #    raise ValueError("Incorrect type of image_bounds. "
-        #                     f"Got type: {type(image_bounds)}")
-        #image_bounds = image_bounds.squeeze(0)
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
@@ -535,9 +523,17 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         if len(pixel_values_flat) == 0:
             return None
 
+        im_start_id = kwargs.pop("im_start_id", None)
+        im_end_id = kwargs.pop("im_end_id", None)
+        slice_start_id = kwargs.pop("slice_start_id", None)
+        slice_end_id = kwargs.pop("slice_end_id", None)
+        if im_start_id is None:
+            return None
+
         return MiniCPMVImagePixelInputs(
             image_bounds=self._get_image_bounds(input_ids, im_start_id,
-                                                im_end_id),
+                                                im_end_id, slice_start_id,
+                                                slice_end_id),
             pixel_values=pixel_values_flat,
             tgt_sizes=torch.stack(tgt_sizes_flat),
         )
