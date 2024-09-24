@@ -10,6 +10,7 @@ _P, _R_co = ParamSpec("_P"), TypeVar("_R_co", covariant=True)
 
 
 def print_stack(f: Callable[_P, _R_co]) -> Callable[_P, _R_co]:
+
     @wraps(f)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs):
         traceback.print_stack()
@@ -31,4 +32,5 @@ def find_cuda_init(fn: Callable[[], object]) -> None:
 
 
 if __name__ == "__main__":
-    find_cuda_init(lambda: importlib.import_module("vllm.model_executor.models.llava"))  # noqa: E501
+    find_cuda_init(
+        lambda: importlib.import_module("vllm.model_executor.models.llava"))
