@@ -38,8 +38,8 @@ def benchmark_vllm(args):
 
     import torch
 
-    from vllm.wde.encode_only.arg_utils import (EncodeOnlyEngineArgs as
-                                                EngineArgs)
+    from vllm.wde.encode_only.arg_utils import (  # noqa: E501
+        EncodeOnlyEngineArgs as EngineArgs)
     from vllm.wde.entrypoints.llm import LLMEngine
 
     prompt = "if" * args.input_len
