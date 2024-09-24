@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.scalar_type import scalar_types
+from vllm.utils import seed_everything
 
 
 def torch_moe(a, w1, w2, score, topk):
@@ -151,7 +152,7 @@ def test_fused_marlin_moe(
     act_order: bool,
     num_bits: int,
 ):
-    torch.manual_seed(7)
+    seed_everything(7)
 
     if topk > e:
         return

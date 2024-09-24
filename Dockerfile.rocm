@@ -51,13 +51,15 @@ RUN python3 -m pip install --upgrade pip
 # TODO: implement sccache support across components
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 # Install torch == 2.5.0 on ROCm
-RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-6.1"*) \
             python3 -m pip uninstall -y torch torchvision \
-            && python3 -m pip install --no-cache-dir --pre \
+            && python3 -m pip install --pre \
                 torch==2.5.0.dev20240726 \
+                cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
                 torchvision==0.20.0.dev20240726 \
-               --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
+               --extra-index-url https://download.pytorch.org/whl/nightly/rocm6.1 ;; \
         *) ;; esac
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
@@ -138,6 +140,7 @@ ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
 RUN --mount=type=cache,target=${CCACHE_DIR} \
+    --mount=type=bind,source=.git,target=.git \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -Ur requirements-rocm.txt \
     && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \

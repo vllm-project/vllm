@@ -8,13 +8,13 @@ from fastapi import Request
 from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
 from vllm.utils import merge_async_iterators, random_uuid
@@ -71,15 +71,15 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        engine_client: EngineClient,
         model_config: ModelConfig,
-        served_model_names: List[str],
+        base_model_paths: List[BaseModelPath],
         *,
         request_logger: Optional[RequestLogger],
     ):
-        super().__init__(async_engine_client=async_engine_client,
+        super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         served_model_names=served_model_names,
+                         base_model_paths=base_model_paths,
                          lora_modules=None,
                          prompt_adapters=None,
                          request_logger=request_logger)
@@ -118,8 +118,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.async_engine_client.get_tokenizer(
-                lora_request)
+            tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             pooling_params = request.to_pooling_params()
 
@@ -144,7 +143,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                         "Prompt adapter is not supported "
                         "for embedding models")
 
-                generator = self.async_engine_client.encode(
+                generator = self.engine_client.encode(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     pooling_params,
                     request_id_item,

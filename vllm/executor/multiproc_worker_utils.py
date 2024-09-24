@@ -168,6 +168,8 @@ class ProcessWorkerWrapper:
         self.tasks[task_id] = future
         try:
             self._task_queue.put((task_id, method, args, kwargs))
+        except SystemExit:
+            raise
         except BaseException as e:
             del self.tasks[task_id]
             raise ChildProcessError("worker died") from e
@@ -222,6 +224,8 @@ def _run_worker_process(
             try:
                 executor = getattr(worker, method)
                 output = executor(*args, **kwargs)
+            except SystemExit:
+                raise
             except KeyboardInterrupt:
                 break
             except BaseException as e:

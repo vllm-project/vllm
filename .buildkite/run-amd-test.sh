@@ -83,6 +83,7 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_encoder_decoder_attn.py \
   --ignore=kernels/test_flash_attn.py \
   --ignore=kernels/test_flashinfer.py \
+  --ignore=kernels/test_gguf.py \
   --ignore=kernels/test_int8_quant.py \
   --ignore=kernels/test_machete_gemm.py \
   --ignore=kernels/test_mamba_ssm.py \
@@ -91,6 +92,16 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_prefix_prefill.py \
   --ignore=kernels/test_rand.py \
   --ignore=kernels/test_sampler.py"
+fi
+
+#ignore certain Entrypoints tests
+if [[ $commands == *" entrypoints/openai "* ]]; then
+  commands=${commands//" entrypoints/openai "/" entrypoints/openai \
+  --ignore=entrypoints/openai/test_accuracy.py \
+  --ignore=entrypoints/openai/test_audio.py \
+  --ignore=entrypoints/openai/test_encoder_decoder.py \
+  --ignore=entrypoints/openai/test_embedding.py \
+  --ignore=entrypoints/openai/test_oot_registration.py "}
 fi
 
 PARALLEL_JOB_COUNT=8

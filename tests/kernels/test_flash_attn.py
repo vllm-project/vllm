@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import vllm.attention.backends.flash_attn  # noqa: F401
+from vllm.utils import seed_everything
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 256]
@@ -87,7 +88,7 @@ def test_flash_attn_with_paged_kv(
     num_blocks: int,
 ) -> None:
     torch.set_default_device("cuda")
-    torch.cuda.manual_seed_all(0)
+    seed_everything(0)
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
@@ -174,7 +175,7 @@ def test_varlen_with_paged_kv(
     num_blocks: int,
 ) -> None:
     torch.set_default_device("cuda")
-    torch.cuda.manual_seed_all(0)
+    seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
