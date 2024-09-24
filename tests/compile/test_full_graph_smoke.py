@@ -1,8 +1,8 @@
 import pytest
 
-from .utils import TEST_MODELS_SMOKE, check_full_graph_support
-
 from vllm.compilation.backends import vllm_backend
+
+from .utils import TEST_MODELS_SMOKE, check_full_graph_support
 
 
 @pytest.mark.parametrize("model_info", TEST_MODELS_SMOKE)
