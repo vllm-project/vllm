@@ -1625,7 +1625,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # NOTE: the send operation is non-blocking
         if self.need_send_kv(model_input, kv_caches):
             get_disagg_group().send_kv_caches_and_hidden_states(
-                # model_executable is used to know which layer the current 
+                # model_executable is used to know which layer the current
                 # worker is working on, so that we can send KV for only those
                 # layers.
                 model_executable,
@@ -1720,14 +1720,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
 
-        return all([
-            dist_kv.IS_KV_CONSUMER,
-            not is_profile_run,
-            is_prefill_run,
-        ])
+        return dist_kv.IS_KV_CONSUMER and (
+            not is_profile_run) and is_prefill_run
 
     def need_send_kv(self, model_input, kv_caches) -> bool:
-        """Check if we need to send kv-cache from the other worker.
+        """Check if we need to send kv-cache to the other worker.
         We need to send KV when
             1. current vLLM instance is KV cache producer/prefill vLLM instance
             2. this batch is not a profiling run
@@ -1745,8 +1742,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
 
-        return all(
-            [dist_kv.IS_KV_PRODUCER, not is_profile_run, is_prefill_run])
+        return dist_kv.IS_KV_PRODUCER and (
+            not is_profile_run) and is_prefill_run
 
 
 class CUDAGraphRunner:
