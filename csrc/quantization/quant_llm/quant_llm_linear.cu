@@ -238,7 +238,7 @@ torch::Tensor fp_eXmY_linear_forward_cuda(int64_t EXPONENT, int64_t MANTISSA,
    */
 
   // FP4
-  else if (EXPONENT == 1 && MANTISSA == 2)
+ if (EXPONENT == 1 && MANTISSA == 2)
       vllm::fpx_linear_kernel<1, 2>(stream, weight, scales, in_feats, out_feats,
                                     M, N, K, Reduction_Workspace, splitK);
   else if (EXPONENT == 3 && MANTISSA == 0)
