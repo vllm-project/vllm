@@ -77,7 +77,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         self.data_pipe.send_tensor(tensor)
 
     def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
-        
+
         if isinstance(data, torch.Tensor):
             return data.element_size() * data.numel()
         if not data:
