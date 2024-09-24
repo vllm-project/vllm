@@ -15,10 +15,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear)
+    apply_fp8_linear, normalize_e4m3fn_to_e4m3fnuz)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter)
 from vllm.platforms import current_platform
+from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -32,9 +33,7 @@ class FBGEMMFp8Config(QuantizationConfig):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89
+        self.use_marlin = not current_platform.has_device_capability(89)
 
     @classmethod
     def get_name(cls) -> str:
@@ -127,8 +126,18 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
         weight = layer.weight
-        layer.weight = Parameter(weight.t(), requires_grad=False)
 
+        if is_hip():
+            weight, weight_scale, input_scale = \
+                normalize_e4m3fn_to_e4m3fnuz(
+                    weight=weight,
+                    weight_scale=layer.weight_scale,
+                    input_scale=None)
+            if input_scale is not None:
+                layer.input_scale = Parameter(input_scale, requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+        layer.weight = Parameter(weight.t(), requires_grad=False)
         if self.quant_config.use_marlin:
             prepare_fp8_layer_for_marlin(layer)
             # Activations not quantized for marlin.
