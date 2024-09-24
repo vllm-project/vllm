@@ -80,7 +80,7 @@ class BaseLogitsProcessor:
                           -math.inf,
                           device=scores.device)
         mask[allowed_tokens] = 0
-        scores = scores.add(mask)
+        scores.add_(mask)
         return scores
 
 
