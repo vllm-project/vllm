@@ -15,6 +15,7 @@ from typing_extensions import NotRequired
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization.base_config import (
@@ -226,7 +227,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
     video_feature_size = get_llava_onevision_video_tokens(ctx, num_frames)
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = dummy_seq_data_for_clip(
+        seq_data, ranges = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             num_videos,
@@ -235,9 +236,9 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
         )
 
         mm_data = dummy_video_for_clip(vision_config, num_frames=num_frames)
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data = dummy_seq_data_for_siglip(
+        seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
             num_videos,
@@ -246,7 +247,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
         )
 
         mm_data = dummy_video_for_siglip(vision_config, num_frames=num_frames)
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
