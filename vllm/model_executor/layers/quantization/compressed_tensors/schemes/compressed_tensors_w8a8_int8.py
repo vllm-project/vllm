@@ -3,6 +3,7 @@ from typing import Callable, List, Optional
 import torch
 from torch.nn import Parameter
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -13,6 +14,8 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
+
+logger = init_logger(__name__)
 
 
 class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
@@ -52,8 +55,12 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
             else:
-                raise NotImplementedError(
-                    "static input asymmetric quantization not supported yet")
+                # Static asymmetric quantization has not been tested yet.
+                # Kernel and ops support exists and is tested, it's just the
+                # following integration code that is untested.
+                logger.warning(
+                    "Static asymmetric quantization currently untested")
+
                 # reconstruct the ranges
                 int8_traits = torch.iinfo(torch.int8)
                 range_max = (layer.input_scale *
@@ -121,8 +128,9 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", input_scale)
 
             if not self.input_symmetric:
-                raise NotImplementedError(
-                    "static input asymmetric quantization not supported yet")
+                # Static asymmetric quantization has not been tested yet
+                logger.warning(
+                    "Static asymmetric quantization currently untested")
                 input_zero_point = Parameter(torch.zeros(1, dtype=torch.int32))
                 layer.register_parameter("input_zero_point", input_zero_point)
 
