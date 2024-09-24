@@ -118,7 +118,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             self.model_config.dtype,
             self.cache_config.cache_dtype,
             self.block_size,
-            self.model_config.is_attention_free(),
+            self.model_config.is_attention_free,
             False,
         )
         self.cached_step_outputs: List[torch.Tensor] = []
