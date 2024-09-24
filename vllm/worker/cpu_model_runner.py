@@ -465,15 +465,6 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
                                    sampling_metadata=sampling_metadata,
                                    virtual_engine=virtual_engine)
 
-    @property
-    def model_is_mrope(self) -> bool:
-        """Detect if the model has "mrope" rope_scaling type.
-        mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
-        if rope_scaling is None:
-            return False
-        return rope_scaling.get("type", None) == "mrope"
-
     @torch.no_grad()
     def execute_model(
         self,
@@ -498,6 +489,8 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             model_input.attn_metadata,
             **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
+            "intermediate_tensors":
+            intermediate_tensors,
         }
 
         hidden_states = model_executable(**execute_model_kwargs)
