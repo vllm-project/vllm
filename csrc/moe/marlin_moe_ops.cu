@@ -25,6 +25,7 @@
 
 #include <iostream>
 
+#include "core/exception.hpp"
 #include "core/scalar_type.hpp"
 
 template <typename T>
