@@ -1,5 +1,18 @@
 // copied and adapted from https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-cuda/vecdotq.cuh
 // and https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-cuda/mmq.cu
+static __device__ __forceinline__ int get_int_b2(const void * x, const int & i32) {
+    const uint16_t * x16 = (const uint16_t *) x; // assume at least 2 byte alignment
+
+    int x32  = x16[2*i32 + 0] <<  0;
+    x32     |= x16[2*i32 + 1] << 16;
+
+    return x32;
+}
+
+static __device__ __forceinline__ int get_int_b4(const void * x, const int & i32) {
+    return ((const int *) x)[i32]; // assume at least 4 byte alignment
+}
+
 static __device__ __forceinline__ int get_int_from_int8(const int8_t * x8, const int & i32) {
     const uint16_t * x16 = (const uint16_t *) (x8 + sizeof(int) * i32); // assume at least 2 byte alignment
     int x32 = 0;
@@ -1661,24 +1674,76 @@ static __device__ __forceinline__ float vec_dot_iq1_s_q8_1(
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 610
     const block_iq1_s * bq1 = (const block_iq1_s *) vbq;
 
-    const int ib32 = iqs;
-    int sumi1 = 0, sumi2 = 0, sumi3 = 0, sumi4 = 0;
-    const uint8_t h1 = bq1->scales[2*ib32+0];
-    const uint8_t h2 = bq1->scales[2*ib32+1];
-    const int * q8 = (const int *)bq8_1[ib32].qs;
-    const int * grid1 = (const int *)(iq1s_grid + (bq1->qs[4*ib32+0] | ((h1 & 0x08) << 5)));
-    const int * grid2 = (const int *)(iq1s_grid + (bq1->qs[4*ib32+1] | ((h1 & 0x80) << 1)));
-    const int * grid3 = (const int *)(iq1s_grid + (bq1->qs[4*ib32+2] | ((h2 & 0x08) << 5)));
-    const int * grid4 = (const int *)(iq1s_grid + (bq1->qs[4*ib32+3] | ((h2 & 0x80) << 1)));
-    for (int j = 0; j < 2; ++j) {
-        sumi1 = __dp4a(q8[j+0], grid1[j], sumi1);
-        sumi2 = __dp4a(q8[j+2], grid2[j], sumi2);
-        sumi3 = __dp4a(q8[j+4], grid3[j], sumi3);
-        sumi4 = __dp4a(q8[j+6], grid4[j], sumi4);
+    const int       qs_packed = get_int_b2(bq1->qs, iqs);
+    const uint8_t * qs        = (const uint8_t *) &qs_packed;
+
+    const int qh = bq1->qh[iqs];
+
+    int sumi = 0;
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const int grid = iq1s_grid_gpu[qs[l0/2] | (((qh >> 3*(l0/2)) & 0x07) << 8)];
+
+        const int grid0 = (grid >> 0) & 0x0F0F0F0F;
+        const int grid1 = (grid >> 4) & 0x0F0F0F0F;
+
+        const int u0 = get_int_b4(bq8_1[iqs].qs, l0 + 0);
+        const int u1 = get_int_b4(bq8_1[iqs].qs, l0 + 1);
+
+        sumi = __dp4a(grid0, u0, sumi);
+        sumi = __dp4a(grid1, u1, sumi);
     }
-    const float d = __half2float(bq1->d) * __low2float(bq8_1[ib32].ds);
-    return d * (sumi1 * (2*(h1 & 7) + 1) + sumi2 * (2*((h1 >> 4) & 7) + 1) +
-                sumi3 * (2*(h2 & 7) + 1) + sumi4 * (2*((h2 >> 4) & 7) + 1));
+
+    const float  d1q   = __half2float(bq1->d) * (((qh >> 11) & 0x0E) + 1);
+    const float  delta = -1.0f + IQ1S_DELTA - (qh & 0x8000) * (2.0f*IQ1S_DELTA/0x8000);
+    const float2 ds    = __half22float2(bq8_1[iqs].ds);
+    return d1q * (ds.x*sumi + ds.y*delta);
+#endif
+}
+
+static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & iqs) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 610
+
+    const block_iq1_m * bq1 = (const block_iq1_m *) vbq;
+
+    const int       qs_packed = get_int_b4(bq1->qs, iqs);
+    const uint8_t * qs        = (const uint8_t *) &qs_packed;
+
+    int   sumi[2] = {0};
+    float sumf[2] = {0.0f};
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const int qhl = bq1->qh[2*iqs + l0/4] >> (4 * ((l0/2) % 2));
+
+        const int grid = iq1s_grid_gpu[qs[l0/2] | ((qhl & 0x07) << 8)];
+
+        const int grid0 = (grid >> 0) & 0x0F0F0F0F;
+        const int grid1 = (grid >> 4) & 0x0F0F0F0F;
+
+        const int u0 = get_int_b4(bq8_1[iqs].qs, l0 + 0);
+        const int u1 = get_int_b4(bq8_1[iqs].qs, l0 + 1);
+
+        sumi[l0/4] = __dp4a(grid0, u0, sumi[l0/4]);
+        sumi[l0/4] = __dp4a(grid1, u1, sumi[l0/4]);
+
+        const float delta = -1.0f + IQ1M_DELTA - (qhl & 0x08) * (2.0f*IQ1M_DELTA/0x08);
+        int sumy = 0;
+        sumy = __dp4a(u0, 0x01010101, sumy);
+        sumy = __dp4a(u1, 0x01010101, sumy);
+        sumf[l0/4] += delta*sumy;
+    }
+
+    const uint16_t * sc = (const uint16_t *) bq1->scales;
+
+    iq1m_scale_t scale;
+    scale.u16 = (sc[0] >> 12) | ((sc[1] >> 8) & 0x00F0) | ((sc[2] >> 4) & 0x0F00) | (sc[3] & 0xF000);
+    const float d = __half2float(scale.f16) * __low2float(bq8_1[iqs].ds);
+
+    const int tmp = sc[iqs/2] >> (6*(iqs%2));
+    const int sc0 = 2*((tmp >> 0) & 0x07) + 1;
+    const int sc1 = 2*((tmp >> 3) & 0x07) + 1;
+    return d * ((sumi[0] + sumf[0]) * sc0 + (sumi[1] + sumf[1]) * sc1);
 #endif
 }
 
