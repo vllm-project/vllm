@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import DEVICE_OPTIONS, EngineArgs
-from vllm.inputs import PromptType
+from vllm.inputs import PromptInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
@@ -61,7 +61,7 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_prompts: List[PromptType] = [{
+    dummy_inputs: List[PromptInputs] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
@@ -74,13 +74,13 @@ def main(args: argparse.Namespace):
                     ],
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
                         str(profile_dir))) as p:
-                llm.generate(dummy_prompts,
+                llm.generate(dummy_inputs,
                              sampling_params=sampling_params,
                              use_tqdm=False)
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
-            llm.generate(dummy_prompts,
+            llm.generate(dummy_inputs,
                          sampling_params=sampling_params,
                          use_tqdm=False)
             end_time = time.perf_counter()
