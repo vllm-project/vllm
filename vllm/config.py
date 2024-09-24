@@ -412,6 +412,7 @@ class ModelConfig:
                            "pipeline parallelism currently. Disabling it.")
             self.use_async_output_proc = False
 
+    @cached_property
     def is_attention_free(self) -> bool:
         """Returns True if the model has no attention, i.e. the model has no
         state that grows with the size of the context.
