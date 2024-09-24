@@ -162,6 +162,41 @@ def test_chat():
     assert len(outputs) == 1
 
 
+def test_multi_chat():
+
+    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
+
+    prompt1 = "Explain the concept of entropy."
+    prompt2 = "Explain what among us is."
+
+    conversation1 = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": prompt1
+        },
+    ]
+
+    conversation2 = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": prompt2
+        },
+    ]
+
+    messages = [conversation1, conversation2]
+
+    outputs = llm.chat(messages)
+    assert len(outputs) == 2
+
+
 @pytest.mark.parametrize("image_urls",
                          [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
 def test_chat_multi_image(image_urls: List[str]):
