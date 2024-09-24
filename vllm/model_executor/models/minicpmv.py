@@ -463,11 +463,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
                           im_end_id: torch.Tensor,
                           slice_start_id: Optional[torch.Tensor] = None,
                           slice_end_id: Optional[torch.Tensor] = None) -> torch.Tensor:
-        start_cond = input_ids == im_start_id.item()
-        end_cond = input_ids == im_end_id.item()
+        start_cond = input_ids == im_start_id[0]
+        end_cond = input_ids == im_end_id[0]
         if slice_start_id is not None:
-            start_cond |= (input_ids == slice_start_id.item())
-            end_cond |= (input_ids == slice_end_id.item())
+            start_cond |= (input_ids == slice_start_id[0])
+            end_cond |= (input_ids == slice_end_id[0])
 
         image_start_tokens, = torch.where(start_cond)
         image_start_tokens += 1
