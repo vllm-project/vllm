@@ -13,7 +13,6 @@ class MllamaTextConfig(mllama_hf_config.MllamaTextConfig):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.hidden_act = self.hidden_activation
         self.is_encoder_decoder = True
 
 
