@@ -1,6 +1,7 @@
 # ruff: noqa: SIM117
 import collections
 import copy
+import dataclasses
 import fnmatch
 import glob
 import json
@@ -8,7 +9,8 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type
+from typing import (Any, Dict, Generator, Iterable, List, Optional, Tuple,
+                    Type, cast)
 
 import gguf
 import huggingface_hub
@@ -207,6 +209,22 @@ class BaseModelLoader(ABC):
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
 
+    @dataclasses.dataclass
+    class Source:
+        """A source for weights."""
+
+        model_or_path: str
+        """The model ID or path."""
+
+        revision: Optional[str]
+        """The optional model revision."""
+
+        prefix: str = ""
+        """A prefix to prepend to all weights."""
+
+        fall_back_to_pt: bool = True
+        """Whether .pt weights can be used."""
+
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         if load_config.model_loader_extra_config:
@@ -313,17 +331,16 @@ class DefaultModelLoader(BaseModelLoader):
         return hf_folder, hf_weights_files, use_safetensors
 
     def _get_weights_iterator(
-        self, model_name_or_path: str, revision: Optional[str],
-        fall_back_to_pt: bool
+            self, source: "Source"
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
-            model_name_or_path, revision, fall_back_to_pt)
+            source.model_or_path, source.revision, source.fall_back_to_pt)
         if self.load_config.load_format == LoadFormat.NPCACHE:
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
             weights_iterator = np_cache_weights_iterator(
-                model_name_or_path, self.load_config.download_dir, hf_folder,
+                source.model_or_path, self.load_config.download_dir, hf_folder,
                 hf_weights_files)
         elif use_safetensors:
             weights_iterator = safetensors_weights_iterator(hf_weights_files)
@@ -341,7 +358,29 @@ class DefaultModelLoader(BaseModelLoader):
                     xm.mark_step()
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
-        return weights_iterator
+
+        # Apply the prefix.
+        return ((source.prefix + name, tensor)
+                for (name, tensor) in weights_iterator)
+
+    def _get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+
+        primary_weights = DefaultModelLoader.Source(
+            model_config.model,
+            model_config.revision,
+            prefix="",
+            fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load",
+                                    True))
+        yield from self._get_weights_iterator(primary_weights)
+
+        secondary_weights = cast(Iterable[DefaultModelLoader.Source],
+                                 getattr(model, "secondary_weights", ()))
+        for source in secondary_weights:
+            yield from self._get_weights_iterator(source)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model,
@@ -360,13 +399,8 @@ class DefaultModelLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
-            model.load_weights(
-                self._get_weights_iterator(model_config.model,
-                                           model_config.revision,
-                                           fall_back_to_pt=getattr(
-                                               model,
-                                               "fall_back_to_pt_during_load",
-                                               True)), )
+
+            model.load_weights(self._get_all_weights(model_config, model))
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
