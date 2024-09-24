@@ -355,6 +355,7 @@ class FusedMoE(torch.nn.Module):
 
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
+            # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
 
             if param.data[expert_id] != 1 and (param.data[expert_id] -
