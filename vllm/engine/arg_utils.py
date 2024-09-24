@@ -269,8 +269,9 @@ class EngineArgs:
         parser.add_argument("--weights-load-device",
                             type=str,
                             default=EngineArgs.weights_load_device,
-                            choices=["cuda", "neuron", "hpu", "cpu"],
-                            help='Device on which weights are loaded.')
+                            choices=DEVICE_OPTIONS,
+                            help=('Device to which model weights '
+                                  'will be loaded.'))
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -848,11 +849,11 @@ class EngineArgs:
             mm_processor_kwargs=self.mm_processor_kwargs,
         )
 
-    def create_load_config(self, load_device) -> LoadConfig:
+    def create_load_config(self) -> LoadConfig:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            device=load_device,
+            device=self.load_device,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
         )
@@ -1037,9 +1038,9 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        load_device = device_config.device if self.weights_load_device is \
+        self.load_device = device_config.device if self.weights_load_device is \
             None else self.weights_load_device
-        load_config = self.create_load_config(load_device)
+        load_config = self.create_load_config()
 
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,

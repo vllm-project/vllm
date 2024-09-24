@@ -751,7 +751,8 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's 
             checkpoints.
-        device: Device on which weights are loaded.
+        device: Device to which model weights will be loaded, default to
+            device_config.device
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO

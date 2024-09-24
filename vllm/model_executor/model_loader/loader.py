@@ -399,7 +399,7 @@ class DefaultModelLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
-            logger.info("Loading weights on %s ...", self.load_config.device)
+            logger.info("Loading weights on %s...", self.load_config.device)
             model.load_weights(self._get_all_weights(model_config, model))
 
             for _, module in model.named_modules():
