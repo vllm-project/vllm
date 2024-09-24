@@ -5,13 +5,16 @@ from typing import Dict, List, Optional, Type
 import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.wde.decode_only.modelzoo import DECODE_ONLY_MODELS
 from vllm.wde.encode_only.modelzoo import ENCODE_ONLY_MODELS
 from vllm.wde.reranker.modelzoo import RERANKER_MODELS
 from vllm.wde.retriever.modelzoo import RETRIEVER_MODELS
 
 logger = init_logger(__name__)
 
-_MODELS_LIST = [ENCODE_ONLY_MODELS, RETRIEVER_MODELS, RERANKER_MODELS]
+_MODELS_LIST = [
+    ENCODE_ONLY_MODELS, RETRIEVER_MODELS, RERANKER_MODELS, DECODE_ONLY_MODELS
+]
 
 _MODELS = dict()
 for m in _MODELS_LIST:

@@ -16,26 +16,24 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 class VllmRunner:
 
-    def __init__(
-        self,
-        model_name: str,
-        max_num_seqs: int = 4,
-        tokenizer_name: Optional[str] = None,
-        dtype: str = "half",
-        scheduling: str = "sync",
-        attention_impl: Optional[str] = None,
-    ) -> None:
+    def __init__(self,
+                 model_name: str,
+                 max_num_seqs: int = 4,
+                 tokenizer_name: Optional[str] = None,
+                 dtype: str = "half",
+                 scheduling: str = "sync",
+                 attention_impl: Optional[str] = None,
+                 **kwargs) -> None:
         if attention_impl is not None:
             os.environ["VLLM_ATTENTION_BACKEND"] = attention_impl
 
-        self.model = LLM(
-            model=model_name,
-            tokenizer=tokenizer_name,
-            trust_remote_code=True,
-            max_num_seqs=max_num_seqs,
-            dtype=dtype,
-            scheduling=scheduling,
-        )
+        self.model = LLM(model=model_name,
+                         tokenizer=tokenizer_name,
+                         trust_remote_code=True,
+                         max_num_seqs=max_num_seqs,
+                         dtype=dtype,
+                         scheduling=scheduling,
+                         **kwargs)
 
         if attention_impl is not None:
             assert (self.model.llm_engine.attn_backend.get_name().lower() ==
