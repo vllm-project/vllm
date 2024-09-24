@@ -302,8 +302,6 @@ class ModelConfig:
 
         # TODO(alpin): Tune the default exp_bits for each fp_bits
         DEFAULT_EXP_BITS = {
-            2: 1,
-            3: 2,
             4: 2,
             5: 2,
             6: 2,
