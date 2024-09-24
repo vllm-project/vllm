@@ -535,7 +535,7 @@ class LLM:
             # messages is List[...]
             list_of_messages = [messages]
 
-        prompts: List[PromptType] = []
+        prompts: List[Union[TokensPrompt, TextPrompt]] = []
 
         for msgs in list_of_messages:
             tokenizer = self.get_tokenizer()
@@ -562,7 +562,7 @@ class LLM:
                     tools=tools,
                 )
 
-            prompt: PromptType
+            prompt: Union[TokensPrompt, TextPrompt]
             if is_list_of(prompt_data, int):
                 prompt = TokensPrompt(prompt_token_ids=prompt_data)
             else:
@@ -573,14 +573,12 @@ class LLM:
 
             prompts.append(prompt)
 
-        outputs = self.generate(
+        return self.generate(
             prompts,
             sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
-
-        return outputs
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
