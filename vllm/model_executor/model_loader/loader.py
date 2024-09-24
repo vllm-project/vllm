@@ -395,7 +395,9 @@ class DefaultModelLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(self.load_config.device):
+            load_device = torch.device(self.load_config.device) if \
+                self.load_config.device is not None else target_device
+            with load_device:
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
