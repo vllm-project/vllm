@@ -182,7 +182,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             if (mm_data := seq_group_metadata.multi_modal_data):
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
                 multi_modal_inputs_list.append(mm_kwargs)
-                
+
                 # special processing for mrope position deltas.
                 if self.runner.model_is_mrope:
                     image_grid_thw = mm_kwargs.get("image_grid_thw", None)
@@ -232,17 +232,19 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
-        if mrope_input_positions:
-            input_positions = mrope_input_positions
-
         num_prompt_tokens = len(input_tokens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
-        input_positions = torch.tensor(input_positions,
-                                       dtype=torch.long,
-                                       device=self.device)  # type: ignore
+        if mrope_input_positions:
+            input_positions = torch.tensor(mrope_input_positions,
+                                           dtype=torch.long,
+                                           device=self.device)
+        else:
+            input_positions = torch.tensor(input_positions,
+                                           dtype=torch.long,
+                                           device=self.device)
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
@@ -271,6 +273,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        mrope_input_positions: List[List[int]] = []
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         block_tables: List[List[int]] = []
@@ -289,6 +292,13 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
                 input_positions.append(position)
+                if seq_data.mrope_position_delta is not None:
+                    next_mrope_positions = MRotaryEmbedding.get_next_input_positions(
+                        seq_data.mrope_position_delta,
+                        position,
+                        seq_len,
+                    )
+                    mrope_input_positions.extend(next_mrope_positions)
 
                 seq_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
@@ -311,9 +321,14 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)
-        input_positions = torch.tensor(input_positions,
-                                       dtype=torch.long,
-                                       device=self.device)
+        if mrope_input_positions:
+            input_positions = torch.tensor(mrope_input_positions,
+                                           dtype=torch.long,
+                                           device=self.device)
+        else:
+            input_positions = torch.tensor(input_positions,
+                                           dtype=torch.long,
+                                           device=self.device)
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
