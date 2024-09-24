@@ -138,10 +138,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
         is_tensor = (weight_strategy and input_quant.strategy
                      == QuantizationStrategy.TENSOR.value)
-        is_symmetric = weight_quant.symmetric
+        is_symmetric_weight = weight_quant.symmetric
         is_static = not weight_quant.dynamic and not input_quant.dynamic
 
-        return is_8_bits and is_tensor and is_symmetric and is_static
+        return is_8_bits and is_tensor and is_symmetric_weight and is_static
 
     def _is_dynamic_token_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -151,10 +151,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
         is_token = (weight_strategy and input_quant.strategy
                     == QuantizationStrategy.TOKEN.value)
-        is_symmetric = weight_quant.symmetric
+        is_symmetric_weight = weight_quant.symmetric
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
-        return is_8_bits and is_token and is_symmetric and is_dynamic
+        return is_8_bits and is_token and is_symmetric_weight and is_dynamic
 
     def _is_fp8_w8a8(self, weight_quant: BaseModel,
                      input_quant: BaseModel) -> bool:
