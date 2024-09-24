@@ -977,7 +977,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-            self.model_config.is_attention_free(),
+            self.model_config.is_attention_free,
         )
         self.attn_state = self.attn_backend.get_state_cls()(
             weakref.proxy(self))
