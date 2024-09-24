@@ -237,19 +237,6 @@ torch::Tensor fp_eXmY_linear_forward_cuda(int64_t EXPONENT, int64_t MANTISSA,
    the compiler will likely optimize it to a jump table.
    */
 
-  // FP2
-  if (EXPONENT == 1 && MANTISSA == 0)
-    vllm::fpx_linear_kernel<1, 0>(stream, weight, scales, in_feats, out_feats,
-                                  M, N, K, Reduction_Workspace, splitK);
-
-  // FP3
-  else if (EXPONENT == 1 && MANTISSA == 1)
-    vllm::fpx_linear_kernel<1, 1>(stream, weight, scales, in_feats, out_feats,
-                                  M, N, K, Reduction_Workspace, splitK);
-  else if (EXPONENT == 2 && MANTISSA == 0)
-    vllm::fpx_linear_kernel<2, 0>(stream, weight, scales, in_feats, out_feats,
-                                  M, N, K, Reduction_Workspace, splitK);
-
   // FP4
   else if (EXPONENT == 1 && MANTISSA == 2)
     vllm::fpx_linear_kernel<1, 2>(stream, weight, scales, in_feats, out_feats,
