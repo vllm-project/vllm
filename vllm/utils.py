@@ -549,7 +549,7 @@ def get_open_port(force: bool = False) -> int:
 
     if force:
         # This flag will only be True in disaggregated prefill scenario
-        # and VLLM_PORT must be set so that vLLM can connect prefill vLLM 
+        # and VLLM_PORT must be set so that vLLM can connect prefill vLLM
         # instance and decode vLLM instance.
         assert port is not None, "Please set environment variable VLLM_PORT in"
         " order to use disaggregated prefill and distributed KV cache transfer"
