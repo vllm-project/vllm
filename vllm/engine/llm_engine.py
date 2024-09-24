@@ -29,7 +29,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
-                         InputRegistry, LLMInputs, PromptType)
+                         InputRegistry, LLMInputs, PromptInputs)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -689,7 +689,7 @@ class LLMEngine:
     def add_request(
         self,
         request_id: str,
-        prompt: PromptType,
+        inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -704,7 +704,8 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
                 for more details about the format of each input.
             params: Parameters for sampling or pooling.
                 :class:`~vllm.SamplingParams` for text generation.
@@ -744,7 +745,7 @@ class LLMEngine:
             arrival_time = time.time()
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
-            prompt,
+            inputs,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
