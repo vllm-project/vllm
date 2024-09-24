@@ -92,6 +92,7 @@ steps:
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
+  - export VLLM_AUDIO_FETCH_TIMEOUT=10
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s entrypoints/test_chat_utils.py
@@ -361,7 +362,8 @@ steps:
   - pytest models/encoder_decoder/language/test_bart.py models/decoder_only/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
-  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s distributed/test_distributed_oot.py
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
