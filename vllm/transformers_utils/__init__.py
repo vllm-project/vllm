@@ -1,5 +1,6 @@
 from vllm.envs import VLLM_USE_MODELSCOPE
 
+print(f'VLLM_USE_MODELSCOPE={VLLM_USE_MODELSCOPE}')
 if VLLM_USE_MODELSCOPE:
     # Patch here, before each import happens
     import modelscope
