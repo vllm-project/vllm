@@ -229,12 +229,17 @@ def initialize_ray_cluster(
             the default Ray cluster address.
     """
     assert_ray_available()
-
     # Connect to a ray cluster.
     if is_hip() or is_xpu():
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True,
-                 num_gpus=parallel_config.world_size)
+        # Try to connect existing ray instance and create a new one if not found
+        try:
+            ray.init('auto')
+        except ray.exceptions.ConnectionError:
+            logger.warning("No existing RAY instance detected. " +
+                           "A new instance will be launched with current node resources.")
+            ray.init(address=ray_address,
+                     ignore_reinit_error=True,
+                     num_gpus=parallel_config.world_size)
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
