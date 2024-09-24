@@ -952,8 +952,6 @@ class SchedulerConfig:
             iteration.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
-        is_attention_free: True if the running model does not have state that
-            grows as the context size increases.
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
         num_lookahead_slots: The number of slots to allocate per sequence per
             step, beyond the known token ids. This is used in speculative
@@ -981,7 +979,6 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
-                 is_attention_free: bool,
                  use_v2_block_manager: bool = False,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
@@ -1023,7 +1020,6 @@ class SchedulerConfig:
 
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
-        self.is_attention_free = is_attention_free
         self.use_v2_block_manager = use_v2_block_manager
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
