@@ -132,7 +132,9 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             if not self.input_symmetric:
                 # Static asymmetric quantization has not been tested yet
                 # See comment in process_weights_after_loading
-                input_zero_point = Parameter(torch.zeros(1, dtype=torch.int32))
+                input_zero_point = BasevLLMParameter(
+                    data=torch.empty(1, dtype=torch.int32),
+                    weight_loader=weight_loader)
                 layer.register_parameter("input_zero_point", input_zero_point)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
