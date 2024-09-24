@@ -283,12 +283,19 @@ class Qwen2VisionAttention(nn.Module):
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
         elif is_cpu():
-            seq_length = q.size(1)
+            bs, seq_length, _, _ = q.shape
             q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
-            attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
+            attention_mask = torch.zeros([bs, 1, seq_length, seq_length],
+                                         device=q.device,
+                                         dtype=torch.bool)
             for i in range(1, len(cu_seqlens)):
-                attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
-            output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
+                attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
+                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
+            output = F.scaled_dot_product_attention(q,
+                                                    k,
+                                                    v,
+                                                    attention_mask,
+                                                    dropout_p=0.0)
             context_layer = rearrange(output, "b h s d -> b s h d ")
         else:
             from xformers import ops as xops
