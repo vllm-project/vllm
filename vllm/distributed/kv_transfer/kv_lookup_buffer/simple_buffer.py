@@ -77,11 +77,13 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         self.data_pipe.send_tensor(tensor)
 
     def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
-
-        if not data:
-            return 0
+        
         if isinstance(data, torch.Tensor):
             return data.element_size() * data.numel()
+        if not data:
+            # cannot perform `not data` on a tensor
+            # so this check needs to go after the check above
+            return 0
 
         raise AssertionError("Unknown data type %s" % type(data))
 
