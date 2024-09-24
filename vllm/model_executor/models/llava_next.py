@@ -28,8 +28,9 @@ from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import (flatten_bn, group_weights_with_prefix, is_pp_missing_parameter,
-                    init_vllm_registered_model, merge_multimodal_embeddings)
+from .utils import (flatten_bn, group_weights_with_prefix,
+                    init_vllm_registered_model, is_pp_missing_parameter,
+                    merge_multimodal_embeddings)
 
 # Result in the max possible feature size (2x2 grid of 336x336px tiles)
 MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448

@@ -20,8 +20,8 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsMultiModal
-from .utils import (group_weights_with_prefix, is_pp_missing_parameter, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+from .utils import (group_weights_with_prefix, init_vllm_registered_model,
+                    is_pp_missing_parameter, merge_multimodal_embeddings)
 
 # We use this internally as placeholders since there is no image token
 # defined on the HuggingFace repo
@@ -649,12 +649,13 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         else:
             inputs_embeds = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  kv_caches,
-                                                  attn_metadata,
-                                                  intermediate_tensors=intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model.model(
+            input_ids,
+            positions,
+            kv_caches,
+            attn_metadata,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds)
 
         return hidden_states
 

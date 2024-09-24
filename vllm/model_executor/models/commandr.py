@@ -47,9 +47,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsLoRA
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
-from .interfaces import SupportsLoRA
 
 
 @torch.compile

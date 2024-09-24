@@ -22,7 +22,8 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import (is_pp_missing_parameter, group_weights_with_prefix, merge_multimodal_embeddings)
+from .utils import (group_weights_with_prefix, is_pp_missing_parameter,
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -263,11 +264,11 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
             inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
-                                            positions,
-                                            kv_caches,
-                                            attn_metadata,
-                                            intermediate_tensors,
-                                            inputs_embeds=inputs_embeds)
+                                                  positions,
+                                                  kv_caches,
+                                                  attn_metadata,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
 
         return hidden_states
 

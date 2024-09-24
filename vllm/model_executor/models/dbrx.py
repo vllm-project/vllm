@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (QKVParallelLinear,

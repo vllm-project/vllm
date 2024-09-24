@@ -47,7 +47,8 @@ from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import is_list_of
 
-from .utils import (flatten_bn, is_pp_missing_parameter, make_empty_intermediate_tensors_factory, make_layers)
+from .utils import (flatten_bn, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 logger = init_logger(__name__)
 
@@ -914,13 +915,15 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
                 )
         return None
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                pixel_values: Optional[torch.Tensor] = None) -> Union[torch.Tensor, IntermediateTensors]:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        pixel_values: Optional[torch.Tensor] = None
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         pixel_values = self._get_image_input_type(pixel_values)
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, intermediate_tensors,

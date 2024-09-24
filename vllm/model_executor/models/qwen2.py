@@ -49,7 +49,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA
-from .utils import (PPMissingLayer, is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory)
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class Qwen2MLP(nn.Module):
