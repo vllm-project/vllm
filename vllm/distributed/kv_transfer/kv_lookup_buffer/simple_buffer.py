@@ -57,7 +57,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
             # so any of the data in the buffer can be drop-selected
             return True
 
-        # Assuming that roi is a mask on tokens
+        # Assuming that roi is a binary mask on tokens
         tokens_sender = tokens_sender[roi_sender]
         tokens_recver = tokens_recver[roi_recver]
 
@@ -128,6 +128,9 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                 matched_length = 0
 
                 # perform input tokens and roi matching
+                # FIXME: this matching is O(n), ideally it should be O(1)
+                # but this buffer size won't (and shouldn't) be too large so
+                # the fix is not urgent.
                 with self.buffer_lock:
 
                     for _ in range(len(self.buffer)):
@@ -158,11 +161,13 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
 
         logger.debug("Closing drop_select_handler")
 
-    def drop_select(self, input_tokens: torch.Tensor,
-                    roi: torch.Tensor) -> List[Optional[torch.Tensor]]:
+    def drop_select(
+            self, input_tokens: Optional[torch.Tensor],
+            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
 
         assert self.request_handling_thread is None, \
-            "drop_select should be called by the receiver"
+            "drop_select should be called by the KV cache consumer "\
+            "(e.g. the decode vLLM instance)"
 
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
@@ -188,8 +193,11 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                key: torch.Tensor, value: torch.Tensor,
                hidden: torch.Tensor) -> None:
 
+        if self.buffer_size > self.buffer_size_threshold:
+            # log outside the while loop to avoid this message being logged 
+            # repeatedly.
+            logger.debug("KV transfer buffer is full. Handling...")
         while self.buffer_size > self.buffer_size_threshold:
-            # logger.debug("KV transfer buffer is full. Handling...")
             self.full_handler()
 
         self._add_to_buffer(input_tokens, roi, key, value, hidden)
