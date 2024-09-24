@@ -49,7 +49,7 @@ __global__ void dummy_kernel() {
 #else
   for (int i = 0; i < 100; i++) {
     long long int start = clock64();
-    while (clock64() - start < 1000000);  // something like 100ms
+    while (clock64() - start < 150000000);  // approximately 98.4ms on P40
   }
 #endif
 }
