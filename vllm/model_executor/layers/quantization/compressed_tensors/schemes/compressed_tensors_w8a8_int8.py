@@ -14,6 +14,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -58,7 +59,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                 # Static asymmetric quantization has not been tested yet.
                 # Kernel and ops support exists and is tested, it's just the
                 # following integration code that is untested.
-                logger.warning(
+                print_warning_once(
                     "Support for models with static asymmetric quantized"
                     " activations has been implemented but is untested.")
 
