@@ -55,6 +55,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             if self.input_symmetric:
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
+                layer.input_zero_point = None
             else:
                 # Static asymmetric quantization has not been tested yet.
                 # Kernel and ops support exists and is tested, it's just the
@@ -142,6 +143,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
+
         return apply_int8_linear(input=x,
                                  weight=layer.weight,
                                  weight_scale=layer.weight_scale,
