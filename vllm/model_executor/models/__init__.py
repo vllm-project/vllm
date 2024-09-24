@@ -12,6 +12,7 @@ logger = init_logger(__name__)
 _GENERATION_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
+    "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
@@ -22,6 +23,7 @@ _GENERATION_MODELS = {
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
+    "EAGLEModel": ("eagle", "EAGLE"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
@@ -30,15 +32,20 @@ _GENERATION_MODELS = {
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
+    "GraniteForCausalLM": ("granite", "GraniteForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
+    "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
+    "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
+    "MedusaModel": ("medusa", "Medusa"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
+    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
@@ -52,6 +59,7 @@ _GENERATION_MODELS = {
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
+    "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -62,14 +70,7 @@ _GENERATION_MODELS = {
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
-    "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
-    "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
-    "MedusaModel": ("medusa", "Medusa"),
-    "EAGLEModel": ("eagle", "EAGLE"),
-    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
-    "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
-    "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {

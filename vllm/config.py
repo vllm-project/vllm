@@ -420,10 +420,9 @@ class ModelConfig:
         # Return true if the model is mamba.
         # This check should be augmented with more models in the future,
         # and made more robust if possible.
-        if hasattr(self.hf_text_config,
-                   "model_type") and self.hf_text_config.model_type == 'mamba':
-            return True
-        return False
+        return hasattr(
+            self.hf_text_config,
+            "model_type") and self.hf_text_config.model_type == 'mamba'
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""

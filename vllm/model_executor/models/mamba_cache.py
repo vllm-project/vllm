@@ -2,6 +2,8 @@ from typing import Dict, List, Optional
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionMetadata
+
 
 class MambaCacheManager:
 
@@ -83,10 +85,11 @@ class MambaCacheManager:
                     from_index=cache_index_already_exists,
                     to_index=destination_index)
 
-    def prepare_current_run_state(self,
-                                  request_ids_to_seq_ids: Dict[str, list[int]],
-                                  batch_size: int,
-                                  finished_requests_ids: List[str]):
+    def _prepare_current_run_state(self,
+                                   request_ids_to_seq_ids: Dict[str,
+                                                                list[int]],
+                                   batch_size: int,
+                                   finished_requests_ids: List[str]):
         running_indices = []
         request_ids_to_seq_ids_flatten = [
             (req_id, seq_id)
@@ -108,6 +111,31 @@ class MambaCacheManager:
         temporal_state = self.mamba_cache[1][:, :batch_size]
 
         return (conv_state, temporal_state)
+
+    def current_run_tensors(self, input_ids: torch.Tensor,
+                            attn_metadata: AttentionMetadata, **kwargs):
+
+        if "seqlen_agnostic_capture_inputs" not in kwargs:
+            # We get here only on Prefill/Eager mode runs
+            assert all(
+                key in kwargs
+                for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
+
+            request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
+            finished_requests_ids = kwargs["finished_requests_ids"]
+            self.release_finished_requests(finished_requests_ids)
+
+            batch_size = input_ids.shape[0]
+            if attn_metadata.prefill_metadata:
+                batch_size = len(request_ids_to_seq_ids)
+            mamba_cache_tensors = self._prepare_current_run_state(
+                request_ids_to_seq_ids, batch_size, finished_requests_ids)
+
+        else:
+            # CUDA graph capturing runs
+            mamba_cache_tensors = kwargs["seqlen_agnostic_capture_inputs"]
+
+        return mamba_cache_tensors
 
     def _get_all_occupied_indices(self):
         return [
@@ -169,8 +197,8 @@ class MambaCacheManager:
         self.release_finished_requests(finished_requests_ids)
         request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
         cg_batch_size = input_buffers['input_ids'].shape[0]
-        self.prepare_current_run_state(request_ids_to_seq_ids, cg_batch_size,
-                                       finished_requests_ids)
+        self._prepare_current_run_state(request_ids_to_seq_ids, cg_batch_size,
+                                        finished_requests_ids)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """

@@ -5,13 +5,11 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
-from torch.nn.parameter import Parameter
 from transformers import MambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -27,7 +25,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    composed_weight_loader, default_weight_loader, sharded_weight_loader)
 from vllm.model_executor.models.interfaces import HasInnerState
 from vllm.model_executor.models.mamba_cache import MambaCacheManager
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -67,16 +66,11 @@ class MambaMixer(nn.Module):
         self.conv_kernel_size = config.conv_kernel
         self.intermediate_size = config.intermediate_size
         self.time_step_rank = int(config.time_step_rank)
-        self.use_conv_bias = config.use_conv_bias
-
-        # TODO: ??
-        #self.use_bias = config.mamba_proj_bias
-        self.use_bias = False
 
         self.conv1d = ColumnParallelLinear(
             input_size=self.conv_kernel_size,
             output_size=self.intermediate_size,
-            bias=self.use_conv_bias,
+            bias=config.use_conv_bias,
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -86,7 +80,7 @@ class MambaMixer(nn.Module):
 
         self.in_proj = MergedColumnParallelLinear(self.hidden_size,
                                                   [self.intermediate_size] * 2,
-                                                  bias=self.use_bias)
+                                                  bias=config.use_bias)
         # selective projection used to make dt, B and C input dependent
         self.x_proj = RowParallelLinear(
             self.intermediate_size,
@@ -101,16 +95,6 @@ class MambaMixer(nn.Module):
                                             bias=True,
                                             skip_bias_add=True)
 
-        def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            tp_rank = get_tensor_model_parallel_rank()
-            tp_size = get_tensor_model_parallel_world_size()
-            param.data.copy_(
-                loaded_weight.data.split(loaded_weight.shape[0] // tp_size,
-                                         dim=0)[tp_rank])
-
-        def A_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            weight_loader(param, -torch.exp(loaded_weight.float()))
-
         tp_size = get_tensor_model_parallel_world_size()
         self.A = nn.Parameter(
             torch.empty(
@@ -120,13 +104,15 @@ class MambaMixer(nn.Module):
             ))
         self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
 
-        set_weight_attrs(self.D, {"weight_loader": weight_loader})
-        set_weight_attrs(self.A, {"weight_loader": A_weight_loader})
+        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
+        a_weight_loader = composed_weight_loader(
+            sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
+        set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
 
         self.out_proj = RowParallelLinear(
             self.intermediate_size,
             self.hidden_size,
-            bias=self.use_bias,
+            bias=config.use_bias,
             input_is_parallel=True,
         )
         self.activation = config.hidden_act
@@ -445,25 +431,8 @@ class MambaForCausalLM(nn.Module, HasInnerState):
                 self.lm_head.weight.dtype, self.config.num_hidden_layers,
                 max_batch_size, *self._get_mamba_cache_shape())
 
-        if "seqlen_agnostic_capture_inputs" not in kwargs:
-            # We get here only on Prefill/Eager mode runs
-            assert all(
-                key in kwargs
-                for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
-
-            request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
-            finished_requests_ids = kwargs["finished_requests_ids"]
-            self.mamba_cache.release_finished_requests(finished_requests_ids)
-
-            batch_size = input_ids.shape[0]
-            if attn_metadata.prefill_metadata:
-                batch_size = len(request_ids_to_seq_ids)
-            mamba_cache_tensors = self.mamba_cache.prepare_current_run_state(
-                request_ids_to_seq_ids, batch_size, finished_requests_ids)
-
-        else:
-            # CUDA graph capturing runs
-            mamba_cache_tensors = kwargs["seqlen_agnostic_capture_inputs"]
+        mamba_cache_tensors = self.mamba_cache.current_run_tensors(
+            input_ids, attn_metadata, **kwargs)
 
         hidden_states = self.backbone(input_ids, positions, kv_caches,
                                       attn_metadata, mamba_cache_tensors[0],

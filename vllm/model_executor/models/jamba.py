@@ -30,7 +30,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    composed_weight_loader, default_weight_loader, sharded_weight_loader)
 from vllm.model_executor.models.interfaces import HasInnerState
 from vllm.model_executor.models.mamba_cache import MambaCacheManager
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -121,8 +122,10 @@ class JambaMambaMixer(nn.Module):
             ))
         self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
 
-        set_weight_attrs(self.D, {"weight_loader": weight_loader})
-        set_weight_attrs(self.A, {"weight_loader": A_weight_loader})
+        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
+        a_weight_loader = composed_weight_loader(
+            sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
+        set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
 
         self.out_proj = RowParallelLinear(
             self.intermediate_size,
@@ -623,24 +626,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                 self.lm_head.weight.dtype, num_mamba_layers, max_batch_size,
                 *self._get_mamba_cache_shape())
 
-        if "seqlen_agnostic_capture_inputs" not in kwargs:
-            # We get here only on Prefill/Eager mode runs
-            assert all(
-                key in kwargs
-                for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
-
-            request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
-            finished_requests_ids = kwargs["finished_requests_ids"]
-            self.mamba_cache.release_finished_requests(finished_requests_ids)
-
-            batch_size = input_ids.shape[0]
-            if attn_metadata.prefill_metadata:
-                batch_size = len(request_ids_to_seq_ids)
-            mamba_cache_tensors = self.mamba_cache.prepare_current_run_state(
-                request_ids_to_seq_ids, batch_size, finished_requests_ids)
-        else:
-            # CUDA graph capturing runs
-            mamba_cache_tensors = kwargs["seqlen_agnostic_capture_inputs"]
+        mamba_cache_tensors = self.mamba_cache.current_run_tensors(
+            input_ids, attn_metadata, **kwargs)
 
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, mamba_cache_tensors[0],

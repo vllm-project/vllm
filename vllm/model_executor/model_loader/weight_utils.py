@@ -6,7 +6,8 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, Union
+from typing import (Any, Callable, Dict, Generator, Iterable, List, Optional,
+                    Tuple, Union)
 
 import filelock
 import gguf
@@ -557,6 +558,38 @@ def row_parallel_weight_loader(param: torch.Tensor,
         loaded_weight = loaded_weight.narrow(shard_dim, start_idx, shard_size)
 
     return default_weight_loader(param, loaded_weight)
+
+
+LoaderFunction = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
+    """Create a weight loader that shards the weights along the given axis"""
+
+    def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        tp_rank = get_tensor_model_parallel_rank()
+
+        shard_size = param.data.shape[shard_axis]
+        start_idx = tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(shard_axis, start_idx, shard_size)
+
+        return default_weight_loader(param, loaded_weight)
+
+    return loader
+
+
+def composed_weight_loader(
+        loader: LoaderFunction, fn: Callable[[torch.Tensor],
+                                             torch.Tensor]) -> LoaderFunction:
+    """Create a weight loader that post-processes the weights after loading"""
+
+    def composed_loader(param: torch.Tensor,
+                        loaded_weight: torch.Tensor) -> None:
+        loader(param, loaded_weight)
+        param.data.copy_(fn(param))
+        return
+
+    return composed_loader
 
 
 def initialize_dummy_weights(
