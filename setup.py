@@ -157,21 +157,12 @@ class cmake_build_ext(build_ext):
         outdir = os.path.abspath(
             os.path.dirname(self.get_ext_fullpath(ext.name)))
 
-
-
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
             '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
             '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
-            "-DCMAKE_CXX_STANDARD=17",
         ]
-
-
-        # What is this used for? In CMakefiles?
-        # TODO: decide if we really need this, because we have VLLM_TARGET_DEVICE
-        # if _is_xpu():
-            # cmake_args += ['DVLLM_BUILD_XPU_OPS=ON']
 
         verbose = envs.VERBOSE
         if verbose:
@@ -179,14 +170,17 @@ class cmake_build_ext(build_ext):
 
         if is_sccache_available():
             cmake_args += [
+                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
+                '-DCMAKE_HIP_COMPILER_LAUNCHER=sccache',
             ]
         elif is_ccache_available():
             cmake_args += [
+                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
+                '-DCMAKE_HIP_COMPILER_LAUNCHER=ccache',
             ]
 
         # Pass the python executable to cmake so it can find an exact
@@ -254,7 +248,7 @@ def _no_device() -> bool:
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu() or _is_xpu()))
+            and not (_is_neuron() or _is_tpu()))
 
 
 def _is_hip() -> bool:
@@ -288,7 +282,7 @@ def _is_xpu() -> bool:
 
 
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu() or _is_xpu()
+    return _is_cuda() or _is_hip() or _is_cpu()
 
 
 def _build_core_ext() -> bool:
@@ -511,6 +505,7 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "video": ["opencv-python"],  # Required for video processing
         "audio": ["librosa", "soundfile"]  # Required for audio processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},

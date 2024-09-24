@@ -203,4 +203,4 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         if parallel_config.pipeline_parallel_size > 1:
             # torch-ccl xpu need a collective API warm up
             # before calling send/recv API
-            get_pp_group().all_gather(torch.zeros(1).xpu())
+            get_pp_group().all_reduce(torch.zeros(1).xpu())

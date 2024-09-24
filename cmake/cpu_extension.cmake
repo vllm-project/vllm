@@ -1,4 +1,5 @@
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_CXX_STANDARD 17)
 
 #
 # Define environment variables for special configurations
@@ -83,12 +84,7 @@ endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
-list(APPEND LIBS "numa")
-
-
-#
-# Define extension targets
-#
+list(APPEND LIBS dnnl numa)
 
 #
 # _C extension
@@ -101,6 +97,16 @@ set(VLLM_EXT_SRC
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/torch_bindings.cpp")
+
+if (AVX512_FOUND AND NOT AVX512_DISABLED)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+#
+# Define extension targets
+#
 
 define_gpu_extension_target(
     _C

@@ -54,10 +54,21 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
-void advance_step(int64_t num_seqs, int64_t num_queries, int64_t block_size,
-                  torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
-                  torch::Tensor& input_positions, torch::Tensor& seq_lens,
-                  torch::Tensor& slot_mapping, torch::Tensor& block_tables);
+void advance_step_flashattn(int64_t num_seqs, int64_t num_queries,
+                            int64_t block_size, torch::Tensor& input_tokens,
+                            torch::Tensor& sampled_token_ids,
+                            torch::Tensor& input_positions,
+                            torch::Tensor& seq_lens,
+                            torch::Tensor& slot_mapping,
+                            torch::Tensor& block_tables);
+
+void advance_step_flashinfer(
+    int64_t num_seqs, int64_t num_queries, int64_t block_size,
+    torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
+    torch::Tensor& input_positions, torch::Tensor& seq_lens,
+    torch::Tensor& slot_mapping, torch::Tensor& block_tables,
+    torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
+    torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
 
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
@@ -123,8 +134,16 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
 
+torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                      torch::Tensor& perm, c10::SymInt size_k,
+                                      c10::SymInt size_n, int64_t num_bits);
+
 torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
                                 int64_t size_n, int64_t num_bits);
+
+torch::Tensor awq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                     c10::SymInt size_k, c10::SymInt size_n,
+                                     int64_t num_bits);
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
@@ -169,9 +188,6 @@ void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales);
-
-void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
-                     torch::Tensor lookup_table);
 
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
