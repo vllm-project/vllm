@@ -1,4 +1,3 @@
-import functools
 import math
 import os
 from typing import Iterable, List, Optional, Tuple
@@ -464,8 +463,10 @@ class Phi3SmallForCausalLM(nn.Module):
 # Register compiler if environment variables is detected.
 # The model will be compiled after being loaded and quantized.
 if os.environ.get("COMPILE_PHI3_SMALL", "0") == "1":
-    dynamic_shape_compiler = functools.partial(torch.compile, dynamic=True)
-    register_module_to_compile(torch.nn.LayerNorm, dynamic_shape_compiler)
-    register_module_to_compile(Phi3SmallMLP, dynamic_shape_compiler)
-    register_module_to_compile(Phi3LongRoPEScaledRotaryEmbedding,
-                               dynamic_shape_compiler)
+    register_module_to_compile(Phi3SmallForCausalLM, torch.nn.LayerNorm, (),
+                               {"dynamic": True})
+    register_module_to_compile(Phi3SmallForCausalLM, Phi3SmallMLP, (),
+                               {"dynamic": True})
+    register_module_to_compile(Phi3SmallForCausalLM,
+                               Phi3LongRoPEScaledRotaryEmbedding, (),
+                               {"dynamic": True})
