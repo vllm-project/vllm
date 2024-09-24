@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 from typing_extensions import ParamSpec
 
-
 _P, _R_co = ParamSpec("_P"), TypeVar("_R_co", covariant=True)
 
 
