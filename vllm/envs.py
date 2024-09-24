@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+    VLLM_ALLOW_DEPRECATED_BEAM_SEARCH: bool = False
 
 
 def get_default_cache_root():
