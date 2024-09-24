@@ -400,10 +400,16 @@ class LLM:
                 of token IDs.
             beam_width: The number of beams to keep at each step.
             max_tokens: The max number of tokens to generate for each prompt.
+        
+        TODO: how does beam search work together with length penalty, frequency
+        penalty, and stopping criteria, etc.?
         """
 
         tokenizer = self.get_tokenizer()
-        beam_search_params = SamplingParams(logprobs=beam_width,
+        # generate 2 * beam_width candidates at each step
+        # following the huggingface transformers implementation
+        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
+        beam_search_params = SamplingParams(logprobs=2 * beam_width - 1,
                                             max_tokens=1,
                                             temperature=0.0)
         instances: List[BeamSearchInstance] = []
