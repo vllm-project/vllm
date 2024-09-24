@@ -34,6 +34,7 @@ from typing_extensions import ParamSpec, TypeIs, assert_never
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 
 logger = init_logger(__name__)
 
@@ -545,16 +546,34 @@ def get_open_zmq_ipc_path() -> str:
 
 def get_open_port(force: bool = False) -> int:
     port = envs.VLLM_PORT
-    if port is not None:
-        if force and port is not None:
-            # force vLLM to use envs.VLLM_PORT for torch.distributed init
-            # This is because this port will binded by prefill instance
-            # But both prefill and decode instance need to use this port to
-            # initialize torch.distributed
+    
+    if force:
+        # This flag will only be True in disaggregated prefill scenario
+        # and it has to be set so that vLLM can connect prefill vLLM instance
+        # and decode vLLM instance.
+        assert port is not None, "Please set VLLM_PORT in order to use "
+        "disaggregated prefill and distributed KV cache transfer."
+        
+        # For prefill vLLM instance (KV producer) this port must be empty.
+        # For decode vLLM instance this port can be non-empty.
+        if dist_kv.IS_KV_PRODUCER:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("", port))
+                    return port
+            except OSError as e:
+                logger.error("Port %d must be empty so that prefill vLLM "
+                             "instance can use this port to initialize "
+                             "distributed KV communication with decode "
+                             "vLLM instance.", port)
+                raise e
+        else:
             return port
+        
+    if port is not None:
         while True:
             try:
-                logger.error('Trying port %d', port)
+                logger.debug('Trying port %d', port)
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.bind(("", port))
                     return port
