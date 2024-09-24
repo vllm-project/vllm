@@ -120,6 +120,32 @@ class HfRunner:
         cleanup()
 
 
+class SentenceTransformersRunner(HfRunner):
+
+    def __init__(
+        self,
+        model_name: str,
+        dtype: str = "half",
+        *,
+        model_kwargs: Optional[Dict[str, Any]] = None,
+        auto_cls=AutoModelForCausalLM,
+    ) -> None:
+        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+
+        self.model_name = model_name
+        from sentence_transformers import SentenceTransformer
+        self.model = self.wrap_device(
+            SentenceTransformer(
+                model_name,
+                device="cpu",
+            ).to(dtype=torch_dtype))
+
+    def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
+        return self.model.encode(prompts,
+                                 convert_to_numpy=False,
+                                 normalize_embeddings=False)
+
+
 def compare_embeddings(embeddings1, embeddings2):
     similarities = [
         F.cosine_similarity(e1, e2, dim=0)
