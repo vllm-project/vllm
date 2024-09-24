@@ -771,36 +771,3 @@ class LLM:
 
     def _is_embedding_model(self):
         return self.llm_engine.is_embedding_model()
-
-
-if __name__ == "__main__":
-    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
-
-    prompt1 = "Explain the concept of entropy."
-    prompt2 = "Explain what among us is."
-
-    conversation1 = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt1
-        },
-    ]
-
-    conversation2 = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt2
-        },
-    ]
-
-    messages = [conversation1, conversation2]
-
-    outputs = llm.chat(messages)
