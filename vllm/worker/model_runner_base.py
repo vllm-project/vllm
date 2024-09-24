@@ -137,7 +137,15 @@ def dump_input_when_exception(exclude_args: Optional[List[int]] = None,
                                                       for t in kv_caches
                                                       if is_tensor(t)]
 
-                    pickle.dump(dumped_inputs, filep)
+                    try:
+                        pickle.dump(dumped_inputs, filep)
+                    except Exception as pickle_err:
+                        logger.warning(
+                            "Failed to pickle inputs of failed execution: %s",
+                            str(pickle_err))
+                        raise type(err)(f"Error in model execution: "
+                                        f"{str(err)}") from err
+
                     logger.info(
                         "Completed writing input of failed execution to %s.",
                         filename)
