@@ -15,6 +15,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
+
 class QuantLLMFPConfig(QuantizationConfig):
     """Config for QuantLLM FP quantizer. It supports fp4,
     fp5, fp6, fp7.
@@ -43,10 +44,11 @@ class QuantLLMFPConfig(QuantizationConfig):
                 "Currently, only 4-bit, 5-bit, 6-bit, and 7-bit "
                 "quantization are supported for QuantLLM FP quantizaiton, "
                 f"but got {self.weight_bits} bits.")
-        
+
         if get_tensor_model_parallel_rank() == 0:
-            logger.info(f"Loading model in FP{self.weight_bits}_E"
-                        f"{self.exponent_bits}M{self.mantissa_bits} format.")
+            logger.info("Loading model in FP%s_E%sM%s format.",
+                        self.weight_bits, self.exponent_bits,
+                        self.mantissa_bits)
 
     def __repr__(self) -> str:
         return (f"QuantLLMFPConfig(weight_bits={self.weight_bits}), "
@@ -84,10 +86,8 @@ class QuantLLMFPConfig(QuantizationConfig):
             "quantize_config.json",
         ]
 
-    def get_quant_method(
-            self,
-            layer: torch.nn.Module,
-            prefix: str) -> Optional["QuantLLMFPLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantLLMFPLinearMethod"]:
         if isinstance(layer, LinearBase):
             return QuantLLMFPLinearMethod(self)
         return None
@@ -148,18 +148,18 @@ class QuantLLMFPLinearMethod(LinearMethodBase):
         scales = weight.scales
         out_dim, in_dim = weights.shape
         bsize = x.shape[0]
-        splitK = _SPLIT_K_MAP[(bsize - 1) // 64].get(
-            out_dim, 1) if bsize <= 768 else 1
+        splitK = _SPLIT_K_MAP[(bsize - 1) //
+                              64].get(out_dim, 1) if bsize <= 768 else 1
         if bias is None:
             return ops.fp_eXmY_linear_forward_cuda(
                 self.quant_config.exponent_bits,
-                self.quant_config.mantissa_bits,
-                x, weights, scales, splitK)
+                self.quant_config.mantissa_bits, x, weights, scales, splitK)
         else:
             return ops.fp_eXmY_linear_forward_cuda(
                 self.quant_config.exponent_bits,
-                self.quant_config.mantissa_bits,
-                x, weights, scales, splitK) + bias
+                self.quant_config.mantissa_bits, x, weights, scales,
+                splitK) + bias
+
 
 class QuantLLMFPParameter(nn.Parameter):
     """
@@ -171,28 +171,26 @@ class QuantLLMFPParameter(nn.Parameter):
     def __new__(cls, orig_shape: torch.Size, params_dtype: torch.dtype,
                 quant_config: QuantLLMFPConfig):
 
-        data = torch.empty(torch.Size((orig_shape[0],
-                            orig_shape[1] * quant_config.weight_bits // 8)),
-                                   dtype=torch.uint8)
-
+        data = torch.empty(torch.Size(
+            (orig_shape[0], orig_shape[1] * quant_config.weight_bits // 8)),
+                           dtype=torch.uint8)
 
         self = torch.Tensor._make_subclass(cls, data, data.requires_grad)
-        self.scales = torch.empty(orig_shape[0],
-                                  dtype=torch.float16)
+        self.scales = torch.empty(orig_shape[0], dtype=torch.float16)
         self.quant_config = quant_config
         self.orig_shape = orig_shape
         return self
 
     def quant_llmquantize_(self, tensor: torch.Tensor):
         assert tensor.device.type == "cuda" and tensor.dtype != torch.int8
-        data, scales = to_scaled_tc_fpx(
-            tensor.data, self.quant_config.exponent_bits,
-            self.quant_config.mantissa_bits)
+        data, scales = to_scaled_tc_fpx(tensor.data,
+                                        self.quant_config.exponent_bits,
+                                        self.quant_config.mantissa_bits)
         self.data.copy_(data)
         self.scales.copy_(scales)
 
     def quant_llmdequantize(self, output_dtype=None):
         output_dtype = output_dtype or torch.get_default_dtype()
-        return from_scaled_tc_fpx(self.data, self.quant_config.exponent_bits, 
-                        self.quant_config.mantissa_bits, self.scales
-                        ).to(output_dtype)
+        return from_scaled_tc_fpx(self.data, self.quant_config.exponent_bits,
+                                  self.quant_config.mantissa_bits,
+                                  self.scales).to(output_dtype)

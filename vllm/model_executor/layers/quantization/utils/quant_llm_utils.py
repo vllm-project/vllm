@@ -192,11 +192,11 @@ def _f32_to_fpx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
     magic_adder = _n_ones(MBITS_F32 - mbits - 1)
 
     # all E bits and M bits are 1s
-    max_normal = (2 ** (_n_ones(ebits) - exp_bias) *
-                  (_n_ones(mbits + 1) / (2 ** mbits)))
+    max_normal = (2**(_n_ones(ebits) - exp_bias) * (_n_ones(mbits + 1) /
+                                                    (2**mbits)))
 
     # E bits = 1, M bits = 0
-    min_normal = 2 ** (1 - exp_bias)
+    min_normal = 2**(1 - exp_bias)
 
     denorm_exp = (
         # exp bias conversion between formats
@@ -204,8 +204,7 @@ def _f32_to_fpx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
         # mantissa length difference between formats
         + (MBITS_F32 - mbits)
         # add one to encoded exponent for denormalized numbers
-        + 1
-    )
+        + 1)
     denorm_mask_int = denorm_exp << MBITS_F32
 
     # reinterpret int32 as float32
@@ -230,8 +229,8 @@ def _f32_to_fpx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
     saturate_mask = x >= max_normal
     denormal_mask = torch.logical_and(torch.logical_not(saturate_mask),
                                       x < min_normal)
-    normal_mask = torch.logical_not(torch.logical_or(saturate_mask,
-                                                     denormal_mask))
+    normal_mask = torch.logical_not(
+        torch.logical_or(saturate_mask, denormal_mask))
 
     #
     # branch 1: saturate to max val - handled later in the code which combines
@@ -349,12 +348,12 @@ def _fpx_unpacked_to_f32(x: Tensor, ebits: int, mbits: int) -> Tensor:
         # i=2, j=100,101,110,111
         # and so on
         for i in range(mbits):
-            for mantissa_cmp in range(1 << i, 1 << (i+1)):
+            for mantissa_cmp in range(1 << i, 1 << (i + 1)):
                 # left shift mantissa until it overflows (create an implicit 1)
                 # subtract exponent by the same amount
                 left_shift = mbits - i
-                mantissa_f32 = (mantissa_cmp - (1 << i)) << (left_shift +
-                                                             MBITS_F32 - mbits)
+                mantissa_f32 = (mantissa_cmp -
+                                (1 << i)) << (left_shift + MBITS_F32 - mbits)
                 exp_biased_f32 = (denormal_exp_biased -
                                   left_shift) << MBITS_F32
 
@@ -367,8 +366,8 @@ def _fpx_unpacked_to_f32(x: Tensor, ebits: int, mbits: int) -> Tensor:
         result = torch.where(denormal_mask, mantissa_lp_int32, result)
 
     # add sign back
-    sign_f32 = sign_lp.to(torch.int32) << (MBITS_F32 - mbits +
-                                           EBITS_F32 - ebits)
+    sign_f32 = sign_lp.to(
+        torch.int32) << (MBITS_F32 - mbits + EBITS_F32 - ebits)
     result = result | sign_f32
 
     return result.view(torch.float)
@@ -378,15 +377,16 @@ _ONES_TABLE = [_n_ones(i) for i in range(8)]
 
 
 def _pack(x: Tensor, n_bits: int) -> Tensor:
-    return reduce(torch.bitwise_or, [x[..., i::(8 // n_bits)]
-                                     << (8 - (i + 1) * n_bits
-                                         ) for i in range(8 // n_bits)])
+    return reduce(torch.bitwise_or, [
+        x[..., i::(8 // n_bits)] << (8 - (i + 1) * n_bits)
+        for i in range(8 // n_bits)
+    ])
 
 
 def _unpack(x: Tensor, n_bits: int) -> Tensor:
-    return torch.stack([(x >> (8 - (i + 1) * n_bits)) &
-                        ((1 << n_bits) - 1
-                         ) for i in range(8 // n_bits)], dim=-1).flatten(-2)
+    return torch.stack([(x >> (8 - (i + 1) * n_bits)) & ((1 << n_bits) - 1)
+                        for i in range(8 // n_bits)],
+                       dim=-1).flatten(-2)
 
 
 # https://github.com/usyd-fsalab/fp6_llm/blob/5df6737cca32f604e957e3f63f03ccc2e4d1df0d/fp6_llm/csrc/utils/weight_prepacking.h#L87-L116
@@ -401,8 +401,10 @@ def _bit_interleave(x: Tensor, n_bits: int, undo: bool = False) -> Tensor:
 
     if not undo:
         bit_order = {
-            1: [1, 5, 9, 13, 17, 21, 25, 29, 3, 7, 11, 15, 19, 23, 27, 31,
-                0, 4, 8, 12, 16, 20, 24, 28, 2, 6, 10, 14, 18, 22, 26, 30],
+            1: [
+                1, 5, 9, 13, 17, 21, 25, 29, 3, 7, 11, 15, 19, 23, 27, 31, 0,
+                4, 8, 12, 16, 20, 24, 28, 2, 6, 10, 14, 18, 22, 26, 30
+            ],
             2: [1, 5, 9, 13, 3, 7, 11, 15, 0, 4, 8, 12, 2, 6, 10, 14],
             4: [1, 5, 3, 7, 0, 4, 2, 6],
         }[n_bits]
@@ -411,8 +413,10 @@ def _bit_interleave(x: Tensor, n_bits: int, undo: bool = False) -> Tensor:
         # this is inverse of the above, obtained by running
         # [v.index(i) for i in range(len(v))]
         bit_order = {
-            1: [16, 0, 24, 8, 17, 1, 25, 9, 18, 2, 26, 10, 19, 3, 27, 11,
-                20, 4, 28, 12, 21, 5, 29, 13, 22, 6, 30, 14, 23, 7, 31, 15],
+            1: [
+                16, 0, 24, 8, 17, 1, 25, 9, 18, 2, 26, 10, 19, 3, 27, 11, 20,
+                4, 28, 12, 21, 5, 29, 13, 22, 6, 30, 14, 23, 7, 31, 15
+            ],
             2: [8, 0, 12, 4, 9, 1, 13, 5, 10, 2, 14, 6, 11, 3, 15, 7],
             4: [4, 0, 6, 2, 5, 1, 7, 3],
         }[n_bits]
@@ -483,7 +487,8 @@ def pack_tc_fpx(tensor: Tensor, nbits: int) -> Tensor:
     return _pack_tc_fpx(tensor, nbits)
 
 
-def to_scaled_tc_fpx(tensor: Tensor, ebits: int, mbits: int) -> Tuple[Tensor, Tensor]:
+def to_scaled_tc_fpx(tensor: Tensor, ebits: int,
+                     mbits: int) -> Tuple[Tensor, Tensor]:
     # _n_ones() is not compatible with torch.compile() due to << operator
     # https://github.com/pytorch/pytorch/issues/119152
     # exp_bias = _n_ones(ebits - 1)
@@ -491,8 +496,8 @@ def to_scaled_tc_fpx(tensor: Tensor, ebits: int, mbits: int) -> Tuple[Tensor, Te
 
     # workaround: global lookup table
     exp_bias = _ONES_TABLE[ebits - 1]
-    max_normal = (2 ** (_ONES_TABLE[ebits] - exp_bias) *
-                  (_ONES_TABLE[mbits + 1] / (2 ** mbits)))
+    max_normal = (2**(_ONES_TABLE[ebits] - exp_bias) *
+                  (_ONES_TABLE[mbits + 1] / (2**mbits)))
 
     tensor = tensor.float()
     scale = tensor.abs().amax(1).clamp(min=1e-12) / max_normal
@@ -515,7 +520,7 @@ def _unpack_tc_fpx(tensor: Tensor, nbits: int) -> Tensor:
     for y in [1, 2, 4]:
         if nbits & y:
             size_ybit = size // nbits * y
-            tensor_ybit = tensor[offset : offset + size_ybit]
+            tensor_ybit = tensor[offset:offset + size_ybit]
             offset += size_ybit
 
             # undo Pass 3
@@ -576,8 +581,10 @@ def unpack_tc_fpx(tensor: Tensor, nbits: int) -> Tensor:
     return _unpack_tc_fpx(tensor, nbits)
 
 
-def from_scaled_tc_fpx(tensor: Tensor, ebits: int,
-                       mbits: int, scale=None) -> Tensor:
+def from_scaled_tc_fpx(tensor: Tensor,
+                       ebits: int,
+                       mbits: int,
+                       scale=None) -> Tensor:
     fpx_unpacked = unpack_tc_fpx(tensor, 1 + ebits + mbits)
     tensor = _fpx_unpacked_to_f32(fpx_unpacked, ebits, mbits)
     if scale is not None:
