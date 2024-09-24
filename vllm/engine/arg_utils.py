@@ -849,11 +849,13 @@ class EngineArgs:
             mm_processor_kwargs=self.mm_processor_kwargs,
         )
 
-    def create_load_config(self) -> LoadConfig:
+    def create_load_config(self, load_device=None) -> LoadConfig:
+        if load_device is None:
+            load_device = DeviceConfig(device=self.device).device
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            device=self.load_device,
+            device=load_device,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
         )
@@ -1038,9 +1040,9 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        self.load_device = device_config.device if self.weights_load_device is \
+        load_device = device_config.device if self.weights_load_device is \
             None else self.weights_load_device
-        load_config = self.create_load_config()
+        load_config = self.create_load_config(load_device)
 
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,
