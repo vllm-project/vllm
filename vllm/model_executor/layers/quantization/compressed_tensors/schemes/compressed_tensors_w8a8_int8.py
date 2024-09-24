@@ -59,7 +59,8 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                 # Kernel and ops support exists and is tested, it's just the
                 # following integration code that is untested.
                 logger.warning(
-                    "Static asymmetric quantization currently untested")
+                    "Support for models with static asymmetric quantized"
+                    " activations has been implemented but is untested.")
 
                 # reconstruct the ranges
                 int8_traits = torch.iinfo(torch.int8)
