@@ -10,6 +10,7 @@ import ssl
 from typing import List, Optional, Sequence, Union
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
+from vllm.entrypoints.chat_utils import validate_chat_template
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
@@ -229,6 +230,17 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     )
 
     return parser
+
+
+def validate_parsed_args(args):
+    """Quick checks / standardization that may raise prior to loading."""
+    # Ensure that the chat template is valid; raises if it likely isn't
+    validate_chat_template(args.chat_template)
+
+    # Enable auto tool needs a tool call parser to be valid
+    if args.enable_auto_tool_choice and not args.tool_call_parser:
+        raise TypeError("Error: --enable-auto-tool-choice requires "
+                        "--tool-call-parser")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
