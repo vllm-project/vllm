@@ -422,6 +422,15 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             raise NotImplementedError(
                 STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
 
+    @property
+    def model_is_mrope(self) -> bool:
+        """Detect if the model has "mrope" rope_scaling type.
+        mrope requires keep "rope_deltas" between prompt and decoding phases."""
+        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
+        if rope_scaling is None:
+            return False
+        return rope_scaling.get("type", None) == "mrope"
+
     def load_model(self) -> None:
         self.model = get_model(model_config=self.model_config,
                                load_config=self.load_config,
