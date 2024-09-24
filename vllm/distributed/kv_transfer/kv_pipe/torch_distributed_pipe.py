@@ -15,13 +15,15 @@ logger = init_logger(__name__)
 # this means that the sended object is None.
 NONE_INT = -150886311
 
-# Mapping tensor dtype to a int, used for tensor metadata transmission
+# Mapping tensor dtype to INT64, used for tensor metadata transmission
 FLOAT16_INT = -543205003776624
 INT64_INT = -375623078607432
 BOOL_INT = -28035262008646
 BFLOAT16_INT = -452084912267662
 FLOAT32_INT = -1049557997456592
 FLOAT64_INT = -452201007054137
+FLOAT8_E4M3FN_INT = -1066697177659525
+FLOAT8_E5M2_INT = -618182574682355
 
 DTYPE2INT = {
     torch.float16: FLOAT16_INT,
@@ -30,6 +32,8 @@ DTYPE2INT = {
     torch.bfloat16: BFLOAT16_INT,
     torch.float32: FLOAT32_INT,
     torch.float64: FLOAT64_INT,
+    torch.float8_e4m3fn: FLOAT8_E4M3FN_INT,
+    torch.float8_e5m2: FLOAT8_E5M2_INT,
 }
 
 INT2DTYPE = {
@@ -39,6 +43,8 @@ INT2DTYPE = {
     BFLOAT16_INT: torch.bfloat16,
     FLOAT32_INT: torch.float32,
     FLOAT64_INT: torch.float64,
+    FLOAT8_E4M3FN_INT: torch.float8_e4m3fn,
+    FLOAT8_E5M2_INT: torch.float8_e5m2,
 }
 
 
