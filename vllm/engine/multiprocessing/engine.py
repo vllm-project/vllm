@@ -17,11 +17,12 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCHealthRequest,
                                          RPCProcessRequest, RPCStartupRequest,
-                                         RPCStartupResponse)
+                                         RPCStartupResponse, RPCUProfileRequest)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
+from vllm.executor.gpu_executor import GPUExecutorAsync
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
                     SchedulerConfig, LoRAConfig]
@@ -231,6 +232,11 @@ class MQLLMEngine:
                     self._handle_abort_request(request)
                 elif isinstance(request, RPCHealthRequest):
                     self._handle_health_request()
+                elif isinstance(request, RPCUProfileRequest):
+                    if request == RPCUProfileRequest.START_PROFILE:
+                        self.start_profile()
+                    else:
+                        self.stop_profile()
                 else:
                     raise ValueError("Unknown RPCRequest Type: {request}")
 
@@ -313,6 +319,21 @@ class MQLLMEngine:
         if self._errored_with is None:
             self._errored_with = e
 
+    def start_profile(self) -> None:
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes
+        if type(self.engine.model_executor) == GPUExecutorAsync:
+            self.engine.model_executor.start_profile()
+        else:
+            self.engine.model_executor._run_workers("start_profile")
+
+    def stop_profile(self) -> None:
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes
+        if type(self.engine.model_executor) == GPUExecutorAsync:
+            self.engine.model_executor.stop_profile()
+        else:
+            self.engine.model_executor._run_workers("stop_profile")
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str):

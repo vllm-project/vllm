@@ -22,7 +22,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCHealthRequest,
                                          RPCProcessRequest, RPCStartupRequest,
-                                         RPCStartupResponse)
+                                         RPCStartupResponse, RPCUProfileRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
@@ -38,10 +38,10 @@ logger = init_logger(__name__)
 
 class MQClientClosedError(Exception):
     """Exception class raised when the client is used post-close.
-    
+
     The client can be closed, which closes the ZMQ context. This normally
-    happens on server shutdown. In some cases, methods like abort and 
-    do_log_stats will still be called and then try to open a socket, which 
+    happens on server shutdown. In some cases, methods like abort and
+    do_log_stats will still be called and then try to open a socket, which
     causes a ZMQError and creates a huge stack trace.
     So, we throw this error such that we can suppress it.
     """
@@ -126,11 +126,11 @@ class MQLLMEngineClient:
 
     async def run_check_health_loop(self, timeout: int):
         """Background loop that continually probes the RPCServer for health.
-        
+
         The loop sends CHECK_HEALTH requests to the INPUT_SOCKET, which
         the MQLLMEngine server is blocking on.
 
-        The Server replies on the HEALTH_SOCKET (rather than on the 
+        The Server replies on the HEALTH_SOCKET (rather than on the
         OUTPUT_SOCKET such that the messages are not intermingled with
         output streaming).
         """
@@ -351,7 +351,7 @@ class MQLLMEngineClient:
     async def check_health(self):
         """
         The check health loop probes the health status of the
-        Engine's health every N seconds and sets _errored_with 
+        Engine's health every N seconds and sets _errored_with
         if the engine is unhealthy.
         """
         if self._errored_with is not None:
@@ -497,3 +497,17 @@ class MQLLMEngineClient:
                     await self.abort(request_id)
         finally:
             self.output_queues.pop(request_id)
+
+    async def start_profile(self) -> None:
+        """Start profiling the engine"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUProfileRequest.START_PROFILE,
+            socket = self.input_socket)
+
+    async def stop_profile(self) -> None:
+        """Stop profiling the engine"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUProfileRequest.STOP_PROFILE,
+            socket = self.input_socket)
