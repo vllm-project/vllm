@@ -147,7 +147,7 @@ static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
                : "=r"(flag)
                : "l"(flag_addr));
 #else
-  asm volatile("ld.volatile.sys.global.u32 %0, [%1]; membar.gl;"
+  asm volatile("ld.volatile.global.u32 %0, [%1]; membar.gl;"
                : "=r"(flag)
                : "l"(flag_addr));
 #endif
