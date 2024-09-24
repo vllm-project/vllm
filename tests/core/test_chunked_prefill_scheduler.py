@@ -333,7 +333,7 @@ def test_prompt_limit_exceed(use_v2_block_manager: bool):
                                        max_seqs,
                                        max_model_len,
                                        enable_chunked_prefill=True)
-    cache_config = CacheConfig(block_size, 1.0, 1, "auto")   
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
