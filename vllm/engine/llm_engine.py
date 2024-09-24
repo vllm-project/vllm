@@ -6,7 +6,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union
+from typing import Set, Type, Union, overload
 
 import torch
 from typing_extensions import TypeVar
@@ -51,7 +51,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device, weak_bind
+from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -686,6 +686,21 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
+    @overload  # DEPRECATED
+    def add_request(
+        self,
+        request_id: str,
+        *,
+        inputs: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> None:
+        ...
+
+    @overload
     def add_request(
         self,
         request_id: str,
@@ -695,6 +710,24 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> None:
+        ...
+
+    @deprecate_kwargs(
+        "inputs",
+        additional_message="Please use the 'prompt' parameter instead.",
+    )
+    def add_request(
+            self,
+            request_id: str,
+            prompt: Optional[PromptType] = None,
+            params: Optional[Union[SamplingParams, PoolingParams]] = None,
+            arrival_time: Optional[float] = None,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            *,
+            inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -737,6 +770,10 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+        if inputs is not None:
+            prompt = inputs
+        assert prompt is not None and params is not None
+
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")

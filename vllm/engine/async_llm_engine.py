@@ -2,8 +2,8 @@ import asyncio
 import time
 import weakref
 from functools import partial
-from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
-                    Mapping, Optional, Set, Tuple, Type, Union)
+from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
+                    List, Mapping, Optional, Set, Tuple, Type, Union, overload)
 from weakref import ReferenceType
 
 import vllm.envs as envs
@@ -28,7 +28,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import weak_bind
+from vllm.utils import deprecate_kwargs, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -402,6 +402,21 @@ class _AsyncLLMEngine(LLMEngine):
         """Stop the remote worker execution loop."""
         await self.model_executor.stop_remote_worker_execution_loop_async()
 
+    @overload  # DEPRECATED
+    async def add_request_async(
+        self,
+        request_id: str,
+        *,
+        inputs: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> None:
+        ...
+
+    @overload
     async def add_request_async(
         self,
         request_id: str,
@@ -412,7 +427,29 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
+        ...
+
+    @deprecate_kwargs(
+        "inputs",
+        additional_message="Please use the 'prompt' parameter instead.",
+    )
+    async def add_request_async(
+            self,
+            request_id: str,
+            prompt: Optional[PromptType] = None,
+            params: Optional[Union[SamplingParams, PoolingParams]] = None,
+            arrival_time: Optional[float] = None,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            *,
+            inputs: Optional[PromptType] = None,  # DEPRECATED
+    ) -> None:
         """Async version of :meth:`add_request`."""
+        if inputs is not None:
+            prompt = inputs
+        assert prompt is not None and params is not None
+
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -774,7 +811,23 @@ class AsyncLLMEngine:
 
     # This method does not need to be async, but kept that way
     # for backwards compatibility.
-    async def add_request(
+    @overload  # DEPRECATED
+    def add_request(
+        self,
+        request_id: str,
+        *,
+        inputs: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> Coroutine[None, None, AsyncGenerator[Union[
+            RequestOutput, EmbeddingRequestOutput], None]]:
+        ...
+
+    @overload
+    def add_request(
         self,
         request_id: str,
         prompt: PromptType,
@@ -782,8 +835,31 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> Coroutine[None, None, AsyncGenerator[Union[
+            RequestOutput, EmbeddingRequestOutput], None]]:
+        ...
+
+    @deprecate_kwargs(
+        "inputs",
+        additional_message="Please use the 'prompt' parameter instead.",
+    )
+    async def add_request(
+        self,
+        request_id: str,
+        prompt: Optional[PromptType] = None,
+        params: Optional[Union[SamplingParams, PoolingParams]] = None,
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        *,
+        inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
+        if inputs is not None:
+            prompt = inputs
+        assert prompt is not None and params is not None
+
         if not self.is_running:
             if self.start_engine_loop:
                 self.start_background_loop()

@@ -304,10 +304,9 @@ class LLM:
         ...
 
     @deprecate_kwargs(
-        "prompts",
         "prompt_token_ids",
         is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-        additional_message="Please use the 'inputs' parameter instead.",
+        additional_message="Please use the 'prompts' parameter instead.",
     )
     def generate(
         self,
@@ -658,10 +657,9 @@ class LLM:
         ...
 
     @deprecate_kwargs(
-        "prompts",
         "prompt_token_ids",
         is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-        additional_message="Please use the 'inputs' parameter instead.",
+        additional_message="Please use the 'prompts' parameter instead.",
     )
     def encode(
         self,
