@@ -3,7 +3,8 @@ from typing import Any, Dict, List, Optional, Type
 
 import torch
 from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import BlockDiagonalMask, LowerTriangularMask
+from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
+                                         BlockDiagonalMask)
 
 from vllm.logger import init_logger
 from vllm.wde.core.layers.attention.abstract import AttentionType
@@ -102,12 +103,25 @@ class PrefillOnlyXFormersImpl(PrefillOnlyAttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+        if self.num_kv_heads != self.num_heads:
+            # GQA/MQA requires the shape [B, M, G, H, K].
+            # Note that the output also has the same shape (which is different
+            # from a spec from the doc).
+            query = query.view(query.shape[0], self.num_kv_heads,
+                               self.num_queries_per_kv, query.shape[-1])
+            key = key[:, :,
+                      None, :].expand(key.shape[0], self.num_kv_heads,
+                                      self.num_queries_per_kv, key.shape[-1])
+            value = value[:, :,
+                          None, :].expand(value.shape[0], self.num_kv_heads,
+                                          self.num_queries_per_kv,
+                                          value.shape[-1])
+
         if causal:
-            attn_bias = LowerTriangularMask.from_seqlens(
-                attn_metadata.seq_lens, attn_metadata.seq_lens)
+            attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                attn_metadata.seq_lens)
         else:
-            attn_bias = BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens,
-                                                       attn_metadata.seq_lens)
+            attn_bias = BlockDiagonalMask.from_seqlens(attn_metadata.seq_lens)
 
         # Add the batch dimension.
         query = query.unsqueeze(0)

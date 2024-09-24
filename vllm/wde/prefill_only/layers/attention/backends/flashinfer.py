@@ -12,6 +12,10 @@ from vllm.wde.prefill_only.layers.attention.backends.abstract import (
 class PrefillOnlyFlashInferBackend(PrefillOnlyAttentionBackend):
 
     @staticmethod
+    def get_supported_head_sizes() -> List[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @staticmethod
     def get_name() -> str:
         return "flashinfer"
 
@@ -52,6 +56,13 @@ class PrefillOnlyFlashInferImpl(PrefillOnlyAttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
     ) -> None:
+        if blocksparse_params is not None:
+            raise ValueError("PrefillOnlyFlashInferImpl does not "
+                             "support block-sparse attention.")
+
+        from vllm_flash_attn import flash_attn_varlen_func
+
+        self.flash_attn_varlen_func = flash_attn_varlen_func
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -59,17 +70,28 @@ class PrefillOnlyFlashInferImpl(PrefillOnlyAttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        if sliding_window is not None:
-            raise ValueError("Sliding window is not supported in FlashInfer.")
-        self.sliding_window = (-1, -1)
+        self.sliding_window = ((sliding_window, sliding_window)
+                               if sliding_window is not None else (-1, -1))
+        if logits_soft_cap is None:
+            # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
+            logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        from vllm_flash_attn import flash_attn_varlen_func
+        if sliding_window is not None:
+            # NOTE(woosuk): flash-attn's sliding window does not work with
+            # paged KV cache.
+            raise ValueError(
+                "Sliding window is not supported in FlashAttention.")
 
-        self.flash_attn_varlen_func = flash_attn_varlen_func
+        support_head_sizes = (
+            PrefillOnlyFlashInferBackend.get_supported_head_sizes())
+        if head_size not in support_head_sizes:
+            raise ValueError(
+                f"Head size {head_size} is not supported by FlashAttention. "
+                f"Supported head sizes are: {support_head_sizes}.")
 
     def forward(
         self,
@@ -82,8 +104,16 @@ class PrefillOnlyFlashInferImpl(PrefillOnlyAttentionImpl):
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.ENCODER,
     ) -> torch.Tensor:
-        assert k_scale == 1.0 and v_scale == 1.0, (
-            "key/v_scale is not supported in FlashInfer.")
+        """Forward pass with FlashAttention.
+
+        Args:
+            query: shape = [num_tokens, num_heads * head_size]
+            key: shape = [num_tokens, num_kv_heads * head_size]
+            value: shape = [num_tokens, num_kv_heads * head_size]
+            attn_metadata: Metadata for attention.
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
 
         if attn_type == AttentionType.ENCODER:
             causal = False
@@ -93,6 +123,10 @@ class PrefillOnlyFlashInferImpl(PrefillOnlyAttentionImpl):
             raise NotImplementedError("Encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PrefillOnlyFlashInferImpl")
+
+        # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
+        assert k_scale == 1.0 and v_scale == 1.0, (
+            "key/v_scale is not supported in FlashAttention.")
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
@@ -115,6 +149,7 @@ class PrefillOnlyFlashInferImpl(PrefillOnlyAttentionImpl):
             causal=causal,
             window_size=self.sliding_window,
             alibi_slopes=self.alibi_slopes,
+            softcap=self.logits_soft_cap,
         )
 
         # Reshape the output tensor.
