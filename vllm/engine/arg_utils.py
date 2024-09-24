@@ -851,7 +851,8 @@ class EngineArgs:
 
     def create_load_config(self, load_device=None) -> LoadConfig:
         if load_device is None:
-            load_device = DeviceConfig(device=self.device).device
+            dummy_device_config = DeviceConfig(device=self.device)
+            load_device = dummy_device_config.device_type
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
@@ -1040,7 +1041,7 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        load_device = device_config.device if self.weights_load_device is \
+        load_device = device_config.device_type if self.weights_load_device is \
             None else self.weights_load_device
         load_config = self.create_load_config(load_device)
 
