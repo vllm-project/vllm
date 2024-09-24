@@ -72,7 +72,10 @@ class MiniCPMVImageInput(TypedDict):
     image: Image.Image
 
     # If provided, contains image_bounds data for the whole prompt.
-    image_bounds: NotRequired[torch.Tensor]
+    im_start_id: torch.Tensor
+    im_end_id: torch.Tensor
+    slice_start_id: NotRequired[torch.Tensor]
+    slice_end_id: NotRequired[torch.Tensor]
 
 
 class MiniCPMVImagePixelInputs(TypedDict):
@@ -268,10 +271,17 @@ def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
     return SequenceData.from_token_counts((0, seq_len))
 
 
-def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
+def dummy_image_for_minicpmv(ctx: InputContext, hf_config: PretrainedConfig,
+                             num_images: int):
+    tokenizer = cached_get_tokenizer(
+        ctx.model_config.tokenizer,
+        trust_remote_code=ctx.model_config.trust_remote_code)
+
     width = height = hf_config.image_size
-    image = MiniCPMVImageInput(
-        image=Image.new("RGB", (width, height), color=0))
+    image = MiniCPMVImageInput(image=Image.new("RGB", (width, height),
+                                               color=0),
+                               im_start_id=torch.tensor(tokenizer.im_start_id),
+                               im_end_id=torch.tensor(tokenizer.im_end_id))
     return {"image": [image] if num_images == 1 else [image] * num_images}
 
 
@@ -279,33 +289,10 @@ def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
                             mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config()
     num_images = mm_counts["image"]
-
     seq_data = dummy_seq_data_for_minicpmv(seq_len, num_images)
-    mm_data = dummy_image_for_minicpmv(hf_config, num_images)
+    mm_data = dummy_image_for_minicpmv(ctx, hf_config, num_images)
 
     return seq_data, mm_data
-
-
-def _get_image_bounds(tokenizer, input_ids: List[int]) -> torch.Tensor:
-    input_ids = torch.tensor(input_ids)
-    start_cond = input_ids == tokenizer.im_start_id
-    end_cond = input_ids == tokenizer.im_end_id
-    if hasattr(tokenizer, "slice_start_id"):
-        start_cond |= (input_ids == tokenizer.slice_start_id)
-        end_cond |= (input_ids == tokenizer.slice_end_id)
-
-    image_start_tokens, = torch.where(start_cond)
-    image_start_tokens += 1
-    image_end_tokens, = torch.where(end_cond)
-    valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
-
-    if valid_image_nums == 0:
-        return torch.zeros((0, 2), device=input_ids.device)
-
-    return torch.hstack([
-        image_start_tokens[:valid_image_nums].unsqueeze(-1),
-        image_end_tokens[:valid_image_nums].unsqueeze(-1),
-    ])
 
 
 def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
@@ -352,12 +339,21 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
         new_prompt = "".join(new_prompt_chunks)
         new_token_ids = tokenizer.encode(new_prompt)
 
-    image_bounds = _get_image_bounds(tokenizer, new_token_ids)
-    multi_modal_data["image"] = [
-        MiniCPMVImageInput(image=image, image_bounds=image_bounds)
-        for image in images
-    ]
-
+    multi_modal_data["image"] = []
+    for image in images:
+        if hasattr(tokenizer, "slice_start_id"):
+            multi_modal_data["image"].append(MiniCPMVImageInput(
+                image=image,
+                im_start_id=torch.tensor(tokenizer.im_start_id),
+                im_end_id=torch.tensor(tokenizer.im_end_id),
+                slice_start_id=torch.tensor(tokenizer.slice_start_id),
+                slice_end_id=torch.tensor(tokenizer.slice_end_id)))
+        else:
+            multi_modal_data["image"].append(MiniCPMVImageInput(
+                image=image,
+                im_start_id=torch.tensor(tokenizer.im_start_id),
+                im_end_id=torch.tensor(tokenizer.im_end_id)))
+    print("multi_modal_data", multi_modal_data)
     llm_inputs = LLMInputs(
         prompt_token_ids=new_token_ids,
         prompt=new_prompt,
@@ -383,11 +379,15 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
             .preprocess([img["image"] for img in data], return_tensors="pt") \
             .data
     except Exception:
-        logger.error("Failed to process image (%s)", data)
+        #logger.error("Failed to process image (%s)", data)
         raise
 
-    if len(data) > 0 and "image_bounds" in data[0]:
-        batch_data["image_bounds"] = data[0]["image_bounds"]
+    if len(data) > 0 and "im_start_id" in data[0]:
+        batch_data["im_start_id"] = data[0]["im_start_id"]
+        batch_data["im_end_id"] = data[0]["im_end_id"]
+        if "slice_start_id" in data[0]:
+            batch_data["slice_start_id"] = data[0]["slice_start_id"]
+            batch_data["slice_end_id"] = data[0]["slice_end_id"]
 
     return MultiModalInputs(batch_data)
 
@@ -460,6 +460,32 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
 
         return vlm_embedding, vision_hidden_states
 
+    def _get_image_bounds(self,
+                          input_ids: torch.Tensor,
+                          im_start_id: int,
+                          im_end_id: int,
+                          slice_start_id: Optional[int] = None,
+                          slice_end_id: Optional[int] = None) -> torch.Tensor:
+        print("im_start_id", im_start_id)
+        start_cond = input_ids == im_start_id[0]
+        end_cond = input_ids == im_end_id[0]
+        if slice_start_id is not None:
+            start_cond |= (input_ids == slice_start_id)
+            end_cond |= (input_ids == slice_end_id)
+
+        image_start_tokens, = torch.where(start_cond)
+        image_start_tokens += 1
+        image_end_tokens, = torch.where(end_cond)
+        valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
+
+        if valid_image_nums == 0:
+            return torch.zeros((0, 2), device=input_ids.device)
+
+        return torch.hstack([
+            image_start_tokens[:valid_image_nums].unsqueeze(-1),
+            image_end_tokens[:valid_image_nums].unsqueeze(-1),
+        ])
+
     def _parse_and_validate_inputs(
         self,
         input_ids: torch.Tensor,
@@ -467,7 +493,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     ) -> Optional[MiniCPMVImageInputs]:
         pixel_values = kwargs.pop("pixel_values", [])
         tgt_sizes = kwargs.pop("tgt_sizes", [])
-        image_bounds = kwargs.pop("image_bounds", torch.Tensor())
+        im_start_id = kwargs.pop("im_start_id", None)
+        im_end_id = kwargs.pop("im_end_id", None)
 
         if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel values. "
@@ -481,10 +508,10 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
             raise ValueError("Inconsistent batch lengths, found: "
                              f"{len(pixel_values)} vs. {len(tgt_sizes)}")
 
-        if not isinstance(image_bounds, torch.Tensor):
-            raise ValueError("Incorrect type of image_bounds. "
-                             f"Got type: {type(image_bounds)}")
-        image_bounds = image_bounds.squeeze(0)
+        #if not isinstance(image_bounds, torch.Tensor):
+        #    raise ValueError("Incorrect type of image_bounds. "
+        #                     f"Got type: {type(image_bounds)}")
+        #image_bounds = image_bounds.squeeze(0)
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
@@ -508,7 +535,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
             return None
 
         return MiniCPMVImageInputs(
-            image_bounds=image_bounds,
+            image_bounds=self._get_image_bounds(input_ids, im_start_id,
+                                                im_end_id),
             pixel_values=pixel_values_flat,
             tgt_sizes=torch.stack(tgt_sizes_flat),
         )
