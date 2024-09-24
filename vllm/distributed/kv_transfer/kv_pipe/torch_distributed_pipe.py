@@ -89,9 +89,6 @@ class TorchDistributedPipe(KVPipeBase):
         self.target_rank_for_recv = self.ranks[(self.rank_in_group - 1) %
                                                self.world_size]
 
-        # FIXME: why we need this?
-        torch.set_default_device(self.device)
-
         self.transport_thread: Optional[ThreadPoolExecutor] = None
         self.buffer_size = 0
         self.buffer_size_lock = threading.Lock()
@@ -110,8 +107,7 @@ class TorchDistributedPipe(KVPipeBase):
             return "cpu"
 
     def _make_metadata(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Create the metadata on based on the input tensor, and move it to GPU.
+        """Create the metadata on based on the input tensor, and move it to GPU.
         The metadata's length is `TorchDistributedPipe.METADATA_LENGTH`.
 
         Currently, the metadata is a int64 tensor and it includes dtype, number
@@ -129,7 +125,9 @@ class TorchDistributedPipe(KVPipeBase):
         Returns:
             - metadata: the metadata tensor, on self.device
         """
-        buffer = torch.empty(self.METADATA_LENGTH, dtype=self.METADATA_DTYPE)
+        buffer = torch.empty(self.METADATA_LENGTH,
+                             dtype=self.METADATA_DTYPE,
+                             device="cpu")
         buffer[0] = DTYPE2INT[tensor.dtype]
         ndims = len(tensor.shape)
         buffer[1] = len(tensor.shape)
@@ -139,8 +137,7 @@ class TorchDistributedPipe(KVPipeBase):
 
     def _prepare_recv_buffer(self,
                              d_metadata_buffer: torch.Tensor) -> torch.Tensor:
-        """
-        Create a buffer to receive the tensor based on the metadata.
+        """Create a buffer to receive the tensor based on the metadata.
 
         Parameters:
             - d_metadata_buffer: the metadata tensor on self.device
@@ -155,8 +152,7 @@ class TorchDistributedPipe(KVPipeBase):
         return torch.empty(shape, dtype=dtype, device=self.device)
 
     def _send_metadata(self, d_metadata_buffer: torch.Tensor):
-        """
-        Send the metadata buffer to the target rank.
+        """Send the metadata buffer to the target rank.
         """
         torch.distributed.send(
             d_metadata_buffer,
@@ -165,8 +161,7 @@ class TorchDistributedPipe(KVPipeBase):
         )
 
     def _recv_metadata(self) -> torch.Tensor:
-        """
-        Receive the metadata buffer from the target rank.
+        """Receive the metadata buffer from the target rank.
 
         Returns:
             - metadata_buffer: the metadata buffer tensor, on self.device
@@ -195,11 +190,9 @@ class TorchDistributedPipe(KVPipeBase):
 
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
-        #logger.debug(f"Sent meta {metadata}")
         torch.distributed.send(tensor.to(self.device),
                                dst=self.target_rank_for_send,
                                group=self.device_group)
-        #logger.debug(f"Sent tensor {tensor}")
 
     def _recv_impl(self) -> torch.Tensor:
         """
@@ -235,17 +228,14 @@ class TorchDistributedPipe(KVPipeBase):
             traceback.print_exc()
 
     def block_if_full(self):
-        """
-        Block the current thread if the buffer size is larger than 1e9.
-        """
+        """Block the current thread if the buffer size is larger than 1e9."""
         # TODO: replace this 1e9 with a configurable parameter or a constant
         while self.buffer_size > 1e9:
             logger.debug("KV cache transfer pipe is full. Waiting...")
             time.sleep(0.05)
 
     def send_tensor(self, tensor: Optional[torch.Tensor]) -> None:
-        """
-        Sends a tensor to the destination rank in a non-blocking way.
+        """Sends a tensor to the destination rank in a non-blocking way.
         Flow: send tensor dim -- send tensor shape -- send tensor data
         """
 
@@ -254,9 +244,8 @@ class TorchDistributedPipe(KVPipeBase):
 
         if tensor is None:
             tensor = self.none_tensor
-            tensor_size = 0
-        else:
-            tensor_size = tensor.element_size() * tensor.numel()
+
+        tensor_size = tensor.element_size() * tensor.numel()
 
         assert (
             0 < len(tensor.shape) < self.MAX_TENSOR_DIMENSIONS
@@ -294,9 +283,7 @@ class TorchDistributedPipe(KVPipeBase):
             return tensor
 
     def close(self):
-        """
-        Close the pipe and release the resources.
-        """
+        """Close the pipe and release the resources."""
         if (hasattr(self, "transport_thread")
                 and self.transport_thread is not None):
             self.transport_thread.shutdown()
