@@ -14,6 +14,11 @@ class IPEXConfig(QuantizationConfig):
     including AWQ.
     """
 
+    IPEX_QUANT_METHOD_MAP = {
+        "awq": 1,
+        "gptq": 2,
+    }
+
     def __init__(
         self,
         method: str,
@@ -25,16 +30,23 @@ class IPEXConfig(QuantizationConfig):
         self.group_size = group_size
         self.pack_factor = 32 // self.weight_bits
 
+        if self.weight_bits not in [4]:
+            raise ValueError(f"IPEX quantization supports weight bits [4], "
+                             f"but got {self.weight_bits}.")
+
         if self.method == "awq":
             self.quant_method = IPEXAWQLinearMethod
         else:
-            raise RuntimeError(f"IPEX quantization supports [awq], "
-                               f"but got {self.method}.")
+            raise ValueError(f"IPEX quantization supports [awq], "
+                             f"but got {self.method}.")
 
     def __repr__(self) -> str:
         return (f"IPEXConfig(method={self.method}"
                 f"weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}")
+
+    def get_ipex_quant_method_id(self) -> int:
+        return IPEXConfig.IPEX_QUANT_METHOD_MAP[self.method]
 
     @classmethod
     def get_name(cls) -> str:
@@ -102,8 +114,12 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 
         import intel_extension_for_pytorch as ipex
 
-        weight_dtype = ipex.quantization.WoqWeightDtype.INT4
+        # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
+        # with better performance.
         lowp_mode = ipex.quantization.WoqLowpMode.INT8
+        # The weight will be de-packed from INT4 to INT8.
+        weight_dtype = ipex.quantization.WoqWeightDtype.INT4
+        # The float activation will be quantized (dynamic, per-token) to INT8.
         act_quant_mode = ipex.quantization.WoqActQuantMode.PER_BATCH
 
         qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
@@ -125,7 +141,8 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
                 qconfig=qconfig,
                 bias=bias,
                 group_size=self.quant_config.group_size,
-                quant_method=1
+                quant_method=
+                    self.quant_config.get_ipex_quant_method_id() # type: ignore
             )
 
     def apply(self,
