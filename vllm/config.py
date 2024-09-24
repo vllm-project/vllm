@@ -1,6 +1,7 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
+from functools import cached_property
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Mapping,
                     Optional, Tuple, Type, Union)
 
@@ -459,7 +460,7 @@ class ModelConfig:
             # we need to pad head_size 192 to 256
             return 256
 
-        if self.is_attention_free():
+        if self.is_attention_free:
             return 0
 
         if hasattr(self.hf_text_config, "head_dim"):
@@ -493,7 +494,7 @@ class ModelConfig:
             return getattr(self.hf_config.attn_config, "kv_n_heads",
                            self.hf_config.num_attention_heads)
 
-        if self.is_attention_free():
+        if self.is_attention_free:
             return 0
 
         attributes = [
@@ -547,7 +548,7 @@ class ModelConfig:
                               parallel_config: "ParallelConfig") -> List[str]:
         num_layers = self.get_num_layers(parallel_config)
 
-        if self.is_attention_free():
+        if self.is_attention_free:
             assert (self.hf_config.model_type == "mamba")
             return ["mamba"] * num_layers
 
