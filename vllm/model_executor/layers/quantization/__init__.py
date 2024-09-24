@@ -50,7 +50,6 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "qqq": QQQConfig,
     "experts_int8": ExpertsInt8Config,
     "neuron_quant": NeuronQuantConfig,
-    "quant_llm": QuantLLMFPConfig,
     # Aliases for the different quant_llm default configs
     "fp4_weights": QuantLLMFPConfig,
     "fp5_weights": QuantLLMFPConfig,
