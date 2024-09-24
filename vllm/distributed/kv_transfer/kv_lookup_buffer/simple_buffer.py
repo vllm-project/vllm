@@ -78,7 +78,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
 
     def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
 
-        if data == [] or data is None:
+        if not data:
             return 0
         if isinstance(data, torch.Tensor):
             return data.element_size() * data.numel()
