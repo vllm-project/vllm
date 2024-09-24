@@ -338,7 +338,6 @@ def test_prompt_limit_exceed(use_v2_block_manager: bool):
     cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: List[SequenceGroup] = []
-
     _, seq_group = create_dummy_prompt("2",
                                        prompt_length=48,
                                        block_size=block_size)
