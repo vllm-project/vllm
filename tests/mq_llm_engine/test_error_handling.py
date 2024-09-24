@@ -61,7 +61,7 @@ async def test_evil_forward(tmp_socket):
 
         # Throws an error in first forward pass.
         with pytest.raises(RAISED_ERROR):
-            async for _ in client.generate(prompt="Hello my name is",
+            async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
@@ -69,7 +69,7 @@ async def test_evil_forward(tmp_socket):
 
         # Engine is errored, should get ENGINE_DEAD_ERROR.
         with pytest.raises(MQEngineDeadError):
-            async for _ in client.generate(prompt="Hello my name is",
+            async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
@@ -118,7 +118,7 @@ async def test_failed_health_check(tmp_socket):
 
         # Generate call should throw ENGINE_DEAD_ERROR
         with pytest.raises(MQEngineDeadError):
-            async for _ in client.generate(prompt="Hello my name is",
+            async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
@@ -165,7 +165,7 @@ async def test_failed_abort(tmp_socket):
         # with reference to the original KeyError("foo")
         with pytest.raises(MQEngineDeadError) as execinfo:
             async for _ in client.generate(
-                    prompt="Hello my name is",
+                    inputs="Hello my name is",
                     sampling_params=SamplingParams(max_tokens=2000),
                     request_id=uuid.uuid4()):
                 pass
@@ -190,7 +190,7 @@ async def test_bad_request(tmp_socket):
 
         # Invalid request should fail, but not crash the server.
         with pytest.raises(ValueError):
-            async for _ in client.generate(prompt="Hello my name is",
+            async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id="abcd-1",
                                            lora_request=LoRARequest(
@@ -199,7 +199,7 @@ async def test_bad_request(tmp_socket):
                 pass
 
         # This request should be okay.
-        async for _ in client.generate(prompt="Hello my name is",
+        async for _ in client.generate(inputs="Hello my name is",
                                        sampling_params=SamplingParams(),
                                        request_id="abcd-2"):
             pass

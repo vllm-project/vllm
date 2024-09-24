@@ -20,7 +20,7 @@ async def generate(
     count = 0
     async for out in client.generate(
             request_id=request_id,
-            prompt="Hello my name is Robert and",
+            inputs="Hello my name is Robert and",
             sampling_params=SamplingParams(max_tokens=num_tokens,
                                            temperature=0)):
 

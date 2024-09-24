@@ -25,7 +25,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupResponse)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
-from vllm.inputs import PromptType
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -375,7 +375,7 @@ class MQLLMEngineClient:
 
     def generate(
         self,
-        prompt: PromptType,
+        inputs: PromptInputs,
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -389,7 +389,8 @@ class MQLLMEngineClient:
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
                 for more details about the format of each input.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
@@ -398,13 +399,13 @@ class MQLLMEngineClient:
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
         """
-        return self._process_request(prompt, sampling_params, request_id,
+        return self._process_request(inputs, sampling_params, request_id,
                                      lora_request, trace_headers,
                                      prompt_adapter_request)
 
     def encode(
         self,
-        prompt: PromptType,
+        inputs: PromptInputs,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -417,7 +418,8 @@ class MQLLMEngineClient:
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
                 for more details about the format of each input.
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
@@ -428,12 +430,12 @@ class MQLLMEngineClient:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
             for the request.
         """
-        return self._process_request(prompt, pooling_params, request_id,
+        return self._process_request(inputs, pooling_params, request_id,
                                      lora_request, trace_headers)
 
     async def _process_request(
         self,
-        prompt: PromptType,
+        inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -466,7 +468,7 @@ class MQLLMEngineClient:
 
             request_bytes = pickle.dumps(
                 RPCProcessRequest(
-                    prompt=prompt,
+                    inputs=inputs,
                     params=params,
                     request_id=request_id,
                     lora_request=lora_request,
