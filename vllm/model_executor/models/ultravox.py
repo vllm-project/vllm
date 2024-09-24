@@ -25,6 +25,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.utils import (flatten_bn,
@@ -334,14 +335,23 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
 
+        self.secondary_weights = []
+        self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
         if config.audio_model_id is not None:
-            self.audio_tower = ModifiedWhisperEncoder.from_pretrained(
-                config.audio_model_id)
-        else:
-            self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
+            self.secondary_weights.append(
+                DefaultModelLoader.Source(
+                    model_or_path=config.audio_model_id,
+                    revision=None,
+                    prefix="audio_tower.",
+                ))
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
+        if config.text_model_id is not None:
+            self.secondary_weights.append(
+                DefaultModelLoader.Source(model_or_path=config.text_model_id,
+                                          revision=None,
+                                          prefix="language_model."))
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor) -> torch.Tensor:
@@ -465,6 +475,18 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
         weights_group = group_weights_with_prefix(weights)
+
+        # load audio tower weights
+        audio_tower_weights = weights_group["audio_tower"]
+        audio_tower_params_dict = dict(
+            self.audio_tower.named_parameters(
+                prefix=self.audio_tower.base_model_prefix))
+        for name, loaded_weight in audio_tower_weights:
+            if name in audio_tower_params_dict:
+                param = audio_tower_params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
 
         # load projector weights
         projector_weights = weights_group["multi_modal_projector"]
