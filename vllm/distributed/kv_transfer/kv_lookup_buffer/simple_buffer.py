@@ -194,7 +194,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                hidden: torch.Tensor) -> None:
 
         if self.buffer_size > self.buffer_size_threshold:
-            # log outside the while loop to avoid this message being logged 
+            # log outside the while loop to avoid this message being logged
             # repeatedly.
             logger.debug("KV transfer buffer is full. Handling...")
         while self.buffer_size > self.buffer_size_threshold:
