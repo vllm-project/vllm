@@ -1,4 +1,5 @@
 import pytest
+
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
 
