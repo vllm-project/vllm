@@ -3,7 +3,8 @@ from collections import deque
 from typing import List, Set, Tuple
 from unittest.mock import MagicMock
 
-import pytest  # noqa
+import pytest
+from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
@@ -16,9 +17,11 @@ from .utils import (append_new_token, append_new_token_seq_group,
                     schedule_and_update_computed_tokens)
 
 
-def test_scheduler_add_seq_group():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_scheduler_add_seq_group(use_v2_block_manager: bool):
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 1)
+    scheduler_config = SchedulerConfig(
+        100, 64, 1, use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, cache_dtype="auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -27,14 +30,18 @@ def test_scheduler_add_seq_group():
     # Add seq group to scheduler.
     num_seq_group = 4
     for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i), block_size)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           block_size,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         assert scheduler.get_num_unfinished_seq_groups() == i + 1
 
 
-def test_scheduler_abort_seq_group():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_scheduler_abort_seq_group(use_v2_block_manager: bool):
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 1)
+    scheduler_config = SchedulerConfig(
+        100, 64, 1, use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -54,11 +61,16 @@ def test_scheduler_abort_seq_group():
     assert scheduler.get_num_unfinished_seq_groups() == 0
 
 
-def test_scheduler_schedule_simple():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_scheduler_schedule_simple(use_v2_block_manager: bool):
     block_size = 4
     num_seq_group = 4
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, num_seq_group, max_model_len)
+    scheduler_config = SchedulerConfig(
+        64,
+        num_seq_group,
+        max_model_len,
+        use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -67,7 +79,9 @@ def test_scheduler_schedule_simple():
 
     # Add seq groups to scheduler.
     for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=block_size,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         running.append(seq_group)
 
@@ -91,20 +105,24 @@ def test_scheduler_schedule_simple():
     append_new_token(out, 1)
 
 
-def test_scheduler_prefill_prioritized():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_scheduler_prefill_prioritized(use_v2_block_manager: bool):
     """Verify running batched tokens are not applied to prefill requests."""
     block_size = 4
     max_model_len = 30
     max_batched_num_tokens = 30
-    scheduler_config = SchedulerConfig(max_batched_num_tokens, 2,
-                                       max_model_len)
+    scheduler_config = SchedulerConfig(
+        max_batched_num_tokens,
+        2,
+        max_model_len,
+        use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 2
-    cache_config.num_gpu_blocks = 2
+    cache_config.num_cpu_blocks = 16
+    cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
     # Add seq groups to scheduler.
-    _, seq_group_a = create_dummy_prompt("1", 1)
+    _, seq_group_a = create_dummy_prompt("1", 1, block_size=block_size)
     scheduler.add_seq_group(seq_group_a)
 
     # Schedule seq groups prompts.
@@ -112,7 +130,7 @@ def test_scheduler_prefill_prioritized():
     assert get_sequence_groups(out) == [seq_group_a]
 
     # Add a new prefill request B.
-    _, seq_group_b = create_dummy_prompt("2", 30)
+    _, seq_group_b = create_dummy_prompt("2", 30, block_size=block_size)
     scheduler.add_seq_group(seq_group_b)
 
     # Verify prefill requests are prioritized. Since max_batched_num_tokens
@@ -121,18 +139,24 @@ def test_scheduler_prefill_prioritized():
     assert get_sequence_groups(out) == [seq_group_b]
 
 
-def test_scheduler_schedule_preempt_abort():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_scheduler_schedule_preempt_abort(use_v2_block_manager: bool):
     block_size = 4
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, 2, max_model_len)
+    scheduler_config = SchedulerConfig(
+        64, 2, max_model_len, use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 2
     cache_config.num_gpu_blocks = 2
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
     # Add seq groups to scheduler.
-    seq_a, seq_group_a = create_dummy_prompt("1", block_size)
-    seq_b, seq_group_b = create_dummy_prompt("2", block_size)
+    seq_a, seq_group_a = create_dummy_prompt("1",
+                                             block_size,
+                                             block_size=block_size)
+    seq_b, seq_group_b = create_dummy_prompt("2",
+                                             block_size,
+                                             block_size=block_size)
     scheduler.add_seq_group(seq_group_a)
     scheduler.add_seq_group(seq_group_b)
 
@@ -170,12 +194,17 @@ def test_scheduler_schedule_preempt_abort():
     assert scheduler.get_num_unfinished_seq_groups() == 1
 
 
-def test_scheduler_max_seqs():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_scheduler_max_seqs(use_v2_block_manager: bool):
     block_size = 4
     num_seq_group = 4
     max_seq_group = 2
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, max_seq_group, max_model_len)
+    scheduler_config = SchedulerConfig(
+        64,
+        max_seq_group,
+        max_model_len,
+        use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -184,7 +213,9 @@ def test_scheduler_max_seqs():
     all_seq_groups: List[SequenceGroup] = []
     # Add seq groups to scheduler.
     for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=block_size,
+                                           block_size=block_size)
         all_seq_groups.append(seq_group)
 
     # Append 1 seq group
@@ -211,9 +242,15 @@ def test_scheduler_max_seqs():
     assert set(get_sequence_groups(out)) == set([all_seq_groups[1]])
 
 
-def test_scheduler_delay_factor():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_scheduler_delay_factor(use_v2_block_manager: bool):
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 16, delay_factor=0.5)
+    scheduler_config = SchedulerConfig(
+        100,
+        64,
+        16,
+        delay_factor=0.5,
+        use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -221,7 +258,8 @@ def test_scheduler_delay_factor():
 
     # schedule first prompt
     seq_group_meta, seq_group = create_dummy_prompt("0",
-                                                    prompt_length=block_size)
+                                                    prompt_length=block_size,
+                                                    block_size=block_size)
     scheduler.add_seq_group(seq_group)
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert out.num_prefill_groups > 0
@@ -231,7 +269,8 @@ def test_scheduler_delay_factor():
     # wait for a second before scheduling next prompt
     time.sleep(1)
     seq_group_meta, seq_group = create_dummy_prompt("1",
-                                                    prompt_length=block_size)
+                                                    prompt_length=block_size,
+                                                    block_size=block_size)
     scheduler.add_seq_group(seq_group)
 
     # second prompt should *not* be scheduled
@@ -248,11 +287,20 @@ def test_scheduler_delay_factor():
     append_new_token(out, 1)
 
 
-def test_swapped_out_prioritized():
-    scheduler = initialize_scheduler(max_num_seqs=6)
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_swapped_out_prioritized(use_v2_block_manager: bool):
+    block_size = 4
+    scheduler = initialize_scheduler(max_num_seqs=6,
+                                     block_size=block_size,
+                                     use_v2_block_manager=use_v2_block_manager,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     # best_of=2 * 3 == 6 sequences.
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           best_of=2,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     # prefill scheduled now.
@@ -276,7 +324,10 @@ def test_swapped_out_prioritized():
     append_new_token(out, 1)
 
     # Add 1 more task. Swap should be prioritized over prefill.
-    _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
+    _, seq_group = create_dummy_prompt(str(i),
+                                       prompt_length=60,
+                                       best_of=2,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     append_new_token(out, 1)
@@ -287,17 +338,26 @@ def test_swapped_out_prioritized():
     assert out.blocks_to_swap_out == []
 
 
-def initialize_scheduler(*,
-                         max_num_seqs=1000,
-                         max_token_budget=1000,
-                         max_model_len=1000,
-                         lora_config=None):
-    block_size = 4
-    scheduler_config = SchedulerConfig(max_token_budget, max_num_seqs,
-                                       max_model_len)
+def initialize_scheduler(
+    *,
+    max_num_seqs=1000,
+    max_token_budget=1000,
+    max_model_len=1000,
+    lora_config=None,
+    use_v2_block_manager=False,
+    block_size=4,
+    num_cpu_blocks=8,
+    num_gpu_blocks=8,
+):
+    block_size = block_size
+    scheduler_config = SchedulerConfig(
+        max_token_budget,
+        max_num_seqs,
+        max_model_len,
+        use_v2_block_manager=use_v2_block_manager)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = num_cpu_blocks
+    cache_config.num_gpu_blocks = num_gpu_blocks
     scheduler = Scheduler(scheduler_config, cache_config, lora_config)
     return scheduler
 
@@ -319,12 +379,18 @@ def add_token_budget(budget: SchedulingBudget,
     budget.add_num_seqs(mock_seq_group.request_id, num_curr_seqs)
 
 
-def test_prefill_schedule_max_prompt_len():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_prefill_schedule_max_prompt_len(use_v2_block_manager: bool):
     """
     Test prompt longer than max_prompt_len is aborted.
     """
-    scheduler = initialize_scheduler(max_model_len=30)
-    _, seq_group = create_dummy_prompt("0", prompt_length=60)
+    block_size = 4
+    scheduler = initialize_scheduler(max_model_len=30,
+                                     use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size)
+    _, seq_group = create_dummy_prompt("0",
+                                       prompt_length=60,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     budget = create_token_budget()
     output = scheduler._schedule_prefills(budget, None)
@@ -336,14 +402,21 @@ def test_prefill_schedule_max_prompt_len():
     assert len(remaining_waiting) == 0
 
 
-def test_prefill_schedule_token_budget():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_prefill_schedule_token_budget(use_v2_block_manager: bool):
     """
     Test token budget respected.
     """
-    scheduler = initialize_scheduler()
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     budget = create_token_budget(token_budget=0)
     for i in range(2):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
 
     # 0 token budget == nothing is scheduled.
@@ -366,10 +439,15 @@ def test_prefill_schedule_token_budget():
     assert len(remaining_waiting) == 1
 
     # Test when current_batched_tokens respected.
-    scheduler = initialize_scheduler()
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=16,
+                                     num_gpu_blocks=16)
     budget = create_token_budget(token_budget=60)
     add_token_budget(budget, 30, 0)
-    _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+    _, seq_group = create_dummy_prompt(str(i),
+                                       prompt_length=60,
+                                       block_size=block_size)
     # Cannot schedule a prompt that doesn't fit the budget.
     scheduler.add_seq_group(seq_group)
     output = scheduler._schedule_prefills(budget, None)
@@ -389,14 +467,21 @@ def test_prefill_schedule_token_budget():
     assert len(remaining_waiting) == 0
 
 
-def test_prefill_schedule_max_seqs():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_prefill_schedule_max_seqs(use_v2_block_manager: bool):
     """
     Test max seq respected.
     """
-    scheduler = initialize_scheduler()
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     budget = create_token_budget(max_num_seqs=2)
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
     output = scheduler._schedule_prefills(budget, None)
     remaining_waiting = scheduler.waiting
@@ -410,7 +495,9 @@ def test_prefill_schedule_max_seqs():
     scheduler.waiting = deque()
     budget = create_token_budget(max_num_seqs=2)
     add_token_budget(budget, 0, 2)
-    _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+    _, seq_group = create_dummy_prompt(str(i),
+                                       prompt_length=60,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     output = scheduler._schedule_prefills(budget, None)
     remaining_waiting = scheduler.waiting
@@ -421,17 +508,24 @@ def test_prefill_schedule_max_seqs():
     assert len(remaining_waiting) == 1
 
 
-def test_prefill_schedule_max_lora():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_prefill_schedule_max_lora(use_v2_block_manager: bool):
     """
     Test max lora is respected and prioritized.
     """
+    block_size = 4
     lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
-    scheduler = initialize_scheduler(lora_config=lora_config)
+    scheduler = initialize_scheduler(lora_config=lora_config,
+                                     use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     budget = create_token_budget(token_budget=120)
     curr_loras: Set[int] = set()
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
+                                           block_size=block_size,
                                            lora_request=LoRARequest(
                                                lora_name=str(i),
                                                lora_int_id=i + 1,
@@ -443,7 +537,9 @@ def test_prefill_schedule_max_lora():
     # If a request is not scheduled because it hits max lora, it is
     # prioritized. Verify that.
     for i in range(2, 4):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
     # Schedule 2 requests (0 and 2)
     output = scheduler._schedule_prefills(budget, curr_loras)
@@ -467,14 +563,21 @@ def test_prefill_schedule_max_lora():
     assert budget.num_batched_tokens == 60
 
 
-def test_prefill_schedule_no_block_manager_capacity():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_prefill_schedule_no_block_manager_capacity(use_v2_block_manager):
     """
     Test sequence cannot be scheduled due to block manager has no capacity.
     """
-    scheduler = initialize_scheduler()
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_gpu_blocks=128,
+                                     num_cpu_blocks=128)
     budget = create_token_budget()
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
     scheduler.block_manager.can_allocate = MagicMock()
     scheduler.block_manager.can_allocate.return_value = AllocStatus.LATER
@@ -489,7 +592,9 @@ def test_prefill_schedule_no_block_manager_capacity():
     scheduler = initialize_scheduler()
     budget = create_token_budget()
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
     scheduler.block_manager.can_allocate = MagicMock()
     scheduler.block_manager.can_allocate.return_value = AllocStatus.NEVER
@@ -502,14 +607,21 @@ def test_prefill_schedule_no_block_manager_capacity():
     assert len(remaining_waiting) == 0
 
 
-def test_decode_schedule_preempted():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_decode_schedule_preempted(use_v2_block_manager: bool):
     """
     Test decodes cannot be scheduled and preempted.
     """
-    scheduler = initialize_scheduler()
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     curr_loras = None
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._add_seq_group_to_running(seq_group)
@@ -541,15 +653,23 @@ def test_decode_schedule_preempted():
     assert output.blocks_to_copy == []
 
 
-def test_decode_swap_beam_search():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_decode_swap_beam_search(use_v2_block_manager: bool):
     """
     Test best_of > 1 swap out blocks
     """
-    scheduler = initialize_scheduler()
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_gpu_blocks=64,
+                                     num_cpu_blocks=64)
     curr_loras = None
     budget = create_token_budget()
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           best_of=2,
+                                           block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         scheduler._add_seq_group_to_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
@@ -589,12 +709,20 @@ def test_decode_swap_beam_search():
     assert output.blocks_to_copy == []
 
 
-def test_schedule_decode_blocks_to_copy_update():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_schedule_decode_blocks_to_copy_update(use_v2_block_manager: bool):
     """
     Verify blocks_to_copy is updated.
     """
-    scheduler = initialize_scheduler()
-    _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=4,
+                                     num_cpu_blocks=16,
+                                     num_gpu_blocks=16)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=60,
+                                       best_of=2,
+                                       block_size=block_size)
     curr_loras = None
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
@@ -644,12 +772,17 @@ def test_schedule_swapped_simple():
     assert blocks_to_swap_out == blocks_to_swap_in_reverse
 
 
-def test_schedule_swapped_max_token_budget():
-    scheduler = initialize_scheduler()
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_schedule_swapped_max_token_budget(use_v2_block_manager: bool):
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
-    for _ in range(2):
-        _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
@@ -676,12 +809,19 @@ def test_schedule_swapped_max_token_budget():
     assert len(output.prefill_seq_groups) == 0
 
 
-def test_schedule_swapped_max_seqs():
-    scheduler = initialize_scheduler()
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_schedule_swapped_max_seqs(use_v2_block_manager: bool):
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
     for i in range(4):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=4)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
@@ -706,14 +846,21 @@ def test_schedule_swapped_max_seqs():
     assert len(output.prefill_seq_groups) == 0
 
 
-def test_schedule_swapped_max_loras():
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_schedule_swapped_max_loras(use_v2_block_manager: bool):
+    block_size = 4
     lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
-    scheduler = initialize_scheduler(lora_config=lora_config)
+    scheduler = initialize_scheduler(lora_config=lora_config,
+                                     use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras: Set[int] = set()
     blocks_to_swap_out: List[Tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
+                                           block_size=block_size,
                                            lora_request=LoRARequest(
                                                lora_name=str(i),
                                                lora_int_id=i + 1,
@@ -734,12 +881,20 @@ def test_schedule_swapped_max_loras():
     assert len(curr_loras) == 1
 
 
-def test_schedule_swapped_cannot_swap_in():
-    scheduler = initialize_scheduler()
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_schedule_swapped_cannot_swap_in(use_v2_block_manager: bool):
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
-    for _ in range(2):
-        _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           best_of=2,
+                                           block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
@@ -759,12 +914,20 @@ def test_schedule_swapped_cannot_swap_in():
     assert len(output.prefill_seq_groups) == 0
 
 
-def test_infeasible_swap():
-    scheduler = initialize_scheduler()
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_infeasible_swap(use_v2_block_manager: bool):
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
-    for _ in range(2):
-        _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           best_of=2,
+                                           block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
@@ -785,10 +948,18 @@ def test_infeasible_swap():
     assert len(output.prefill_seq_groups) == 0
 
 
-def test_schedule_swapped_blocks_to_copy():
-    scheduler = initialize_scheduler()
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_schedule_swapped_blocks_to_copy(use_v2_block_manager: bool):
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras = None
-    _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=60,
+                                       best_of=2,
+                                       block_size=block_size)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
     blocks_to_swap_out: List[Tuple[int, int]] = []
