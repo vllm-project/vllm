@@ -5,7 +5,6 @@ import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -39,9 +38,6 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GGUFConfig":
-        if get_tensor_model_parallel_world_size() > 1:
-            raise ValueError(
-                "GGUF quantization hasn't supported tensor parallelism yet.")
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,
@@ -59,7 +55,10 @@ class GGUFConfig(QuantizationConfig):
 def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
                   qweight_type: int) -> torch.Tensor:
     # use dequantize mulmat for IQmatrix, mmq for k-quants
-    if qweight_type >= 16:
+    if x.shape[0] == 1:
+        # enable mmvq in contiguous batching
+        y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+    elif qweight_type >= 16:
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
         weight = ops.ggml_dequantize(qweight, qweight_type, *shape)

@@ -21,7 +21,7 @@ def append_new_token(seq_group, token_id: int):
 
 
 def schedule_and_update_computed_tokens(scheduler):
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
     return metas, out
@@ -180,7 +180,7 @@ def test_maximal_decoding():
     """Verify decoding requests are prioritized."""
     block_size = 4
     max_seqs = 2
-    max_model_len = 2
+    max_model_len = 8
     max_num_batched_tokens = 2
     scheduler_config = SchedulerConfig(max_num_batched_tokens,
                                        max_seqs,
@@ -562,3 +562,42 @@ def test_chunked_prefill_max_seqs():
     assert len(get_sequence_groups(out)) == max_seqs
     assert not running[0].is_prefill()
     assert not running[1].is_prefill()
+
+
+def test_perfix_caching():
+    """Verify allocating full blocks when prefix caching is enabled."""
+    block_size = 4
+    max_seqs = 10
+    max_model_len = 80
+    max_num_batched_tokens = 64
+    scheduler_config = SchedulerConfig(max_num_batched_tokens,
+                                       max_seqs,
+                                       max_model_len,
+                                       enable_chunked_prefill=True)
+    cache_config = CacheConfig(block_size,
+                               1.0,
+                               1,
+                               "auto",
+                               enable_prefix_caching=True)
+    cache_config.num_cpu_blocks = 0
+    cache_config.num_gpu_blocks = 32
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    running: List[SequenceGroup] = []
+
+    # Add seq groups to scheduler.
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           block_size=block_size,
+                                           prompt_length=50)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    assert seq_group_meta[0].token_chunk_size == 50
+    # Verify it is chunked. Note that although the budget is 64-50=14,
+    # we only allocate full blocks for prefix caching, so only 4*(14//4)=12
+    # tokens are allocated.
+    assert seq_group_meta[1].token_chunk_size == 12
+    assert out.num_prefill_groups == 2
+    assert out.num_batched_tokens == 62

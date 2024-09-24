@@ -56,8 +56,22 @@ Build from source
 .. code-block:: console
 
     $ pip install --upgrade pip
-    $ pip install wheel packaging ninja "setuptools>=49.4.0" numpy
+    $ pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
     $ pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+- Third, build and install oneDNN library from source:
+
+.. code-block:: console
+
+    $ git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
+    $ cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \ 
+        -DONEDNN_BUILD_DOC=OFF \ 
+        -DONEDNN_BUILD_EXAMPLES=OFF \ 
+        -DONEDNN_BUILD_TESTS=OFF \ 
+        -DONEDNN_BUILD_GRAPH=OFF \ 
+        -DONEDNN_ENABLE_WORKLOAD=INFERENCE \ 
+        -DONEDNN_ENABLE_PRIMITIVE=MATMUL
+    $ cmake --build ./oneDNN/build --target install --config Release
 
 - Finally, build and install vLLM CPU backend: 
 

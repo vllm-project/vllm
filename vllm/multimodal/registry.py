@@ -2,13 +2,14 @@ import functools
 from collections import UserDict
 from typing import Dict, Mapping, Optional, Sequence
 
-from vllm.config import ModelConfig, MultiModalConfig
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
 from .audio import AudioPlugin
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
                    MultiModalPlugin, MultiModalTokensCalc, NestedTensors)
 from .image import ImagePlugin
+from .video import VideoPlugin
 
 logger = init_logger(__name__)
 
@@ -34,7 +35,7 @@ class MultiModalRegistry:
     :class:`~vllm.multimodal.MultiModalPlugin` for each modality.
     """
 
-    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin())
+    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin())
 
     def __init__(
             self,
@@ -137,6 +138,15 @@ class MultiModalRegistry:
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
+        # NOTE - we currently make the assumption that if a model has multiple
+        # supported modalities, they take the same kwargs. For the default,
+        # this could be an issue in the future if it falls back to two HF
+        # resources and we can't inspect the signature easily since it's
+        # getting initialized through the autoclass.
+        #
+        # If this is a problem in the future, we should revisit it, but since
+        # it potentially introduces a lot of complexity for a currently
+        # uncommon case, we do not for simplicity of both use & implementation
         return functools.partial(self.map_input, model_config)
 
     def register_max_multimodal_tokens(
@@ -181,7 +191,6 @@ class MultiModalRegistry:
     def init_mm_limits_per_prompt(
         self,
         model_config: ModelConfig,
-        multimodal_config: Optional[MultiModalConfig],
     ) -> None:
         """
         Initialize the maximum number of multi-modal input instances for each
@@ -192,6 +201,7 @@ class MultiModalRegistry:
                 "`mm_limits` has already been set for model=%s, and will "
                 "be overwritten by the new values.", model_config.model)
 
+        multimodal_config = model_config.multimodal_config
         if multimodal_config is None:
             limits_per_plugin = self._disabled_limits_per_plugin
         else:

@@ -1,17 +1,20 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import torch
 from pydantic import BaseModel
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+    CompressedTensorsMoEMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
-    CompressedTensorsScheme, CompressedTensorsUnquantized,
-    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
-    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
-    CompressedTensorsWNA16)
+    CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
+    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     QuantizationType, find_matched_target, is_activation_quantization_format,
@@ -52,25 +55,32 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "compressed_tensors"
 
-    # TODO (@robertgshaw2-neuralmagic): do layer skipping though here
-    # rather than though create_weights to match other methods
     def get_quant_method(
         self,
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
+
+        # Check if the layer is skipped for quantization.
+        # TODO (@robertgshaw2): support module names
+        if should_ignore_layer(prefix, ignore=self.ignore):
+            return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
+            scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
+        if isinstance(layer, FusedMoE):
+            return CompressedTensorsMoEMethod(self)
         return None
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
         target_scheme_map: Dict[str, Any] = dict()
-        ignore: List[str] = config.get("ignore", None)
-        quant_format: str = config.get("format", None)
+        ignore = cast(List[str], config.get("ignore"))
+        quant_format = cast(str, config.get("format"))
 
         # The quant_config has multiple config_groups, each containing
         # an input_activations key with details about how the activations are
@@ -106,15 +116,19 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _check_scheme_supported(self,
                                 min_capability: int,
                                 error: bool = True) -> bool:
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        supported = capability >= min_capability
-        if error and not supported:
-            raise RuntimeError(
-                "Quantization scheme is not supported for ",
-                f"the current GPU. Min capability: {min_capability}. ",
-                f"Current capability: {capability}.")
-        return supported
+        capability_tuple = current_platform.get_device_capability()
+
+        if capability_tuple is not None:
+            capability = capability_tuple.to_int()
+            supported = capability >= min_capability
+            if error and not supported:
+                raise RuntimeError(
+                    "Quantization scheme is not supported for ",
+                    f"the current GPU. Min capability: {min_capability}. ",
+                    f"Current capability: {capability}.")
+            return supported
+        else:
+            return False
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -186,7 +200,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_per_tensor_or_channel_weight = (weight_quant.strategy in [
             QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
         ])
-        if not (is_symmetric_weight and is_static_weight
+        if not (is_symmetric_weight and is_static_weight  # noqa: SIM103
                 and is_per_tensor_or_channel_weight):
             return False
 
@@ -222,7 +236,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
-                    group_size=weight_quant.group_size)
+                    group_size=weight_quant.group_size,
+                    actorder=weight_quant.actorder)
 
         # Detect If Activation Quantization.
         # TODO @dsikka: clean-up conditions
@@ -281,15 +296,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         to select the CompressedTensorsScheme used for infernece.
         """
 
-        # Check if the layer is skipped for quantization.
-        # TODO (@robertgshaw2): support module names
-        if should_ignore_layer(layer_name, ignore=self.ignore):
-            return CompressedTensorsUnquantized()
-
         # Find the "target" in the compressed-tensors config
         # that our layer conforms to.
         # TODO (@robertgshaw): add compressed-tensors as dep
         # so we do not have to re-write these functions
+        # need to make accelerate optional in ct to do this
         matched_target = find_matched_target(
             layer_name=layer_name,
             module=layer,
@@ -322,15 +333,12 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         """
-        Use the CompressedTensorsScheme associated with each layer to create 
+        Use the CompressedTensorsScheme associated with each layer to create
         the necessary parameters for the layer. See LinearMethodBase for param
         details
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
-        layer_name = extra_weight_attrs.get("prefix")
-
-        scheme = self.quantization_config.get_scheme(layer, layer_name)
-        scheme.create_weights(
+        layer.scheme.create_weights(
             layer=layer,
             input_size=input_size,
             input_size_per_partition=input_size_per_partition,
@@ -339,15 +347,13 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader)
 
-        layer.scheme = scheme
-
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None):
         """
-        Use the output of create_weights and the CompressedTensorsScheme 
-        associated with the layer to apply the forward pass with the 
+        Use the output of create_weights and the CompressedTensorsScheme
+        associated with the layer to apply the forward pass with the
         layer input.  See LinearMethodBase for param details
 
         """

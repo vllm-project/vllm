@@ -8,6 +8,7 @@ import torch
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -29,6 +30,10 @@ class IpexAttnBackend(AttentionBackend):
         return IpexAttnMetadata
 
     @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
+
+    @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
@@ -44,14 +49,18 @@ class IpexAttnBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        from vllm._ipex_ops import ipex_ops as ops
+        ops.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
+        from vllm._ipex_ops import ipex_ops as ops
+        key_caches = [kv_cache[0] for kv_cache in kv_caches]
+        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+        ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 @dataclass

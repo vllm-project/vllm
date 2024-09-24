@@ -100,7 +100,7 @@ def _bgmv_expand(
             corresponding to each batch, An index of -1 means no lora should be
             applied.
         batches (int): batch size
-        add_inputs (bool, optional):  Defaults to False. adds the final lora 
+        add_inputs (bool, optional):  Defaults to False, adds the final lora 
             results to the output.
     """
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
@@ -160,6 +160,9 @@ def _bgmv_expand(
     return
 
 
-bgmv_expand = torch.library.custom_op("lora::bgmv_expand",
-                                      _bgmv_expand,
-                                      mutates_args=["output_tensor"])
+try:
+    bgmv_expand = torch.library.custom_op("lora::bgmv_expand",
+                                          _bgmv_expand,
+                                          mutates_args=["output_tensor"])
+except AttributeError:
+    bgmv_expand = _bgmv_expand
