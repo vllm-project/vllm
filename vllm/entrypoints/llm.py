@@ -354,34 +354,6 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
-    @overload
-    def chat(
-        self,
-        messages: List[ChatCompletionMessageParam],
-        sampling_params: Optional[Union[SamplingParams,
-                                        List[SamplingParams]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
-        chat_template: Optional[str] = None,
-        add_generation_prompt: bool = True,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> List[RequestOutput]:
-        ...
-
-    @overload
-    def chat(
-        self,
-        messages: List[List[ChatCompletionMessageParam]],
-        sampling_params: Optional[Union[SamplingParams,
-                                        List[SamplingParams]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
-        chat_template: Optional[str] = None,
-        add_generation_prompt: bool = True,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> List[List[RequestOutput]]:
-        ...
-
     def chat(
         self,
         messages: Union[List[ChatCompletionMessageParam],
@@ -393,7 +365,7 @@ class LLM:
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
         tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Union[List[RequestOutput], List[List[RequestOutput]]]:
+    ) -> List[RequestOutput]:
         """
         Generate responses for a chat conversation.
 
@@ -421,9 +393,8 @@ class LLM:
                 to each message.
 
         Returns:
-            A list of lists or single list of ``RequestOutput`` objects
-            containing the generated responses in the same order as the input
-            conversations and messages.
+            A list of ``RequestOutput`` objects containing the generated
+            responses in the same order as the input messages.
         """
         list_of_messages: List[List[ChatCompletionMessageParam]]
 
@@ -435,7 +406,7 @@ class LLM:
             # messages is List[...]
             list_of_messages = [messages]
 
-        outputs: List[List[RequestOutput]] = []
+        prompts: List[List[PromptType]] = []
 
         for msgs in list_of_messages:
             tokenizer = self.get_tokenizer()
@@ -471,16 +442,16 @@ class LLM:
             if mm_data is not None:
                 prompt["multi_modal_data"] = mm_data
 
-            out = self.generate(
-                prompt,
-                sampling_params=sampling_params,
-                use_tqdm=use_tqdm,
-                lora_request=lora_request,
-            )
-            outputs.append(out)
+            prompts.append(prompt)
 
-        # When messages is List[...], return a single list
-        return outputs if len(outputs) > 1 else outputs[0]
+        outputs = self.generate(
+            prompts,
+            sampling_params=sampling_params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+        )
+
+        return outputs
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
@@ -800,3 +771,36 @@ class LLM:
 
     def _is_embedding_model(self):
         return self.llm_engine.is_embedding_model()
+
+
+if __name__ == "__main__":
+    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
+
+    prompt1 = "Explain the concept of entropy."
+    prompt2 = "Explain what among us is."
+
+    conversation1 = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": prompt1
+        },
+    ]
+
+    conversation2 = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": prompt2
+        },
+    ]
+
+    messages = [conversation1, conversation2]
+
+    outputs = llm.chat(messages)
