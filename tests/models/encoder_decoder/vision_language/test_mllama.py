@@ -28,7 +28,6 @@ text_only_prompts = [
 models = [
     "meta-llama/Llama-3.2-11B-Vision-Instruct",
 ]
-# TODO: Update model path to huggingface model
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
