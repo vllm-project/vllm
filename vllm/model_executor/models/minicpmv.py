@@ -464,6 +464,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
             im_end_id: torch.Tensor,
             slice_start_id: Optional[torch.Tensor] = None,
             slice_end_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # All the images in the batch should share the same special image
+        # bound token ids.
         start_cond = input_ids == im_start_id[0]
         end_cond = input_ids == im_end_id[0]
         if slice_start_id is not None:
