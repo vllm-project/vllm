@@ -224,7 +224,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             else:
                 input_positions.extend(list(range(computed_len, seq_len)))
                 num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] *
-                                                (seq_len - computed_len))
+                                                  (seq_len - computed_len))
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
@@ -320,7 +320,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                         input_mrope_positions[idx].extend(next_pos[idx])
                 else:
                     input_positions.append(position)
-                    num_orig_input_tokens_list.append(seq_data.get_prompt_len())
+                    num_orig_input_tokens_list.append(
+                        seq_data.get_prompt_len())
 
                 seq_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
