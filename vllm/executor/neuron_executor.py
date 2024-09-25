@@ -105,7 +105,6 @@ class NeuronExecutor(ExecutorBase):
         self.driver_worker.stop_profile()
 
 
-
 class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(

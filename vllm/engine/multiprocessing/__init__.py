@@ -46,9 +46,11 @@ class RPCAbortRequest:
 class RPCStartupRequest(Enum):
     IS_SERVER_READY = 1
 
+
 class RPCProfileRequest(Enum):
     START = 1
     STOP = 2
+
 
 @dataclass
 class RPCStartupResponse:

@@ -18,8 +18,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCProcessRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
-                                         RPCProfileRequest)
+                                         RPCProfileRequest, RPCStartupRequest,
+                                         RPCStartupResponse)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.logger import init_logger
@@ -375,6 +375,7 @@ class MQLLMEngine:
         logger.info("Stopping profiler...")
         self.engine.stop_profile()
         logger.info("Profiler stopped.")
+
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str):

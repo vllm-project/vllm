@@ -37,8 +37,8 @@ from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
-                                  RequestFuncOutput, async_request_vllm_util,
-                                  UtilRequestFuncInput)
+                                  RequestFuncOutput, UtilRequestFuncInput,
+                                  async_request_vllm_util)
 from datasets import load_dataset
 from PIL.Image import Image
 from tqdm.asyncio import tqdm
@@ -437,7 +437,8 @@ async def benchmark(
             api_url=base_url + "/start_profile",
             model=model_id,
         )
-        profile_output = await async_request_vllm_util(request_func_input=profile_input)
+        profile_output = await async_request_vllm_util(
+            request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
         else:
@@ -474,7 +475,8 @@ async def benchmark(
             api_url=base_url + "/stop_profile",
             model=model_id,
         )
-        profile_output = await async_request_vllm_util(request_func_input=profile_input)
+        profile_output = await async_request_vllm_util(
+            request_func_input=profile_input)
         if profile_output.success:
             print("Profiler stopped")
         else:

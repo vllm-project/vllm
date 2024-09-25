@@ -18,6 +18,7 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
 
 logger = init_logger(__name__)
 
+
 class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
     """

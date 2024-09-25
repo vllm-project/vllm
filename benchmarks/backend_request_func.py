@@ -27,6 +27,7 @@ class RequestFuncInput:
     logprobs: Optional[int] = None
     multi_modal_content: Optional[dict] = None
 
+
 @dataclass
 class RequestFuncOutput:
     generated_text: str = ""
@@ -226,8 +227,8 @@ async def async_request_openai_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        ("completions")
-    ), "OpenAI Completions API URL must end with 'completions'."
+        ("completions"
+         )), "OpenAI Completions API URL must end with 'completions'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert not request_func_input.use_beam_search
@@ -393,19 +394,19 @@ class UtilRequestFuncInput:
     api_url: str
     model: str
 
+
 @dataclass
 class UtilRequestFuncOutput:
     success: bool = False
     error: str = ""
 
+
 async def async_request_vllm_util(
-    request_func_input: UtilRequestFuncInput,
-) -> UtilRequestFuncOutput:
+    request_func_input: UtilRequestFuncInput, ) -> UtilRequestFuncOutput:
     # for making request to utility vllm methods like "start_profile"
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        ("profile")
-    ), "VLLM utility requests must end with 'profile'."
+        ("profile")), "VLLM utility requests must end with 'profile'."
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         headers = {
@@ -413,9 +414,7 @@ async def async_request_vllm_util(
         }
 
         output = UtilRequestFuncOutput()
-        payload = {
-            "model": request_func_input.model
-        }
+        payload = {"model": request_func_input.model}
 
         try:
             async with session.post(url=api_url, json=payload,
