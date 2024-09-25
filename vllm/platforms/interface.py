@@ -9,6 +9,7 @@ class PlatformEnum(enum.Enum):
     ROCM = enum.auto()
     TPU = enum.auto()
     CPU = enum.auto()
+    XPU = enum.auto()
     UNSPECIFIED = enum.auto()
 
 
@@ -26,6 +27,9 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
+    
+    def is_xpu(self) -> bool:
+        return self._enum == PlatformEnum.XPU
 
     @staticmethod
     def get_device_capability(device_id: int = 0) -> Optional[Tuple[int, int]]:
