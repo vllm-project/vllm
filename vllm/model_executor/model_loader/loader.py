@@ -1,6 +1,7 @@
 # ruff: noqa: SIM117
 import collections
 import copy
+import dataclasses
 import fnmatch
 import glob
 import json
@@ -8,7 +9,8 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type
+from typing import (Any, Dict, Generator, Iterable, List, Optional, Tuple,
+                    Type, cast)
 
 import gguf
 import huggingface_hub
@@ -22,6 +24,8 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -95,10 +99,10 @@ def _get_quantization_config(
     """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
-        capability = current_platform.get_device_capability()  # type: ignore
+        capability_tuple = current_platform.get_device_capability()
 
-        if capability is not None:
-            capability = capability[0] * 10 + capability[1]
+        if capability_tuple is not None:
+            capability = capability_tuple.to_int()
             if capability < quant_config.get_min_capability():
                 raise ValueError(
                     f"The quantization method {model_config.quantization} "
@@ -204,6 +208,22 @@ class BaseModelLoader(ABC):
 
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
+
+    @dataclasses.dataclass
+    class Source:
+        """A source for weights."""
+
+        model_or_path: str
+        """The model ID or path."""
+
+        revision: Optional[str]
+        """The optional model revision."""
+
+        prefix: str = ""
+        """A prefix to prepend to all weights."""
+
+        fall_back_to_pt: bool = True
+        """Whether .pt weights can be used."""
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
@@ -311,17 +331,16 @@ class DefaultModelLoader(BaseModelLoader):
         return hf_folder, hf_weights_files, use_safetensors
 
     def _get_weights_iterator(
-        self, model_name_or_path: str, revision: Optional[str],
-        fall_back_to_pt: bool
+            self, source: "Source"
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
-            model_name_or_path, revision, fall_back_to_pt)
+            source.model_or_path, source.revision, source.fall_back_to_pt)
         if self.load_config.load_format == LoadFormat.NPCACHE:
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
             weights_iterator = np_cache_weights_iterator(
-                model_name_or_path, self.load_config.download_dir, hf_folder,
+                source.model_or_path, self.load_config.download_dir, hf_folder,
                 hf_weights_files)
         elif use_safetensors:
             weights_iterator = safetensors_weights_iterator(hf_weights_files)
@@ -339,7 +358,29 @@ class DefaultModelLoader(BaseModelLoader):
                     xm.mark_step()
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
-        return weights_iterator
+
+        # Apply the prefix.
+        return ((source.prefix + name, tensor)
+                for (name, tensor) in weights_iterator)
+
+    def _get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+
+        primary_weights = DefaultModelLoader.Source(
+            model_config.model,
+            model_config.revision,
+            prefix="",
+            fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load",
+                                    True))
+        yield from self._get_weights_iterator(primary_weights)
+
+        secondary_weights = cast(Iterable[DefaultModelLoader.Source],
+                                 getattr(model, "secondary_weights", ()))
+        for source in secondary_weights:
+            yield from self._get_weights_iterator(source)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model,
@@ -358,13 +399,8 @@ class DefaultModelLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
-            model.load_weights(
-                self._get_weights_iterator(model_config.model,
-                                           model_config.revision,
-                                           fall_back_to_pt=getattr(
-                                               model,
-                                               "fall_back_to_pt_during_load",
-                                               True)), )
+
+            model.load_weights(self._get_all_weights(model_config, model))
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
@@ -689,6 +725,8 @@ class ShardedStateLoader(BaseModelLoader):
 class BitsAndBytesModelLoader(BaseModelLoader):
     """Model loader to load model weights with BitAndBytes quantization."""
 
+    # TODO: these module names are for Llama only,
+    # change so that it works with other models as well
     default_target_modules = [
         "gate_proj", "down_proj", "up_proj", "q_proj", "k_proj", "v_proj",
         "o_proj"
@@ -813,12 +851,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # only load the bitsandbytes module when needed
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.42.0":
+            if bitsandbytes.__version__ < "0.44.0":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.42.0.")
+                                  "install bitsandbytes>=0.44.0.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.42.0 via "
-                              "`pip install bitsandbytes>=0.42.0` to use "
+            raise ImportError("Please install bitsandbytes>=0.44.0 via "
+                              "`pip install bitsandbytes>=0.44.0` to use "
                               "bitsandbytes quantizer.") from err
 
         hf_weights_files, use_safetensors = self._prepare_weights(
@@ -911,13 +949,44 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def _unquantized_generator(self, hf_weights_files, use_safetensors,
                                quant_state_dict) -> Generator:
         from bitsandbytes.functional import quantize_4bit
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
             if any(target_module in weight_name
                    for target_module in self.target_modules):
                 weight_name = weight_name.replace(".weight", ".qweight")
+
+                # weight partitions of different modules occur at
+                # different dimensions
+                # TODO: these module names are for Llama only,
+                # change so that it works with other models as well
+                if 'down_proj' in weight_name or 'o_proj' in weight_name:
+                    total_size = weight_tensor.size(-1)
+                    start_index = total_size // tp_size * tp_rank
+                    end_index = total_size // tp_size * (tp_rank + 1)
+                    weight_sub_tensor = weight_tensor[...,
+                                                      start_index:end_index]
+
+                else:
+                    total_size = weight_tensor.size(0)
+                    start_index = total_size // tp_size * tp_rank
+                    end_index = total_size // tp_size * (tp_rank + 1)
+                    weight_sub_tensor = weight_tensor[start_index:end_index,
+                                                      ...]
+
                 # bitsandbytes requires data in GPU
-                loaded_weight = weight_tensor.cuda().data
+                if weight_sub_tensor.is_cuda:
+                    loaded_weight = weight_sub_tensor
+                else:
+                    loaded_weight = weight_sub_tensor.cuda()
+
+                # remove the following after the issue is fixed:
+                # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1342
+                if loaded_weight.is_contiguous() is False:
+                    loaded_weight = loaded_weight.contiguous()
+
                 with set_default_torch_dtype(torch.float32):
                     processed_weight, quant_state = quantize_4bit(
                         loaded_weight,
@@ -957,6 +1026,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 raise ValueError(
                     f"BitsAndBytes loader does not support {quant_method} "
                     "quantization")
+
+        # The quant_states in pre_quantized models cannot work with a split
+        # weight tensor. So TP does not work with pre_quantized bnb models.
+        if pre_quant and get_tensor_model_parallel_world_size() > 1:
+            raise ValueError(
+                "Prequant BitsAndBytes models with TP is not supported."
+                "Please try with PP.")
 
         load_8bit = False
         if pre_quant:
