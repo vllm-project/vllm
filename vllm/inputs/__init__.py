@@ -32,3 +32,17 @@ __all__ = [
     "InputContext",
     "InputRegistry",
 ]
+
+
+def __getattr__(name: str):
+    if name == "PromptInput":
+        import warnings
+
+        msg = ("PromptInput has been renamed to PromptType. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PromptType
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -45,7 +45,7 @@ from vllm.attention import AttentionMetadata
 from vllm.attention.selector import (_Backend, backend_name_to_enum,
                                      get_global_forced_attn_backend)
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.distributed import parallel_state
+from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
@@ -68,6 +68,10 @@ from vllm.multimodal.image import cached_get_image_processor
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import get_processor
+from vllm.utils import is_cpu
+
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory)
 
 logger = init_logger(__name__)
 
@@ -279,6 +283,21 @@ class Qwen2VisionAttention(nn.Module):
             context_layer = rearrange(output,
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
+        elif is_cpu():
+            seq_length = q.size(1)
+            q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
+            attention_mask = torch.zeros([1, seq_length, seq_length],
+                                         device=q.device,
+                                         dtype=torch.bool)
+            for i in range(1, len(cu_seqlens)):
+                attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
+                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
+            output = F.scaled_dot_product_attention(q,
+                                                    k,
+                                                    v,
+                                                    attention_mask,
+                                                    dropout_p=0.0)
+            context_layer = rearrange(output, "b h s d -> b s h d ")
         else:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
@@ -857,15 +876,21 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.model = Qwen2Model(config, cache_config, quant_config)
 
-        if config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
+        if get_pp_group().is_last_rank:
+            if config.tie_word_embeddings:
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(config.vocab_size,
+                                              config.hidden_size,
+                                              quant_config=quant_config)
         else:
-            self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.hidden_size,
-                                          quant_config=quant_config)
+            self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def _validate_and_reshape_mm_tensor(self,
                                         mm_input: Union[torch.Tensor,
@@ -980,7 +1005,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         image_input = self._parse_and_validate_image_input(**kwargs)
         video_input = self._parse_and_validate_video_input(**kwargs)
 
-        if image_input is None and video_input is None:
+        if (image_input is None
+                and video_input is None) or not get_pp_group().is_first_rank:
             inputs_embeds = None
         else:
             if getattr(self.config, "rope_scaling", {}).get("type",
@@ -1016,6 +1042,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
         return hidden_states
@@ -1056,6 +1083,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -1081,6 +1110,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                 try:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name]
                 except KeyError:

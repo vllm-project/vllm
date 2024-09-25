@@ -7,23 +7,20 @@ RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRO
     echo "deb [arch=amd64,i386 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/graphics/ubuntu jammy arc" | tee /etc/apt/sources.list.d/intel.gpu.jammy.list && \
     chmod 644 /usr/share/keyrings/intel-graphics.gpg
 
-RUN apt-get update  -y \
-&& apt-get install -y curl libicu70 lsb-release git wget vim numactl python3 python3-pip ffmpeg libsm6 libxext6 libgl1 
-
-RUN git clone https://github.com/intel/pti-gpu && \
-    cd pti-gpu/sdk && \
-    mkdir build && \
-    cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/icpx_toolchain.cmake -DBUILD_TESTING=OFF .. && \
-    make -j && \
-    cmake --install . --config Release --prefix "/usr/local"
+RUN apt-get update  -y && \
+    apt-get install -y curl libicu70 lsb-release git wget vim numactl python3 python3-pip ffmpeg libsm6 libxext6 libgl1
 
 COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
 
-RUN pip install -v -r requirements-xpu.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -v --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ \
+        cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
+        -r requirements-xpu.txt
 
-RUN VLLM_TARGET_DEVICE=xpu python3 setup.py install
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=.git,target=.git \
+    VLLM_TARGET_DEVICE=xpu python3 setup.py install
 
 CMD ["/bin/bash"]

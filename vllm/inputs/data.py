@@ -196,3 +196,17 @@ def to_enc_dec_tuple_list(
     return [(enc_dec_prompt["encoder_prompt"],
              enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]
+
+
+def __getattr__(name: str):
+    if name == "PromptInput":
+        import warnings
+
+        msg = ("PromptInput has been renamed to PromptType. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PromptType
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
