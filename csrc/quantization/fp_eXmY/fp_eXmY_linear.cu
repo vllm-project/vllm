@@ -111,7 +111,8 @@ cudaError_t fpx_linear_kernel(
         break;
       default:
         if (N_PowerOf2 % 128 != 0) {
-          printf("FP6LLM_API Error: Unsupported N dimension %zu!\n", N_PowerOf2);
+          printf("FP6LLM_API Error: Unsupported N dimension %zu!\n",
+                 N_PowerOf2);
           return cudaErrorUnknown;
         }
         Kernel_Ex<TilingConfig<4, 1, 8>, half, EXPONENT, MANTISSA>(
@@ -148,7 +149,8 @@ cudaError_t fpx_linear_kernel(
         break;
       default:
         if (N_PowerOf2 % 128 != 0) {
-          printf("FP6LLM_API Error: Unsupported N dimension %zu!\n", N_PowerOf2);
+          printf("FP6LLM_API Error: Unsupported N dimension %zu!\n",
+                 N_PowerOf2);
           return cudaErrorUnknown;
         }
         Kernel_Ex<TilingConfig<4, 1, 8>, float, EXPONENT, MANTISSA>(
