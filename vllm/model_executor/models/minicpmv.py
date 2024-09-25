@@ -50,6 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -403,6 +404,9 @@ class LLMWrapper(nn.Module):
     def forward(self, *args, **kwargs) -> Any:
         return getattr(self, self.model_name)(*args, **kwargs)
 
+    def embed_tokens(self, *args, **kwargs):
+        return getattr(self, self.model_name).embed_tokens(*args, **kwargs)
+
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     """
@@ -636,6 +640,14 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
 
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys(language_model="llm",
+                              connector="resampler",
+                              vision_tower="vpm")
+
     def init_llm(
         self,
         config: PretrainedConfig,
@@ -778,8 +790,10 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "fc1", "fc2",
-        "out_proj", "kv_proj"
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
     ]
     embedding_modules = {}
     embedding_padding_modules = []
