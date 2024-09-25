@@ -24,6 +24,7 @@ def single_marlin_moe(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    has_zero_point: bool = False,
     g_idx: Optional[torch.Tensor] = None,
     sort_indices: Optional[torch.Tensor] = None,
     w_zeros: Optional[torch.Tensor] = None,
@@ -91,7 +92,9 @@ def single_marlin_moe(
                             device=hidden_states.device,
                             requires_grad=False)
 
-    has_zp = w_zeros is not None
+    if has_zero_point:
+        assert w_zeros is not None and w_zeros.nelement() > 0
+
     if w_zeros is None:
         w_zeros = torch.empty((0),
                               dtype=hidden_states.dtype,
@@ -110,12 +113,12 @@ def single_marlin_moe(
                                    device=hidden_states.device,
                                    requires_grad=False)
 
-    scalar_type = get_scalar_type(num_bits, has_zp)
+    scalar_type = get_scalar_type(num_bits, has_zero_point)
 
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
         w_zeros, g_idx, sort_indices, workspace, scalar_type, M, N, K, True,
-        has_zp, E, topk, block_size_m, True, False)
+        has_zero_point, E, topk, block_size_m, True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -129,6 +132,7 @@ def fused_marlin_moe(
     gating_output: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    has_zero_point: bool = False,
     g_idx1: Optional[torch.Tensor] = None,
     g_idx2: Optional[torch.Tensor] = None,
     sort_indices1: Optional[torch.Tensor] = None,
@@ -207,8 +211,10 @@ def fused_marlin_moe(
                             device="cuda",
                             requires_grad=False)
 
-    has_zp1 = w1_zeros is not None
-    has_zp2 = w2_zeros is not None
+    if has_zero_point:
+        assert w1_zeros is not None and w1_zeros.nelement() > 0
+        assert w2_zeros is not None and w2_zeros.nelement() > 0
+
     if w1_zeros is None:
         w1_zeros = torch.empty((0),
                                dtype=hidden_states.dtype,
@@ -244,8 +250,8 @@ def fused_marlin_moe(
                                     device=hidden_states.device,
                                     requires_grad=False)
 
-    scalar_type1 = get_scalar_type(num_bits, has_zp1)
-    scalar_type2 = get_scalar_type(num_bits, has_zp2)
+    scalar_type1 = get_scalar_type(num_bits, has_zero_point)
+    scalar_type2 = get_scalar_type(num_bits, has_zero_point)
 
     intermediate_cache2 = torch.empty(
         (M * topk_ids.shape[1], N),
@@ -269,7 +275,7 @@ def fused_marlin_moe(
         2 * N,
         K,
         True,
-        has_zp1,
+        has_zero_point,
         E,
         topk,
         block_size_m,
@@ -295,7 +301,7 @@ def fused_marlin_moe(
         K,
         N,
         True,
-        has_zp2,
+        has_zero_point,
         E,
         topk,
         block_size_m,
