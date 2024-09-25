@@ -714,6 +714,7 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         ...
 
@@ -730,6 +731,7 @@ class LLMEngine:
             lora_request: Optional[LoRARequest] = None,
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            priority: int = 0,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
