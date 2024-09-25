@@ -294,7 +294,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config)
         if max_mm_tokens > 0:
-            logger.warning("profile run for multi-modal models")
+            logger.info("Starting profile run for multi-modal models.")
 
         batch_size = 0
         for group_id in range(max_num_seqs):
