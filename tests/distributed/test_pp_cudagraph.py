@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from ..utils import compare_two_settings, fork_new_process_for_each_test
+from ..utils import compare_two_settings
 
 
 @pytest.mark.parametrize("PP_SIZE, MODEL_NAME", [
@@ -12,7 +12,6 @@ from ..utils import compare_two_settings, fork_new_process_for_each_test
     "FLASH_ATTN",
     "FLASHINFER",
 ])
-@fork_new_process_for_each_test
 def test_pp_cudagraph(PP_SIZE, MODEL_NAME, ATTN_BACKEND):
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment

@@ -13,7 +13,7 @@ import pytest
 
 from vllm.logger import init_logger
 
-from ..utils import compare_two_settings, fork_new_process_for_each_test
+from ..utils import compare_two_settings
 
 logger = init_logger("test_pipeline_parallel")
 

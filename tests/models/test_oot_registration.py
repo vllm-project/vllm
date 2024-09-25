@@ -5,10 +5,7 @@ import pytest
 from vllm import LLM, PoolingParams, SamplingParams
 from vllm.assets.image import ImageAsset
 
-from ..utils import fork_new_process_for_each_test
 
-
-@fork_new_process_for_each_test
 def test_plugin(dummy_opt_path):
     os.environ["VLLM_PLUGINS"] = ""
     with pytest.raises(Exception) as excinfo:
@@ -16,7 +13,6 @@ def test_plugin(dummy_opt_path):
     assert "are not supported for now" in str(excinfo.value)
 
 
-@fork_new_process_for_each_test
 def test_oot_registration_text_generation(dummy_opt_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = ["Hello, my name is", "The text does not matter"]
@@ -32,7 +28,6 @@ def test_oot_registration_text_generation(dummy_opt_path):
         assert rest == ""
 
 
-@fork_new_process_for_each_test
 def test_oot_registration_embedding(dummy_gemma2_embedding_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = ["Hello, my name is", "The text does not matter"]
@@ -47,7 +42,6 @@ def test_oot_registration_embedding(dummy_gemma2_embedding_path):
 image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
 
-@fork_new_process_for_each_test
 def test_oot_registration_multimodal(dummy_llava_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = [{
