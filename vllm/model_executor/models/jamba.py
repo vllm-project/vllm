@@ -154,35 +154,27 @@ class JambaMambaMixer(nn.Module):
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        has_initial_state, cu_seq_len = None ,None
-        if attn_metadata.context_lens_tensor is not None:
-            has_initial_state = attn_metadata.context_lens_tensor > 0
-        else:
-            # happens on CG, all of decode steps has initial state
-            has_initial_state = torch.ones(
-                hidden_states.shape[-1],
-                device=hidden_states.device,
-                dtype=torch.bool
+        if attn_metadata.query_start_loc is not None \
+            and attn_metadata.context_lens_tensor is not None:
+            hidden_states = causal_conv1d_fn(
+                hidden_states,
+                conv_weights,
+                self.conv1d.bias,
+                activation=self.activation,
+                conv_states=conv_state,
+                has_initial_state=attn_metadata.context_lens_tensor > 0,
+                cu_seq_len=attn_metadata.query_start_loc[1:]
             )
-        if attn_metadata.query_start_loc is not None:
-            cu_seq_len = attn_metadata.query_start_loc[1:]
         else:
             # happens on CG , assuming forward pass context_len=1 for all seqs
-            cu_seq_len = torch.arange(
-                hidden_states.shape[-1],
-                device=hidden_states.device,
-                dtype=torch.int32
-            ) + 1
-
-        hidden_states = causal_conv1d_fn(
-            hidden_states,
-            conv_weights,
-            self.conv1d.bias,
-            activation=self.activation,
-            conv_states=conv_state,
-            has_initial_state=has_initial_state,
-            cu_seq_len=cu_seq_len
-        )
+            hidden_states = causal_conv1d_update(
+                    hidden_states.transpose(0,1),
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                )
+            hidden_states = hidden_states.transpose(0,1)
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
@@ -201,20 +193,39 @@ class JambaMambaMixer(nn.Module):
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
         time_proj_bias = (self.dt_proj.bias.float() if hasattr(
             self.dt_proj, "bias") else None)
-        scan_outputs = selective_scan_fn(
-            hidden_states,
-            discrete_time_step,
-            self.A,
-            B.transpose(-2, -1),
-            C.transpose(-2, -1),
-            self.D.float(),
-            gate,
-            time_proj_bias,
-            delta_softplus=True,
-            ssm_states=ssm_state,
-            has_initial_state= has_initial_state,
-            cu_seq_len=cu_seq_len
-        )
+
+        if attn_metadata.query_start_loc is not None \
+            and attn_metadata.context_lens_tensor is not None:
+            scan_outputs = selective_scan_fn(
+                hidden_states,
+                discrete_time_step,
+                self.A,
+                B.transpose(-2, -1),
+                C.transpose(-2, -1),
+                self.D.float(),
+                gate,
+                time_proj_bias,
+                delta_softplus=True,
+                ssm_states=ssm_state,
+                has_initial_state=attn_metadata.context_lens_tensor > 0,
+                cu_seq_len=attn_metadata.query_start_loc[1:]
+            )
+
+        else:
+            scan_outputs = selective_state_update(
+                ssm_state,
+                hidden_states.transpose(0,1),
+                discrete_time_step.transpose(0,1),
+                self.A,
+                B,
+                C,
+                self.D,
+                gate.transpose(0,1),
+                time_proj_bias,
+                dt_softplus=True,
+                )
+            scan_outputs = scan_outputs.transpose(0,1)
+
 
         # 4. Final linear projection
         contextualized_states = self.out_proj(scan_outputs.transpose(-2, -1))[0]
