@@ -103,69 +103,81 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
 
 class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        kv_cache_dtype: Optional[str] = "auto",
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        is_driver_worker: bool = False,
-        *args,
-        **kwargs,
-    ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        # Currently, CPU worker doesn't support chunked prefill.
-        assert self.scheduler_config.chunked_prefill_enabled is False
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.prompt_adapter_config = prompt_adapter_config
-        self.load_config = load_config
-        self.is_driver_worker = is_driver_worker
+    def __init__(self,
+                 runner: "CPUModelRunner",
+                 finished_requests_ids: Optional[List[str]] = None) -> None:
+        super().__init__()
+        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        self.runner = runner
+        self.model_input_cls = self.runner._model_input_cls
+        self.attn_backend = self.runner.attn_backend
+        self.sliding_window = self.runner.sliding_window
+        self.block_size = self.runner.block_size
+        self.device = self.runner.device
+        self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
 
-        self.device = self.device_config.device
+    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
+        self.seq_group_metadata_list.append(seq_group_metadata)
 
-        self.kv_cache_dtype = kv_cache_dtype
-        self.sliding_window = model_config.get_sliding_window()
-        self.block_size = cache_config.block_size
-        self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
-            self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
-            self.model_config.get_sliding_window(),
-            self.model_config.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
+    def build(self) -> ModelInputForCPU:
+        multi_modal_kwargs = None
+        # NOTE: We assume that all sequences in the group are all prompts or
+        # all decodes.
+        is_prompt = self.seq_group_metadata_list[0].is_prompt
+        # Prepare input tensors.
+        if is_prompt:
+            (input_tokens, input_positions, attn_metadata, seq_lens,
+             multi_modal_kwargs) = self._prepare_prompt(
+                 self.seq_group_metadata_list)
+        else:
+            (input_tokens, input_positions,
+             attn_metadata) = self._prepare_decode(
+                 self.seq_group_metadata_list)
+            seq_lens = []
+
+        return self.model_input_cls(
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            multi_modal_kwargs=multi_modal_kwargs,
+            # query_lens is not needed if chunked prefill is not
+            # supported. Since CPU worker doesn't support chunked prefill
+            # just use seq_lens instead.
+            seq_lens=seq_lens,
+            query_lens=seq_lens,
         )
 
-        # Multi-modal data support
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.multi_modal_input_mapper = self.mm_registry \
-            .create_input_mapper(self.model_config)
-        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
+    def _compute_multi_modal_input(self, seq_data: SequenceData, mm_data,
+                                   computed_len: int):
+        mm_kwargs = self.multi_modal_input_mapper(mm_data)
 
-        # Lazy initialization.
-        self.model: nn.Module  # Set after init_Model
+        # special processing for mrope position deltas.
+        mrope_positions = None
+        if self.runner.model_is_mrope:
+            image_grid_thw = mm_kwargs.get("image_grid_thw", None)
+            video_grid_thw = mm_kwargs.get("video_grid_thw", None)
+            assert image_grid_thw is not None or video_grid_thw is not None, (
+                "mrope embedding type requires multi-modal input mapper "
+                "returns 'image_grid_thw' or 'video_grid_thw'.")
 
-        if self.model_config.is_encoder_decoder_model:
-            raise NotImplementedError(
-                STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
+            hf_config = self.runner.model_config.hf_config
+            token_ids = seq_data.get_token_ids()
 
-    def load_model(self) -> None:
-        self.model = get_model(model_config=self.model_config,
-                               load_config=self.load_config,
-                               device_config=self.device_config,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config,
-                               cache_config=self.cache_config)
+            mrope_positions, mrope_position_delta = \
+                MRotaryEmbedding.get_input_positions(
+                    token_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    image_token_id=hf_config.image_token_id,
+                    video_token_id=hf_config.video_token_id,
+                    vision_start_token_id=hf_config.vision_start_token_id,
+                    vision_end_token_id=hf_config.vision_end_token_id,
+                    spatial_merge_size=hf_config.vision_config.
+                    spatial_merge_size,
+                    context_len=computed_len,
+                )
+            seq_data.mrope_position_delta = mrope_position_delta
+        return mm_kwargs, mrope_positions
 
     def _prepare_prompt(
         self,
@@ -209,11 +221,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     input_mrope_positions[idx].extend(mrope_positions[idx])
             else:
                 input_positions.extend(list(range(computed_len, seq_len)))
-
-            mm_data = seq_group_metadata.multi_modal_data
-            if mm_data:
-                mm_kwargs = self.multi_modal_input_mapper(mm_data)
-                multi_modal_inputs_list.append(mm_kwargs)
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
@@ -369,6 +376,85 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             input_positions,
             attn_metadata,
         )
+
+
+class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
+    _model_input_cls: Type[ModelInputForCPUWithSamplingMetadata] = (
+        ModelInputForCPUWithSamplingMetadata)
+    _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
+
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        load_config: LoadConfig,
+        lora_config: Optional[LoRAConfig],
+        kv_cache_dtype: Optional[str] = "auto",
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        is_driver_worker: bool = False,
+        *args,
+        **kwargs,
+    ):
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        # Currently, CPU worker doesn't support chunked prefill.
+        assert self.scheduler_config.chunked_prefill_enabled is False
+        self.device_config = device_config
+        self.cache_config = cache_config
+        self.lora_config = lora_config
+        self.prompt_adapter_config = prompt_adapter_config
+        self.load_config = load_config
+        self.is_driver_worker = is_driver_worker
+
+        self.device = self.device_config.device
+
+        self.kv_cache_dtype = kv_cache_dtype
+        self.sliding_window = model_config.get_sliding_window()
+        self.block_size = cache_config.block_size
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
+
+        # Multi-modal data support
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.multi_modal_input_mapper = self.mm_registry \
+            .create_input_mapper(self.model_config)
+        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
+
+        # Lazy initialization.
+        self.model: nn.Module  # Set after init_Model
+
+        if self.model_config.is_encoder_decoder_model:
+            raise NotImplementedError(
+                STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
+
+    @property
+    def model_is_mrope(self) -> bool:
+        """Detect if the model has "mrope" rope_scaling type.
+        mrope requires keep "rope_deltas" between prompt and decoding phases."""
+        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
+        if rope_scaling is None:
+            return False
+        return rope_scaling.get("type", None) == "mrope"
+
+    def load_model(self) -> None:
+        self.model = get_model(model_config=self.model_config,
+                               load_config=self.load_config,
+                               device_config=self.device_config,
+                               lora_config=self.lora_config,
+                               parallel_config=self.parallel_config,
+                               scheduler_config=self.scheduler_config,
+                               cache_config=self.cache_config)
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,

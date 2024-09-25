@@ -72,9 +72,6 @@ from vllm.utils import is_cpu
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
 
-from .utils import (PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory)
-
 logger = init_logger(__name__)
 
 # === Vision Inputs === #
