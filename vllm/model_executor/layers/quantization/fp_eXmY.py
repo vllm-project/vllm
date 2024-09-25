@@ -86,7 +86,6 @@ class QuantLLMFPConfig(QuantizationConfig):
         return [torch.half]
 
     @classmethod
-    # Need to figure it out
     def get_min_capability(cls) -> int:
         return 80
 
