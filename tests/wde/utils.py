@@ -135,10 +135,9 @@ class SentenceTransformersRunner(HfRunner):
         self.model_name = model_name
         from sentence_transformers import SentenceTransformer
         self.model = self.wrap_device(
-            SentenceTransformer(
-                model_name,
-                device="cpu",
-            ).to(dtype=torch_dtype))
+            SentenceTransformer(model_name,
+                                device="cpu",
+                                trust_remote_code=True).to(dtype=torch_dtype))
 
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts,

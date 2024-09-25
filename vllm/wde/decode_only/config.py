@@ -1,4 +1,4 @@
-from dataclasses import dataclass, fields
+from dataclasses import fields
 from typing import Optional
 
 from vllm.logger import init_logger
@@ -56,7 +56,6 @@ class DecodeOnlyEmbeddingSchedulerConfig(DecodeOnlySchedulerConfig,
         self.output_last_hidden_states = True
 
 
-@dataclass(frozen=True)
 class DecodeOnlyEngineConfig(EngineConfig):
     model_config: DecodeOnlyModelConfig
     scheduler_config: DecodeOnlySchedulerConfig
