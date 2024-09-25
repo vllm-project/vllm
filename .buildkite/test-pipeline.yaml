@@ -88,12 +88,12 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
-  - pip install -e ./plugins/vllm_add_dummy_model
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - export VLLM_AUDIO_FETCH_TIMEOUT=10
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
+  - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
