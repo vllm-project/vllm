@@ -15,6 +15,9 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 
+capability = current_platform.get_device_capability()
+capability = capability[0] * 10 + capability[1]
+
 
 def to_fp8(tensor: torch.Tensor):
     finfo = torch.finfo(torch.float8_e4m3fn)
@@ -73,6 +76,9 @@ def cutlass_fp8_gemm_helper(m: int,
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     torch.testing.assert_close(out, baseline, rtol=1e-2, atol=5e-2)
+
+    opcheck(torch.ops._C.cutlass_scaled_mm,
+            (out, a, b, scale_a, scale_b, bias))
 
 
 def cutlass_int8_gemm_helper(m: int,
@@ -425,3 +431,7 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b * b.to(dtype=torch.float32)).to(torch.bfloat16)
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+
+
+def test_cutlass_support_opcheck():
+    opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability, ))
