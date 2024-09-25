@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.scalar_type import scalar_types
+from vllm.utils import seed_everything
 
 
 def torch_moe(a, w1, w2, score, topk):
@@ -153,7 +154,7 @@ def test_fused_marlin_moe(
     num_bits: int,
     dtype: torch.dtype,
 ):
-    torch.manual_seed(7)
+    seed_everything(7)
 
     if topk > e:
         return
@@ -167,7 +168,6 @@ def test_fused_marlin_moe(
 
     quant_type = (scalar_types.uint4b8
                   if num_bits == 4 else scalar_types.uint8b128)
-
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -283,7 +283,6 @@ def test_single_marlin_moe_multiply(
 
     quant_type = (scalar_types.uint4b8
                   if num_bits == 4 else scalar_types.uint8b128)
-
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
 
