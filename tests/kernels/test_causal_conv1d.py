@@ -177,10 +177,6 @@ def test_causal_conv1d_update(dim, width, seqlen, has_cache_seqlens, has_bias,
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
     # set seed
-    torch.random.manual_seed(0)
-    batch = 64
-    # batch = 1
-    # dim = 64
     seed_everything(0)
     batch = 2
     x = torch.randn(batch, dim, device=device, dtype=itype)
@@ -231,7 +227,7 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_bias,
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
 
-    # set seed
+    # set )seed
     seed_everything(0)
     batch = 64
 
