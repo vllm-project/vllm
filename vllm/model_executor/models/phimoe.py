@@ -321,13 +321,13 @@ class PhiMoEAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=True,
-            quant_config=None,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=True,
-            quant_config=None,
+            quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
