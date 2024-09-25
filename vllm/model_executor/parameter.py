@@ -1,3 +1,4 @@
+from fractions import Fraction
 from typing import Callable, Optional, Union
 
 import torch
@@ -9,7 +10,7 @@ from vllm.logger import init_logger
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
     "ModelWeightParameter", "ChannelQuantScaleParameter",
-    "GroupQuantScaleParameter"
+    "GroupQuantScaleParameter", "PackedColumnParameter", "RowvLLMParameter"
 ]
 
 logger = init_logger(__name__)
@@ -92,7 +93,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_size = kwargs.get("shard_size")
         if isinstance(
                 self,
-                PackedvLLMParameter) and self.packed_dim == self.output_dim:
+            (PackedColumnParameter,
+             PackedvLLMParameter)) and self.packed_dim == self.output_dim:
             shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
@@ -115,7 +117,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         if isinstance(
                 self,
-                PackedvLLMParameter) and self.output_dim == self.packed_dim:
+            (PackedColumnParameter,
+             PackedvLLMParameter)) and self.output_dim == self.packed_dim:
             shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
@@ -131,12 +134,12 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data.copy_(loaded_weight)
 
 
-class ModelWeightParameter(_ColumnvLLMParameter):
+class RowvLLMParameter(BasevLLMParameter):
     """
-    Parameter class for linear layer weights. Extends the
-    _ColumnvLLMParameter by adding loading functionality
-    for linear layers with row parallel functionality.
-    Requires an input dimension to be defined.
+    Parameter class defining weight_loading functionality
+    (load_row_parallel_weight) for parameters being loaded
+    into linear layers with row parallel functionality.
+    Requires an input_dim to be defined.
     """
 
     def __init__(self, input_dim: int, **kwargs):
@@ -160,10 +163,18 @@ class ModelWeightParameter(_ColumnvLLMParameter):
         self.data.copy_(loaded_weight)
 
 
-class GroupQuantScaleParameter(ModelWeightParameter):
+class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
+    """
+    Parameter class for linear layer weights. Uses both column and
+    row parallelism.
+    """
+    pass
+
+
+class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     """
     Parameter class for weight scales loaded for weights with
-    grouped quantization. Equivalent to ModelWeightParameter.
+    grouped quantization. Uses both column and row parallelism.
     """
     pass
 
@@ -171,7 +182,7 @@ class GroupQuantScaleParameter(ModelWeightParameter):
 class ChannelQuantScaleParameter(_ColumnvLLMParameter):
     """
     Parameter class for weight scales loaded for weights with
-    channel-wise quantization. Equivalent to _ColumnvLLMParameter. 
+    channel-wise quantization. Equivalent to _ColumnvLLMParameter.
     """
     pass
 
@@ -181,7 +192,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
     Parameter class for scales where the number of scales is
     equivalent to the number of logical matrices in fused linear
     layers (e.g. for QKV, there are 3 scales loaded from disk).
-    This is relevant to weights with per-tensor quantization. 
+    This is relevant to weights with per-tensor quantization.
     Adds functionality to map the scalers to a shard during
     weight loading. 
 
@@ -198,9 +209,16 @@ class PerTensorScaleParameter(BasevLLMParameter):
         if isinstance(shard_id, int):
             return shard_id
 
+        # if not int, assume shard_id for qkv
+        # map to int and return
         assert isinstance(shard_id, str)
         assert shard_id in self.qkv_idxs
         return self.qkv_idxs[shard_id]
+
+    # For row parallel layers, no sharding needed
+    # load weight into parameter as is
+    def load_row_parallel_weight(self, *args, **kwargs):
+        super().load_row_parallel_weight(*args, **kwargs)
 
     def load_merged_column_weight(self, *args, **kwargs):
         self._load_into_shard_id(*args, **kwargs)
@@ -209,7 +227,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
         self._load_into_shard_id(*args, **kwargs)
 
     def load_column_parallel_weight(self, *args, **kwargs):
-        self._load_into_shard_id(*args, **kwargs)
+        super().load_row_parallel_weight(*args, **kwargs)
 
     def _load_into_shard_id(self, loaded_weight: torch.Tensor,
                             shard_id: Union[str, int], **kwargs):
@@ -232,25 +250,21 @@ class PerTensorScaleParameter(BasevLLMParameter):
         param_data.copy_(loaded_weight)
 
 
-class PackedvLLMParameter(ModelWeightParameter):
+class PackedColumnParameter(_ColumnvLLMParameter):
     """
-    Parameter for model weights which are packed on disk.
-    Example: GPTQ Marlin weights are int4 or int8, packed into int32.
-    Extends the ModelWeightParameter to take in the
-    packed factor, the packed dimension, and optionally, marlin
-    tile size for marlin kernels. Adjusts the shard_size and 
-    shard_offset for fused linear layers model weight loading 
-    by accounting for packing and optionally, marlin tile size.
+    Parameter for model parameters which are packed on disk
+    and support column parallelism only. See PackedvLLMParameter
+    for more details on the packed properties.
     """
 
     def __init__(self,
-                 packed_factor: int,
+                 packed_factor: Union[int, Fraction],
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):
         self._packed_factor = packed_factor
         self._packed_dim = packed_dim
-        self._marlin_tile = marlin_tile_size
+        self._marlin_tile_size = marlin_tile_size
         super().__init__(**kwargs)
 
     @property
@@ -262,16 +276,128 @@ class PackedvLLMParameter(ModelWeightParameter):
         return self._packed_factor
 
     @property
-    def marlin_tile(self):
-        return self._marlin_tile
-
-    def _adjust_shard_indexes_for_marlin(self, shard_size, shard_offset):
-        return shard_size * self.marlin_tile, shard_offset * self.marlin_tile
+    def marlin_tile_size(self):
+        return self._marlin_tile_size
 
     def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
-        shard_size = shard_size // self.packed_factor
-        shard_offset = shard_offset // self.packed_factor
-        if self.marlin_tile is not None:
-            return self._adjust_shard_indexes_for_marlin(
-                shard_size, shard_offset)
-        return shard_size, shard_offset
+        return _adjust_shard_indexes_for_packing(
+            shard_size=shard_size,
+            shard_offset=shard_offset,
+            packed_factor=self.packed_factor,
+            marlin_tile_size=self.marlin_tile_size)
+
+
+class PackedvLLMParameter(ModelWeightParameter):
+    """
+    Parameter for model weights which are packed on disk.
+    Example: GPTQ Marlin weights are int4 or int8, packed into int32.
+    Extends the ModelWeightParameter to take in the
+    packed factor, the packed dimension, and optionally, marlin
+    tile size for marlin kernels. Adjusts the shard_size and 
+    shard_offset for fused linear layers model weight loading
+    by accounting for packing and optionally, marlin tile size.
+    """
+
+    def __init__(self,
+                 packed_factor: Union[int, Fraction],
+                 packed_dim: int,
+                 marlin_tile_size: Optional[int] = None,
+                 **kwargs):
+        self._packed_factor = packed_factor
+        self._packed_dim = packed_dim
+        self._marlin_tile_size = marlin_tile_size
+        super().__init__(**kwargs)
+
+    @property
+    def packed_dim(self):
+        return self._packed_dim
+
+    @property
+    def packed_factor(self):
+        return self._packed_factor
+
+    @property
+    def marlin_tile_size(self):
+        return self._marlin_tile_size
+
+    def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
+        return _adjust_shard_indexes_for_packing(
+            shard_size=shard_size,
+            shard_offset=shard_offset,
+            packed_factor=self.packed_factor,
+            marlin_tile_size=self.marlin_tile_size)
+
+
+def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
+                          output_dim: int, **kwargs) -> BasevLLMParameter:
+    """
+    Permute a parameter's layout to the specified input and output dimensions, 
+    useful for forcing the parameter into a known layout, for example, if I need
+    a packed (quantized) weight matrix to be in the layout 
+        {input_dim = 0, output_dim = 1, packed_dim = 0}
+    then I can call:
+        permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
+    to ensure x is in the correct layout (permuting it to the correct layout if 
+    required, asserting if it cannot get it to the correct layout)
+    """
+
+    curr_input_dim = getattr(param, "input_dim", None)
+    curr_output_dim = getattr(param, "output_dim", None)
+
+    if curr_input_dim is None or curr_output_dim is None:
+        assert param.data.dim() == 2,\
+            "permute_param_layout_ only supports 2D parameters when either "\
+            "input_dim or output_dim is not set"
+
+    # if one of the dimensions is not set, set it to the opposite of the other
+    #  we can only do this since we asserted the parameter is 2D above
+    if curr_input_dim is None:
+        assert curr_output_dim is not None,\
+            "either input or output dim must be set"
+        curr_input_dim = (curr_output_dim + 1) % 2
+    if curr_output_dim is None:
+        assert curr_input_dim is not None,\
+            "either input or output dim must be set"
+        curr_output_dim = (curr_input_dim + 1) % 2
+
+    # create permutation from the current layout to the layout with
+    # self.input_dim at input_dim and self.output_dim at output_dim preserving
+    # other dimensions
+    perm = [
+        i for i in range(param.data.dim())
+        if i not in [curr_input_dim, curr_output_dim]
+    ]
+    perm.insert(input_dim, curr_input_dim)
+    perm.insert(output_dim, curr_output_dim)
+
+    if "packed_dim" in kwargs:
+        assert hasattr(param, "packed_dim") and\
+            param.packed_dim == perm[kwargs["packed_dim"]],\
+            "permute_param_layout_ currently doesn't support repacking"
+
+    param.data = param.data.permute(*perm)
+    if hasattr(param, "_input_dim"):
+        param._input_dim = input_dim
+    if hasattr(param, "_output_dim"):
+        param._output_dim = output_dim
+    if "packed_dim" in kwargs and hasattr(param, "_packed_dim"):
+        param._packed_dim = kwargs["packed_dim"]
+
+    return param
+
+
+def _adjust_shard_indexes_for_marlin(shard_size, shard_offset,
+                                     marlin_tile_size):
+    return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
+
+
+def _adjust_shard_indexes_for_packing(shard_size, shard_offset, packed_factor,
+                                      marlin_tile_size):
+    shard_size = shard_size // packed_factor
+    shard_offset = shard_offset // packed_factor
+    if marlin_tile_size is not None:
+        return _adjust_shard_indexes_for_marlin(
+            shard_size=shard_size,
+            shard_offset=shard_offset,
+            marlin_tile_size=marlin_tile_size)
+    return shard_size, shard_offset

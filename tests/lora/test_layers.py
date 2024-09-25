@@ -39,6 +39,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, get_masked_input_and_mask)
 from vllm.model_executor.utils import set_random_seed
+from vllm.utils import seed_everything
 
 from .utils import DummyLoRAManager
 
@@ -247,10 +248,10 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
         # Check that resetting the lora weights succeeds
 
@@ -274,10 +275,10 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
         expected_result = embedding(torch.cat(inputs))
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
 
 @torch.inference_mode()
@@ -384,10 +385,10 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
         # Check that resetting the lora weights succeeds
 
@@ -411,10 +412,10 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
         expected_result = expanded_embedding(torch.cat(inputs))
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
 
 @torch.inference_mode()
@@ -541,10 +542,10 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
             embedding_bias=None)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
 
 @torch.inference_mode()
@@ -614,10 +615,10 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
         # Check that resetting the lora weights succeeds
 
@@ -642,10 +643,10 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
 
 @torch.inference_mode()
@@ -728,10 +729,10 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
         # Check that resetting the lora weights succeeds
 
@@ -756,10 +757,10 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
 
 @torch.inference_mode()
@@ -868,10 +869,10 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         expected_result = torch.cat(expected_results)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
         for slot_idx in range(max_loras):
             lora_linear.reset_lora(slot_idx)
@@ -900,10 +901,10 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        assert torch.allclose(lora_result,
-                              expected_result,
-                              rtol=rtol,
-                              atol=atol)
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
 
 @torch.inference_mode()
@@ -922,9 +923,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
                                        seq_len) -> None:
     dtype = torch.float16
     seed = 0
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
     punica_wrapper = PunicaWrapper(8192, 256, device)
     max_loras = 8

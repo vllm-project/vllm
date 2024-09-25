@@ -3,20 +3,162 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
-from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
-from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
+from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
+                                           compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
+    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
+                                          ModelInputForGPUWithSamplingMetadata)
+
+# yapf: disable
+from vllm.vllm_flash_attn import (
+    flash_attn_varlen_func as _flash_attn_varlen_func)
+from vllm.vllm_flash_attn import (
+    flash_attn_with_kvcache as _flash_attn_with_kvcache)
+
+# yapf: enable
+
+
+@torch.library.custom_op("vllm::flash_attn_varlen_func", mutates_args=[])
+def flash_attn_varlen_func(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Optional[List[int]] = None,
+    softcap: float = 0.0,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    # custom op does not support tuple input
+    real_window_size: Tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+    return _flash_attn_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=real_window_size,
+        softcap=softcap,
+        alibi_slopes=alibi_slopes,
+        block_table=block_table,
+    )
+
+
+@flash_attn_varlen_func.register_fake  # type: ignore
+def _(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size: Optional[List[int]] = None,
+    softcap: float = 0.0,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    return torch.empty_like(q)
+
+
+@torch.library.custom_op("vllm::flash_attn_with_kvcache", mutates_args=[])
+def flash_attn_with_kvcache(
+    decode_query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    softcap: float = 0.0,
+) -> torch.Tensor:
+    return _flash_attn_with_kvcache(
+        decode_query,
+        key_cache,
+        value_cache,
+        cache_seqlens=cache_seqlens,
+        block_table=block_table,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        alibi_slopes=alibi_slopes,
+        softcap=softcap,
+    )
+
+
+@flash_attn_with_kvcache.register_fake  # type: ignore
+def _(
+    decode_query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cache_seqlens: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    softcap: float = 0.0,
+) -> torch.Tensor:
+    return torch.empty_like(decode_query)
+
+
+@torch.library.custom_op("vllm::reshape_and_cache_flash",
+                         mutates_args=["kv_cache"])
+def reshape_and_cache_flash(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+) -> None:
+    """Inductor cannot deal with inplace operations on views.
+    See https://github.com/pytorch/pytorch/issues/131192
+    and https://github.com/pytorch/pytorch/issues/130174
+    This is a workaround to hide the view operation from the inductor.
+    """
+    return torch.ops._C_cache_ops.reshape_and_cache_flash(
+        key, value, kv_cache[0], kv_cache[1], slot_mapping, kv_cache_dtype,
+        k_scale, v_scale)
+
+
+@reshape_and_cache_flash.register_fake  # type: ignore
+def _(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+) -> None:
+    pass
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -40,6 +182,10 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> Type["FlashAttentionMetadataBuilder"]:
         return FlashAttentionMetadataBuilder
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -196,6 +342,59 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
+    def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int, num_seqs: int, num_queries: int):
+        """
+        Update metadata in-place to advance one decode step.
+        """
+        # When using cudagraph, the num_seqs is padded to the next captured
+        # batch sized, but num_queries tracks the actual number of requests in
+        # the batch. For --enforce-eager mode, num_seqs == num_queries
+        if num_seqs != num_queries:
+            assert num_seqs > num_queries
+            assert self.use_cuda_graph
+
+        assert self.num_prefills == 0
+        assert self.num_prefill_tokens == 0
+        assert self.num_decode_tokens == num_seqs
+        assert self.slot_mapping.shape == (num_seqs, )
+
+        assert self.seq_lens is not None
+        assert len(self.seq_lens) == num_seqs
+        assert self.seq_lens_tensor is not None
+        assert self.seq_lens_tensor.shape == (num_seqs, )
+        assert self.max_query_len == 1
+        assert self.max_prefill_seq_len == 0
+        assert self.max_decode_seq_len == max(self.seq_lens)
+
+        assert self.query_start_loc is not None
+        assert self.query_start_loc.shape == (num_queries + 1, )
+        assert self.seq_start_loc is not None
+        assert self.seq_start_loc.shape == (num_seqs + 1, )
+
+        assert self.context_lens_tensor is not None
+        assert self.context_lens_tensor.shape == (num_queries, )
+
+        assert self.block_tables is not None
+        assert self.block_tables.shape[0] == num_seqs
+
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
+            self.seq_lens[i] += 1
+        self.max_decode_seq_len = max(self.seq_lens)
+
+        ops.advance_step_flashattn(num_seqs=num_seqs,
+                                   num_queries=num_queries,
+                                   block_size=block_size,
+                                   input_tokens=model_input.input_tokens,
+                                   sampled_token_ids=sampled_token_ids,
+                                   input_positions=model_input.input_positions,
+                                   seq_lens=self.seq_lens_tensor,
+                                   slot_mapping=self.slot_mapping,
+                                   block_tables=self.block_tables)
+
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
@@ -311,9 +510,19 @@ class FlashAttentionMetadataBuilder(
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.runner.graph_block_tables[:batch_size]
+            max_blocks = input_block_tables.shape[1]
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
-                    input_block_tables[i, :len(block_table)] = block_table
+                    num_blocks = len(block_table)
+                    if num_blocks <= max_blocks:
+                        input_block_tables[i, :num_blocks] = block_table
+                    else:
+                        # It may be possible to have more blocks allocated due
+                        # to lookahead slots of multi-step, however, they are
+                        # not used anyway, so can be safely ignored.
+                        input_block_tables[
+                            i, :max_blocks] = block_table[:max_blocks]
+
             block_tables = torch.from_numpy(input_block_tables).to(
                 device=device, non_blocking=True)
         else:
@@ -483,11 +692,10 @@ class FlashAttentionImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            ops.reshape_and_cache_flash(
+            torch.ops.vllm.reshape_and_cache_flash(
                 key,
                 value,
-                key_cache,
-                value_cache,
+                kv_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
                 k_scale,
@@ -499,7 +707,6 @@ class FlashAttentionImpl(AttentionImpl):
         assert key.shape[0] == num_prefill_tokens + num_decode_tokens
         assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
-        output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
         # QKV for prefill.
@@ -510,6 +717,9 @@ class FlashAttentionImpl(AttentionImpl):
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
 
+        prefill_output: Optional[torch.Tensor] = None
+        decode_output: Optional[torch.Tensor] = None
+
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if (kv_cache is None or prefill_meta.block_tables is None
@@ -517,7 +727,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                out = flash_attn_varlen_func(
+                prefill_output = torch.ops.vllm.flash_attn_varlen_func(
                     q=query,
                     k=key,
                     v=value,
@@ -531,13 +741,11 @@ class FlashAttentionImpl(AttentionImpl):
                     alibi_slopes=self.alibi_slopes,
                     softcap=self.logits_soft_cap,
                 )
-                assert output[:num_prefill_tokens].shape == out.shape
-                output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-                output[:num_prefill_tokens] = flash_attn_varlen_func(
+                prefill_output = torch.ops.vllm.flash_attn_varlen_func(  # noqa
                     q=query,
                     k=key_cache,
                     v=value_cache,
@@ -554,7 +762,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output[num_prefill_tokens:] = flash_attn_with_kvcache(
+            decode_output = torch.ops.vllm.flash_attn_with_kvcache(
                 decode_query.unsqueeze(1),
                 key_cache,
                 value_cache,
@@ -563,7 +771,14 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
+                softcap=self.logits_soft_cap,
             ).squeeze(1)
 
-        # Reshape the output tensor.
+        if prefill_output is None:
+            assert decode_output is not None
+            return decode_output.view(num_decode_tokens, hidden_size)
+        if decode_output is None:
+            assert prefill_output is not None
+            return prefill_output.view(num_prefill_tokens, hidden_size)
+        output = torch.cat([prefill_output, decode_output], dim=0)
         return output.view(num_tokens, hidden_size)

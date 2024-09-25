@@ -1,13 +1,10 @@
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Logprob, SamplingParams,
+                           Sequence, SequenceGroup)
 
-from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
-from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-    BaseTokenizerGroup)
-
-# Used eg. for marking rejected tokens in spec decoding.
-INVALID_TOKEN_ID = -1
+from .tokenizer import AnyTokenizer
+from .tokenizer_group import BaseTokenizerGroup
 
 
 class Detokenizer:
@@ -16,8 +13,7 @@ class Detokenizer:
     def __init__(self, tokenizer_group: BaseTokenizerGroup):
         self.tokenizer_group = tokenizer_group
 
-    def get_tokenizer_for_seq(self,
-                              sequence: Sequence) -> "PreTrainedTokenizer":
+    def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
         """Returns the HF tokenizer to use for a given sequence."""
         return self.tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
@@ -63,7 +59,7 @@ class Detokenizer:
                 continue
             for token_id, sample_logprob in prompt_logprobs_for_token.items():
                 if (sample_logprob.decoded_token is None
-                        and token_id != INVALID_TOKEN_ID):
+                        and token_id != VLLM_INVALID_TOKEN_ID):
                     prompt_token_ids_with_token = (
                         prompt_token_ids[:token_position] + [token_id])
                     (new_tokens, new_text, new_prefix_offset,
@@ -145,7 +141,7 @@ class Detokenizer:
                     continue
 
                 if (sample_logprob.decoded_token is None
-                        and token_id != INVALID_TOKEN_ID):
+                        and token_id != VLLM_INVALID_TOKEN_ID):
                     all_input_ids_with_logprob = previous_tokens + [token_id]
                     (_, new_text, _, _) = detokenize_incrementally(
                         tokenizer=tokenizer,
@@ -174,7 +170,7 @@ def _replace_none_with_empty(tokens: List[Optional[str]]):
 
 
 def _convert_tokens_to_string_with_added_encoders(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: AnyTokenizer,
     output_tokens: List[str],
     skip_special_tokens: bool,
     spaces_between_special_tokens: bool,
@@ -213,7 +209,7 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 
 def convert_prompt_ids_to_tokens(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: AnyTokenizer,
     prompt_ids: List[int],
     skip_special_tokens: bool = False,
 ) -> Tuple[List[str], int, int]:
@@ -232,7 +228,7 @@ def convert_prompt_ids_to_tokens(
     prefix_offset = max(
         read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
     # This is required to guard against out-of-vocab prompt token ids
-    _replace_none_with_empty(new_tokens)
+    _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
 
 
@@ -240,7 +236,7 @@ def convert_prompt_ids_to_tokens(
 # https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
 # under Apache 2.0 license
 def detokenize_incrementally(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: AnyTokenizer,
     all_input_ids: List[int],
     prev_tokens: Optional[List[str]],
     prefix_offset: int,
@@ -284,14 +280,14 @@ def detokenize_incrementally(
     assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.
-    if new_token_id >= len(tokenizer):
-        new_tokens = [""]
-    else:
+    if 0 <= new_token_id < len(tokenizer):
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
             [new_token_id], skip_special_tokens=skip_special_tokens)
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
+    else:
+        new_tokens = [""]
     output_tokens = prev_tokens + new_tokens
 
     # If this is the first iteration, return all tokens.

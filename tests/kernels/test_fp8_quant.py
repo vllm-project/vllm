@@ -2,8 +2,10 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.quant_utils import (ref_dynamic_per_tensor_fp8_quant,
+from tests.kernels.quant_utils import (FP8_DTYPE,
+                                       ref_dynamic_per_tensor_fp8_quant,
                                        ref_dynamic_per_token_quant)
+from vllm.utils import seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
@@ -23,23 +25,21 @@ SEEDS = [0]
 def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
                                      dtype: torch.dtype, scale_ub: bool,
                                      seed: int) -> None:
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype,
                    device="cuda") + 1e-6  # avoid nans
 
     scale_ub = torch.mean(x).to(dtype=torch.float32, device='cuda') \
             if scale_ub else None
-    ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.float8_e4m3fn,
-                                                      scale_ub)
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, FP8_DTYPE, scale_ub)
     ops_out, ops_scales = ops.scaled_fp8_quant(x,
                                                scale_ub=scale_ub,
                                                use_per_token_if_dynamic=True)
 
-    assert torch.allclose(ref_scales, ops_scales)
-    assert torch.allclose(ref_out.to(dtype=torch.float32),
-                          ops_out.to(dtype=torch.float32))
+    torch.testing.assert_close(ref_scales, ops_scales)
+    torch.testing.assert_close(ref_out.to(dtype=torch.float32),
+                               ops_out.to(dtype=torch.float32))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -49,17 +49,16 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
 @torch.inference_mode()
 def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
                                       dtype: torch.dtype, seed: int) -> None:
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
 
     ref_out, ref_scale = ref_dynamic_per_tensor_fp8_quant(x)
     ops_out, ops_scale = ops.scaled_fp8_quant(x)
 
-    assert torch.allclose(ref_scale, ops_scale)
-    assert torch.allclose(ref_out.to(dtype=torch.float32),
-                          ops_out.to(dtype=torch.float32))
+    torch.testing.assert_close(ref_scale, ops_scale)
+    torch.testing.assert_close(ref_out.to(dtype=torch.float32),
+                               ops_out.to(dtype=torch.float32))
 
 
 # Regression test for a case with large activations where an int32 index cannot
@@ -67,8 +66,7 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
 @torch.inference_mode()
 @pytest.mark.parametrize("seed", SEEDS)
 def test_fp8_quant_large(seed: int) -> None:
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     num_tokens = 1024000  # Mistral-Nemo's max_position_embeddings
     hidden_size = 1152  # Smallest hidden_size to reproduce the error
@@ -84,4 +82,4 @@ def test_fp8_quant_large(seed: int) -> None:
     ref_out = ref_out.to(dtype=dtype)
     ops_out = ops_out.to(dtype=dtype)
 
-    assert torch.allclose(ref_out, ops_out)
+    torch.testing.assert_close(ref_out, ops_out)

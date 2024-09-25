@@ -86,9 +86,7 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
             assert attn._k_scale == 1.0
             assert attn._v_scale == 1.0
 
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        if capability >= 89 and not force_marlin:
+        if current_platform.has_device_capability(89) and not force_marlin:
             # For GPUs with hardware support, we keep weights in fp8
             assert fc1.weight.dtype == torch.float8_e4m3fn
         else:
@@ -127,16 +125,18 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # Reference dynamic quantizaton
     y = quantize_ref(x, inv_scale)
-    assert torch.allclose(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
+    torch.testing.assert_close(ref_y,
+                               per_tensor_dequantize(y, inv_scale, dtype))
 
     # Static quantization
     y, _ = ops.scaled_fp8_quant(x, inv_scale)
-    assert torch.allclose(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
+    torch.testing.assert_close(ref_y,
+                               per_tensor_dequantize(y, inv_scale, dtype))
 
     # Padding
     y, _ = ops.scaled_fp8_quant(x, inv_scale, num_token_padding=17)
     assert y.shape[0] == 17
-    assert torch.allclose(
+    torch.testing.assert_close(
         ref_y,
         per_tensor_dequantize(torch.narrow(y, 0, 0, x.shape[0]), inv_scale,
                               dtype))

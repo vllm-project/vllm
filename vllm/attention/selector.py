@@ -10,8 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino,
-                        is_tpu, is_xpu)
+from vllm.utils import STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino, is_xpu
 
 logger = init_logger(__name__)
 
@@ -194,7 +193,7 @@ def which_attn_to_use(
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         return _Backend.IPEX
 
-    if is_tpu():
+    if current_platform.is_tpu():
         if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
         return _Backend.PALLAS
@@ -204,7 +203,7 @@ def which_attn_to_use(
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:
-            if current_platform.get_device_capability()[0] != 9:
+            if not current_platform.has_device_capability(90):
                 # not Instinct series GPUs.
                 logger.info("flash_attn is not supported on NAVI GPUs.")
         else:
@@ -213,7 +212,7 @@ def which_attn_to_use(
 
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
-        if current_platform.get_device_capability()[0] < 8:
+        if not current_platform.has_device_capability(80):
             # Volta and Turing NVIDIA GPUs.
             logger.info(
                 "Cannot use FlashAttention-2 backend for Volta and Turing "
@@ -227,6 +226,10 @@ def which_attn_to_use(
         elif kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
             logger.info(
                 "Cannot use FlashAttention-2 backend for FP8 KV cache.")
+            logger.warning(
+                "Please use FlashInfer backend with FP8 KV Cache for "
+                "better performance by setting environment variable  "
+                "VLLM_ATTENTION_BACKEND=FLASHINFER")
             selected_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
             logger.info(
@@ -241,8 +244,7 @@ def which_attn_to_use(
     # FlashAttn is valid for the model, checking if the package is installed.
     if selected_backend == _Backend.FLASH_ATTN:
         try:
-            import vllm_flash_attn  # noqa: F401
-
+            import vllm.vllm_flash_attn  # noqa: F401
             from vllm.attention.backends.flash_attn import (  # noqa: F401
                 FlashAttentionBackend)
 
@@ -255,8 +257,9 @@ def which_attn_to_use(
         except ImportError:
             logger.info(
                 "Cannot use FlashAttention-2 backend because the "
-                "vllm_flash_attn package is not found. "
-                "`pip install vllm-flash-attn` for better performance.")
+                "vllm.vllm_flash_attn package is not found. "
+                "Make sure that vllm_flash_attn was built and installed "
+                "(on by default).")
             selected_backend = _Backend.XFORMERS
 
     return selected_backend

@@ -37,12 +37,12 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 
 class PersimmonMLP(nn.Module):
@@ -213,10 +213,10 @@ class PersimmonModel(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.vocab_size = config.vocab_size
+        self.vocab_size = config.text_config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
-                                                   config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(
+            config.text_config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([
             PersimmonDecoderLayer(config,
                                   cache_config=cache_config,
@@ -257,14 +257,14 @@ class PersimmonForCausalLM(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.vocab_size = config.vocab_size
+        self.vocab_size = config.text_config.vocab_size
         self.model = PersimmonModel(config,
                                     cache_config=cache_config,
                                     quant_config=quant_config)
-        self.lm_head = ParallelLMHead(config.vocab_size,
+        self.lm_head = ParallelLMHead(config.text_config.vocab_size,
                                       config.hidden_size,
                                       bias=False)
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
@@ -285,8 +285,11 @@ class PersimmonForCausalLM(nn.Module):
         )
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

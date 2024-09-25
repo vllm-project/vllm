@@ -7,15 +7,13 @@ from typing import Optional, Type
 import pytest
 import torch
 
+from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
-
-capability = current_platform.get_device_capability()
-capability = capability[0] * 10 + capability[1]
 
 
 def to_fp8(tensor: torch.Tensor):
@@ -74,7 +72,7 @@ def cutlass_fp8_gemm_helper(m: int,
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
-    assert torch.allclose(out, baseline, rtol=1e-2, atol=5e-2)
+    torch.testing.assert_close(out, baseline, rtol=1e-2, atol=5e-2)
 
 
 def cutlass_int8_gemm_helper(m: int,
@@ -106,7 +104,10 @@ def cutlass_int8_gemm_helper(m: int,
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
-    assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
+    torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+
+    opcheck(torch.ops._C.cutlass_scaled_mm,
+            (out, a, b, scale_a, scale_b, bias))
 
 
 @pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 100, 33])
@@ -115,7 +116,7 @@ def cutlass_int8_gemm_helper(m: int,
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
-@pytest.mark.skipif(capability < 89,
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
                           per_out_ch: bool, use_bias: bool):
@@ -153,7 +154,7 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
-@pytest.mark.skipif(capability < 89,
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                        out_dtype: Type[torch.dtype],
@@ -171,7 +172,7 @@ def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.skipif(capability < 89,
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool,
                                   use_bias: bool, device: str):
@@ -203,7 +204,7 @@ def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
-@pytest.mark.skipif(capability < 89,
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
 def test_cutlass_fp8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
                                   use_bias: bool):
@@ -252,7 +253,7 @@ def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int,
     azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
     a_dq = scale_a * (aq_i32 + azp_aq_i8).to(dtype=torch.float32)
-    assert torch.allclose(a_dq, scale_a * aq_f32 + azp_a)
+    torch.testing.assert_close(a_dq, scale_a * aq_f32 + azp_a)
 
     baseline_dq = torch.mm(a_dq, b_dq).to(out_dtype)
 
@@ -271,8 +272,8 @@ def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int,
                                 scale_b,
                                 out_dtype=out_dtype,
                                 bias=azp_bias[0, :])
-    assert torch.allclose(out, baseline_dq, rtol=1e-2, atol=1e0)
-    assert torch.allclose(out, baseline_q, rtol=1e-2, atol=1e0)
+    torch.testing.assert_close(out, baseline_dq, rtol=1e-2, atol=1e0)
+    torch.testing.assert_close(out, baseline_q, rtol=1e-2, atol=1e0)
 
 
 @pytest.mark.parametrize("m", [32, 64, 128])
@@ -302,7 +303,10 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
     azp_a = azp_aq_i8.to(dtype=torch.float32) * scale_a  # correct for rounding
 
     a_dq = scale_a * (aq_i32 - azp_aq_i8).to(dtype=torch.float32)
-    assert torch.allclose(a_dq, scale_a * aq_f32 - azp_a, rtol=1e-4, atol=1e-3)
+    torch.testing.assert_close(a_dq,
+                               scale_a * aq_f32 - azp_a,
+                               rtol=1e-4,
+                               atol=1e-3)
 
     if use_bias:
         bias = torch.rand((1, n), device="cuda", dtype=out_dtype) * 10 + 2.5
@@ -335,8 +339,17 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
     # float16 precision is 10-bit mantissa -> 2^-11 ~ 0.05%
     rtol = 1e-2 if out_dtype == torch.bfloat16 else 1e-3
     atol = 1e-3
-    assert torch.allclose(out, baseline_dq, rtol=rtol, atol=atol)
-    assert torch.allclose(out, baseline_q, rtol=rtol, atol=atol)
+    torch.testing.assert_close(out, baseline_dq, rtol=rtol, atol=atol)
+    torch.testing.assert_close(out, baseline_q, rtol=rtol, atol=atol)
+
+    if azp_per_token:
+        opcheck(torch.ops._C.cutlass_scaled_mm_azp,
+                (out, aq_i8, bq_i8, scale_a, scale_b, azp_adj_i32, azp_i32,
+                 func_bias))
+    else:
+        opcheck(torch.ops._C.cutlass_scaled_mm_azp,
+                (out, aq_i8, bq_i8, scale_a, scale_b, azp_with_adj_i32, None,
+                 func_bias))
 
 
 # Test working with a subset of A and B
@@ -363,7 +376,7 @@ def test_cutlass_subset():
                                   scale_b,
                                   out_dtype=torch.bfloat16)
 
-    assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
+    torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
 
 # Test to make sure cuda graphs work
@@ -411,4 +424,4 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
 
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b * b.to(dtype=torch.float32)).to(torch.bfloat16)
-    assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
+    torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)

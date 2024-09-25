@@ -1,11 +1,10 @@
 import asyncio
 import time
+import weakref
 from functools import partial
-from typing import (AsyncGenerator, Callable, Dict, Iterable, List, Mapping,
-                    Optional, Set, Tuple, Type, Union)
-
-from transformers import PreTrainedTokenizer
-from typing_extensions import assert_never
+from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
+                    Mapping, Optional, Set, Tuple, Type, Union)
+from weakref import ReferenceType
 
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
@@ -13,22 +12,23 @@ from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
-from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
-                                    PromptComponents)
-from vllm.engine.metrics import StatLoggerBase
+from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
+from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
-from vllm.executor.ray_utils import initialize_ray_cluster, ray
-from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
-                         SingletonPromptInputs)
-from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
+from vllm.executor.gpu_executor import GPUExecutorAsync
+from vllm.executor.ray_utils import initialize_ray_cluster
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -81,9 +81,8 @@ class AsyncStream:
 
     def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
                               Exception]) -> None:
-        if self._finished:
-            return
-        self._queue.put_nowait(item)
+        if not self._finished:
+            self._queue.put_nowait(item)
 
     def finish(
         self,
@@ -92,7 +91,7 @@ class AsyncStream:
         if not self._finished:
             self._finished = True
             self._queue.put_nowait(
-                exception if exception is not None else STOP_ITERATION)
+                exception if self._is_raisable(exception) else STOP_ITERATION)
 
     @property
     def finished(self) -> bool:
@@ -102,9 +101,9 @@ class AsyncStream:
         self
     ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
         try:
-            while not self._finished:
+            while True:
                 result = await self._queue.get()
-                if isinstance(result, Exception):
+                if self._is_raisable(result):
                     if result == STOP_ITERATION:
                         return
                     raise result
@@ -112,6 +111,12 @@ class AsyncStream:
         except GeneratorExit:
             self._cancel(self.request_id)
             raise asyncio.CancelledError from None
+
+    @staticmethod
+    def _is_raisable(value: Any):
+        return isinstance(value, BaseException) or \
+                (isinstance(value, type) and \
+                 issubclass(value, BaseException))
 
 
 class RequestTracker:
@@ -251,6 +256,9 @@ class RequestTracker:
 class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     async def step_async(
         self, virtual_engine: int
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
@@ -263,13 +271,57 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
-        seq_group_metadata_list, scheduler_outputs = self.scheduler[
-            virtual_engine].schedule()
+        # these are cached outputs from previous iterations. None if on first
+        # iteration
+        cached_outputs = self.cached_scheduler_outputs[virtual_engine]
+        seq_group_metadata_list = cached_outputs.seq_group_metadata_list
+        scheduler_outputs = cached_outputs.scheduler_outputs
+        allow_async_output_proc = cached_outputs.allow_async_output_proc
+
+        ctx = self.scheduler_contexts[virtual_engine]
+
+        # Clear outputs for each new scheduler iteration
+        ctx.request_outputs.clear()
+
+        # skip the scheduler if there are any remaining steps in the seq groups.
+        # This ensures that the scheduler is only called again when the current
+        # batch has completed.
+        if not self._has_remaining_steps(seq_group_metadata_list):
+
+            # Schedule iteration
+            (seq_group_metadata_list, scheduler_outputs,
+             allow_async_output_proc
+             ) = self.scheduler[virtual_engine].schedule()
+
+            ctx.seq_group_metadata_list = seq_group_metadata_list
+            ctx.scheduler_outputs = scheduler_outputs
+
+            # Maybe switch from async mode to sync mode
+            if not allow_async_output_proc and len(ctx.output_queue) > 0:
+                self._process_model_outputs(ctx=ctx)
+
+            if (self.scheduler_config.is_multi_step
+                    and scheduler_outputs.num_lookahead_slots > 0):
+                # cache the scheduler outputs for the next iteration if we have
+                # lookahead slots
+                self._cache_scheduler_outputs_for_multi_step(
+                    virtual_engine, seq_group_metadata_list, scheduler_outputs,
+                    allow_async_output_proc)
+
+        assert seq_group_metadata_list is not None
+        assert scheduler_outputs is not None
 
         if not scheduler_outputs.is_empty():
-            # Execute the model.
             finished_requests_ids = self.scheduler[
                 virtual_engine].get_and_reset_finished_requests_ids()
+
+            # Check if we have a cached last_output from the previous iteration.
+            # For supporting PP this is probably the best way to pass the
+            # sampled_token_ids, as a separate broadcast over all the PP stages
+            # will cause one virtual engine's microbatch to block the pipeline.
+            last_sampled_token_ids = \
+                self._get_last_sampled_token_ids(virtual_engine)
+
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -278,160 +330,77 @@ class _AsyncLLMEngine(LLMEngine):
                 virtual_engine=virtual_engine,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-                finished_requests_ids=finished_requests_ids)
-            output = await self.model_executor.execute_model_async(
+                finished_requests_ids=finished_requests_ids,
+                # We use ExecuteModelRequest to pass the last sampled_token_ids
+                # to each of the non-last PP stages for in-place prepare_input.
+                last_sampled_token_ids=last_sampled_token_ids)
+
+            if allow_async_output_proc:
+                execute_model_req.async_callback = self.async_callbacks[
+                    virtual_engine]
+
+            # Execute the model.
+            outputs = await self.model_executor.execute_model_async(
                 execute_model_req)
+
+            # we need to do this here so that last step's sampled_token_ids can
+            # be passed to the next iteration for PP.
+            if self.scheduler_config.is_multi_step:
+                self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
-            output = []
+            if len(ctx.output_queue) > 0:
+                self._process_model_outputs(ctx=ctx)
+            outputs = []
 
-        request_outputs = self._process_model_outputs(
-            output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+        # Finish the current step for all the sequence groups.
+        if self.scheduler_config.is_multi_step:
+            for seq_group in seq_group_metadata_list:
+                seq_group.finish_step()
 
-        # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
+        if not self._has_remaining_steps(seq_group_metadata_list):
+            # Clear the cache if we have finished all the steps
+            if self.scheduler_config.is_multi_step:
+                self.cached_scheduler_outputs[
+                    virtual_engine] = SchedulerOutputState()
 
-        # Tracing
-        self.do_tracing(scheduler_outputs)
+            ctx.append_output(outputs=outputs,
+                              seq_group_metadata_list=seq_group_metadata_list,
+                              scheduler_outputs=scheduler_outputs,
+                              is_async=allow_async_output_proc,
+                              is_last_step=True)
 
-        return request_outputs
+            if outputs and allow_async_output_proc:
+                assert len(
+                    outputs
+                ) == 1, "Async postprocessor expects only a single output set"
+                self._advance_to_next_step(
+                    outputs[0], seq_group_metadata_list,
+                    scheduler_outputs.scheduled_seq_groups)
+
+            if not allow_async_output_proc:
+                self._process_model_outputs(ctx=ctx)
+
+                # Log stats.
+                self.do_log_stats(scheduler_outputs, outputs)
+
+                # Tracing
+                self.do_tracing(scheduler_outputs)
+
+        else:
+            # Multi-step case
+            return ctx.request_outputs
+
+        if not self.has_unfinished_requests():
+            # Drain async postprocessor (if exists)
+            if len(ctx.output_queue) > 0:
+                self._process_model_outputs(ctx=ctx)
+            assert len(ctx.output_queue) == 0
+
+        return ctx.request_outputs
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         """Stop the remote worker execution loop."""
         await self.model_executor.stop_remote_worker_execution_loop_async()
-
-    async def _tokenize_prompt_async(
-        self,
-        prompt: str,
-        request_id: str,
-        lora_request: Optional[LoRARequest],
-    ) -> List[int]:
-        """Async version of :meth:`_tokenize_prompt`."""
-        tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                             "skip_tokenizer_init is True")
-
-        return await tokenizer.encode_async(request_id=request_id,
-                                            prompt=prompt,
-                                            lora_request=lora_request)
-
-    async def _extract_prompt_components_async(
-        self,
-        inputs: SingletonPromptInputs,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> PromptComponents:
-        """Async version of :meth:`_extract_prompt_components`."""
-        if isinstance(inputs, str):
-            prompt = inputs
-            prompt_token_ids = await self._tokenize_prompt_async(
-                prompt,
-                request_id=request_id,
-                lora_request=lora_request,
-            )
-            multi_modal_data = None
-        elif isinstance(inputs, dict):
-            if "prompt_token_ids" in inputs:
-                prompt = None
-                prompt_token_ids = inputs["prompt_token_ids"]
-            else:
-                # NOTE: This extra assignment is required to pass mypy
-                prompt = parsed_prompt = inputs["prompt"]
-                prompt_token_ids = await self._tokenize_prompt_async(
-                    parsed_prompt,
-                    request_id=request_id,
-                    lora_request=lora_request,
-                )
-
-            multi_modal_data = inputs.get("multi_modal_data")
-        else:
-            assert_never(inputs)
-
-        return prompt, prompt_token_ids, multi_modal_data
-
-    async def _process_encoder_decoder_prompt_async(
-        self,
-        inputs: PromptInputs,
-        request_id: str,
-    ) -> EncoderDecoderLLMInputs:
-        """Async version of :meth:`_process_encoder_decoder_prompt`."""
-        encoder_comps: PromptComponents
-        decoder_comps: DecoderPromptComponents
-
-        if is_explicit_encoder_decoder_prompt(inputs):
-            encoder_task = self._extract_prompt_components_async(
-                inputs["encoder_prompt"],
-                request_id=request_id,
-            )
-
-            if (decoder_input := inputs["decoder_prompt"]) is None:
-                encoder_comps = await encoder_task
-                decoder_comps = None, None, None
-            else:
-                decoder_task = self._extract_prompt_components_async(
-                    decoder_input,
-                    request_id=request_id,
-                )
-
-                encoder_comps, decoder_comps = await asyncio.gather(
-                    encoder_task, decoder_task)
-        else:
-            encoder_comps = await self._extract_prompt_components_async(
-                inputs,
-                request_id=request_id,
-            )
-
-            decoder_comps = None, None, None
-
-        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
-
-    async def _process_decoder_only_prompt_async(
-        self,
-        inputs: SingletonPromptInputs,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> LLMInputs:
-        """Async version of :meth:`_process_decoder_only_prompt`."""
-        prompt_comps = await self._extract_prompt_components_async(
-            inputs,
-            request_id=request_id,
-            lora_request=lora_request,
-        )
-
-        return self._build_decoder_only_llm_inputs(
-            prompt_comps,
-            prompt_adapter_request=prompt_adapter_request,
-        )
-
-    async def process_model_inputs_async(
-        self,
-        inputs: PromptInputs,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
-        """Async version of :meth:`process_model_inputs`."""
-        if self.is_encoder_decoder_model():
-            # Encoder-decoder model requires special mapping of
-            # input prompts to encoder & decoder
-            model_inputs = await self._process_encoder_decoder_prompt_async(
-                inputs,
-                request_id=request_id,
-            )
-        else:
-            if is_explicit_encoder_decoder_prompt(inputs):
-                raise ValueError("Cannot pass encoder-decoder prompt "
-                                 "to decoder-only models")
-
-            # Decoder-only operation
-            model_inputs = await self._process_decoder_only_prompt_async(
-                inputs,
-                request_id=request_id,
-                lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request,
-            )
-
-        return self.input_processor(model_inputs)
 
     async def add_request_async(
         self,
@@ -450,12 +419,13 @@ class _AsyncLLMEngine(LLMEngine):
         if arrival_time is None:
             arrival_time = time.time()
 
-        processed_inputs = await self.process_model_inputs_async(
+        preprocessed_inputs = await self.input_preprocessor.preprocess_async(
             inputs,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
+        processed_inputs = self.input_processor(preprocessed_inputs)
 
         self._add_processed_request(
             request_id=request_id,
@@ -483,12 +453,6 @@ class AsyncLLMEngine:
     method yields the outputs from the :class:`LLMEngine` to the caller.
 
     Args:
-        worker_use_ray: Whether to use Ray for model workers. Required for
-            distributed execution. Should be the same as
-            `parallel_config.worker_use_ray`.
-        engine_use_ray: Whether to make LLMEngine a Ray actor. If so, the
-            async frontend will be executed in a separate process as the
-            model workers.
         log_requests: Whether to log the requests.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
@@ -499,16 +463,22 @@ class AsyncLLMEngine:
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
 
     def __init__(self,
-                 worker_use_ray: bool,
-                 engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
-        self.worker_use_ray = worker_use_ray
-        self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
-        self.engine = self._init_engine(*args, **kwargs)
+        self.engine = self._engine_class(*args, **kwargs)
+
+        # This ensures quick processing of request outputs
+        # so the append to asyncio queues is not delayed,
+        # especially for multi-step.
+        self.use_process_request_outputs_callback = (
+            self.engine.model_config.use_async_output_proc)
+
+        if self.use_process_request_outputs_callback:
+            self.engine.process_request_outputs_callback = \
+                weak_bind(self.process_request_outputs)
 
         self.background_loop: Optional[asyncio.Future] = None
         # We need to keep a reference to unshielded
@@ -521,6 +491,11 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
+    def __del__(self):
+        if rt := getattr(self, "request_tracker", None):
+            # Wake up engine loop so that it will exit cleanly
+            rt.new_requests_event.set()
+
     @classmethod
     def _get_executor_cls(
             cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
@@ -531,15 +506,12 @@ class AsyncLLMEngine:
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
                     f"ExecutorAsyncBase. Got {distributed_executor_backend}.")
-            if distributed_executor_backend.uses_ray:  # type: ignore
-                initialize_ray_cluster(engine_config.parallel_config)
             executor_class = distributed_executor_backend
         elif engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutorAsync
             executor_class = NeuronExecutorAsync
         elif engine_config.device_config.device_type == "tpu":
             if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_tpu_executor import RayTPUExecutorAsync
                 executor_class = RayTPUExecutorAsync
             else:
@@ -560,14 +532,16 @@ class AsyncLLMEngine:
                 from vllm.executor.xpu_executor import XPUExecutorAsync
                 executor_class = XPUExecutorAsync
             elif distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
                 executor_class = RayXPUExecutorAsync
+            elif distributed_executor_backend == "mp":
+                from vllm.executor.multiproc_xpu_executor import (
+                    MultiprocessingXPUExecutorAsync)
+                executor_class = MultiprocessingXPUExecutorAsync
             else:
                 raise RuntimeError(
                     "Not supported distributed execution model on XPU device.")
         elif distributed_executor_backend == "ray":
-            initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
             executor_class = RayGPUExecutorAsync
         elif distributed_executor_backend == "mp":
@@ -583,24 +557,23 @@ class AsyncLLMEngine:
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
+        engine_config: Optional[EngineConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_config = engine_args.create_engine_config()
-
-        if engine_args.engine_use_ray:
-            from vllm.executor import ray_utils
-            ray_utils.assert_ray_available()
+        if engine_config is None:
+            engine_config = engine_args.create_engine_config()
 
         executor_class = cls._get_executor_cls(engine_config)
 
+        if executor_class.uses_ray:
+            initialize_ray_cluster(engine_config.parallel_config)
+
         # Create the async LLM engine.
         engine = cls(
-            executor_class.uses_ray,
-            engine_args.engine_use_ray,
             **engine_config.to_dict(),
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
@@ -627,6 +600,14 @@ class AsyncLLMEngine:
     def errored(self) -> bool:
         return self._errored_with is not None
 
+    @property
+    def dead_error(self) -> BaseException:
+        return AsyncEngineDeadError(
+            "Background loop is not running. If it was running, "
+            "inspect the output to find the stacktrace of the "
+            "error that caused the background loop to stop "
+            "(AsyncEngineDeadError).")
+
     def set_errored(self, exc: Exception) -> None:
         self._errored_with = exc
 
@@ -637,11 +618,7 @@ class AsyncLLMEngine:
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
-    ) -> "PreTrainedTokenizer":
-        if self.engine_use_ray:
-            return await self.engine.get_tokenizer.remote(  # type: ignore
-                lora_request)
-
+    ) -> AnyTokenizer:
         return await (self.engine.get_tokenizer_group().
                       get_lora_tokenizer_async(lora_request))
 
@@ -656,30 +633,24 @@ class AsyncLLMEngine:
         self._request_tracker = RequestTracker()
 
         self._background_loop_unshielded = asyncio.get_event_loop(
-        ).create_task(self.run_engine_loop())
+        ).create_task(self.run_engine_loop(weakref.ref(self)))
         self._background_loop_unshielded.add_done_callback(
             partial(_log_task_completion, error_callback=self._error_callback))
         self.background_loop = asyncio.shield(self._background_loop_unshielded)
 
-    def _init_engine(self, *args,
-                     **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
-        if not self.engine_use_ray:
-            engine_class = self._engine_class
-        elif self.worker_use_ray:
-            engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
-        else:
-            # FIXME(woosuk): This is a bit hacky. Be careful when changing the
-            # order of the arguments.
-            cache_config = kwargs["cache_config"]
-            parallel_config = kwargs["parallel_config"]
-            if (parallel_config.tensor_parallel_size == 1
-                    and parallel_config.pipeline_parallel_size == 1):
-                num_gpus = cache_config.gpu_memory_utilization
-            else:
-                num_gpus = 1
-            engine_class = ray.remote(num_gpus=num_gpus)(
-                self._engine_class).remote
-        return engine_class(*args, **kwargs)
+    def shutdown_background_loop(self) -> None:
+        """
+        Shut down the background loop.
+
+        This method needs to be called during cleanup to remove
+        references to `self` and properly GC the resources held
+        by the async LLM engine (e.g., the executors as well as
+        their resources).
+        """
+        if self._background_loop_unshielded is not None:
+            self._background_loop_unshielded.cancel()
+            self._background_loop_unshielded = None
+        self.background_loop = None
 
     async def engine_step(self, virtual_engine: int) -> bool:
         """Kick the engine to process the waiting requests.
@@ -691,13 +662,8 @@ class AsyncLLMEngine:
 
         for new_request in new_requests:
             # Add the request into the vLLM engine's waiting queue.
-            # TODO: Maybe add add_request_batch to reduce Ray overhead
             try:
-                if self.engine_use_ray:
-                    await self.engine.add_request.remote(  # type: ignore
-                        **new_request)
-                else:
-                    await self.engine.add_request_async(**new_request)
+                await self.engine.add_request_async(**new_request)
             except ValueError as e:
                 # TODO: use a vLLM specific error for failed validation
                 self._request_tracker.process_exception(
@@ -709,32 +675,44 @@ class AsyncLLMEngine:
         if aborted_requests:
             await self._engine_abort(aborted_requests)
 
-        if self.engine_use_ray:
-            request_outputs = await self.engine.step.remote()  # type: ignore
-        else:
-            request_outputs = await self.engine.step_async(virtual_engine)
+        request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
-        finished = True
+        # If used as a callback, then already invoked inside
+        # LLMEngine's _process_model_outputs
+        if not self.use_process_request_outputs_callback:
+            all_finished = self.process_request_outputs(request_outputs)
+        else:
+            # For callback case, we only need to detect when all
+            # requests are finished
+            all_finished = all(request_output.finished
+                               for request_output in request_outputs)
+
+        return not all_finished
+
+    def process_request_outputs(self, request_outputs) -> bool:
+        # Put the outputs into the corresponding streams.
+        all_finished = True
         for request_output in request_outputs:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
-            finished = finished and request_output.finished
+            all_finished = all_finished and request_output.finished
 
-        return not finished
+        return all_finished
 
     async def _engine_abort(self, request_ids: Iterable[str]):
-        if self.engine_use_ray:
-            await self.engine.abort_request.remote(request_ids)  # type: ignore
-        else:
-            self.engine.abort_request(request_ids)
+        self.engine.abort_request(request_ids)
 
-    async def run_engine_loop(self):
-        if self.engine_use_ray:
-            pipeline_parallel_size = 1  # type: ignore
-        else:
-            pipeline_parallel_size = \
-                self.engine.parallel_config.pipeline_parallel_size
+    @staticmethod
+    async def run_engine_loop(engine_ref: ReferenceType):
+        """We use a weakref to the engine so that the running loop
+        doesn't prevent the engine being garbage collected."""
+        engine: Optional["AsyncLLMEngine"] = engine_ref()
+        if not engine:
+            return
+
+        pipeline_parallel_size = \
+                engine.engine.parallel_config.pipeline_parallel_size
         has_requests_in_progress = [False] * pipeline_parallel_size
         while True:
             if not any(has_requests_in_progress):
@@ -745,16 +723,21 @@ class AsyncLLMEngine:
                 # timeout, and unblocks the RPC thread in the workers so that
                 # they can process any other queued control plane messages,
                 # such as add/remove lora adapters.
-                if self.engine_use_ray:
-                    await (self.engine.stop_remote_worker_execution_loop.
-                           remote()  # type: ignore
-                           )
-                else:
-                    await self.engine.stop_remote_worker_execution_loop_async()
-                await self._request_tracker.wait_for_new_requests()
+                await engine.engine.stop_remote_worker_execution_loop_async()
+                request_tracker = engine._request_tracker
+                # Allow engine to be garbage collected while
+                # waiting for new requests
+                del engine
+                await asyncio.sleep(0)
+                if engine_ref() is None:
+                    return
+                await request_tracker.wait_for_new_requests()
+                engine = engine_ref()
+                if not engine:
+                    return
                 logger.debug("Got new requests!")
                 requests_in_progress = [
-                    asyncio.create_task(self.engine_step(ve))
+                    asyncio.create_task(engine.engine_step(ve))
                     for ve in range(pipeline_parallel_size)
                 ]
                 has_requests_in_progress = [True] * pipeline_parallel_size
@@ -771,28 +754,21 @@ class AsyncLLMEngine:
                 for task in done:
                     result = task.result()
                     virtual_engine = requests_in_progress.index(task)
-                    if self.engine_use_ray:
-                        has_unfinished_requests = (
-                            await (self.engine.
-                                   has_unfinished_requests_for_virtual_engine.
-                                   remote(  # type: ignore
-                                       virtual_engine)))
-                    else:
-                        has_unfinished_requests = (
-                            self.engine.
-                            has_unfinished_requests_for_virtual_engine(
-                                virtual_engine))
+                    has_unfinished_requests = (
+                        engine.engine.
+                        has_unfinished_requests_for_virtual_engine(
+                            virtual_engine))
                     if result or has_unfinished_requests:
                         requests_in_progress[virtual_engine] = (
                             asyncio.create_task(
-                                self.engine_step(virtual_engine)))
+                                engine.engine_step(virtual_engine)))
                         has_requests_in_progress[virtual_engine] = True
                     else:
                         has_requests_in_progress[virtual_engine] = False
             except asyncio.TimeoutError as exc:
                 logger.error(
                     "Engine iteration timed out. This should never happen!")
-                self.set_errored(exc)
+                engine.set_errored(exc)
                 raise
             await asyncio.sleep(0)
 
@@ -853,7 +829,7 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
-            prompt_adapter_request: Prompt Adapter request to use 
+            prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
 
         Yields:
@@ -1023,52 +999,29 @@ class AsyncLLMEngine:
 
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
-        if self.engine_use_ray:
-            return await self.engine.get_model_config.remote()  # type: ignore
-        else:
-            return self.engine.get_model_config()
+        return self.engine.get_model_config()
 
     async def get_parallel_config(self) -> ParallelConfig:
         """Get the parallel configuration of the vLLM engine."""
-        if self.engine_use_ray:
-            return await self.engine.get_parallel_config.remote(  # type: ignore
-            )
-        else:
-            return self.engine.get_parallel_config()
+        return self.engine.get_parallel_config()
 
     async def get_decoding_config(self) -> DecodingConfig:
         """Get the decoding configuration of the vLLM engine."""
-        if self.engine_use_ray:
-            return await self.engine.get_decoding_config.remote(  # type: ignore
-            )
-        else:
-            return self.engine.get_decoding_config()
+        return self.engine.get_decoding_config()
 
     async def get_scheduler_config(self) -> SchedulerConfig:
         """Get the scheduling configuration of the vLLM engine."""
-        if self.engine_use_ray:
-            return await self.engine.get_scheduler_config.remote(  # type: ignore
-            )
-        else:
-            return self.engine.get_scheduler_config()
+        return self.engine.get_scheduler_config()
 
     async def get_lora_config(self) -> LoRAConfig:
         """Get the lora configuration of the vLLM engine."""
-        if self.engine_use_ray:
-            return await self.engine.get_lora_config.remote(  # type: ignore
-            )
-        else:
-            return self.engine.get_lora_config()
+        return self.engine.get_lora_config()
 
     async def do_log_stats(
             self,
             scheduler_outputs: Optional[SchedulerOutputs] = None,
             model_output: Optional[List[SamplerOutput]] = None) -> None:
-        if self.engine_use_ray:
-            await self.engine.do_log_stats.remote(  # type: ignore
-                scheduler_outputs, model_output)
-        else:
-            self.engine.do_log_stats()
+        self.engine.do_log_stats()
 
     async def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""
@@ -1077,34 +1030,30 @@ class AsyncLLMEngine:
         if self.is_stopped:
             raise AsyncEngineDeadError("Background loop is stopped.")
 
-        if self.engine_use_ray:
-            try:
-                await self.engine.check_health.remote()  # type: ignore
-            except ray.exceptions.RayActorError as e:
-                raise RuntimeError("Engine is dead.") from e
-        else:
-            await self.engine.check_health_async()
+        await self.engine.check_health_async()
         logger.debug("Health check took %fs", time.perf_counter() - t)
 
     async def is_tracing_enabled(self) -> bool:
-        if self.engine_use_ray:
-            return await self.engine.is_tracing_enabled.remote(  # type: ignore
-            )
-        else:
-            return self.engine.is_tracing_enabled()
+        return self.engine.is_tracing_enabled()
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
-        if self.engine_use_ray:
-            ray.get(
-                self.engine.add_logger.remote(  # type: ignore
-                    logger_name=logger_name, logger=logger))
-        else:
-            self.engine.add_logger(logger_name=logger_name, logger=logger)
+        self.engine.add_logger(logger_name=logger_name, logger=logger)
 
     def remove_logger(self, logger_name: str) -> None:
-        if self.engine_use_ray:
-            ray.get(
-                self.engine.remove_logger.remote(  # type: ignore
-                    logger_name=logger_name))
+        self.engine.remove_logger(logger_name=logger_name)
+
+    async def start_profile(self) -> None:
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes
+        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
+            self.engine.model_executor.start_profile()
         else:
-            self.engine.remove_logger(logger_name=logger_name)
+            self.engine.model_executor._run_workers("start_profile")
+
+    async def stop_profile(self) -> None:
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes
+        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
+            self.engine.model_executor.stop_profile()
+        else:
+            self.engine.model_executor._run_workers("stop_profile")
