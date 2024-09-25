@@ -248,6 +248,12 @@ def run_mllama(question, modality):
 
     model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 
+    # Note: The default setting of max_num_seqs (256) and
+    # max_model_len (131072) for this model may cause OOM.
+    # You may lower either to run this example on lower-end GPUs.
+
+    # The configuration below has been confirmed to launch on a 
+    # single H100 GPU.
     llm = LLM(
         model=model_name,
         max_num_seqs=16,
