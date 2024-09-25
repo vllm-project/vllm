@@ -1027,9 +1027,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"
-            # assert not supports_multimodal(
-            #     self.model
-            # ), "To be tested: Multi-modal model with LoRA settings."
+            if supports_multimodal(self.model):
+                logger.warning("todo:add warning info")
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,

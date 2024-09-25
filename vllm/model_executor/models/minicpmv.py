@@ -389,7 +389,6 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
     return MultiModalInputs(batch_data)
 
 
-
 class LLMWrapper(nn.Module):
     """
     To align with the key names of LoRA trained with PEFT, we need to add an 
@@ -403,7 +402,6 @@ class LLMWrapper(nn.Module):
 
     def forward(self, *args, **kwargs) -> Any:
         return getattr(self, self.model_name)(*args, **kwargs)
-
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
@@ -448,7 +446,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImagePixelInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        vlm_embedding: torch.Tensor = self.get_llm_embedding(input_ids)
+        vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
         if hasattr(self.config, "scale_emb"):
             vlm_embedding *= self.config.scale_emb
 
