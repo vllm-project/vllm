@@ -166,7 +166,6 @@ class JambaMambaMixer(nn.Module):
                 cu_seq_len=attn_metadata.query_start_loc[1:]
             )
         else:
-            # happens on CG , assuming forward pass context_len=1 for all seqs
             hidden_states = causal_conv1d_update(
                     hidden_states.transpose(0,1),
                     conv_state,
@@ -210,7 +209,6 @@ class JambaMambaMixer(nn.Module):
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
                 cu_seq_len=attn_metadata.query_start_loc[1:]
             )
-
         else:
             scan_outputs = selective_state_update(
                 ssm_state,
