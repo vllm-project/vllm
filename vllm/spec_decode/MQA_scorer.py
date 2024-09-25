@@ -5,7 +5,6 @@ from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
-from vllm.spec_decode.util import nvtx_range
 from vllm.worker.worker_base import WorkerBase
 
 SeqId = int

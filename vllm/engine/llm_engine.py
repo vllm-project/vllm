@@ -995,8 +995,11 @@ class LLMEngine:
             else:
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
-                    self.output_processor.process_outputs(
+                    output_token_num = self.output_processor.process_outputs(
                         seq_group, output, is_async)
+                    if self.speculative_config:
+                        seq_group.update_num_computed_tokens(output_token_num -
+                                                             1)
 
             if seq_group.is_finished():
                 finished_now.append(i)

@@ -146,7 +146,7 @@ class SamplingMetadata:
     def prepare(
         seq_group_metadata_list: List[SequenceGroupMetadata],
         seq_lens: List[int],
-        query_lens: Optional[List[int]],
+        query_lens: List[int],
         device: str,
         pin_memory: bool,
         generators: Optional[Dict[str, torch.Generator]] = None,
@@ -194,7 +194,7 @@ class SamplingMetadata:
 def _prepare_seq_groups(
     seq_group_metadata_list: List[SequenceGroupMetadata],
     seq_lens: List[int],
-    query_lens: Optional[List[int]],
+    query_lens: List[int],
     device: str,
     generators: Optional[Dict[str, torch.Generator]] = None,
     cache: Optional[SamplingMetadataCache] = None,

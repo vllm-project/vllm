@@ -245,8 +245,8 @@ class FlashAttentionMetadata(AttentionMetadata):
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
-    # Maximum query length in the batch. None for decoding.
-    max_query_len: Optional[int]
+    # Maximum query length in the batch.
+    max_query_len: int
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
     max_prefill_seq_len: int
@@ -331,7 +331,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            max_query_len=None,
+            max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             query_start_loc=None,
@@ -357,7 +357,6 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         assert self.num_prefills == 0
         assert self.num_prefill_tokens == 0
-        print("**", self.num_decode_tokens, num_seqs)
         assert self.num_decode_tokens == num_seqs
         assert self.slot_mapping.shape == (num_seqs, )
 

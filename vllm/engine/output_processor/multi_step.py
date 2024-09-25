@@ -1,5 +1,5 @@
 import functools
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
@@ -69,7 +69,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def process_outputs(self,
                         sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput],
-                        is_async: bool = False) -> None:
+                        is_async: bool = False) -> Optional[int]:
         """Append new tokens in the outputs to sequences in the sequence group.
 
         This only supports sequence groups of size 1. It supports greater than
@@ -103,6 +103,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             # was already appended, so we only need to do the rest of the
             # postprocessor: Detokenization + stopping logic
             self._process_decode_and_stop(seq, sequence_group.sampling_params)
+            return None
         else:
             # Standard multi-step case
 
@@ -117,8 +118,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             ]
             assert valid_samples
 
-            self._process_seq_outputs(seq, valid_samples,
-                                      sequence_group.sampling_params)
+            return self._process_seq_outputs(seq, valid_samples,
+                                             sequence_group.sampling_params)
 
     def _process_decode_and_stop(self, seq: Sequence,
                                  sampling_params: SamplingParams) -> None:
@@ -136,7 +137,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def _process_seq_outputs(self, seq: Sequence,
                              valid_samples: List[SequenceOutput],
-                             sampling_params: SamplingParams) -> None:
+                             sampling_params: SamplingParams) -> int:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
 
@@ -144,7 +145,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
                                                          len(output_token_ids))
         if remaining_tokens < 0:
-            valid_samples = valid_samples[:remaining_tokens]
             output_token_ids = output_token_ids[:remaining_tokens]
 
         # Truncate any tokens after EOS. This is required as spec decode
@@ -158,7 +158,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             for i in range(len(output_token_ids)):
                 if output_token_ids[i] == eos_token_id:
                     output_token_ids = output_token_ids[:i + 1]
-                    valid_samples = valid_samples[:i + 1]
                     break
 
         # Incrementally append tokens to the sequence, as if we had only one new
@@ -174,3 +173,4 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
             if seq.is_finished():
                 break
+        return len(output_token_ids)

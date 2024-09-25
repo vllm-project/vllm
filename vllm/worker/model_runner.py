@@ -475,6 +475,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Compute tokens.
         tokens = seq_data.get_token_ids()[context_len:seq_len]
+        # print("tokens", tokens)
+        # print("seq_len", seq_len, "context_len", context_len)
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len

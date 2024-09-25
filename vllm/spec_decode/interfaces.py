@@ -5,6 +5,7 @@ from typing import Optional, Set
 import torch
 
 from vllm.sequence import ExecuteModelRequest
+from vllm.worker.worker_base import WorkerBase
 
 
 @dataclass
@@ -73,6 +74,11 @@ class SpeculativeProposer(ABC):
 
 
 class SpeculativeScorer(ABC):
+
+    @abstractmethod
+    def __init__(self, scorer_worker: WorkerBase, device: str,
+                 vocab_size: int):
+        pass
 
     @abstractmethod
     def score_proposals(
