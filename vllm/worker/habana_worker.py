@@ -320,9 +320,6 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
     def shutdown_inc(self):
         self.model_runner.shutdown_inc()
 
-    def __del__(self):
-        self.shutdown_inc()
-
     @property
     def max_model_len(self) -> int:
         return self.model_config.max_model_len

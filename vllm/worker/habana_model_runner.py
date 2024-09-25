@@ -550,6 +550,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # Lazy initialization
         self.lora_manager: LRUCacheWorkerLoRAManager = None
         self.model: torch.nn.Module = None
+        self.inc_initialized_successfully = False
 
         # Profiler stats
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
@@ -632,6 +633,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         self.model = convert(self.model, config)
                     htcore.hpu_initialize(self.model,
                                           mark_only_scales_as_const=True)
+                self.inc_initialized_successfully = True
                 logger.info("Preparing model with INC took %s",
                             m_inc.get_summary_string())
             elif not is_fake_hpu():
@@ -1938,14 +1940,18 @@ class HabanaModelRunner(
         return [output]
 
     def shutdown_inc(self):
-        print('inc shutdown')
-        if (model_config := getattr(self, "model_config", None)) and \
-                         getattr(model_config, "quantization", None) == 'inc':
-            print('inc shutdown start')
+        can_finalize_inc = False
+        from contextlib import suppress
+        with suppress(AttributeError):
+            can_finalize_inc = (self.model_config.quantization == 'inc') and \
+                (self.model.model is not None) and \
+                self.inc_initialized_successfully and \
+                not getattr(self, "_is_inc_finalized", False)
+        if can_finalize_inc:
             from neural_compressor.torch.quantization import (
                 finalize_calibration)
             finalize_calibration(self.model.model)
-            print('inc shutdown')
+            self._is_inc_finalized = True
 
     def __del__(self):
         self.shutdown_inc()
