@@ -375,7 +375,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         self.img_context_token_id = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-        
+
         if hasattr(self.language_model, "sampler"):
             self.sampler = self.language_model.sampler
         else:
