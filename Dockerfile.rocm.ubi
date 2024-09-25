@@ -13,6 +13,7 @@ ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 RUN --mount=type=cache,target=/root/.cache/pip \
+ microdnf -y update && \
  microdnf install -y --setopt=install_weak_deps=0 --nodocs \
     python${PYTHON_VERSION}-devel \
     python${PYTHON_VERSION}-pip \
@@ -40,8 +41,7 @@ gpgcheck=1\n\
 gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key" > /etc/yum.repos.d/amdgpu.repo
 
 
-RUN microdnf -y update && \
-    microdnf -y install \
+RUN microdnf -y install \
         rocm-hip-libraries rocm-hip-runtime \
         miopen-hip && \
     microdnf clean all
@@ -49,9 +49,8 @@ RUN microdnf -y update && \
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install -v --index-url "https://download.pytorch.org/whl/nightly/rocm6.1" \
-        torch==2.5.0.dev20240726+rocm6.1 \
-        torchvision==0.20.0.dev20240726+rocm6.1
-
+        torch==2.5.0.dev20240912+rocm6.1 \
+        torchvision==0.20.0.dev20240912+rocm6.1
 
 FROM rocm_base as rocm_devel
 
@@ -127,31 +126,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ##################################################################################################
 
-FROM rocm_devel AS build_triton
-
-# Whether to build triton on rocm
-ARG BUILD_TRITON="0"
-ARG TRITON_BRANCH="e0fc12c"
-
-# Build triton wheel if `BUILD_TRITON` is set to 1
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/uv \
-    if [ "$BUILD_TRITON" = "1" ]; then \
-        mkdir -p /libs && cd /libs && \
-        git clone https://github.com/OpenAI/triton.git && \
-        cd triton && \
-        git checkout "${TRITON_BRANCH}" && \
-        cd python && \
-        uv pip install -v cmake ninja && \
-        python3 setup.py bdist_wheel --dist-dir=/install; \
-    else \
-        mkdir -p /install && \
-        wget -P /install "https://download.pytorch.org/whl/pytorch_triton_rocm-3.0.0-cp312-cp312-linux_x86_64.whl#sha256=650ce7a6624ecbbe90c30fccb472a57772c08bc6f12312246f7af584f275b7ca"; \
-    fi
-
-##################################################################################################
-
 FROM rocm_devel AS build_vllm
 ARG PYTORCH_ROCM_ARCH
 ARG MAX_JOBS
@@ -189,7 +163,6 @@ RUN microdnf install -y --setopt=install_weak_deps=0 --nodocs gcc && \
     microdnf clean all
 
 RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
-    --mount=type=bind,from=build_triton,src=/install,target=/install/triton \
     --mount=type=bind,from=build_flashattention,src=/install,target=/install/flashattention \
     --mount=type=bind,from=build_vllm,src=/workspace/dist,target=/install/vllm/ \
     --mount=type=cache,target=/root/.cache/pip \
@@ -198,7 +171,6 @@ RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
         --index-strategy=unsafe-best-match \
         --extra-index-url "https://download.pytorch.org/whl/nightly/rocm6.1" \
         /install/amdsmi/*.whl\
-        /install/triton/*.whl\
         /install/flashattention/*.whl\
         /install/vllm/*.whl
 
