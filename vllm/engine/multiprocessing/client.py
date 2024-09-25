@@ -503,11 +503,11 @@ class MQLLMEngineClient:
 
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.START_PROFILE,
-            socket = self.input_socket)
+            socket=self.input_socket)
 
     async def stop_profile(self) -> None:
         """Stop profiling the engine"""
 
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE,
-            socket = self.input_socket)
+            socket=self.input_socket)
