@@ -107,6 +107,11 @@ class UsageInfo(OpenAIBaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class RequestResponseMetadata(BaseModel):
+    request_id: str
+    final_usage_info: Optional[UsageInfo] = None
+
+
 class JsonSchemaResponseFormat(OpenAIBaseModel):
     name: str
     description: Optional[str] = None
