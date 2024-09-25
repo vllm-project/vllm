@@ -35,14 +35,22 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name == "PromptInput":
-        import warnings
+    import warnings
 
+    if name == "PromptInput":
         msg = ("PromptInput has been renamed to PromptType. "
                "The original name will be removed in an upcoming version.")
 
         warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         return PromptType
+
+    if name == "LLMInputs":
+        msg = ("LLMInputs has been renamed to DecoderOnlyInputs. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return DecoderOnlyInputs
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
