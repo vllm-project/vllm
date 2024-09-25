@@ -217,4 +217,13 @@ def __getattr__(name: str):
 
         return DecoderOnlyInputs
 
+    if name == "EncoderDecoderLLMInputs":
+        msg = (
+            "EncoderDecoderLLMInputs has been renamed to EncoderDecoderInputs. "
+            "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return EncoderDecoderInputs
+
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
