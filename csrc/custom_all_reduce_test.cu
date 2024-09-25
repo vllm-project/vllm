@@ -44,7 +44,14 @@
   } while (0)
 
 __global__ void dummy_kernel() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
   for (int i = 0; i < 100; i++) __nanosleep(1000000);  // 100ms
+#else
+  for (int i = 0; i < 100; i++) {
+    long long int start = clock64();
+    while (clock64() - start < 150000000);  // approximately 98.4ms on P40
+  }
+#endif
 }
 
 template <typename T>
