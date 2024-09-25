@@ -252,7 +252,7 @@ def run_mllama(question, modality):
     # max_model_len (131072) for this model may cause OOM.
     # You may lower either to run this example on lower-end GPUs.
 
-    # The configuration below has been confirmed to launch on a 
+    # The configuration below has been confirmed to launch on a
     # single H100 GPU.
     llm = LLM(
         model=model_name,
