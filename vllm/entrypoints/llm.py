@@ -319,7 +319,8 @@ class LLM:
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None
+                                               GuidedDecodingRequest]] = None,
+        priority: Optional[List[int]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -340,6 +341,8 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
+            priority: The priority of the requests, if any.
+                Only applicable when priority scheduling policy is enabled.
 
         Returns:
             A list of ``RequestOutput`` objects containing the
@@ -381,7 +384,8 @@ class LLM:
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
-            guided_options=guided_options_request)
+            guided_options=guided_options_request,
+            priority=priority)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
@@ -784,6 +788,7 @@ class LLM:
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
+        priority: Optional[List[int]] = None,
     ) -> None:
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
@@ -813,6 +818,7 @@ class LLM:
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,
+                priority=priority[i] if priority else 0,
             )
 
     def _add_request(
@@ -821,6 +827,7 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(
@@ -829,6 +836,7 @@ class LLM:
             params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            priority=priority,
         )
 
     def _add_guided_processor(

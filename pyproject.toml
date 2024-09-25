@@ -51,9 +51,6 @@ ignore = [
     "UP032",
 ]
 
-[tool.setuptools_scm]
-version_file = "vllm/_version.py"
-
 [tool.mypy]
 python_version = "3.8"
 

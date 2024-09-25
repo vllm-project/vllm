@@ -631,6 +631,7 @@ class LLMEngine:
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> None:
         self._validate_model_inputs(processed_inputs)
         # Create the sequences.
@@ -661,7 +662,8 @@ class LLMEngine:
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
-                encoder_seq=encoder_seq)
+                encoder_seq=encoder_seq,
+                priority=priority)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
@@ -670,7 +672,8 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
-                encoder_seq=encoder_seq)
+                encoder_seq=encoder_seq,
+                priority=priority)
         else:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
@@ -697,6 +700,7 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         ...
 
@@ -745,6 +749,8 @@ class LLMEngine:
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
             trace_headers: OpenTelemetry trace headers.
+            priority: The priority of the request.
+                Only applicable with priority scheduling.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -777,6 +783,11 @@ class LLMEngine:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+
+        if priority > 0 and not self.scheduler_config.policy == "priority":
+            raise ValueError(f"Got priority {priority} but "
+                             "Priority scheduling is not enabled.")
+
         if arrival_time is None:
             arrival_time = time.time()
 
@@ -796,6 +807,7 @@ class LLMEngine:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
+            priority=priority,
         )
 
     def _create_sequence_group_with_sampling(
@@ -808,6 +820,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
+        priority: int = 0,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -834,7 +847,8 @@ class LLMEngine:
             lora_request=lora_request,
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
-            encoder_seq=encoder_seq)
+            encoder_seq=encoder_seq,
+            priority=priority)
 
         return seq_group
 
@@ -847,6 +861,7 @@ class LLMEngine:
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         encoder_seq: Optional[Sequence] = None,
+        priority: int = 0,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
@@ -859,7 +874,8 @@ class LLMEngine:
             lora_request=lora_request,
             pooling_params=pooling_params,
             prompt_adapter_request=prompt_adapter_request,
-            encoder_seq=encoder_seq)
+            encoder_seq=encoder_seq,
+            priority=priority)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
