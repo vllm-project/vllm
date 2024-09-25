@@ -156,6 +156,12 @@ class JambaMambaMixer(nn.Module):
 
         if attn_metadata.query_start_loc is not None \
             and attn_metadata.context_lens_tensor is not None:
+            # |---------- N-1 iteration --------|
+            # |---------------- N iteration ---------------------|
+            # |- tokenA -|......................|-- newTokens ---|
+            # |---------- context_len ----------|
+            # |-------------------- seq_len ---------------------|
+            #                                   |-- query_len ---|
             hidden_states = causal_conv1d_fn(
                 hidden_states,
                 conv_weights,
