@@ -1,4 +1,3 @@
-#import pytest
 import torch
 
 from tests.kernels.utils import opcheck

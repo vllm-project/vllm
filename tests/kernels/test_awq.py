@@ -1,12 +1,13 @@
+import os
+
 import torch
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
-from vllm import envs
 
 
 def test_awq_dequantize_opcheck():
-    envs.VLLM_USE_TRITON_AWQ = False
+    os.environ["VLLM_USE_TRITON_AWQ"] = "0"
     qweight = torch.randint(-2000000000,
                             2000000000, (8192, 256),
                             device='cuda',
@@ -21,7 +22,7 @@ def test_awq_dequantize_opcheck():
 
 
 def test_awq_gemm_opcheck():
-    envs.VLLM_USE_TRITON_AWQ = False
+    os.environ["VLLM_USE_TRITON_AWQ"] = "0"
     input = torch.rand((2, 8192), device='cuda', dtype=torch.float16)
     qweight = torch.randint(-2000000000,
                             2000000000, (8192, 256),
