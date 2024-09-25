@@ -66,7 +66,14 @@ class MQLLMEngine:
                  *args,
                  log_requests: bool = True,
                  **kwargs) -> None:
-        self.engine = LLMEngine(*args, **kwargs)
+        # For MQLLMEngine, we can use cached outputs, since each new request
+        # output is immediately pickled and send over the socket, which frees
+        # the python object to be reused again.
+        use_cached_outputs = True
+
+        self.engine = LLMEngine(*args,
+                                **kwargs,
+                                use_cached_outputs=use_cached_outputs)
         self.log_requests = log_requests
 
         self.use_async_sockets = use_async_sockets
@@ -245,7 +252,7 @@ class MQLLMEngine:
         try:
             self.engine.add_request(
                 request_id=request_id,
-                prompt=request.prompt,
+                inputs=request.inputs,
                 params=request.params,
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
