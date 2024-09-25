@@ -30,6 +30,7 @@ COPY requirements-common.txt /workspace/vllm/requirements-common.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
+    --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ \
     -r requirements-xpu.txt
 
 COPY ./ /workspace/vllm
@@ -39,6 +40,8 @@ ENV VLLM_TARGET_DEVICE=xpu
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 setup.py install
+
+CMD ["/bin/bash"]
 
 FROM vllm-base AS vllm-openai
 

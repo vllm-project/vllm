@@ -14,4 +14,3 @@ intel-extension-for-pytorch == 2.3.110+xpu
 oneccl_bind_pt == 2.3.100+xpu
 
 triton-xpu == 3.0.0b2
---extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
