@@ -189,7 +189,6 @@ def test_mlp_e2e_acceptance_rate(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-
         # Print spec metrics.
         "disable_log_stats": False,
 
@@ -250,7 +249,6 @@ def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-
         # Precision
         "dtype": PRECISION,
 
@@ -300,7 +298,6 @@ def test_mlp_e2e_greedy_correctness_with_preemption(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
 
         # Precision
         "dtype": PRECISION,
@@ -354,7 +351,6 @@ def test_mlp_e2e_greedy_correctness_with_padding(
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-
         # Precision
         "dtype": PRECISION,
 
@@ -404,7 +400,6 @@ def test_mlp_different_k(vllm_runner, common_llm_kwargs,
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
 
         # Precision
         "dtype": PRECISION,

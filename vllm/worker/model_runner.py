@@ -590,9 +590,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             curr_sliding_window_block = self.sliding_window_blocks
             # number of elements in last block
             suff_len = inter_data.seq_lens[seq_idx] % self.block_size
-            sliding_seq_len = min(
-                inter_data.seq_lens[seq_idx],
-                self.block_aligned_sliding_window + suff_len)
+            sliding_seq_len = min(inter_data.seq_lens[seq_idx],
+                                  self.block_aligned_sliding_window + suff_len)
             if suff_len > 0:
                 curr_sliding_window_block += 1
 

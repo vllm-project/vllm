@@ -185,12 +185,14 @@ def test_metric_spec_decode(
 ) -> None:
     k = 5
 
-    with vllm_runner(model,
-                     dtype=dtype,
-                     disable_log_stats=False,
-                     gpu_memory_utilization=0.4,
-                     speculative_model=model,
-                     num_speculative_tokens=k,) as vllm_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            disable_log_stats=False,
+            gpu_memory_utilization=0.4,
+            speculative_model=model,
+            num_speculative_tokens=k,
+    ) as vllm_model:
 
         # Force log interval to be 0 to catch all metrics.
         stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']

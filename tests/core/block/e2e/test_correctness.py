@@ -21,8 +21,7 @@ from .conftest import get_token_ids_from_llm_generator
         "num_gpu_blocks_override": 5 * (64 + 1),
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
     "preemption_mode": "swap"
 }, {
@@ -95,8 +94,7 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
         "block_size": 32,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
     "preemption_mode": "swap"
 }, {
@@ -269,8 +267,7 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
                              "max_num_seqs": 10,
                          }])
 @pytest.mark.parametrize("baseline_llm_kwargs", [
-    {
-    },
+    {},
 ])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
@@ -338,8 +335,7 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
         "enable_prefix_caching": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
     "preemption_mode": "swap"
 }, {

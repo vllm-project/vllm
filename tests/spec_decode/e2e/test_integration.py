@@ -55,7 +55,6 @@ def test_spec_decode_cuda_graph(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
