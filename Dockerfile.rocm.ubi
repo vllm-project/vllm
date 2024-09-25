@@ -144,9 +144,28 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
+    env CFLAGS="-march=haswell" \
+        CXXFLAGS="$CFLAGS $CXXFLAGS" \
+        CMAKE_BUILD_TYPE=Release \
     uv pip install -v -U \
         ninja setuptools-scm>=8 "cmake>=3.26" packaging && \
     python3 setup.py bdist_wheel --dist-dir=dist
+
+#################### libsodium Build IMAGE ####################
+FROM rocm_base as libsodium-builder
+
+RUN microdnf install -y gcc gzip tar \
+    && microdnf clean all
+
+WORKDIR /usr/src/libsodium
+
+ARG LIBSODIUM_VERSION=1.0.20
+RUN curl -LO https://github.com/jedisct1/libsodium/releases/download/${LIBSODIUM_VERSION}-RELEASE/libsodium-${LIBSODIUM_VERSION}.tar.gz \
+    && tar -xzvf libsodium*.tar.gz \
+    && rm -f libsodium*.tar.gz \
+    && mv libsodium*/* ./
+
+RUN CFLAGS="-O3 -Wall -Werror=format-security -Wno-unused-function -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -fstack-clash-protection -fcf-protection"\    ./configure --prefix="/usr/" --libdir=/usr/lib64 && make -j $MAX_JOBS && make check
 
 ##################################################################################################
 
@@ -178,7 +197,13 @@ RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
 RUN umask 002 && \
     useradd --uid 2000 --gid 0 vllm && \
     mkdir -p /licenses && \
-    chmod g+rwx $HOME /usr/src /workspace
+    chmod g+rwx $HOME /usr/src /workspace && \
+    chmod 0664 /var/log/rocm_smi_lib
+
+# Install libsodium for Tensorizer encryption
+RUN --mount=type=bind,from=libsodium-builder,src=/usr/src/libsodium,target=/usr/src/libsodium \
+    cd /usr/src/libsodium \
+    && make install
 
 COPY LICENSE /licenses/vllm.md
 COPY examples/*.jinja /app/data/template/
@@ -199,7 +224,8 @@ ENV HF_HUB_OFFLINE=1 \
     FLASH_ATTENTION_USE_TRITON_ROCM="TRUE" \
     OUTLINES_CACHE_DIR=/tmp/outlines \
     NUMBA_CACHE_DIR=/tmp/numba \
-    TRITON_CACHE_DIR=/tmp/triton
+    TRITON_CACHE_DIR=/tmp/triton \
+    LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/vllm/lib/python3.12/site-packages/pillow.libs/:/opt/vllm/lib/python3.12/site-packages/numpy.libs/"
 
 # Switch to the non-root user
 USER 2000
