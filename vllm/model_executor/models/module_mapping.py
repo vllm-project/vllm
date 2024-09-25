@@ -1,5 +1,5 @@
-
-#Copied code from: https://github.com/modelscope/ms-swift/blob/v2.4.2/swift/utils/module_mapping.py
+# Copied code from
+#  https://github.com/modelscope/ms-swift/blob/v2.4.2/swift/utils/module_mapping.py
 
 from dataclasses import dataclass, field
 from typing import List, Union
@@ -51,7 +51,9 @@ class MultiModelKeys(ModelKeys):
 
     def __post_init__(self):
         # compat
-        for key in ["language_model", "connector", "vision_tower", "generator"]:
+        for key in [
+                "language_model", "connector", "vision_tower", "generator"
+        ]:
             v = getattr(self, key)
             if isinstance(v, str):
                 setattr(self, key, [v])
