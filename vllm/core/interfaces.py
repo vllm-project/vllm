@@ -4,7 +4,7 @@ from typing import List
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
-from vllm.sequence import Sequence, SequenceGroup
+from vllm.request import Request
 from vllm.utils import Device
 
 
@@ -44,53 +44,49 @@ class BlockSpaceManager(ABC):
         raise ValueError(f"Unknown version {version=}")
 
     @abstractmethod
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+    def can_allocate(self, request: Request) -> AllocStatus:
         pass
 
     @abstractmethod
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    def allocate(self, request: Request) -> None:
         pass
 
     @abstractmethod
-    def can_append_slots(self, seq_group: SequenceGroup,
+    def can_append_slots(self, request: Request,
                          num_lookahead_slots: int) -> bool:
         pass
 
     @abstractmethod
     def append_slots(
         self,
-        seq: Sequence,
+        request: Request,
         num_lookahead_slots: int,
     ) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
-    def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
-        pass
-
-    @abstractmethod
-    def can_swap_in(self, seq_group: SequenceGroup,
+    def can_swap_in(self, request: Request,
                     num_lookahead_slots: int) -> AllocStatus:
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(self, request: Request) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
-    def can_swap_out(self, seq_group: SequenceGroup) -> bool:
+    def can_swap_out(self, request: Request) -> bool:
         pass
 
     @abstractmethod
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_out(self, request: Request) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
-    def free(self, seq: Sequence) -> None:
+    def free(self, request: Request) -> None:
         pass
 
     @abstractmethod
-    def get_block_table(self, seq: Sequence) -> List[int]:
+    def get_block_table(self, request: Request) -> List[int]:
         pass
 
     @abstractmethod
@@ -104,19 +100,18 @@ class BlockSpaceManager(ABC):
     @abstractmethod
     def access_all_blocks_in_seq(
         self,
-        seq: Sequence,
+        request: Request,
         access_time: float,
     ) -> None:
         pass
 
     @abstractmethod
     def get_common_computed_block_ids(
-            self, seqs: List[Sequence]) -> GenericSequence[int]:
+            self, reqs: List[Request]) -> GenericSequence[int]:
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
-                                token_chunk_size: int):
+    def mark_blocks_as_computed(self, request: Request, token_chunk_size: int):
         pass
 
     @abstractmethod

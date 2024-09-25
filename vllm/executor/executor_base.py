@@ -8,7 +8,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest
 
 
 class ExecutorBase(ABC):
@@ -75,7 +74,8 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def execute_model(
-        self, execute_model_req: ExecuteModelRequest
+        self,
+        scheduler_output,
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences."""
         raise NotImplementedError
@@ -134,9 +134,8 @@ class ExecutorBase(ABC):
 class ExecutorAsyncBase(ExecutorBase):
 
     @abstractmethod
-    async def execute_model_async(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+    async def execute_model_async(self,
+                                  scheduler_output) -> List[SamplerOutput]:
         """Executes one model step on the given sequences."""
         raise NotImplementedError
 

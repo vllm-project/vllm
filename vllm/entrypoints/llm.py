@@ -5,7 +5,7 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Union, cast,
 from tqdm import tqdm
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.llm_engine_v2 import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
