@@ -49,9 +49,8 @@ RUN microdnf -y install \
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install -v --index-url "https://download.pytorch.org/whl/nightly/rocm6.1" \
-        torch==2.5.0.dev20240726+rocm6.1 \
-        torchvision==0.20.0.dev20240726+rocm6.1
-
+        torch==2.5.0.dev20240912+rocm6.1 \
+        torchvision==0.20.0.dev20240912+rocm6.1
 
 FROM rocm_base as rocm_devel
 
