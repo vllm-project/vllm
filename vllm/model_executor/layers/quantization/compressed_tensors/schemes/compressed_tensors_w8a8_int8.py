@@ -136,8 +136,10 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             if not self.input_symmetric:
                 # Static asymmetric quantization has not been tested yet
                 # See comment in process_weights_after_loading
+                # Note: compressed-tensors stores the zp using the same dtype
+                # as the weights
                 input_zero_point = BasevLLMParameter(
-                    data=torch.empty(1, dtype=torch.int32),
+                    data=torch.empty(1, dtype=torch.int8),
                     weight_loader=weight_loader)
                 layer.register_parameter("input_zero_point", input_zero_point)
 

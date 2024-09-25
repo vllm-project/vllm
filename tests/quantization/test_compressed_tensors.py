@@ -14,14 +14,16 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationType)
 
 
-@pytest.mark.parametrize("model_args", [
-    ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", "tensor",
-     QuantizationType.INT, 2560),
-    ("nm-testing/tinyllama-oneshot-w8-channel-a8-tensor", "channel",
-     QuantizationType.INT, 2560),
-])
+@pytest.mark.parametrize(
+    "model_args",
+    [("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", "tensor",
+      QuantizationType.INT, 2560, True),
+     ("nm-testing/tinyllama-oneshot-w8-channel-a8-tensor", "channel",
+      QuantizationType.INT, 2560, True),
+     ("nm-testing/asym-w8w8-int8-static-per-tensor-tiny-llama", "tensor",
+      QuantizationType.INT, 2560, False)])
 def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
-    model_path, strategy, quant_type, shape_0 = model_args
+    model_path, strategy, quant_type, shape_0, is_symmetric = model_args
     with vllm_runner(model_path, enforce_eager=True) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
@@ -30,6 +32,17 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         o_proj = layer.self_attn.o_proj
         gate_up_proj = layer.mlp.gate_up_proj
         down_proj = layer.mlp.down_proj
+
+        # assert zp for symmetric and asymmetric cases
+        qkv_zp = (qkv_proj.input_zero_point is None
+                  if is_symmetric else qkv_proj.input_zero_point is not None)
+        o_zp = (o_proj.input_zero_point is None
+                if is_symmetric else o_proj.input_zero_point is not None)
+        gate_zp = (gate_up_proj.input_zero_point is None if is_symmetric else
+                   gate_up_proj.input_zero_point is not None)
+        down_zp = (down_proj.input_zero_point is None
+                   if is_symmetric else down_proj.input_zero_point is not None)
+        assert (qkv_zp and o_zp and gate_zp and down_zp)
 
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
         assert isinstance(o_proj.quant_method, CompressedTensorsLinearMethod)
