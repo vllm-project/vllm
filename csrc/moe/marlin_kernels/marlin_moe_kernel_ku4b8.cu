@@ -4,7 +4,6 @@ namespace marlin_moe {
 
 // We return bool so we can create these different kernel calls as a sequence
 // of if-elseif's.
-template <typename scalar_t>
 bool call_marlin_moe_kernel_ku4b8(
     vllm::ScalarType const& a_type, vllm::ScalarType const& q_type,
     int thread_n_blocks, int thread_k_blocks, bool has_act_order,
