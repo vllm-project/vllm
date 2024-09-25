@@ -747,13 +747,19 @@ def test_schedule_decode_blocks_to_copy_update(use_v2_block_manager: bool):
     assert output.blocks_to_copy == [(2, 3)]
 
 
-def test_schedule_swapped_simple():
-    scheduler = initialize_scheduler()
+@pytest.mark.parametrize('use_v2_block_manager', [True, False])
+def test_schedule_swapped_simple(use_v2_block_manager: bool):
+    block_size = 4
+    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
+                                     block_size=block_size)
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
-    _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=4,
+                                       best_of=2,
+                                       block_size=block_size)
     scheduler._allocate_and_set_running(seq_group)
-    append_new_token_seq_group(60, seq_group, 1)
+    append_new_token_seq_group(4, seq_group, 1)
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     scheduler._add_seq_group_to_swapped(seq_group)
 
