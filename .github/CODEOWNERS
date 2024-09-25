@@ -14,5 +14,5 @@
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/multi_step @solitarythinker
+/tests/multi_step @SolitaryThinker
 /tests/weight_loading @dsikka
