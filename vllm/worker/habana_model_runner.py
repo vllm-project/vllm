@@ -670,7 +670,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if self.lora_config and \
             max_bucket_cfg > self.max_num_batched_tokens // self.block_size:
             max_bucket_cfg = self.max_num_batched_tokens // self.block_size
-        blocks_step = 128
         #FIXME: The default values should be max_model_len
         max_prompt_seq = 1024
         max_decode_seq = 2048
@@ -682,7 +681,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             max=align_bs(max_bucket_cfg))
         self.decode_bs_bucket_cfg = read_bucket_settings('decode',
                                                          'bs',
-                                                         min=align_bs(32),
+                                                         min=1,
                                                          step=align_bs(32),
                                                          max=self.max_num_seqs)
         self.prompt_seq_bucket_cfg = read_bucket_settings('prompt',
@@ -693,9 +692,9 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.decode_block_bucket_cfg = read_bucket_settings(
             'decode',
             'block',
-            min=blocks_step,
-            step=blocks_step,
-            max=max(blocks_step,
+            min=self.block_size,
+            step=self.block_size,
+            max=max(self.block_size,
                     self.max_num_seqs * max_decode_seq // self.block_size))
         self.graphed_buckets: Set[Any] = set()
 
@@ -1594,7 +1593,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 graph_free_mem = align_workers(graph_free_mem,
                                                torch.distributed.ReduceOp.MIN)
                 prompt_graph_mem_ratio = float(
-                    os.environ.get('VLLM_GRAPH_PROMPT_RATIO', '0.5'))
+                    os.environ.get('VLLM_GRAPH_PROMPT_RATIO', '0.3'))
                 prompt_available_memory = (prompt_graph_mem_ratio *
                                            graph_free_mem)
                 decode_available_memory = (graph_free_mem -

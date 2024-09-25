@@ -245,7 +245,7 @@ Only after that, ``gpu_memory_utilization`` flag is utilized - at its default va
 Next, KV cache gets allocated, model is warmed up, and HPU Graphs are captured. 
 Environment variable ``VLLM_GRAPH_RESERVED_MEM`` defines the ratio of memory reserved for HPU Graphs capture. 
 With its default value (``VLLM_GRAPH_RESERVED_MEM=0.1``), 10% of usable memory will be reserved for graph capture (later referred to as "usable graph memory"), and the remaining 90% will be utilized for KV cache. 
-Environment variable ``VLLM_GRAPH_PROMPT_RATIO`` determines the ratio of usable graph memory reserved for prefill and decode graphs. By default (``VLLM_GRAPH_PROMPT_RATIO=0.5``), both stages have equal memory constraints. 
+Environment variable ``VLLM_GRAPH_PROMPT_RATIO`` determines the ratio of usable graph memory reserved for prefill and decode graphs. By default (``VLLM_GRAPH_PROMPT_RATIO=0.3``), both stages have equal memory constraints.
 Lower value corresponds to less usable graph memory reserved for prefill stage, e.g. ``VLLM_GRAPH_PROMPT_RATIO=0.2`` will reserve 20% of usable graph memory for prefill graphs, and 80% of usable graph memory for decode graphs. 
 
 .. note:: 
@@ -280,7 +280,7 @@ Each described step is logged by vLLM server, as follows (negative values corres
    INFO 08-02 17:37:54 habana_model_runner.py:1066] [Warmup][Prompt][1/24] batch_size:4 seq_len:1024 free_mem:55.43 GiB
    ...
    INFO 08-02 17:38:22 habana_model_runner.py:1066] [Warmup][Decode][48/48] batch_size:1 seq_len:128 free_mem:55.43 GiB
-   INFO 08-02 17:38:22 habana_model_runner.py:1159] Using 15.85 GiB/55.43 GiB of free device memory for HPUGraphs, 7.923 GiB for prompt and 7.923 GiB for decode (VLLM_GRAPH_PROMPT_RATIO=0.5)
+   INFO 08-02 17:38:22 habana_model_runner.py:1159] Using 15.85 GiB/55.43 GiB of free device memory for HPUGraphs, 7.923 GiB for prompt and 7.923 GiB for decode (VLLM_GRAPH_PROMPT_RATIO=0.3)
    INFO 08-02 17:38:22 habana_model_runner.py:1066] [Warmup][Graph/Prompt][1/24] batch_size:1 seq_len:128 free_mem:55.43 GiB
    ...
    INFO 08-02 17:38:26 habana_model_runner.py:1066] [Warmup][Graph/Prompt][11/24] batch_size:1 seq_len:896 free_mem:48.77 GiB
@@ -324,7 +324,7 @@ Environment variables
 
 -   ``VLLM_SKIP_WARMUP``: if ``true``, warmup will be skipped, ``false`` by default
 -   ``VLLM_GRAPH_RESERVED_MEM``: percentage of memory dedicated for HPUGraph capture, ``0.1`` by default
--   ``VLLM_GRAPH_PROMPT_RATIO``: percentage of reserved graph memory dedicated for prompt graphs, ``0.5`` by default
+-   ``VLLM_GRAPH_PROMPT_RATIO``: percentage of reserved graph memory dedicated for prompt graphs, ``0.3`` by default
 -   ``VLLM_GRAPH_PROMPT_STRATEGY``: strategy determining order of prompt graph capture, ``min_tokens`` or ``max_bs``, ``min_tokens`` by default
 -   ``VLLM_GRAPH_DECODE_STRATEGY``: strategy determining order of decode graph capture, ``min_tokens`` or ``max_bs``, ``max_bs`` by default
 -   ``VLLM_{phase}_{dim}_BUCKET_{param}`` - collection of 12 environment variables configuring ranges of bucketing mechanism
@@ -343,11 +343,11 @@ Environment variables
          - sequence length max (``VLLM_PROMPT_SEQ_BUCKET_MAX``): ``max_model_len``
 
       - Decode:
-         - batch size min (``VLLM_DECODE_BS_BUCKET_MIN``): ``min(max_num_seqs, 32)``
+         - batch size min (``VLLM_DECODE_BS_BUCKET_MIN``): ``1``
          - batch size step (``VLLM_DECODE_BS_BUCKET_STEP``): ``min(max_num_seqs, 32)``
          - batch size max (``VLLM_DECODE_BS_BUCKET_MAX``): ``max_num_seqs``
-         - sequence length min (``VLLM_DECODE_BLOCK_BUCKET_MIN``): ``128``
-         - sequence length step (``VLLM_DECODE_BLOCK_BUCKET_STEP``): ``128``
+         - sequence length min (``VLLM_DECODE_BLOCK_BUCKET_MIN``): ``block_size``
+         - sequence length step (``VLLM_DECODE_BLOCK_BUCKET_STEP``): ``block_size``
          - sequence length max (``VLLM_DECODE_BLOCK_BUCKET_MAX``): ``max(128, (max_num_seqs*max_model_len)/block_size)``
 
 
