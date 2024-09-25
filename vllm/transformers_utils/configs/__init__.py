@@ -35,5 +35,4 @@ __all__ = [
     # Granite can be removed from here once we have upgraded to
     # transformers 4.45+
     "GraniteConfig",
-    ""
 ]
