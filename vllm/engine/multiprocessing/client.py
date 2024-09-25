@@ -517,9 +517,10 @@ class MQLLMEngineClient:
         # Constructing guided decoding logits processors is expensive, so we do
         # it here to avoid contending with cpu resources and the GIL on the
         # backend process.
-        sampling_params = await \
-            self._build_guided_decoding_logits_processor_async(
-                sampling_params, lora_request)
+        if isinstance(params, SamplingParams):
+            params = await \
+                self._build_guided_decoding_logits_processor_async(
+                    params, lora_request)
 
         # 1) Create output queue for this requests.
         queue: asyncio.Queue[Union[RequestOutput,
@@ -601,7 +602,7 @@ class MQLLMEngineClient:
         sampling_params.guided_decoding = None
 
         return sampling_params
-    
+
     async def start_profile(self) -> None:
         """Start profiling the engine"""
 
