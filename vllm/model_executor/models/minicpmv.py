@@ -457,12 +457,13 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
 
         return vlm_embedding, vision_hidden_states
 
-    def _get_image_bounds(self,
-                          input_ids: torch.Tensor,
-                          im_start_id: torch.Tensor,
-                          im_end_id: torch.Tensor,
-                          slice_start_id: Optional[torch.Tensor] = None,
-                          slice_end_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _get_image_bounds(
+            self,
+            input_ids: torch.Tensor,
+            im_start_id: torch.Tensor,
+            im_end_id: torch.Tensor,
+            slice_start_id: Optional[torch.Tensor] = None,
+            slice_end_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         start_cond = input_ids == im_start_id[0]
         end_cond = input_ids == im_end_id[0]
         if slice_start_id is not None:
