@@ -1734,7 +1734,11 @@ class LLMEngine:
 
     def _validate_model_inputs(self, inputs: Union[LLMInputs,
                                                    EncoderDecoderLLMInputs]):
-        if self.is_encoder_decoder_model():
+        if self.model_config.is_multimodal_model:
+            # For encoder-decoder multimodal models, the max_prompt_len
+            # restricts the decoder prompt length
+            prompt_ids = inputs.get("prompt_token_ids")
+        elif self.is_encoder_decoder_model():
             prompt_ids = inputs.get("encoder_prompt_token_ids")
         else:
             prompt_ids = inputs.get("prompt_token_ids")

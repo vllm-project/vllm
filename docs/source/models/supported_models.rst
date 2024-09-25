@@ -254,6 +254,11 @@ Multimodal Language Models
     - Image\ :sup:`+`
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     -
+  * - :code:`MllamaForConditionalGeneration`
+    - Llama 3.2
+    - Image
+    - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
+    -
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
     - Image\ :sup:`E`

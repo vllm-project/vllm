@@ -111,7 +111,6 @@ def get_tokenizer(
             'encoding and decoding.',
             FutureWarning,
             stacklevel=2)
-
     if tokenizer_mode == "mistral":
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
                                                      revision=revision)
