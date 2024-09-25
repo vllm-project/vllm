@@ -91,10 +91,7 @@ class QuantLLMFPConfig(QuantizationConfig):
 
     @staticmethod
     def get_config_filenames() -> List[str]:
-        return [
-            "quant_config.json",
-            "quantize_config.json",
-        ]
+        return []
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantLLMFPLinearMethod"]:
