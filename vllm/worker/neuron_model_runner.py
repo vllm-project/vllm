@@ -1,4 +1,3 @@
-import copy
 from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -270,8 +269,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             current_generation_config.top_k = top_k
             current_generation_config.top_p = top_p
             current_generation_config.temperature = temperature
-            self.model_config.generation_config = copy.deepcopy(
-                current_generation_config)
 
             self.model.model.update_generation_config(
                 current_generation_config)
