@@ -22,8 +22,10 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, ToolCall, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+    DeltaToolCall, ErrorResponse, FunctionCall, RequestResponseMetadata,
+    ToolCall, UsageInfo)
+from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
+                                                    LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath,
                                                     TextTokensPrompt)
@@ -47,7 +49,7 @@ class OpenAIServingChat(OpenAIServing):
     def __init__(self,
                  engine_client: EngineClient,
                  model_config: ModelConfig,
-                 served_model_names: List[str],
+                 base_model_paths: List[BaseModelPath],
                  response_role: str,
                  *,
                  lora_modules: Optional[List[LoRAModulePath]],
@@ -59,7 +61,7 @@ class OpenAIServingChat(OpenAIServing):
                  tool_parser: Optional[str] = None):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         served_model_names=served_model_names,
+                         base_model_paths=base_model_paths,
                          lora_modules=lora_modules,
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
@@ -174,6 +176,11 @@ class OpenAIServingChat(OpenAIServing):
                 "--enable-auto-tool-choice and --tool-call-parser to be set")
 
         request_id = f"chat-{random_uuid()}"
+
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         try:
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
@@ -240,11 +247,13 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation, tokenizer)
+                request, result_generator, request_id, conversation, tokenizer,
+                request_metadata)
 
         try:
             return await self.chat_completion_full_generator(
-                request, result_generator, request_id, conversation, tokenizer)
+                request, result_generator, request_id, conversation, tokenizer,
+                request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -261,8 +270,9 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
-        model_name = self.served_model_names[0]
+        model_name = self.base_model_paths[0].name
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -299,6 +309,8 @@ class OpenAIServingChat(OpenAIServing):
             async for res in result_generator:
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
+                    if res.encoder_prompt_token_ids is not None:
+                        num_prompt_tokens += len(res.encoder_prompt_token_ids)
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -579,6 +591,13 @@ class OpenAIServingChat(OpenAIServing):
                     exclude_unset=True, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
+            # report to FastAPI middleware aggregate usage across all choices
+            num_completion_tokens = sum(previous_num_tokens)
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=num_completion_tokens,
+                total_tokens=num_prompt_tokens + num_completion_tokens)
+
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             logger.error("error in chat completion stream generator: %s", e)
@@ -594,9 +613,10 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
-        model_name = self.served_model_names[0]
+        model_name = self.base_model_paths[0].name
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 
@@ -713,6 +733,9 @@ class OpenAIServingChat(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
+
+        request_metadata.final_usage_info = usage
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,

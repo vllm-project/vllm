@@ -46,6 +46,7 @@ _GENERATION_MODELS = {
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
+    "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
@@ -82,12 +83,14 @@ _MULTIMODAL_MODELS = {
     ("chameleon", "ChameleonForConditionalGeneration"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
-    "LlavaForConditionalGeneration":
-    ("llava", "LlavaForConditionalGeneration"),
+    "LlavaForConditionalGeneration": ("llava",
+                                      "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next",
                                           "LlavaNextForConditionalGeneration"),
     "LlavaNextVideoForConditionalGeneration":
     ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),
+    "LlavaOnevisionForConditionalGeneration":
+    ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "PaliGemmaForConditionalGeneration": ("paligemma",
                                           "PaliGemmaForConditionalGeneration"),
@@ -98,6 +101,8 @@ _MULTIMODAL_MODELS = {
     "Qwen2VLForConditionalGeneration": ("qwen2_vl",
                                         "Qwen2VLForConditionalGeneration"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
+    "MllamaForConditionalGeneration": ("mllama",
+                                       "MllamaForConditionalGeneration"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
