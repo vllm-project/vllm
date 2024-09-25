@@ -17,12 +17,13 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCHealthRequest,
                                          RPCProcessRequest, RPCStartupRequest,
-                                         RPCStartupResponse, RPCUProfileRequest)
+                                         RPCStartupResponse,
+                                         RPCUProfileRequest)
+from vllm.executor.gpu_executor import GPUExecutorAsync
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-from vllm.executor.gpu_executor import GPUExecutorAsync
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
                     SchedulerConfig, LoRAConfig]
@@ -334,6 +335,7 @@ class MQLLMEngine:
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
+
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str):

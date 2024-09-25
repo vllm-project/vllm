@@ -55,9 +55,11 @@ class RPCStartupRequest(Enum):
 class RPCStartupResponse:
     tracing_enabled: bool
 
+
 class RPCUProfileRequest(Enum):
     START_PROFILE = 1
     STOP_PROFILE = 2
+
 
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCHealthRequest,
                       RPCStartupRequest, RPCUProfileRequest]
