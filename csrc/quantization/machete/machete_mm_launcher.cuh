@@ -71,7 +71,7 @@ torch::Tensor run_impl(PyTorchArguments args) {
   auto arguments = MacheteKernel::create_arguments(
       stream, A_ptr, layout_A, B_ptr, D_ptr, layout_D, C_ptr, layout_C, S_ptr,
       layout_S, Z_ptr, layout_Z, args.alpha.value_or(1), args.beta.value_or(0),
-      args.group_size.value_or(K));
+      args.group_size);
   TORCH_CHECK(MacheteKernel::can_implement(arguments),
               "Machete kernel cannot be run with these arguments");
 
