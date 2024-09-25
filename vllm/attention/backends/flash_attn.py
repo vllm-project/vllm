@@ -357,6 +357,7 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         assert self.num_prefills == 0
         assert self.num_prefill_tokens == 0
+        print("**", self.num_decode_tokens, num_seqs)
         assert self.num_decode_tokens == num_seqs
         assert self.slot_mapping.shape == (num_seqs, )
 
@@ -441,9 +442,6 @@ class FlashAttentionMetadataBuilder(
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
             else:
-                assert query_len == 1, (
-                    "seq_len: {}, context_len: {}, query_len: {}".format(
-                        seq_len, context_len, query_len))
                 self.num_decode_tokens += query_len
                 self.curr_seq_lens.append(curr_seq_len)
 
@@ -762,8 +760,12 @@ class FlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
+            _, num_head, head_dim = decode_query.shape
+            decode_query = decode_query.reshape(-1,
+                                                attn_metadata.max_query_len,
+                                                num_head, head_dim)
             decode_output = torch.ops.vllm.flash_attn_with_kvcache(
-                decode_query.unsqueeze(1),
+                decode_query,
                 key_cache,
                 value_cache,
                 block_table=decode_meta.block_tables,
@@ -772,7 +774,7 @@ class FlashAttentionImpl(AttentionImpl):
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
                 softcap=self.logits_soft_cap,
-            ).squeeze(1)
+            )
 
         if prefill_output is None:
             assert decode_output is not None
