@@ -11,7 +11,14 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from tt_metal.models.demos.t3000.llama2_70b.tt.llama_generation import TtLlamaModelForGeneration
 
 
-def run_inference(prompts_json, default_max_tokens=128, max_seqs_in_batch=32, num_repeat_prompts=2, measure_perf=False):
+def run_inference(
+    prompts_json,
+    default_max_tokens=128,
+    max_seqs_in_batch=32,
+    num_repeat_prompts=2,
+    measure_perf=False,
+    greedy_sampling=False,  # Option to use greedy decoding instead of top-k/p
+):
     # Generation args
     ignore_eos = True if measure_perf else False
     
@@ -22,7 +29,10 @@ def run_inference(prompts_json, default_max_tokens=128, max_seqs_in_batch=32, nu
     if num_repeat_prompts is not None:
         prompts = prompts * num_repeat_prompts
     print("Number of prompts:", len(prompts))
-    sampling_params = SamplingParams(max_tokens=default_max_tokens, ignore_eos=ignore_eos)
+    if greedy_sampling:
+        sampling_params = SamplingParams(max_tokens=default_max_tokens, ignore_eos=ignore_eos, temperature=0.0)
+    else:
+        sampling_params = SamplingParams(max_tokens=default_max_tokens, ignore_eos=ignore_eos, top_k=10, top_p=0.9, temperature=1.0)
 
     # Create an LLM.
     ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)

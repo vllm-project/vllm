@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
 import torch
+import torch.nn.functional as F
+from transformers import TopPLogitsWarper
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig,
                          ModelConfig, ParallelConfig,
@@ -19,6 +21,16 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
+class TTSamplingParams:
+    """
+    Used by TTModelInput.
+    """
+    temperature: float
+    top_k: int
+    top_p: float
+
+
+@dataclass(frozen=True)
 class TTModelInput(ModelRunnerInputBase):
     """
     Used by the TTModelRunner.
@@ -26,9 +38,10 @@ class TTModelInput(ModelRunnerInputBase):
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     prompt_lens: Optional[torch.Tensor] = None
-    seq_groups: Optional[List[List[int]]] = None
+    seq_groups: Optional[List[int]] = None
     block_tables: Optional[torch.Tensor] = None
     unpadded_batch_size: Optional[int] = None
+    tt_sampling_params: Optional[TTSamplingParams] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -39,6 +52,7 @@ class TTModelInput(ModelRunnerInputBase):
             "seq_groups": self.seq_groups,
             "block_tables": self.block_tables,
             "unpadded_batch_size": self.unpadded_batch_size,
+            "tt_sampling_params": self.tt_sampling_params,
         }
         
         return tensor_dict
@@ -49,6 +63,23 @@ class TTModelInput(ModelRunnerInputBase):
             tensor_dict: Dict[str, Any],
     ) -> "TTModelInput":
         return cls(**tensor_dict)
+    
+
+def top_pk_logits_efficient(logits, p=0.9, k=10, temperature=1.0, return_probs=False):
+    # do not keep the entire vocab size after top k. Instead, keep the k size tensor and record the associated indices
+    if k == -1:  # no top-k sampling
+        top_k_values, top_k_indices = logits, torch.arange(logits.size(-1))
+    else:
+        top_k_values, top_k_indices = torch.topk(logits, k=k)
+    top_p_values = TopPLogitsWarper(top_p=p)(None, top_k_values)
+    probs = F.softmax(top_p_values / temperature, dim=-1)
+    probs = torch.nan_to_num(probs)  # convert nan to num to prevent error in multinomial
+    top_k_id = torch.multinomial(probs, num_samples=1).squeeze(-1)
+    token = top_k_indices.gather(-1, top_k_id.unsqueeze(-1)).squeeze(-1)
+    if return_probs:
+        return token, (probs, top_k_indices)
+    else:
+        return token
 
 
 class TTModelRunner(ModelRunnerBase[TTModelInput]):
@@ -114,6 +145,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         prompt_lens: List[int] = []
         block_tables: List[List[int]] = []
         seq_groups: List[int] = []
+        top_pk_sampling_params = {}
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -142,7 +174,26 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 
             block_table = seq_group_metadata.block_tables[seq_id]
             block_tables.append(block_table)
-               
+            
+            # Sampling params
+            # TODO: Add support for different sampling params in the same batch
+            sampling_params = seq_group_metadata.sampling_params
+            self._validate_sampling_params(sampling_params)
+            if len(top_pk_sampling_params) == 0:
+                top_pk_sampling_params["temperature"] = sampling_params.temperature
+                top_pk_sampling_params["top_k"] = sampling_params.top_k
+                top_pk_sampling_params["top_p"] = sampling_params.top_p
+            else:
+                assert top_pk_sampling_params["temperature"] == sampling_params.temperature, "Currently only supporting same temperature for all sequences in batch"
+                assert top_pk_sampling_params["top_k"] == sampling_params.top_k, "Currently only supporting same top_k for all sequences in batch"
+                assert top_pk_sampling_params["top_p"] == sampling_params.top_p, "Currently only supporting same top_p for all sequences in batch"
+        
+        tt_sampling_params = TTSamplingParams(
+            temperature=top_pk_sampling_params["temperature"],
+            top_k=top_pk_sampling_params["top_k"],
+            top_p=top_pk_sampling_params["top_p"]
+        )
+        
         # Convert lists to tensors and add padding
         
         block_tables = make_tensor_with_pad(
@@ -186,7 +237,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     torch.zeros(batch_pad_len, block_tables.shape[1], dtype=torch.int32, device="cpu")
                 ])
         
-        return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables, unpadded_batch_size)
+        return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables, unpadded_batch_size, tt_sampling_params)
 
     @torch.no_grad()
     def execute_model(
@@ -213,7 +264,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # Note: for other devices, vLLM applies vllm.model_executor.layers.logits_processor::LogitsProcessor::_apply_logits_processors on logits, we don't use this
         # Note: for other devices, vLLM applies vllm.model_executor.layers.sampler::Sampler for sampling tokens, we don't use this
         next_logits = logits[:model_input.unpadded_batch_size, -1, :]  # unpadded batch, vocab of last token
-        next_token_ids = self._sample_tokens(next_logits)
+        next_token_ids = self._sample_tokens(next_logits, model_input.tt_sampling_params)
 
         # Minimal code to construct the sampler outputs, based on tpu_model_runner.py
         # TT backend does not support the advanced sampling parameters such as logprobs.
@@ -227,7 +278,20 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 CompletionSequenceGroupOutput(seq_outputs, None))
         return [SamplerOutput(sampler_outputs)]
 
-
-    def _sample_tokens(self, logits):
-        # TODO: Add other sampling methods, currently only using greedy sampling
-        return torch.argmax(logits, dim=-1)
+    def _sample_tokens(self, logits, tt_sampling_params : TTSamplingParams):
+        if tt_sampling_params.temperature == 0:  # greedy decoding
+            return torch.argmax(logits, dim=-1)
+        else:  # top-k top-p sampling
+            return top_pk_logits_efficient(
+                logits,
+                p=tt_sampling_params.top_p,
+                k=tt_sampling_params.top_k,
+                temperature=tt_sampling_params.temperature
+            )
+    
+    def _validate_sampling_params(self, sampling_params):
+        assert sampling_params.n == 1, "Currently only supporting n=1"
+        assert sampling_params.best_of == 1, "Currently only supporting best_of=1"
+        assert not sampling_params.use_beam_search, "Currently not supporting beam search"
+        assert sampling_params.logprobs is None, "Currently not supporting logprobs"
+        assert sampling_params.prompt_logprobs is None, "Currently not supporting prompt_logprobs"
