@@ -230,8 +230,9 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
 
     prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
@@ -278,8 +279,9 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
                                   use_thumbnail=use_thumbnail) for img in data
         ]
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
     image_token_id = tokenizer.encode(IMG_CONTEXT,
                                       add_special_tokens=False,
                                       return_tensors="pt")[0]
@@ -298,8 +300,9 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int,
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
 
     seq_data = dummy_seq_data_for_clip(
         vision_config,
