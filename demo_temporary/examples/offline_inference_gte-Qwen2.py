@@ -1,3 +1,5 @@
+import contextlib
+
 from vllm.wde.entrypoints.llm import LLM
 
 prompts = [
@@ -12,12 +14,11 @@ prompts = [
 # gte-Qwen2 using switch_to_gte_Qwen2.
 
 # Output warning:
-try:
+with contextlib.suppress(ValueError):
+    # wde does not yet have integrated generation
+
     llm = LLM(model="Alibaba-NLP/gte-Qwen2-1.5B-instruct",
               switch_to_gte_Qwen2=False)
-except ValueError:
-    pass
-    # wde does not yet have an integrated generation model
 
 # You should use it like this
 llm = LLM(model="Alibaba-NLP/gte-Qwen2-1.5B-instruct",
