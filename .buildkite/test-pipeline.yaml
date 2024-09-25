@@ -118,11 +118,7 @@ steps:
   - tests/tracing
   commands:
   - pytest -v -s metrics 
-  - "pip install \
-      'opentelemetry-sdk>=1.26.0,<1.27.0' \
-      'opentelemetry-api>=1.26.0,<1.27.0' \
-      'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \
-      'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'"
+  - pip install "opentelemetry-sdk>=1.26.0,<1.27.0" "opentelemetry-api>=1.26.0,<1.27.0" "opentelemetry-exporter-otlp>=1.26.0,<1.27.0" "opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0"
   - pytest -v -s tracing
 
 ##### fast check tests  #####
@@ -333,12 +329,10 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   commands:
-  - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
-    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
-    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
-  - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
+  # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
+  - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q "Same node test passed" && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
+  # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
+  - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q "Same node test passed"
 
 - label: Distributed Tests (2 GPUs) # 28min
   #mirror_hardwares: [amd]
@@ -354,7 +348,7 @@ steps:
   commands:
   - pytest -v -s ./compile/test_full_graph.py
   - pytest -v -s ./compile/test_wrapper.py
-  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
+  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q "Same node test passed"
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/encoder_decoder/language/test_bart.py models/decoder_only/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
