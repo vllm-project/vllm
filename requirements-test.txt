@@ -30,5 +30,5 @@ datamodel_code_generator # required for minicpm3 test
 aiohttp
 
 # quantization
-bitsandbytes==0.42.0
+bitsandbytes>=0.44.0
 buildkite-test-collector==0.1.8

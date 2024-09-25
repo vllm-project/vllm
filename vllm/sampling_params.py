@@ -8,6 +8,7 @@ import msgspec
 import torch
 from typing_extensions import Annotated
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -260,6 +261,10 @@ class SamplingParams(
 
         self._verify_args()
         if self.use_beam_search:
+            if not envs.VLLM_ALLOW_DEPRECATED_BEAM_SEARCH:
+                raise ValueError(
+                    "Using beam search as a sampling parameter is deprecated, and will be removed in the future release. Please use the `vllm.LLM.use_beam_search` method for dedicated beam search instead, or set the environment variable `VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1` to suppress this error. For more details, see https://github.com/vllm-project/vllm/issues/8306 ."  # noqa
+                )
             self._verify_beam_search()
         else:
             self._verify_non_beam_search()
