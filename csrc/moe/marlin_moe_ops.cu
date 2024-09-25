@@ -195,7 +195,7 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
   } else {
     int tb_scales = tb_groups * tb_n * 2;
 
-    return tb_scales * STAGES * 2;
+    return tb_scales * STAGES;
   }
 }
 
