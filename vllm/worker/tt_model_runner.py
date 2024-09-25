@@ -26,8 +26,9 @@ class TTModelInput(ModelRunnerInputBase):
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     prompt_lens: Optional[torch.Tensor] = None
-    seq_groups: Optional[List[List[int]]] = None,
+    seq_groups: Optional[List[List[int]]] = None
     block_tables: Optional[torch.Tensor] = None
+    unpadded_batch_size: Optional[int] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -37,6 +38,7 @@ class TTModelInput(ModelRunnerInputBase):
             "prompt_lens": self.prompt_lens,
             "seq_groups": self.seq_groups,
             "block_tables": self.block_tables,
+            "unpadded_batch_size": self.unpadded_batch_size,
         }
         
         return tensor_dict
@@ -104,18 +106,20 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         is_prompt = seq_group_metadata_list[0].is_prompt  # prefill if True, otherwise decode
         assert all(x.is_prompt == is_prompt for x in seq_group_metadata_list), "Currently only supporting all prefills or all decodes in seq group"
         
-        batch_size = len(seq_group_metadata_list)
-        assert batch_size > 0
+        unpadded_batch_size = len(seq_group_metadata_list)
+        assert unpadded_batch_size > 0
         
         input_tokens: List[int] = []
         input_positions: List[int] = []
         prompt_lens: List[int] = []
         block_tables: List[List[int]] = []
+        seq_groups: List[int] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1   # Only support one sequence per request group
             seq_id = seq_ids[0]
+            seq_groups.append(seq_id)
 
             seq_data = seq_group_metadata.seq_data[seq_id]
             
@@ -124,10 +128,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 prompt_tokens = seq_data.get_token_ids()
                 input_tokens.append(prompt_tokens)
                 
-                # positions
+                # prompt lengths
                 prompt_len = len(prompt_tokens)
                 prompt_lens.append(prompt_len)
-                input_positions.extend(list(range(prompt_len)))
             else:
                 # tokens
                 generation_token = seq_data.get_last_token_id()
@@ -139,15 +142,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 
             block_table = seq_group_metadata.block_tables[seq_id]
             block_tables.append(block_table)
-                
+               
+        # Convert lists to tensors and add padding
+        
         block_tables = make_tensor_with_pad(
             block_tables,
             dtype=torch.int32,
             device="cpu",
             pad=0
         )
-        
-        input_positions = torch.tensor(input_positions, dtype=torch.int32, device="cpu")
         if is_prompt:
             input_tokens = make_tensor_with_pad(
                 input_tokens, 
@@ -155,45 +158,18 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 device="cpu", 
                 pad=0
             )
+            input_positions = 0
             prompt_lens = torch.tensor(
                 prompt_lens,
                 dtype=torch.int32,
                 device="cpu"
             )
         else:
-            input_tokens = torch.tensor(input_tokens, dtype=torch.int32, device="cpu")
+            input_tokens = torch.tensor(input_tokens, dtype=torch.int32, device="cpu").view(-1, 1)
+            input_positions = torch.tensor(input_positions, dtype=torch.int32, device="cpu")
             prompt_lens = None
             
-        seq_groups = [
-            list(metadata.seq_data.keys())
-            for metadata in seq_group_metadata_list
-        ]
-        
-        return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables)
-
-    @torch.no_grad()
-    def execute_model(
-        self,
-        model_input: TTModelInput,
-        kv_caches: List[torch.Tensor],
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
-        if num_steps > 1:
-            raise ValueError(
-                "TT worker does not support multi-step execution.")
-            
-        is_prompt = model_input.prompt_lens is not None  # prefill if True, otherwise decode
-
-        block_tables = model_input.block_tables
-        if is_prompt:
-            input_tokens = model_input.input_tokens
-            input_positions = 0
-        else:
-            input_tokens = model_input.input_tokens.view(-1, 1)
-            input_positions = model_input.input_positions
-            
-            # TODO: Remove once the model can support arbitrary batch sizes
+            # TODO: Remove once TT models can support arbitrary batch sizes
             # Pad batch to max_num_seqs
             if input_tokens.shape[0] < self.scheduler_config.max_num_seqs:
                 batch_pad_len = self.scheduler_config.max_num_seqs - input_tokens.shape[0]
@@ -210,10 +186,24 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     torch.zeros(batch_pad_len, block_tables.shape[1], dtype=torch.int32, device="cpu")
                 ])
         
+        return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables, unpadded_batch_size)
+
+    @torch.no_grad()
+    def execute_model(
+        self,
+        model_input: TTModelInput,
+        kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        num_steps: int = 1,
+    ) -> Optional[List[SamplerOutput]]:
+        if num_steps > 1:
+            raise ValueError(
+                "TT worker does not support multi-step execution.")
+        
         execute_model_kwargs = {
-            "tokens": input_tokens,
-            "start_pos": input_positions,
-            "page_table": block_tables,
+            "tokens": model_input.input_tokens,
+            "start_pos": model_input.input_positions,
+            "page_table": model_input.block_tables,
             "kv_cache": kv_caches,
             "prompt_lens": model_input.prompt_lens,
         }
@@ -222,17 +212,16 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         # Note: for other devices, vLLM applies vllm.model_executor.layers.logits_processor::LogitsProcessor::_apply_logits_processors on logits, we don't use this
         # Note: for other devices, vLLM applies vllm.model_executor.layers.sampler::Sampler for sampling tokens, we don't use this
-        next_logits = logits[:, -1, :]  # batch, vocab of last token
+        next_logits = logits[:model_input.unpadded_batch_size, -1, :]  # unpadded batch, vocab of last token
         next_token_ids = self._sample_tokens(next_logits)
 
         # Minimal code to construct the sampler outputs, based on tpu_model_runner.py
         # TT backend does not support the advanced sampling parameters such as logprobs.
         zero_logprob = Logprob(0.0)
         sampler_outputs = []
-        for batch_idx, seq_ids in enumerate(model_input.seq_groups):
-            assert len(seq_ids) == 1   # Only support one sequence per request group
+        for batch_idx, seq_id in enumerate(model_input.seq_groups):
             next_token_id = next_token_ids[batch_idx]
-            seq_outputs = [SequenceOutput(seq_ids[0], next_token_id,
+            seq_outputs = [SequenceOutput(seq_id, next_token_id,
                                 {next_token_id: zero_logprob})]
             sampler_outputs.append(
                 CompletionSequenceGroupOutput(seq_outputs, None))
