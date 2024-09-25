@@ -112,6 +112,8 @@ class InputRegistry:
     def __init__(self) -> None:
         self._dummy_factories_by_model_type: Dict[Type[nn.Module],
                                                   DummyDataFactory] = {}
+        self._dummy_encoder_factories_by_model_type: Dict[
+            Type[nn.Module], DummyDataFactory] = {}
         self._input_processors_by_model_type: Dict[Type[nn.Module],
                                                    InputProcessor] = {}
 
@@ -162,11 +164,44 @@ class InputRegistry:
         return self._dummy_factories_by_model_type \
             .get(model_cls, self._default_dummy_data_factory)
 
+    def register_dummy_encoder_data(self, factory: DummyDataFactory):
+        """
+        Register a dummy encoder data factory to a model class
+
+        This is similar to :meth:`~register_dummy_data`, but for encoder input.
+        """
+
+        def wrapper(model_cls: N) -> N:
+            if model_cls in self._dummy_encoder_factories_by_model_type:
+                logger.warning(
+                    "Model class %s already has dummy encoder data "
+                    "registered to %s. It is overwritten by the new one.",
+                    model_cls, self)
+
+            self._dummy_encoder_factories_by_model_type[model_cls] = factory
+
+            return model_cls
+
+        return wrapper
+
+    def _get_dummy_encoder_data_factory(self, model_cls: Type[nn.Module]):
+        if model_cls in self._dummy_encoder_factories_by_model_type:
+            dummy_factory = self._dummy_encoder_factories_by_model_type[
+                model_cls]
+        else:
+            logger.warning(
+                "No dummy encoder data factory registered to %s. "
+                "Using the dummy data factory for the model instead.",
+                model_cls)
+            dummy_factory = self._get_dummy_data_factory(model_cls)
+        return dummy_factory
+
     def dummy_data_for_profiling(
         self,
         model_config: "ModelConfig",
         seq_len: int,
         mm_registry: "MultiModalRegistry",
+        is_encoder_data: bool = False,
     ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -184,8 +219,10 @@ class InputRegistry:
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        dummy_factory = self._get_dummy_data_factory(model_cls)
-
+        if is_encoder_data:
+            dummy_factory = self._get_dummy_encoder_data_factory(model_cls)
+        else:
+            dummy_factory = self._get_dummy_data_factory(model_cls)
         mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
         mm_processor_kwargs = get_allowed_kwarg_only_overrides(
             dummy_factory, overrides=model_config.mm_processor_kwargs)
@@ -196,10 +233,15 @@ class InputRegistry:
 
         # Having more tokens is over-conservative but otherwise fine
         num_tokens = seq_data.prompt_token_ids
-        assert len(num_tokens) >= seq_len, (
-            f"Expected at least {seq_len} dummy tokens for profiling, "
-            f"but found {len(num_tokens)} tokens instead.")
-
+        if len(num_tokens) < seq_len:
+            if is_encoder_data:
+                logger.warning(
+                    "Expected at least %d dummy encoder tokens for profiling, "
+                    "but found %d tokens instead.", seq_len, len(num_tokens))
+            else:
+                raise AssertionError(
+                    f"Expected at least {seq_len} dummy tokens for profiling, "
+                    f"but found {len(num_tokens)} tokens instead.")
         if mm_data is not None:
             for k, v in mm_data.items():
                 num_items = len(v) if isinstance(v, list) else 1
