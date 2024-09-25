@@ -18,12 +18,12 @@ TEST_AUDIO_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
+        "--gpu-memory-utilization",
+        "0.6",
         "--dtype",
         "bfloat16",
         "--max-model-len",
         "2048",
-        "--max-num-seqs",
-        "5",
         "--enforce-eager",
     ]
 
