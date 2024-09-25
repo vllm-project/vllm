@@ -69,6 +69,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
+        disable_mqa_scorer=speculative_config.speculative_disable_mqa_scorer,
         disable_by_batch_size=speculative_config.
         speculative_disable_by_batch_size,
         draft_token_acceptance_method=speculative_config.
@@ -115,6 +116,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         cls,
         scorer_worker: Worker,
         draft_worker_kwargs: Dict[str, Any],
+        disable_mqa_scorer: bool,
         disable_by_batch_size: Optional[int],
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: float,
@@ -172,12 +174,19 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     typical_acceptance_sampler_posterior_threshold,
                 posterior_alpha=typical_acceptance_sampler_posterior_alpha,
             )
-        logger.info("Configuring SpecDecodeWorker with sampler=%s",
-                    type(spec_decode_sampler))
+        logger.info(
+            "[Speculative Decoding] Configuring \
+            SpecDecodeWorker with sampler=%s", type(spec_decode_sampler))
+
+        if scorer_worker.model_runner.attn_backend.get_name() != "flash-attn":
+            disable_mqa_scorer = True
+            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
+                        "MQA is only available with flash attn backend.")
 
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
+            disable_mqa_scorer=disable_mqa_scorer,
             disable_logprobs=disable_logprobs,
             disable_log_stats=disable_log_stats,
             disable_by_batch_size=disable_by_batch_size,
@@ -189,7 +198,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
         spec_decode_sampler: SpecDecodeBaseSampler,
-        use_mqa_scorer: bool = True,
+        disable_mqa_scorer: bool = False,
         disable_logprobs: bool = False,
         disable_log_stats: bool = False,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
@@ -211,6 +220,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 types of sampler namely RejectionSampler and
                 TypicalAcceptanceSampler. 'spec_decode_sampler' is either an
                 instance of RejectionSampler or TypicalAcceptanceSampler.
+            disable_mqa_scorer: If set to True, disable the MQA scorer and use
+                the BatchExpansionTop1Scorer instead.
             disable_logprobs: If set to True, token log probabilities will
                 not be output in both the draft worker and the target worker.
                 If set to False, log probabilities will be output by both.
@@ -248,7 +259,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
         # Lazy initialization.
         self.scorer: SpeculativeScorer
-        self.use_mqa_scorer: bool = use_mqa_scorer
+        self.disable_mqa_scorer = disable_mqa_scorer
 
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
@@ -272,10 +283,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.spec_decode_sampler.init_gpu_tensors(self.rank)
 
         scorer_cls: Type[SpeculativeScorer]
-        if self.use_mqa_scorer:
-            scorer_cls = MQAScorer
-        else:
+        if self.disable_mqa_scorer:
             scorer_cls = BatchExpansionTop1Scorer
+            logger.info("[Speculative Decoding] Use batch "
+                        "expansion for scoring proposals.")
+        else:
+            scorer_cls = MQAScorer
+            logger.info(
+                "[Speculative Decoding] Use MQA scorer for scoring proposals.")
 
         self.scorer = scorer_cls(scorer_worker=self.scorer_worker,
                                  device=self.device,
