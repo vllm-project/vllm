@@ -3,7 +3,7 @@
     {%- set tools = custom_tools %}
 {%- endif %}
 {%- if not tools_in_user_message is defined %}
-    {%- set tools_in_user_message = false %}
+    {%- set tools_in_user_message = true %}
 {%- endif %}
 {%- if not date_string is defined %}
     {%- set date_string = "26 Jul 2024" %}
@@ -17,7 +17,7 @@
     {%- set system_message = messages[0]['content']|trim %}
     {%- set messages = messages[1:] %}
 {%- else %}
-    {%- set system_message = "" %}
+    {%- set system_message = "You are a helpful assistant with tool calling capabilities. Only reply with a tool call if the function exists in the library provided by the user. If it doesn't exist, just reply directly in natural language. When you receive a tool call response, use the output to format an answer to the original user question." %}
 {%- endif %}
 
 {#- System message + builtin tools #}
@@ -25,8 +25,8 @@
 {%- if tools is not none %}
     {{- "Environment: ipython\n" }}
 {%- endif %}
-{{- "Knowledge Cutoff Date: December 2023\n" }}
-{{- "Today's Date: " + date_string + "\n\n" }}
+{{- "Cutting Knowledge Date: December 2023\n" }}
+{{- "Today Date: " + date_string + "\n\n" }}
 {%- if tools is not none and not tools_in_user_message %}
     {{- "You have access to the following functions. To call a function, please respond with JSON for a function call." }}
     {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
@@ -76,10 +76,10 @@
         {{- "<|eot_id|>" }}
     {%- elif message.role == "tool" or message.role == "ipython" %}
         {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
-        {%- if message.content is mapping or message.content is iterable %}
+        {%- if message.content is mapping %}
             {{- message.content | tojson }}
         {%- else %}
-            {{- message.content }}
+            {{- { "output": message.content } | tojson }}
         {%- endif %}
         {{- "<|eot_id|>" }}
     {%- endif %}

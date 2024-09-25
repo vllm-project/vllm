@@ -4,7 +4,7 @@ import openai
 import pytest
 
 from .utils import (MESSAGES_WITHOUT_TOOLS, WEATHER_TOOL, ServerConfig,
-                    adapt_prompt_to_model)
+                    ensure_system_prompt)
 
 
 # test: make sure chat completions without tools provided work even when tools
@@ -16,7 +16,7 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI,
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=adapt_prompt_to_model(MESSAGES_WITHOUT_TOOLS, server_config),
+        messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
         max_tokens=150,
         model=model_name,
@@ -36,7 +36,7 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI,
 
     # make the same request, streaming
     stream = await client.chat.completions.create(
-        messages=adapt_prompt_to_model(MESSAGES_WITHOUT_TOOLS, server_config),
+        messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
         max_tokens=150,
         model=model_name,
@@ -84,7 +84,7 @@ async def test_chat_completion_with_tools(client: openai.AsyncOpenAI,
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=adapt_prompt_to_model(MESSAGES_WITHOUT_TOOLS, server_config),
+        messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
         max_tokens=150,
         model=model_name,
@@ -105,7 +105,7 @@ async def test_chat_completion_with_tools(client: openai.AsyncOpenAI,
 
     # make the same request, streaming
     stream = await client.chat.completions.create(
-        messages=adapt_prompt_to_model(MESSAGES_WITHOUT_TOOLS, server_config),
+        messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
         max_tokens=150,
         model=model_name,

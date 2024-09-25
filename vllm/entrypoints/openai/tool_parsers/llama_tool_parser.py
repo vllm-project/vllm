@@ -60,7 +60,7 @@ class Llama3JsonToolParser(ToolParser):
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "<|python_tag|>"
-        self.bot_token_id = self.model_tokenizer.tokenizer.encode(
+        self.bot_token_id = self.model_tokenizer.encode(
             self.bot_token, add_special_tokens=False)[0]
         self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
 

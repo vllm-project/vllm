@@ -6,7 +6,7 @@ import pytest
 
 from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
                     MESSAGES_WITH_PARALLEL_TOOL_RESPONSE, SEARCH_TOOL,
-                    WEATHER_TOOL, ServerConfig, adapt_prompt_to_model)
+                    WEATHER_TOOL, ServerConfig)
 
 
 # test: getting the model to generate parallel tool calls (streaming/not)
@@ -24,8 +24,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=adapt_prompt_to_model(MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
-                                       server_config),
+        messages=MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
         temperature=0,
         max_tokens=200,
         model=model_name,
@@ -62,8 +61,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
     # make the same request, streaming
     stream = await client.chat.completions.create(
         model=model_name,
-        messages=adapt_prompt_to_model(MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
-                                       server_config),
+        messages=MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
         temperature=0,
         max_tokens=200,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
@@ -154,8 +152,7 @@ async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=adapt_prompt_to_model(MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
-                                       server_config),
+        messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
         temperature=0,
         max_tokens=200,
         model=model_name,
@@ -173,8 +170,7 @@ async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
     assert "78" in choice.message.content  # Orlando temp in tool response
 
     stream = await client.chat.completions.create(
-        messages=adapt_prompt_to_model(MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
-                                       server_config),
+        messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
         temperature=0,
         max_tokens=200,
         model=model_name,
