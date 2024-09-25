@@ -208,7 +208,6 @@ steps:
   parallelism: 4
 
 - label: "PyTorch Fullgraph Smoke Test"
-  mirror_hardwares: [amd]
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -217,7 +216,6 @@ steps:
   - pytest -v -s compile/test_full_graph_smoke.py
 
 - label: "PyTorch Fullgraph Test"
-  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/compile
