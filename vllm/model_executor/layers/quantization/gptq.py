@@ -217,6 +217,7 @@ class GPTQLinearMethod(LinearMethodBase):
         layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
         layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
+        layer.scales = Parameter(layer.scales.data, requires_grad=False)
 
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass

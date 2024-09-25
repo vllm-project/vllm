@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 import sys
-import warnings
+from pathlib import Path
 from shutil import which
 from typing import Dict, List
 
@@ -13,6 +13,7 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
+from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME
 
 
@@ -26,34 +27,6 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
-
-
-def embed_commit_hash():
-    try:
-        if "BUILDKITE_COMMIT" in os.environ:
-            # ci build
-            commit_id = os.environ["BUILDKITE_COMMIT"]
-        else:
-            commit_id = subprocess.check_output(["git", "rev-parse", "HEAD"],
-                                                encoding="utf-8").strip()
-
-        commit_contents = f'__commit__ = "{commit_id}"\n'
-
-        version_file = os.path.join(ROOT_DIR, "vllm", "commit_id.py")
-        with open(version_file, "w", encoding="utf-8") as f:
-            f.write(commit_contents)
-
-    except subprocess.CalledProcessError as e:
-        warnings.warn(f"Failed to get commit hash:\n{e}",
-                      RuntimeWarning,
-                      stacklevel=2)
-    except Exception as e:
-        warnings.warn(f"Failed to embed commit hash:\n{e}",
-                      RuntimeWarning,
-                      stacklevel=2)
-
-
-embed_commit_hash()
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -152,15 +125,8 @@ class cmake_build_ext(build_ext):
         default_cfg = "Debug" if self.debug else "RelWithDebInfo"
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
-        # where .so files will be written, should be the same for all extensions
-        # that use the same CMakeLists.txt.
-        outdir = os.path.abspath(
-            os.path.dirname(self.get_ext_fullpath(ext.name)))
-
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
-            '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
-            '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
@@ -224,10 +190,12 @@ class cmake_build_ext(build_ext):
             os.makedirs(self.build_temp)
 
         targets = []
+        target_name = lambda s: remove_prefix(remove_prefix(s, "vllm."),
+                                              "vllm_flash_attn.")
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
-            targets.append(remove_prefix(ext.name, "vllm."))
+            targets.append(target_name(ext.name))
 
         num_jobs, _ = self.compute_num_jobs()
 
@@ -239,6 +207,43 @@ class cmake_build_ext(build_ext):
         ]
 
         subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+
+        # Install the libraries
+        for ext in self.extensions:
+            # Install the extension into the proper location
+            outdir = Path(self.get_ext_fullpath(ext.name)).parent.absolute()
+
+            # Skip if the install directory is the same as the build directory
+            if outdir == self.build_temp:
+                continue
+
+            # CMake appends the extension prefix to the install path,
+            # and outdir already contains that prefix, so we need to remove it.
+            prefix = outdir
+            for i in range(ext.name.count('.')):
+                prefix = prefix.parent
+
+            # prefix here should actually be the same for all components
+            install_args = [
+                "cmake", "--install", ".", "--prefix", prefix, "--component",
+                target_name(ext.name)
+            ]
+            subprocess.check_call(install_args, cwd=self.build_temp)
+
+    def run(self):
+        # First, run the standard build_ext command to compile the extensions
+        super().run()
+
+        # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
+        # directory so that they can be included in the editable build
+        import glob
+        files = glob.glob(
+            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
+        for file in files:
+            dst_file = os.path.join("vllm/vllm_flash_attn",
+                                    os.path.basename(file))
+            print(f"Copying {file} to {dst_file}")
+            self.copy_file(file, dst_file)
 
 
 def _no_device() -> bool:
@@ -348,52 +353,43 @@ def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
 
-def find_version(filepath: str) -> str:
-    """Extract version information from the given filepath.
-
-    Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
-    """
-    with open(filepath) as fp:
-        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
-                                  fp.read(), re.M)
-        if version_match:
-            return version_match.group(1)
-        raise RuntimeError("Unable to find version string.")
-
-
 def get_vllm_version() -> str:
-    version = find_version(get_path("vllm", "version.py"))
+    version = get_version(
+        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+    )
+
+    sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
-            version += "+empty"
+            version += f"{sep}empty"
     elif _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
             # skip this for source tarball, required for pypi
             if "sdist" not in sys.argv:
-                version += f"+cu{cuda_version_str}"
+                version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
         if hipcc_version != MAIN_CUDA_VERSION:
             rocm_version_str = hipcc_version.replace(".", "")[:3]
-            version += f"+rocm{rocm_version_str}"
+            version += f"{sep}rocm{rocm_version_str}"
     elif _is_neuron():
         # Get the Neuron version
         neuron_version = str(get_neuronxcc_version())
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
-            version += f"+neuron{neuron_version_str}"
+            version += f"{sep}neuron{neuron_version_str}"
     elif _is_openvino():
-        version += "+openvino"
+        version += f"{sep}openvino"
     elif _is_tpu():
-        version += "+tpu"
+        version += f"{sep}tpu"
     elif _is_cpu():
-        version += "+cpu"
+        version += f"{sep}cpu"
     elif _is_xpu():
-        version += "+xpu"
+        version += f"{sep}xpu"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -466,6 +462,10 @@ if _is_cuda() or _is_hip():
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
+
+if _is_cuda():
+    ext_modules.append(
+        CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
