@@ -31,7 +31,8 @@ def run_inference(prompts_json, default_max_tokens=128, max_seqs_in_batch=32, nu
     if measure_perf:
         # TODO: Double check how many different seq lengths need to be compiled for decode
         print("Starting compile run")
-        generate_tokens(llm, prompts[:max_seqs_in_batch], sampling_params[:max_seqs_in_batch], print_output=False)
+        sampling_params_compile = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
+        generate_tokens(llm, prompts[:max_seqs_in_batch], sampling_params_compile, print_output=False)
         print("Finished compile run")
 
     print("Starting inference run")
