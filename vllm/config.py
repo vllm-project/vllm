@@ -312,9 +312,17 @@ class ModelConfig:
                 "quant_method": self.quantization
             }
             # TODO(alpin): Investigate supporting bfloat16 dtype
-            self.dtype = torch.float16
+            if self.dtype != torch.float16:
+                logger.info(
+                    "%s data type is not supported for "
+                    "fp%s quantization. Using float16 instead.", self.dtype,
+                    fp_bits)
+                self.dtype = torch.float16
             # In some cases, CUDA graph execution breaks this quant method
-            self.enforce_eager = True
+            logger.warning(
+                "CUDA Graph execution may not work with fp%s "
+                "quantization. You can try disabling it "
+                "with `enforce_eager=True` if you run into issues.", fp_bits)
 
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
