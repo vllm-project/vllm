@@ -7,8 +7,7 @@ prompts = [
     "The future of AI is",
 ]
 
-llm = LLM(model='intfloat/e5-mistral-7b-instruct',
-          output_last_hidden_states=True)
+llm = LLM(model='intfloat/e5-mistral-7b-instruct')
 
 outputs = llm.encode(prompts)
 

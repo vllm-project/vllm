@@ -5,8 +5,7 @@ from torch import nn
 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.wde.core.layers.attention import AttentionMetadata
-
-from .llama import LlamaModel
+from vllm.wde.decode_only.modelzoo.llama import LlamaModel
 
 
 class LlamaEmbeddingModel(nn.Module):

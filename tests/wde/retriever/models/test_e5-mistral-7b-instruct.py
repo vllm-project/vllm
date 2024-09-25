@@ -60,8 +60,7 @@ def test_models(
     with vllm_runner(model,
                      dtype=dtype,
                      max_num_seqs=max_num_seqs,
-                     scheduling=scheduling,
-                     output_last_hidden_states=True) as vllm_model:
+                     scheduling=scheduling) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
 
     similarities = compare_embeddings(hf_outputs, vllm_outputs)
