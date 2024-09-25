@@ -455,8 +455,6 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
     int tot_m_blocks = ceildiv(tot_m, 16);
     for (int m_block = 0; m_block < tot_m_blocks;
          m_block += 4 * exec_cfg.max_m_blocks) {
-      int cfg_max_m_blocks = exec_cfg.max_m_blocks;
-
       if (false) {
       }
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4b8)

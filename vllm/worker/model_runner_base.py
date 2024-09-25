@@ -1,10 +1,15 @@
 import dataclasses
+import pickle
 from abc import ABC, abstractmethod
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
-                    TypeVar)
+from datetime import datetime
+from functools import wraps
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
+                    Optional, Type, TypeVar)
 
 import torch
+from torch import is_tensor
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
@@ -13,6 +18,8 @@ if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
     from vllm.attention.backends.abstract import AttentionBackend
     from vllm.model_executor import SamplingMetadata
+
+logger = init_logger(__name__)
 
 T = TypeVar('T', bound="BroadcastableModelInput")
 
@@ -96,6 +103,59 @@ def _init_frozen_model_input_from_tensor_dict(
     frozen_model_input = frozen_model_input_cls(**valid_tensor_kwargs)
     tensor_dict["frozen_model_input"] = frozen_model_input
     return tensor_dict
+
+
+def dump_input_when_exception(exclude_args: Optional[List[int]] = None,
+                              exclude_kwargs: Optional[List[str]] = None):
+
+    def _inner(func):
+
+        @wraps(func)
+        def _wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as err:
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                filename = f"/tmp/err_{func.__name__}_input_{timestamp}.pkl"
+                logger.info("Writing input of failed execution to %s...",
+                            filename)
+                with open(filename, "wb") as filep:
+                    dumped_inputs = {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in (exclude_kwargs or [])
+                    }
+                    for i, arg in enumerate(args):
+                        if i not in (exclude_args or []):
+                            dumped_inputs[f"arg_{i}"] = arg
+
+                    # Only persist dtype and shape for kvcache tensors
+                    # (can be way to big otherwise)
+                    if (kv_caches := dumped_inputs.get("kv_caches")) \
+                        and isinstance(kv_caches, Iterable):
+                        dumped_inputs["kv_caches"] = [(t.dtype, t.shape)
+                                                      for t in kv_caches
+                                                      if is_tensor(t)]
+
+                    try:
+                        pickle.dump(dumped_inputs, filep)
+                    except Exception as pickle_err:
+                        logger.warning(
+                            "Failed to pickle inputs of failed execution: %s",
+                            str(pickle_err))
+                        raise type(err)(f"Error in model execution: "
+                                        f"{str(err)}") from err
+
+                    logger.info(
+                        "Completed writing input of failed execution to %s.",
+                        filename)
+                raise type(err)(
+                    f"Error in model execution (input dumped to {filename}): "
+                    f"{str(err)}") from err
+
+        return _wrapper
+
+    return _inner
 
 
 class BroadcastableModelInput(ABC):

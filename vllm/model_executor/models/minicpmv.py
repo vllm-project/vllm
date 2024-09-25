@@ -23,7 +23,6 @@
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
-from array import array
 from functools import partial
 from typing import (Any, Callable, Iterable, List, Mapping, Optional, Tuple,
                     TypedDict)
@@ -38,7 +37,6 @@ from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -56,12 +54,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-
-logger = init_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
@@ -259,8 +254,7 @@ def get_max_minicpmv_image_tokens(ctx: InputContext):
 
 
 def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * seq_len
-    return SequenceData(token_ids)
+    return SequenceData.from_token_counts((0, seq_len))
 
 
 def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
@@ -884,7 +878,7 @@ class MiniCPMV(MiniCPMVBaseModel):
             version = str(config.version).split(".")
             version = tuple([int(x) for x in version])
         # Dispatch class based on version
-        instance_class = _SUPPORT_VERSION.get(version, None)
+        instance_class = _SUPPORT_VERSION.get(version)
         if instance_class is None:
             raise ValueError(
                 "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
