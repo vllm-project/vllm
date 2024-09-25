@@ -192,6 +192,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> Tensor");
   ops.impl("machete_prepack_B", torch::kCUDA, &machete::prepack_B);
 
+  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
+  ops.impl("permute_cols", torch::kCUDA, &permute_cols);
+
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
@@ -275,7 +278,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cu_seq_len,"
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
-      "Tensor(a! -> *)? ssm_states) -> Tensor[]");
+      "Tensor!? ssm_states) -> Tensor[]");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
   ops.def(

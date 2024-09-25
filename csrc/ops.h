@@ -113,6 +113,8 @@ torch::Tensor prepack_B(torch::Tensor const& B,
 
 };  // namespace machete
 
+torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
+
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   torch::Tensor& b_meta,
                                   torch::Tensor& b_scales,
