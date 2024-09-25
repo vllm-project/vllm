@@ -5,6 +5,7 @@ from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
+from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -14,7 +15,6 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser)
 from vllm.entrypoints.openai.tool_parsers.utils import find_common_prefix
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -49,7 +49,7 @@ class Llama3JsonToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
 
         # initialize properties used for state when parsing tool calls in
@@ -60,8 +60,8 @@ class Llama3JsonToolParser(ToolParser):
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "<|python_tag|>"
-        self.bot_token_id = self.model_tokenizer.encode(
-            self.bot_token, add_special_tokens=False)[0]
+        self.bot_token_id = tokenizer.encode(self.bot_token,
+                                             add_special_tokens=False)[0]
         self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
 
     def extract_tool_calls(self,
