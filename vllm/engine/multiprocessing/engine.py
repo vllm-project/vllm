@@ -18,9 +18,11 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCProcessRequest,
-                                         RPCStartupRequest, RPCStartupResponse)
+                                         RPCStartupRequest, RPCStartupResponse,
+                                         RPCUProfileRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
+from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -249,6 +251,11 @@ class MQLLMEngine:
                     self._handle_process_request(request)
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)
+                elif isinstance(request, RPCUProfileRequest):
+                    if request == RPCUProfileRequest.START_PROFILE:
+                        self.start_profile()
+                    else:
+                        self.stop_profile()
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -355,6 +362,18 @@ class MQLLMEngine:
 
     def _alive(self):
         self._last_alive_time = time.time()
+
+    def start_profile(self) -> None:
+        if type(self.engine.model_executor) is GPUExecutor:
+            self.engine.model_executor.start_profile()
+        else:
+            self.engine.model_executor._run_workers("start_profile")
+
+    def stop_profile(self) -> None:
+        if type(self.engine.model_executor) is GPUExecutor:
+            self.engine.model_executor.stop_profile()
+        else:
+            self.engine.model_executor._run_workers("stop_profile")
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
