@@ -20,9 +20,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCError, RPCProcessRequest,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
-from vllm.executor.gpu_executor import GPUExecutorAsync
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
+from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
