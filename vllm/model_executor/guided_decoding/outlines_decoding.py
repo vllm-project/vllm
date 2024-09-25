@@ -5,7 +5,6 @@ from json import dumps as json_dumps
 from re import escape as regex_escape
 from typing import Tuple, Union
 
-from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
@@ -100,10 +99,6 @@ def _get_guide_and_mode(
         if isinstance(guided_params.json, dict):
             # turn dict into hashable string
             json = json_dumps(guided_params.json)
-        elif isinstance(guided_params.json, BaseModel):
-            # use pydantic signature so that different model classes
-            # with the same fields will get hashed the same
-            json = str(guided_params.json.__signature__)
         else:
             json = guided_params.json
         return json, GuidedDecodingMode.JSON

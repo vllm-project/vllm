@@ -7,7 +7,6 @@ from lmformatenforcer import (CharacterLevelParser, JsonSchemaParser,
                               TokenEnforcerTokenizerData, UnionParser)
 from lmformatenforcer.integrations.vllm import (
     build_vllm_logits_processor, build_vllm_token_enforcer_tokenizer_data)
-from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 from vllm.sampling_params import GuidedDecodingParams, LogitsProcessor
@@ -27,8 +26,8 @@ def get_local_lm_format_enforcer_guided_decoding_logits_processor(
         tokenizer)
     character_level_parser: CharacterLevelParser
     if guided_params.json:
-        schema = _normalize_json_schema_object(guided_params.json)
-        character_level_parser = JsonSchemaParser(schema)
+        schema_dict = _normalize_json_schema_object(guided_params.json)
+        character_level_parser = JsonSchemaParser(schema_dict)
     elif guided_params.choice:
         character_level_parser = UnionParser(
             [StringParser(choice) for choice in guided_params.choice])
@@ -50,13 +49,11 @@ def get_local_lm_format_enforcer_guided_decoding_logits_processor(
     return logits_processor
 
 
-def _normalize_json_schema_object(schema: Union[str, dict, BaseModel]) -> dict:
+def _normalize_json_schema_object(schema: Union[str, dict]) -> dict:
     if isinstance(schema, str):
         return json_loads(schema)
     if isinstance(schema, dict):
         return schema
-    if isinstance(schema, BaseModel):
-        return schema.model_json_schema()
     raise AssertionError(f"Unsupported schema type {schema}")
 
 

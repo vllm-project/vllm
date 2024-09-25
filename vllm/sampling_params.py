@@ -3,7 +3,6 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
-from json import dumps
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import msgspec
@@ -41,7 +40,7 @@ to sample from."""
 @dataclass
 class GuidedDecodingParams:
     """One of these fields will be used to build a logit processor."""
-    json: Optional[Union[BaseModel, str]] = None
+    json: Optional[Union[str, Dict]] = None
     regex: Optional[str] = None
     choice: Optional[List[str]] = None
     grammar: Optional[str] = None
@@ -60,11 +59,9 @@ class GuidedDecodingParams:
         backend: Optional[str] = None,
         whitespace_pattern: Optional[str] = None,
     ) -> "GuidedDecodingParams":
-        if isinstance(json, dict):
-            # Serialize dicts to json strings up-front
-            # msgspec decoders will complain about a type union with both
-            # Dict and BaseModel in it
-            json = dumps(json)
+        # Extract json schemas from pydantic models
+        if isinstance(json, (BaseModel, type(BaseModel))):
+            json = json.model_json_schema()
         return GuidedDecodingParams(
             json=json,
             regex=regex,
