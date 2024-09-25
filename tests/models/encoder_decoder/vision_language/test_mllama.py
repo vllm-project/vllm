@@ -26,7 +26,7 @@ text_only_prompts = [
 ]
 
 models = [
-    "nltpt/Llama-3.2-11B-Vision-Instruct",
+    "meta-llama/Llama-3.2-11B-Vision-Instruct",
 ]
 # TODO: Update model path to huggingface model
 
