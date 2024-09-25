@@ -32,8 +32,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // PagedAttention V2.
   ops.def(
       "paged_attention_v2("
-      "    Tensor! out, Tensor exp_sums, Tensor max_logits,"
-      "    Tensor tmp_out, Tensor query, Tensor key_cache,"
+      "    Tensor! out, Tensor! exp_sums, Tensor! max_logits,"
+      "    Tensor! tmp_out, Tensor query, Tensor key_cache,"
       "    Tensor value_cache, int num_kv_heads, float scale,"
       "    Tensor block_tables, Tensor seq_lens, int block_size,"
       "    int max_seq_len, Tensor? alibi_slopes,"
@@ -94,13 +94,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #ifdef __AVX512F__
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
-      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale) -> "
-      "()");
+      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
+      "Tensor? azp) -> ()");
   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
+
   // Compute int8 quantized tensor and scaling factor
   ops.def(
-      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
-      "()");
+      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
+      "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
            &dynamic_scaled_int8_quant);
   // W8A8 GEMM, supporting symmetric per-tensor or per-row/column
@@ -122,8 +123,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
 
   // Copy the cache blocks from src to dst.
   cache_ops.def(
-      "copy_blocks(Tensor[]! key_caches, Tensor[]! value_caches, Tensor "
-      "block_mapping) -> ()");
+      "copy_blocks(Tensor(a!)[] key_caches, Tensor[](b!) value_caches, "
+      "Tensor block_mapping) -> ()");
   cache_ops.impl("copy_blocks", torch::kCPU, &copy_blocks);
 
   // Reshape the key and value tensors and cache them.
