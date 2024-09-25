@@ -1,12 +1,10 @@
 from typing import Dict, List, Optional, Tuple
 
-from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Logprob, SamplingParams,
+                           Sequence, SequenceGroup)
 
 from .tokenizer import AnyTokenizer
 from .tokenizer_group import BaseTokenizerGroup
-
-# Used eg. for marking rejected tokens in spec decoding.
-INVALID_TOKEN_ID = -1
 
 
 class Detokenizer:
@@ -61,7 +59,7 @@ class Detokenizer:
                 continue
             for token_id, sample_logprob in prompt_logprobs_for_token.items():
                 if (sample_logprob.decoded_token is None
-                        and token_id != INVALID_TOKEN_ID):
+                        and token_id != VLLM_INVALID_TOKEN_ID):
                     prompt_token_ids_with_token = (
                         prompt_token_ids[:token_position] + [token_id])
                     (new_tokens, new_text, new_prefix_offset,
@@ -143,7 +141,7 @@ class Detokenizer:
                     continue
 
                 if (sample_logprob.decoded_token is None
-                        and token_id != INVALID_TOKEN_ID):
+                        and token_id != VLLM_INVALID_TOKEN_ID):
                     all_input_ids_with_logprob = previous_tokens + [token_id]
                     (_, new_text, _, _) = detokenize_incrementally(
                         tokenizer=tokenizer,
@@ -282,14 +280,14 @@ def detokenize_incrementally(
     assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.
-    if new_token_id >= len(tokenizer):
-        new_tokens = [""]
-    else:
+    if 0 <= new_token_id < len(tokenizer):
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
             [new_token_id], skip_special_tokens=skip_special_tokens)
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
+    else:
+        new_tokens = [""]
     output_tokens = prev_tokens + new_tokens
 
     # If this is the first iteration, return all tokens.
