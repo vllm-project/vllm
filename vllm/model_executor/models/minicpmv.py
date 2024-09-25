@@ -787,13 +787,19 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj",
+        # vision encoder
+        "fc1",
+        "fc2",
+        "out_proj",
+        # language model
+        "qkv_proj",  # same name with vision encoder
         "o_proj",
         "gate_up_proj",
         "down_proj",
+        # resampler
+        "kv_proj",
     ]
     embedding_modules = {}
     embedding_padding_modules = []

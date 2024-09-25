@@ -446,7 +446,7 @@ class LoRAModelManager(AdapterModelManager):
             if self._filter_unsupported_modules(module_name):
                 logger.warning(
                     "Regarding multimodal models, vLLM currently only supports "
-                    "adding LoRA to language models, %s will be ignored.",
+                    "adding LoRA to language model, %s will be ignored.",
                     module_name,
                 )
                 continue
