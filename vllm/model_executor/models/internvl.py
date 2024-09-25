@@ -19,7 +19,7 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import InternVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -378,6 +378,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         self.img_context_token_id = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+        if hasattr(self.language_model, "sampler"):
+            self.sampler = self.language_model.sampler
+        else:
+            self.sampler = Sampler()
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
