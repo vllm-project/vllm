@@ -3,7 +3,7 @@ from enum import Enum
 from typing import List, Mapping, Optional, Union
 
 from vllm import PoolingParams
-from vllm.inputs import PromptType
+from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -23,7 +23,7 @@ class MQEngineDeadError(RuntimeError):
 
 @dataclass
 class RPCProcessRequest:
-    prompt: PromptType
+    inputs: PromptInputs
     params: Union[SamplingParams, PoolingParams]
     request_id: str
     lora_request: Optional[LoRARequest] = None
@@ -43,10 +43,6 @@ class RPCAbortRequest:
     request_id: str
 
 
-class RPCHealthRequest:
-    pass
-
-
 class RPCStartupRequest(Enum):
     IS_SERVER_READY = 1
 
@@ -61,8 +57,8 @@ class RPCUProfileRequest(Enum):
     STOP_PROFILE = 2
 
 
-RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCHealthRequest,
-                      RPCStartupRequest, RPCUProfileRequest]
+RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
+                      RPCUProfileRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
 

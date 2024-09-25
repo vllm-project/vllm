@@ -20,13 +20,12 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCHealthRequest,
-                                         RPCProcessRequest, RPCStartupRequest,
-                                         RPCStartupResponse,
+                                         RPCError, RPCProcessRequest,
+                                         RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
-from vllm.inputs import PromptType
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -96,9 +95,9 @@ class MQLLMEngineClient:
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
-        # IPC path for ack of check_health requests.
-        self.health_socket: Socket = self.context.socket(zmq.constants.PULL)
-        self.health_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
+        # IPC path for acking heartbeats.
+        self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
+        self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
 
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
@@ -125,34 +124,28 @@ class MQLLMEngineClient:
         finally:
             socket.close(linger=0)
 
-    async def run_check_health_loop(self, timeout: int):
-        """Background loop that continually probes the RPCServer for health.
-
-        The loop sends CHECK_HEALTH requests to the INPUT_SOCKET, which
-        the MQLLMEngine server is blocking on.
-
-        The Server replies on the HEALTH_SOCKET (rather than on the
-        OUTPUT_SOCKET such that the messages are not intermingled with
-        output streaming).
+    async def run_heartbeat_loop(self, timeout: int):
+        """Background loop that continually listens to the RPCServer for
+        heartbeats.
         """
-
         try:
             while True:
-                if await self.health_socket.poll(timeout=timeout) == 0:
-                    # Wakeup every N seconds and do a health probe.
-                    await self._send_one_way_rpc_request(
-                        RPCHealthRequest(), self.input_socket)
+                if await self.heartbeat_socket.poll(timeout=timeout) == 0:
+                    # No heartbeat was received. Set error and exit the loop
+                    self._set_errored(
+                        TimeoutError("No heartbeat received "
+                                     "from MQLLMEngine"))
+                    logger.debug("Shutting down MQLLMEngineClient check "
+                                 "health loop due to timeout")
+                    break
 
-                    # Wait for ack from the health socket.
-                    await self._await_ack(error_message="Health check failed.",
-                                          socket=self.health_socket)
                 else:
-                    # Server sent a health status message unprompted.
+                    # Heartbeat received- check the message
                     await self._check_success(
-                        error_message="Health check failed.",
-                        socket=self.health_socket)
+                        error_message="Heartbeat failed.",
+                        socket=self.heartbeat_socket)
 
-                logger.debug("Health probe successful.")
+                logger.debug("Heartbeat successful.")
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient check health loop.")
@@ -235,7 +228,7 @@ class MQLLMEngineClient:
 
             # Start health_loop.
             self.health_loop = asyncio.create_task(
-                self.run_check_health_loop(timeout=VLLM_RPC_TIMEOUT))
+                self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
 
     def close(self):
         """Destroy the ZeroMQ Context."""
@@ -376,7 +369,7 @@ class MQLLMEngineClient:
 
     def generate(
         self,
-        prompt: PromptType,
+        inputs: PromptInputs,
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -390,7 +383,8 @@ class MQLLMEngineClient:
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
                 for more details about the format of each input.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
@@ -399,13 +393,13 @@ class MQLLMEngineClient:
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
         """
-        return self._process_request(prompt, sampling_params, request_id,
+        return self._process_request(inputs, sampling_params, request_id,
                                      lora_request, trace_headers,
                                      prompt_adapter_request)
 
     def encode(
         self,
-        prompt: PromptType,
+        inputs: PromptInputs,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -418,7 +412,8 @@ class MQLLMEngineClient:
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
                 for more details about the format of each input.
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
@@ -429,12 +424,12 @@ class MQLLMEngineClient:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
             for the request.
         """
-        return self._process_request(prompt, pooling_params, request_id,
+        return self._process_request(inputs, pooling_params, request_id,
                                      lora_request, trace_headers)
 
     async def _process_request(
         self,
-        prompt: PromptType,
+        inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -467,7 +462,7 @@ class MQLLMEngineClient:
 
             request_bytes = pickle.dumps(
                 RPCProcessRequest(
-                    prompt=prompt,
+                    inputs=inputs,
                     params=params,
                     request_id=request_id,
                     lora_request=lora_request,
