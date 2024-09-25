@@ -20,6 +20,9 @@ class EAGLEConfig(PretrainedConfig):
                     model_config, k):
                 setattr(model_config, k, v)
 
+        if not hasattr(model_config, "bias"):
+            setattr(model_config, "bias", False)
+
         self.model = model_config
 
         if self.model is None:
