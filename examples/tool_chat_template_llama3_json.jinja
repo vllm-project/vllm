@@ -25,8 +25,8 @@
 {%- if tools is not none %}
     {{- "Environment: ipython\n" }}
 {%- endif %}
-{{- "Cutting Knowledge Date: December 2023\n" }}
-{{- "Today Date: " + date_string + "\n\n" }}
+{{- "Knowledge Cutoff Date: December 2023\n" }}
+{{- "Today's Date: " + date_string + "\n\n" }}
 {%- if tools is not none and not tools_in_user_message %}
     {{- "You have access to the following functions. To call a function, please respond with JSON for a function call." }}
     {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
