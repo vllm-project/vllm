@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
+VLLM_INVALID_TOKEN_ID = -1
+
 
 # We use dataclass for now because it is used for
 # openai server output, and msgspec is not serializable.
