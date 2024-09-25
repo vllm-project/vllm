@@ -16,8 +16,9 @@ from vllm.model_executor.utils import set_weight_attrs
 logger = init_logger(__name__)
 
 # Used in vllm/config.py::ModelConfig::_verify_quantization
-VALID_FP_EXMY_METHODS = ["fp4_weights", "fp5_weights",
-                         "fp6_weights", "fp7_weights"]
+VALID_FP_EXMY_METHODS = [
+    "fp4_weights", "fp5_weights", "fp6_weights", "fp7_weights"
+]
 DEFAULT_FP_EXMY_EXP_BITS = {
     4: 2,
     5: 2,

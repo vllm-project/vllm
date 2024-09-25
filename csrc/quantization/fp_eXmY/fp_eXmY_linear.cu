@@ -21,6 +21,11 @@
 #include <stdio.h>
 #include <assert.h>
 
+#include <torch/all.h>
+#include <ATen/ATen.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <torch/library.h>
+
 namespace vllm {
 
 template <typename TilingConfig, typename OutputDataType, int EXPONENT,
@@ -69,9 +74,9 @@ cudaError_t fpx_linear_kernel(
     float* Reduction_Workspace,  // Reduction_Workspace_Size = Split_K *
                                  // M_Global * N_Global * sizeof(fp32)
     int Split_K) {
-  assert(M_Global % 256 == 0);
-  assert(K_Global % 64 == 0);
-  assert(N_Global > 0);
+  TORCH_CHECK(M_Global % 256 == 0, "M_Global must be a multiple of 256.");
+  TORCH_CHECK(K_Global % 64 == 0, "K_Global must be a multiple of 64.");
+  TORCH_CHECK(N_Global > 0, "N_Global must be greater than zero.");
 
   // Work around to support more N shapes:
   size_t N_PowerOf2;
@@ -168,11 +173,6 @@ cudaError_t fpx_linear_kernel(
   return cudaGetLastError();
 }
 }  // namespace vllm
-
-#include <torch/all.h>
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/library.h>
 
 // MODIFICATION NOTE: dtype of _weights is changed to uint8
 /*
