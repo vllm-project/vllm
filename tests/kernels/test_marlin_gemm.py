@@ -501,3 +501,18 @@ def test_marlin_qqq_gemm(
     max_diff = compute_max_diff(output, output_ref)
 
     assert max_diff < 0.04
+
+
+def test_marlin_gemm_opcheck():
+    size_m = 2048
+    size_n = 4096
+    size_k = 4096
+    a = torch.rand((size_m, size_n), device='cuda', dtype=torch.float16)
+    w = torch.randint(-5, 5, (256, 8192), device='cuda', dtype=torch.int32)
+    s = torch.full((32, size_k), 0.125, device='cuda', dtype=torch.float16)
+    wk = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
+                         GPTQ_MARLIN_MAX_PARALLEL).scratch
+    x = torch.ops._C.marlin_gemm(a, w, s, wk, size_m, size_n, size_k)
+    y = torch.ops._C.marlin_gemm(a, w, s, wk, size_m, size_n, size_k)
+    torch.testing.assert_close(x, y)
+    opcheck(torch.ops._C.marlin_gemm, (a, w, s, wk, size_m, size_n, size_k))

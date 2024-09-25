@@ -169,6 +169,12 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
         cleanup()
 
 
+@pytest.fixture(autouse=True)
+def dynamo_reset():
+    yield
+    torch._dynamo.reset()
+
+
 @pytest.fixture
 def example_prompts() -> List[str]:
     prompts = []

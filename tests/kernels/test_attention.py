@@ -205,7 +205,8 @@ def test_paged_attention(
                 (output, query, key_cache, value_cache, num_kv_heads, scale,
                  block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
                  kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
-                cond=(head_size == HEAD_SIZES[0]))
+                cond=(head_size == HEAD_SIZES[0]
+                      and block_size == BLOCK_SIZES[0]))
 
     elif version in ("v2", "rocm"):
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
@@ -246,7 +247,8 @@ def test_paged_attention(
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
                      seq_lens, block_size, max_seq_len, alibi_slopes,
                      kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
-                    cond=(head_size == HEAD_SIZES[0]))
+                    cond=(head_size == HEAD_SIZES[0]
+                          and block_size == BLOCK_SIZES[0]))
 
         else:
             ops.paged_attention_rocm(
@@ -274,7 +276,8 @@ def test_paged_attention(
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
                      seq_lens, block_size, max_seq_len, alibi_slopes,
                      kv_cache_dtype, k_scale, v_scale),
-                    cond=(head_size == HEAD_SIZES[0]))
+                    cond=(head_size == HEAD_SIZES[0]
+                          and block_size == BLOCK_SIZES[0]))
 
     else:
         raise AssertionError(f"Unknown version: {version}")
