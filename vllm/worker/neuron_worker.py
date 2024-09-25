@@ -4,16 +4,19 @@ from typing import List, Optional, Tuple
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
 
+logger = init_logger(__name__)
 
 class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes the model on a group of neuron cores.
@@ -46,6 +49,20 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
             model_config, parallel_config, scheduler_config, device_config)
         self.is_driver_worker = True
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info(("Profiling enabled. Traces will be saved to: %s. "
+                         "Only CPU profiling supported on Neuron"),
+                        torch_profiler_dir)
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                ],
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_dir, use_gzip=True))
+        else:
+            self.profiler = None
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -125,3 +142,13 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             1,
             1,
         )
+
+    def start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.start()
+
+    def stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.stop()

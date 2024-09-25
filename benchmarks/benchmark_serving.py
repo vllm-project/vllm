@@ -37,7 +37,8 @@ from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
-                                  RequestFuncOutput)
+                                  RequestFuncOutput, async_request_vllm_util,
+                                  UtilRequestFuncInput)
 from datasets import load_dataset
 from PIL.Image import Image
 from tqdm.asyncio import tqdm
@@ -432,20 +433,15 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
+        profile_input = UtilRequestFuncInput(
             api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            best_of=best_of,
-            use_beam_search=use_beam_search,
-            multi_modal_content=test_mm_content,
+            model=model_id,
         )
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await async_request_vllm_util(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
+        else:
+            print(profile_output)
 
     print(f"Traffic request rate: {request_rate}")
 
@@ -474,19 +470,15 @@ async def benchmark(
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
+        profile_input = UtilRequestFuncInput(
             api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            best_of=best_of,
-            use_beam_search=use_beam_search,
+            model=model_id,
         )
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await async_request_vllm_util(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler stopped")
+        else:
+            print(profile_output)
 
     if pbar is not None:
         pbar.close()

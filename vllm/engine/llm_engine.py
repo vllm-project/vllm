@@ -27,6 +27,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
+from vllm.executor.neuron_executor import NeuronExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
                          InputRegistry, LLMInputs, PromptInputs)
@@ -1642,7 +1643,7 @@ class LLMEngine:
     def start_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
+        if type(self.model_executor) in [GPUExecutor, NeuronExecutor]:  # noqa: E721
             self.model_executor.start_profile()
         else:
             self.model_executor._run_workers("start_profile")
@@ -1650,7 +1651,7 @@ class LLMEngine:
     def stop_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
+        if type(self.model_executor) in [GPUExecutor, NeuronExecutor]:  # noqa: E721
             self.model_executor.stop_profile()
         else:
             self.model_executor._run_workers("stop_profile")

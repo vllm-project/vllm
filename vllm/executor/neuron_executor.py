@@ -98,6 +98,13 @@ class NeuronExecutor(ExecutorBase):
         # it's running.
         return
 
+    def start_profile(self) -> None:
+        self.driver_worker.start_profile()
+
+    def stop_profile(self) -> None:
+        self.driver_worker.stop_profile()
+
+
 
 class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
 

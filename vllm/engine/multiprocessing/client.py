@@ -21,7 +21,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCProcessRequest,
-                                         RPCStartupRequest, RPCStartupResponse)
+                                         RPCStartupRequest, RPCStartupResponse,
+                                         RPCProfileRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptInputs
@@ -492,3 +493,15 @@ class MQLLMEngineClient:
                     await self.abort(request_id)
         finally:
             self.output_queues.pop(request_id)
+
+    async def start_profile(self) -> None:
+        """Start profiling the engine"""
+        await self._send_one_way_rpc_request(
+            request=RPCProfileRequest.START,
+            socket=self.input_socket)
+
+    async def stop_profile(self) -> None:
+        """Stop profiling the engine"""
+        await self._send_one_way_rpc_request(
+            request=RPCProfileRequest.STOP,
+            socket=self.input_socket)

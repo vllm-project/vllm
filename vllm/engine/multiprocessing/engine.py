@@ -18,7 +18,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCProcessRequest,
-                                         RPCStartupRequest, RPCStartupResponse)
+                                         RPCStartupRequest, RPCStartupResponse,
+                                         RPCProfileRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.logger import init_logger
@@ -249,6 +250,15 @@ class MQLLMEngine:
                     self._handle_process_request(request)
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)
+                elif isinstance(request, RPCProfileRequest):
+                    if request == RPCProfileRequest.START:
+                        self._start_profile()
+                    elif request == RPCProfileRequest.STOP:
+                        self._stop_profile()
+                    else:
+                        raise ValueError("Unknown RPCProfileRequest Type: "
+                                         f"{request}")
+
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -356,6 +366,15 @@ class MQLLMEngine:
     def _alive(self):
         self._last_alive_time = time.time()
 
+    def _start_profile(self):
+        logger.info("Starting profiler...")
+        self.engine.start_profile()
+        logger.info("Profiler started.")
+
+    def _stop_profile(self):
+        logger.info("Stopping profiler...")
+        self.engine.stop_profile()
+        logger.info("Profiler stopped.")
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str):
