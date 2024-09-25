@@ -467,9 +467,24 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             AllocStatus: The AllocStatus for swapping in/out the given 
                 sequence_group on to the 'device'.
         """
-        blocks = self._get_blocks_for_swap(seq_group, status)
+        # First determine the number of blocks that will be touched to swap the 
+        # already full blocks.
+        blocks = []
+        for seq in seq_group.get_seqs(status=status):
+            block_table = self.block_tables[seq.seq_id]
+            if block_table.blocks is not None:
+                for block in block_table.blocks:
+                    if block.is_full:
+                       blocks.append(block)
         num_blocks_touched = self.block_allocator.get_num_blocks_touched(
-            blocks, device, num_lookahead_slots)
+            blocks, device, num_lookahead_slots = 0)
+        # Next determine the number of blocks that will be touched to swap the 
+        # the partially full appendable blocks.
+        for seq in seq_group.get_seqs(status=status):
+            block_table = self.block_tables[seq.seq_id]
+            num_blocks_touched += block_table.get_num_blocks_touched_by_append_slots(
+                block_table.get_unseen_token_ids(seq.get_token_ids()),
+                num_lookahead_slots=num_lookahead_slots)
         watermark_blocks = 0
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks
