@@ -1,13 +1,15 @@
 # enable python only development
 # copy compiled files to the current directory directly
 
-import sys
 import os
 import shutil
 import subprocess
+import sys
 
-# cannot directly `import vllm` , because it will try to import from the current directory
-output = subprocess.run([sys.executable, "-m", "pip", "show", "vllm"], capture_output=True)
+# cannot directly `import vllm` , because it will try to
+# import from the current directory
+output = subprocess.run([sys.executable, "-m", "pip", "show", "vllm"],
+                        capture_output=True)
 
 assert output.returncode == 0, "vllm is not installed"
 
