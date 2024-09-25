@@ -3,7 +3,7 @@ import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
-                    Union, overload)
+                    Union)
 
 import cloudpickle
 import zmq
@@ -25,14 +25,13 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCUProfileRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
-from vllm.inputs import PromptType
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import deprecate_kwargs
 
 logger = init_logger(__name__)
 
@@ -368,45 +367,14 @@ class MQLLMEngineClient:
     def dead_error(self) -> BaseException:
         return ENGINE_DEAD_ERROR(self._errored_with)
 
-    @overload  # DEPRECATED
     def generate(
         self,
-        *,
-        inputs: PromptType,
+        inputs: PromptInputs,
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        ...
-
-    @overload
-    def generate(
-        self,
-        prompt: PromptType,
-        sampling_params: SamplingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        ...
-
-    @deprecate_kwargs(
-        "inputs",
-        additional_message="Please use the 'prompt' parameter instead.",
-    )
-    def generate(
-        self,
-        prompt: Optional[PromptType] = None,
-        sampling_params: Optional[SamplingParams] = None,
-        request_id: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        *,
-        inputs: Optional[PromptType] = None  # DEPRECATED
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
@@ -415,7 +383,8 @@ class MQLLMEngineClient:
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
                 for more details about the format of each input.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
@@ -424,51 +393,17 @@ class MQLLMEngineClient:
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
         """
-        if inputs is not None:
-            prompt = inputs
-        assert (prompt is not None and sampling_params is not None
-                and request_id is not None)
-
-        return self._process_request(prompt, sampling_params, request_id,
+        return self._process_request(inputs, sampling_params, request_id,
                                      lora_request, trace_headers,
                                      prompt_adapter_request)
 
-    @overload  # DEPRECATED
     def encode(
         self,
-        *,
-        inputs: PromptType,
+        inputs: PromptInputs,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
-        ...
-
-    @overload
-    def encode(
-        self,
-        prompt: PromptType,
-        pooling_params: PoolingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
-        ...
-
-    @deprecate_kwargs(
-        "inputs",
-        additional_message="Please use the 'prompt' parameter instead.",
-    )
-    def encode(
-        self,
-        prompt: Optional[PromptType] = None,
-        pooling_params: Optional[PoolingParams] = None,
-        request_id: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        *,
-        inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         """Generate outputs for a request from an embedding model.
 
@@ -477,7 +412,8 @@ class MQLLMEngineClient:
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
                 for more details about the format of each input.
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
@@ -488,17 +424,12 @@ class MQLLMEngineClient:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
             for the request.
         """
-        if inputs is not None:
-            prompt = inputs
-        assert (prompt is not None and pooling_params is not None
-                and request_id is not None)
-
-        return self._process_request(prompt, pooling_params, request_id,
+        return self._process_request(inputs, pooling_params, request_id,
                                      lora_request, trace_headers)
 
     async def _process_request(
         self,
-        prompt: PromptType,
+        inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
@@ -531,7 +462,7 @@ class MQLLMEngineClient:
 
             request_bytes = pickle.dumps(
                 RPCProcessRequest(
-                    prompt=prompt,
+                    inputs=inputs,
                     params=params,
                     request_id=request_id,
                     lora_request=lora_request,

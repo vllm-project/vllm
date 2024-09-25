@@ -86,19 +86,17 @@ class MockAsyncLLMEngine(AsyncLLMEngine):
 
 @pytest.mark.asyncio
 async def test_new_requests_event():
-    params = SamplingParams()
-
     engine = MockAsyncLLMEngine()
     engine.start_background_loop()
     await asyncio.sleep(0.01)
     assert engine.engine.step_calls == 0
 
-    await engine.add_request("1", "", params)
+    await engine.add_request("1", "", None)
     await asyncio.sleep(0.01)
     assert engine.engine.add_request_calls == 1
     assert engine.engine.step_calls == 1
 
-    await engine.add_request("2", "", params)
+    await engine.add_request("2", "", None)
     engine.engine.generate("2")
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -113,7 +111,7 @@ async def test_new_requests_event():
     await asyncio.sleep(0.001)
     assert engine.engine.step_calls == old_step_calls
 
-    await engine.add_request("3", "", params)
+    await engine.add_request("3", "", None)
     await asyncio.sleep(0.01)
     assert engine.engine.add_request_calls == 3
     assert engine.engine.step_calls == old_step_calls + 1

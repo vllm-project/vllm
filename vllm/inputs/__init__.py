@@ -1,5 +1,5 @@
 from .data import (EncoderDecoderLLMInputs, ExplicitEncoderDecoderPrompt,
-                   LLMInputs, PromptType, SingletonPrompt, TextPrompt,
+                   LLMInputs, PromptInputs, SingletonPromptInputs, TextPrompt,
                    TokensPrompt, build_explicit_enc_dec_prompt,
                    to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from .registry import InputContext, InputRegistry
@@ -16,8 +16,8 @@ See also:
 __all__ = [
     "TextPrompt",
     "TokensPrompt",
-    "PromptType",
-    "SingletonPrompt",
+    "PromptInputs",
+    "SingletonPromptInputs",
     "ExplicitEncoderDecoderPrompt",
     "LLMInputs",
     "EncoderDecoderLLMInputs",
@@ -28,17 +28,3 @@ __all__ = [
     "InputContext",
     "InputRegistry",
 ]
-
-
-def __getattr__(name: str):
-    if name == "PromptInput":
-        import warnings
-
-        msg = ("PromptInput has been renamed to PromptType. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return PromptType
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
