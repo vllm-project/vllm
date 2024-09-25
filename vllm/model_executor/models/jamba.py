@@ -138,40 +138,55 @@ class JambaMambaMixer(nn.Module):
         self.c_layernorm = RMSNorm(self.ssm_state_size,
                                    eps=config.rms_norm_eps)
 
-    def mamba_forward(self,
-                      hidden_states: torch.Tensor,
-                      cache_params: MambaCacheParams = None,
-                      prev_cache_params: MambaCacheParams = None):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor
+    ):
+                      
         # 1. Gated MLP's linear projection
-        projected_states = self.in_proj(hidden_states)[0].transpose(1, 2)
-        hidden_states, gate = projected_states.chunk(2, dim=1)
+        projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
+        hidden_states, gate = projected_states.chunk(2, dim=-2)
 
         # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
-        if cache_params is not None and not cache_params.is_prompt:
-            hidden_states = causal_conv1d_update(
-                hidden_states,
-                cache_params.conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-            )
+
+        has_initial_state, cu_seq_len = None ,None
+        if attn_metadata.context_lens_tensor is not None:
+            has_initial_state = attn_metadata.context_lens_tensor > 0
         else:
-            hidden_states, _ = causal_conv1d_fn(
-                hidden_states,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=cache_params.conv_state,
-                has_initial_state=torch.ones(hidden_states.shape[0],
-                                             dtype=torch.bool,
-                                             device=hidden_states.device)
-                if prev_cache_params is not None else None)
+            # happens on CG, all of decode steps has initial state
+            has_initial_state = torch.ones(
+                hidden_states.shape[-1],
+                device=hidden_states.device,
+                dtype=torch.bool
+            )
+        if attn_metadata.query_start_loc is not None:
+            cu_seq_len = attn_metadata.query_start_loc[1:]
+        else:
+            # happens on CG , assuming forward pass context_len=1 for all seqs
+            cu_seq_len = torch.arange(
+                hidden_states.shape[-1],
+                device=hidden_states.device,
+                dtype=torch.int32
+            ) + 1
+
+        hidden_states = causal_conv1d_fn(
+            hidden_states,
+            conv_weights,
+            self.conv1d.bias,
+            activation=self.activation,
+            conv_states=conv_state,
+            has_initial_state=has_initial_state,
+            cu_seq_len=cu_seq_len
+        )
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
-        ssm_parameters = self.x_proj(hidden_states.transpose(1, 2))[0]
+        ssm_parameters = self.x_proj(hidden_states.transpose(-2, -1))[0]
 
         time_step, B, C = torch.split(
             ssm_parameters,
@@ -182,90 +197,28 @@ class JambaMambaMixer(nn.Module):
         B = self.b_layernorm(B.contiguous())
         C = self.c_layernorm(C.contiguous())
 
-        discrete_time_step = self.dt_proj(time_step)[0].transpose(1, 2)
+        discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
         time_proj_bias = (self.dt_proj.bias.float() if hasattr(
             self.dt_proj, "bias") else None)
-        if cache_params is not None and not cache_params.is_prompt:
-            scan_outputs = selective_state_update(
-                cache_params.ssm_state,
-                hidden_states[..., 0],
-                discrete_time_step[..., 0],
-                self.A,
-                B[:, 0],
-                C[:, 0],
-                self.D,
-                gate[..., 0],
-                time_proj_bias,
-                dt_softplus=True,
-            ).unsqueeze(-1)
-        else:
-            scan_outputs, _ = selective_scan_fn(
-                hidden_states,
-                discrete_time_step,
-                self.A,
-                B.transpose(1, 2),
-                C.transpose(1, 2),
-                self.D.float(),
-                gate,
-                time_proj_bias,
-                delta_softplus=True,
-                ssm_states=cache_params.ssm_state,
-                has_initial_state=torch.ones(hidden_states.shape[0],
-                                             dtype=torch.bool,
-                                             device=hidden_states.device)
-                if prev_cache_params is not None else None)
+        scan_outputs = selective_scan_fn(
+            hidden_states,
+            discrete_time_step,
+            self.A,
+            B.transpose(-2, -1),
+            C.transpose(-2, -1),
+            self.D.float(),
+            gate,
+            time_proj_bias,
+            delta_softplus=True,
+            ssm_states=ssm_state,
+            has_initial_state= has_initial_state,
+            cu_seq_len=cu_seq_len
+        )
 
         # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(1, 2))[0]
+        contextualized_states = self.out_proj(scan_outputs.transpose(-2, -1))[0]
         return contextualized_states
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor,
-    ):
-        offset = 0
-        if attn_metadata.prefill_metadata is not None:
-            # |---------- N-1 iteration --------|
-            # |---------------- N iteration ---------------------|
-            # |- tokenA -|......................|-- newTokens ---|
-            # |---------- context_len ----------|
-            # |-------------------- seq_len ---------------------|
-            #                                   |-- query_len ---|
-            # We assume that the hidden state is sorted by
-            # prefills and then decodes
-            for i, seq_len in enumerate(
-                    attn_metadata.prefill_metadata.seq_lens):
-                context_len = attn_metadata.prefill_metadata. \
-                              context_lens_tensor[i].item()
-                query_len = seq_len - context_len
-                cache = MambaCacheParams(True,
-                                         conv_state=conv_state[i].unsqueeze(0),
-                                         ssm_state=ssm_state[i].unsqueeze(0))
-
-                hidden_states_out = self.mamba_forward(
-                    hidden_states[offset:offset + query_len].unsqueeze(0),
-                    cache_params=cache,
-                    prev_cache_params=None if context_len == 0 else cache)[0]
-
-                hidden_states[offset:offset +
-                              query_len].copy_(hidden_states_out)
-                offset += query_len
-
-        if attn_metadata.decode_metadata is not None:
-            cache = MambaCacheParams(
-                False,
-                conv_state=conv_state[attn_metadata.num_prefills:],
-                ssm_state=ssm_state[attn_metadata.num_prefills:])
-
-            hidden_states[offset:].copy_(
-                self.mamba_forward(hidden_states[offset:].unsqueeze(1),
-                                   cache_params=cache).squeeze(1))
-
-        return hidden_states
 
 
 class JambaMoE(nn.Module):
