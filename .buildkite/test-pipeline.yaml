@@ -215,7 +215,7 @@ steps:
   - vllm/spec_decode
   - tests/spec_decode
   commands:
-    - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
+    - pytest -v -s --streamed-fork spec_decode/e2e/test_multistep_correctness.py
     - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s spec_decode/e2e/test_compatibility.py
     - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py --ignore=spec_decode/e2e/test_compatibility.py
 
@@ -242,7 +242,7 @@ steps:
 #   - vllm/
 #   - tests/compile
 #   commands:
-#   - pytest -v -s compile/test_full_graph.py
+#   - pytest -v -s --streamed-fork compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
   mirror_hardwares: [amd]
@@ -279,7 +279,9 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   - tests/quantization
-  command: VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
+  commands: 
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s --streamed-fork quantization/test_bitsandbytes.py
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization --ignore=quantization/test_bitsandbytes.py
 
 - label: LM Eval Small Models # 53min
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -314,7 +316,7 @@ steps:
   - tests/models
   commands:
     - pip install -e ./plugins/vllm_add_dummy_model
-    - pytest -v -s models/test_oot_registration.py # it needs a clean process
+    - pytest -v -s --streamed-fork models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
 - label: Decoder-only Language Models Test # 1h36min
@@ -383,7 +385,7 @@ steps:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
-    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
+    - VLLM_MULTI_NODE=1 pytest -v -s --streamed-fork distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
 
@@ -441,8 +443,8 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   commands:
-  - pytest -v -s distributed/test_pp_cudagraph.py
-  - pytest -v -s distributed/test_pipeline_parallel.py
+  - pytest -v -s --streamed-fork distributed/test_pp_cudagraph.py
+  - pytest -v -s --streamed-fork distributed/test_pipeline_parallel.py
 
 - label: LoRA Long Context (Distributed) # 11min
   # This test runs llama 13B, so it is required to run on 4 GPUs.
