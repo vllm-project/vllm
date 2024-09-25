@@ -222,8 +222,8 @@ class Worker(LocalOrDistributedWorkerBase):
         # of the model.
         self.model_runner.profile_run()
 
-        # # Calculate the number of blocks that can be allocated with the
-        # # profiled peak memory.
+        # Calculate the number of blocks that can be allocated with the
+        # profiled peak memory.
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
 
