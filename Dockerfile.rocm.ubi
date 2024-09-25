@@ -13,6 +13,7 @@ ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 RUN --mount=type=cache,target=/root/.cache/pip \
+ microdnf -y update && \
  microdnf install -y --setopt=install_weak_deps=0 --nodocs \
     python${PYTHON_VERSION}-devel \
     python${PYTHON_VERSION}-pip \
@@ -40,8 +41,7 @@ gpgcheck=1\n\
 gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key" > /etc/yum.repos.d/amdgpu.repo
 
 
-RUN microdnf -y update && \
-    microdnf -y install \
+RUN microdnf -y install \
         rocm-hip-libraries rocm-hip-runtime \
         miopen-hip && \
     microdnf clean all
