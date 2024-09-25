@@ -44,17 +44,10 @@ def causal_conv1d_fn(
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    if conv_states is None:
-        conv_states = torch.empty(x.shape[0],
-                                  x.shape[1],
-                                  weight.shape[1] - 1,
-                                  device=x.device,
-                                  dtype=x.dtype)
-
     out = ops.causal_conv1d_fwd(x, weight, bias, conv_states, cu_seq_len,
                                 cache_indices, has_initial_state, activation
                                 in ["silu", "swish"])
-    return (out, conv_states)
+    return out
 
 
 def causal_conv1d_update(x: torch.Tensor,
