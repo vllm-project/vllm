@@ -851,12 +851,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # only load the bitsandbytes module when needed
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.42.0":
+            if bitsandbytes.__version__ < "0.44.0":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.42.0.")
+                                  "install bitsandbytes>=0.44.0.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.42.0 via "
-                              "`pip install bitsandbytes>=0.42.0` to use "
+            raise ImportError("Please install bitsandbytes>=0.44.0 via "
+                              "`pip install bitsandbytes>=0.44.0` to use "
                               "bitsandbytes quantizer.") from err
 
         hf_weights_files, use_safetensors = self._prepare_weights(
