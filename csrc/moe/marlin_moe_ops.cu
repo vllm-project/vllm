@@ -485,10 +485,6 @@ torch::Tensor marlin_gemm_moe(
   TORCH_CHECK(*b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,
               "b_q_type must be uint4b8 or uint8b128. Got = ", b_q_type->str());
 
-  TORCH_CHECK(
-      is_k_full,
-      "NYI: Marlin MoE kernel does not currently support !is_k_full case.");
-
   int pack_factor = 32 / b_q_type->size_bits();
 
   int max_par = 4;
