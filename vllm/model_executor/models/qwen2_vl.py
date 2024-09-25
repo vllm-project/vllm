@@ -283,9 +283,9 @@ class Qwen2VisionAttention(nn.Module):
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
         elif is_cpu():
-            bs, seq_length, _, _ = q.shape
+            seq_length = q.size(1)
             q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
-            attention_mask = torch.zeros([bs, 1, seq_length, seq_length],
+            attention_mask = torch.zeros([1, seq_length, seq_length],
                                          device=q.device,
                                          dtype=torch.bool)
             for i in range(1, len(cu_seqlens)):

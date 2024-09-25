@@ -187,6 +187,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
 
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
@@ -216,7 +217,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             if mrope_positions:
-                input_positions.extend(mrope_positions)
+                for idx in range(3):
+                    input_mrope_positions[idx].extend(mrope_positions[idx])
             else:
                 input_positions.extend(list(range(computed_len, seq_len)))
 
@@ -242,12 +244,18 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
+        if any(input_mrope_positions):
+            input_positions = None  # type: ignore
+        else:
+            input_mrope_positions = None  # type: ignore
+
         num_prompt_tokens = len(input_tokens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
-        input_positions = torch.tensor(input_positions,
+        input_positions = torch.tensor(input_positions
+                                       or input_mrope_positions,
                                        dtype=torch.long,
                                        device=self.device)  # type: ignore
         slot_mapping = torch.tensor(slot_mapping,
@@ -278,6 +286,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         block_tables: List[List[int]] = []
@@ -302,7 +311,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                         context_len,
                         seq_len,
                     )
-                    input_positions.extend(next_pos)
+                    for idx in range(3):
+                        input_mrope_positions[idx].extend(next_pos[idx])
                 else:
                     input_positions.append(position)
 
@@ -322,12 +332,18 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
+        if any(input_mrope_positions):
+            input_positions = None  # type: ignore
+        else:
+            input_mrope_positions = None  # type: ignore
+
         max_decode_seq_len = max(seq_lens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)
-        input_positions = torch.tensor(input_positions,
+        input_positions = torch.tensor(input_positions
+                                       or input_mrope_positions,
                                        dtype=torch.long,
                                        device=self.device)
         slot_mapping = torch.tensor(slot_mapping,
