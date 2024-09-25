@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
+VLLM_INVALID_TOKEN_ID = -1
+
 
 # We use dataclass for now because it is used for
 # openai server output, and msgspec is not serializable.
@@ -644,6 +646,7 @@ class SequenceGroup:
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
+        priority: User-defined priority of the request.
     """
 
     def __init__(
@@ -658,9 +661,11 @@ class SequenceGroup:
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
+        self.arrival_time = arrival_time
         self.is_single_seq = len(seqs) == 1
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
 
@@ -678,6 +683,7 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+        self.priority = priority
 
         self.cached_request_output = None
 
