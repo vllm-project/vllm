@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from PIL import Image
+from transformers.image_processing_base import BatchFeature
 
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
@@ -41,6 +42,10 @@ class ImagePlugin(MultiModalPlugin):
         data: MultiModalData[object],
     ) -> MultiModalInputs:
         model_config = ctx.model_config
+
+        # Processed by input processor
+        if isinstance(data, BatchFeature):
+            return MultiModalInputs(data.data)
 
         # PIL image
         if isinstance(data, Image.Image) or is_list_of(data, Image.Image):

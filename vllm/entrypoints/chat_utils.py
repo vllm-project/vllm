@@ -159,6 +159,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.image_token_index)
             if model_type in ("chameleon", "internvl_chat"):
                 return "<image>"
+            if model_type == "mllama":
+                return "<|image|>"
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|image_pad|><|vision_end|>"
 
@@ -358,6 +360,7 @@ _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
+MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
 
 def _parse_chat_message_content_parts(
@@ -368,7 +371,11 @@ def _parse_chat_message_content_parts(
     texts: List[str] = []
 
     mm_parser = mm_tracker.create_parser()
+    keep_multimodal_content = \
+        mm_tracker._model_config.hf_config.model_type in \
+            MODEL_KEEP_MULTI_MODAL_CONTENT
 
+    has_image = False
     for part in parts:
         part_type = part["type"]
         if part_type == "text":
@@ -383,6 +390,7 @@ def _parse_chat_message_content_parts(
                     "will be ignored.")
 
             mm_parser.parse_image(image_url["url"])
+            has_image = True
         elif part_type == "audio_url":
             audio_url = _AudioParser(part)["audio_url"]
 
@@ -394,12 +402,20 @@ def _parse_chat_message_content_parts(
             raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
-    mm_placeholder_counts = mm_parser.mm_placeholder_counts()
-    if mm_placeholder_counts:
-        text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_counts,
-                                                       text_prompt)
+    if keep_multimodal_content:
+        text_prompt = "\n".join(texts)
+        role_content = [{'type': 'text', 'text': text_prompt}]
 
-    return [ConversationMessage(role=role, content=text_prompt)]
+        if has_image:
+            role_content = [{'type': 'image'}] + role_content
+        return [ConversationMessage(role=role,
+                                    content=role_content)]  # type: ignore
+    else:
+        mm_placeholder_counts = mm_parser.mm_placeholder_counts()
+        if mm_placeholder_counts:
+            text_prompt = _get_full_multimodal_text_prompt(
+                mm_placeholder_counts, text_prompt)
+        return [ConversationMessage(role=role, content=text_prompt)]
 
 
 # No need to validate using Pydantic again
