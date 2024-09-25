@@ -300,20 +300,12 @@ class ModelConfig:
                     f"method specified in the `quantization` argument "
                     f"({self.quantization}).")
 
-        # TODO(alpin): Tune the default exp_bits for each fp_bits
-        DEFAULT_EXP_BITS = {
-            4: 2,
-            5: 2,
-            6: 2,
-            7: 3,
-        }
-        quant_llm_methods = [
-            "fp4_weights", "fp5_weights", "fp6_weights", "fp7_weights"
-        ]
+        from vllm.model_executor.layers.quantization.fp_eXmY import (
+            DEFAULT_FP_EXMY_EXP_BITS, VALID_FP_EXMY_METHODS)
         if self.quantization is not None and self.quantization in \
-            quant_llm_methods:
+            VALID_FP_EXMY_METHODS:
             fp_bits = int(self.quantization[2])
-            exp_bits = DEFAULT_EXP_BITS[fp_bits]
+            exp_bits = DEFAULT_FP_EXMY_EXP_BITS[fp_bits]
             self.hf_config.quantization_config = {
                 "bits": fp_bits,
                 "exp_bits": exp_bits,

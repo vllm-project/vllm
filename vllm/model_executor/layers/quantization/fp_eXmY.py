@@ -15,6 +15,16 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
+# Used in vllm/config.py::ModelConfig::_verify_quantization
+VALID_FP_EXMY_METHODS = ["fp4_weights", "fp5_weights",
+                         "fp6_weights", "fp7_weights"]
+DEFAULT_FP_EXMY_EXP_BITS = {
+    4: 2,
+    5: 2,
+    6: 2,
+    7: 3,
+}
+
 
 class QuantLLMFPConfig(QuantizationConfig):
     """Config for QuantLLM FP quantizer. It supports fp4,
@@ -39,11 +49,11 @@ class QuantLLMFPConfig(QuantizationConfig):
 
         self.valid_types = [torch.float16]
 
-        if self.weight_bits not in [4, 5, 6, 7]:
+        if self.weight_bits not in DEFAULT_FP_EXMY_EXP_BITS:
             raise ValueError(
                 "Currently, only 4-bit, 5-bit, 6-bit, and 7-bit "
-                "quantization are supported for QuantLLM FP quantizaiton, "
-                f"but got {self.weight_bits} bits.")
+                "weight-only quantization are supported for fp_eXmY "
+                f"quantization, but got {self.weight_bits} bits.")
 
         if get_tensor_model_parallel_rank() == 0:
             logger.info("Loading model in FP%s_E%sM%s format.",
