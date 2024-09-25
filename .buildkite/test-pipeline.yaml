@@ -70,7 +70,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
-  
+
 - label: Core Test # 10min
   mirror_hardwares: [amd]
   fast_check: true
@@ -209,6 +209,21 @@ steps:
   - tests/lora
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
+
+- label: "PyTorch Fullgraph Smoke Test"
+  fast_check: true
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  - pytest -v -s compile/test_full_graph_smoke.py
+
+- label: "PyTorch Fullgraph Test"
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 30min each
   mirror_hardwares: [amd]
@@ -355,7 +370,7 @@ steps:
   - tests/distributed/
   - vllm/compilation
   commands:
-  - pytest -v -s ./compile/test_full_graph.py
+  - pytest -v -s ./compile/test_full_graph_multi_gpu.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
