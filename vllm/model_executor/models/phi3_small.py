@@ -462,7 +462,7 @@ class Phi3SmallForCausalLM(nn.Module):
 
 # Register compiler if environment variables is detected.
 # The model will be compiled after being loaded and quantized.
-if os.environ.get("COMPILE_PHI3_SMALL", "0") == "1":
+if os.environ.get("COMPILE_CHILD_NN_MODULES", "0") == "1":
     register_module_to_compile(Phi3SmallForCausalLM, torch.nn.LayerNorm, (),
                                {"dynamic": True})
     register_module_to_compile(Phi3SmallForCausalLM, Phi3SmallMLP, (),
