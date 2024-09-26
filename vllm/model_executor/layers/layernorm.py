@@ -82,14 +82,11 @@ class RMSNorm(CustomOp):
                 self.variance_epsilon,
             )
             return x, residual
-        out = torch.empty_like(x)
-        ops.rms_norm(
-            out,
+        return ops.rms_norm(
             x,
             self.weight.data,
             self.variance_epsilon,
         )
-        return out
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"

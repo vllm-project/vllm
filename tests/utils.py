@@ -10,17 +10,21 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import openai
+import pytest
 import requests
+from openai.types.completion import Completion
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
+from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
+from vllm.utils import (FlexibleArgumentParser, cuda_device_count_stateless,
+                        get_open_port, is_hip)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -87,11 +91,11 @@ class RemoteOpenAIServer:
         is_local = os.path.isdir(model)
         if not is_local:
             engine_args = AsyncEngineArgs.from_cli_args(args)
-            engine_config = engine_args.create_engine_config()
-            dummy_loader = DefaultModelLoader(engine_config.load_config)
-            dummy_loader._prepare_weights(engine_config.model_config.model,
-                                          engine_config.model_config.revision,
-                                          fall_back_to_pt=True)
+            model_config = engine_args.create_model_config()
+            load_config = engine_args.create_load_config()
+
+            model_loader = get_model_loader(load_config)
+            model_loader.download_model(model_config)
 
         env = os.environ.copy()
         # the current process might initialize cuda,
@@ -115,7 +119,7 @@ class RemoteOpenAIServer:
     def __exit__(self, exc_type, exc_value, traceback):
         self.proc.terminate()
         try:
-            self.proc.wait(3)
+            self.proc.wait(8)
         except subprocess.TimeoutExpired:
             # force kill if needed
             self.proc.kill()
@@ -176,7 +180,12 @@ def compare_two_settings(model: str,
         env2: The second set of environment variables to pass to the API server.
     """
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    trust_remote_code = "--trust-remote-code"
+    if trust_remote_code in arg1 or trust_remote_code in arg2:
+        tokenizer = AutoTokenizer.from_pretrained(model,
+                                                  trust_remote_code=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model)
 
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]
@@ -349,12 +358,23 @@ def error_on_warning():
         yield
 
 
+def get_physical_device_indices(devices):
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices is None:
+        return devices
+
+    visible_indices = [int(x) for x in visible_devices.split(",")]
+    index_mapping = {i: physical for i, physical in enumerate(visible_indices)}
+    return [index_mapping[i] for i in devices if i in index_mapping]
+
+
 @_nvml()
 def wait_for_gpu_memory_to_clear(devices: List[int],
                                  threshold_bytes: int,
                                  timeout_s: float = 120) -> None:
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
+    devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
         output: Dict[int, str] = {}
@@ -432,3 +452,78 @@ def fork_new_process_for_each_test(
                                     f" args {args} and kwargs {kwargs}")
 
     return wrapper
+
+
+def multi_gpu_test(*, num_gpus: int):
+    """
+    Decorate a test to be run only when multiple GPUs are available.
+    """
+    test_selector = getattr(pytest.mark, f"distributed_{num_gpus}_gpus")
+    test_skipif = pytest.mark.skipif(
+        cuda_device_count_stateless() < num_gpus,
+        reason=f"Need at least {num_gpus} GPUs to run the test.",
+    )
+
+    def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
+        return test_selector(test_skipif(fork_new_process_for_each_test(f)))
+
+    return wrapper
+
+
+async def completions_with_server_args(
+    prompts: List[str],
+    model_name: str,
+    server_cli_args: List[str],
+    num_logprobs: Optional[int],
+    max_wait_seconds: int = 240,
+) -> Completion:
+    '''Construct a remote OpenAI server, obtain an async client to the
+    server & invoke the completions API to obtain completions.
+
+    Args:
+      prompts: test prompts
+      model_name: model to spin up on the vLLM server
+      server_cli_args: CLI args for starting the server
+      num_logprobs: Number of logprobs to report (or `None`)
+      max_wait_seconds: timeout interval for bringing up server.
+                        Default: 240sec
+
+    Returns:
+      OpenAI Completion instance
+    '''
+
+    outputs = None
+    max_wait_seconds = 240 * 3  # 240 is default
+    with RemoteOpenAIServer(model_name,
+                            server_cli_args,
+                            max_wait_seconds=max_wait_seconds) as server:
+        client = server.get_async_client()
+        outputs = await client.completions.create(model=model_name,
+                                                  prompt=prompts,
+                                                  temperature=0,
+                                                  stream=False,
+                                                  max_tokens=5,
+                                                  logprobs=num_logprobs)
+    assert outputs is not None, "Completion API call failed."
+
+    return outputs
+
+
+def get_client_text_generations(completions: Completion) -> List[str]:
+    '''Extract generated tokens from the output of a
+    request made to an Open-AI-protocol completions endpoint.
+    '''
+    return [x.text for x in completions.choices]
+
+
+def get_client_text_logprob_generations(
+        completions: Completion) -> List[TextTextLogprobs]:
+    '''Operates on the output of a request made to an Open-AI-protocol
+    completions endpoint; obtains top-rank logprobs for each token in
+    each :class:`SequenceGroup`
+    '''
+    text_generations = get_client_text_generations(completions)
+    text = ''.join(text_generations)
+    return [(text_generations, text,
+             (None if x.logprobs is None else x.logprobs.top_logprobs))
+            for x in completions.choices]

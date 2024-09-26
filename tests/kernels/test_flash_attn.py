@@ -4,6 +4,8 @@ import pytest
 import torch
 
 import vllm.attention.backends.flash_attn  # noqa: F401
+from tests.kernels.utils import opcheck
+from vllm.utils import seed_everything
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 256]
@@ -87,7 +89,7 @@ def test_flash_attn_with_paged_kv(
     num_blocks: int,
 ) -> None:
     torch.set_default_device("cuda")
-    torch.cuda.manual_seed_all(0)
+    seed_everything(0)
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
@@ -126,19 +128,19 @@ def test_flash_attn_with_paged_kv(
     else:
         test_utils = ["test_faketensor"]
 
-    torch.library.opcheck(torch.ops.vllm.flash_attn_with_kvcache,
-                          args=tuple(),
-                          kwargs=dict(
-                              decode_query=query.unsqueeze(1),
-                              key_cache=key_cache,
-                              value_cache=value_cache,
-                              softmax_scale=scale,
-                              causal=True,
-                              block_table=block_tables,
-                              cache_seqlens=kv_lens_tensor,
-                              softcap=soft_cap if soft_cap is not None else 0,
-                          ),
-                          test_utils=test_utils)
+    opcheck(torch.ops.vllm.flash_attn_with_kvcache,
+            args=tuple(),
+            kwargs=dict(
+                decode_query=query.unsqueeze(1),
+                key_cache=key_cache,
+                value_cache=value_cache,
+                softmax_scale=scale,
+                causal=True,
+                block_table=block_tables,
+                cache_seqlens=kv_lens_tensor,
+                softcap=soft_cap if soft_cap is not None else 0,
+            ),
+            test_utils=test_utils)
 
     ref_output = ref_paged_attn(
         query=query,
@@ -174,7 +176,7 @@ def test_varlen_with_paged_kv(
     num_blocks: int,
 ) -> None:
     torch.set_default_device("cuda")
-    torch.cuda.manual_seed_all(0)
+    seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -231,23 +233,23 @@ def test_varlen_with_paged_kv(
     else:
         test_utils = ["test_faketensor"]
 
-    torch.library.opcheck(torch.ops.vllm.flash_attn_varlen_func,
-                          args=tuple(),
-                          kwargs=dict(
-                              q=query,
-                              k=key_cache,
-                              v=value_cache,
-                              cu_seqlens_q=cu_query_lens,
-                              cu_seqlens_k=cu_kv_lens,
-                              max_seqlen_q=max_query_len,
-                              max_seqlen_k=max_kv_len,
-                              softmax_scale=scale,
-                              causal=True,
-                              window_size=window_size,
-                              block_table=block_tables,
-                              softcap=soft_cap if soft_cap is not None else 0,
-                          ),
-                          test_utils=test_utils)
+    opcheck(torch.ops.vllm.flash_attn_varlen_func,
+            args=tuple(),
+            kwargs=dict(
+                q=query,
+                k=key_cache,
+                v=value_cache,
+                cu_seqlens_q=cu_query_lens,
+                cu_seqlens_k=cu_kv_lens,
+                max_seqlen_q=max_query_len,
+                max_seqlen_k=max_kv_len,
+                softmax_scale=scale,
+                causal=True,
+                window_size=window_size,
+                block_table=block_tables,
+                softcap=soft_cap if soft_cap is not None else 0,
+            ),
+            test_utils=test_utils)
 
     ref_output = ref_paged_attn(
         query=query,

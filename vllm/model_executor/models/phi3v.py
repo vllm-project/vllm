@@ -31,7 +31,7 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
@@ -39,7 +39,7 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
@@ -69,6 +69,23 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      num_hidden_layers=24,
                                                      patch_size=14,
                                                      projection_dim=768)
+
+
+def _init_img_processor(hf_config: PretrainedConfig):
+    clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
+    layer_idx = hf_config.img_processor.get('layer_idx', -2)
+
+    # Initialize the CLIP only up to the required feature layer
+    if layer_idx < 0:
+        num_hidden_layers = clip_config.num_hidden_layers + \
+            layer_idx + 1
+    else:
+        num_hidden_layers = layer_idx + 1
+
+    img_processor = CLIPVisionModel(
+        clip_config, num_hidden_layers_override=num_hidden_layers)
+
+    return img_processor
 
 
 class Phi3VImagePixelInputs(TypedDict):
@@ -139,18 +156,8 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         hidden_size = config.n_embd if hasattr(
             config, 'n_embd') else config.hidden_size
 
-        clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
-        self.layer_idx = config.img_processor.get('layer_idx', -2)
+        self.img_processor = _init_img_processor(config)
 
-        # Initialize the CLIP only up to the required feature layer
-        if self.layer_idx < 0:
-            num_hidden_layers = clip_config.num_hidden_layers + \
-                self.layer_idx + 1
-        else:
-            num_hidden_layers = self.layer_idx + 1
-
-        self.img_processor = CLIPVisionModel(
-            clip_config, num_hidden_layers_override=num_hidden_layers)
         image_dim_out = config.img_processor['image_dim_out']
         self.num_img_tokens = config.img_processor['num_img_tokens']
 
@@ -300,7 +307,7 @@ def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
 
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L90
-def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
+def _calc_hd_transform_size(*, width: int, height: int, hd_num: int):
     transposed = False
     if width < height:
         width, height = height, width
@@ -330,8 +337,10 @@ def get_phi3v_image_feature_size(
     *,
     input_height: int,
     input_width: int,
+    num_crops: int,
 ) -> int:
-    num_crops = hf_config.get("num_crops", 16)
+    if num_crops is None:
+        num_crops = hf_config.get("num_crops", 16)
     new_width, new_height = _calc_hd_transform_size(width=input_width,
                                                     height=input_height,
                                                     hd_num=num_crops)
@@ -340,20 +349,26 @@ def get_phi3v_image_feature_size(
         + (new_height // 336 + 1) * 12
 
 
-def get_max_phi3v_image_tokens(ctx: InputContext):
+def get_max_phi3v_image_tokens(ctx: InputContext,
+                               *,
+                               num_crops: Optional[int] = None):
 
     return get_phi3v_image_feature_size(
         ctx.get_hf_image_processor_config(),
         input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+        num_crops=num_crops,
     )
 
 
-def dummy_data_for_phi3v(ctx: InputContext, seq_len: int,
-                         mm_counts: Mapping[str, int]):
+def dummy_data_for_phi3v(ctx: InputContext,
+                         seq_len: int,
+                         mm_counts: Mapping[str, int],
+                         *,
+                         num_crops: Optional[int] = None):
     num_images = mm_counts["image"]
 
-    image_feature_size = get_max_phi3v_image_tokens(ctx)
+    image_feature_size = get_max_phi3v_image_tokens(ctx, num_crops=num_crops)
 
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
@@ -391,7 +406,10 @@ def _get_image_placeholder_token_ids(model_config: ModelConfig,
     return image_placeholder_token_ids
 
 
-def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_phi3v(ctx: InputContext,
+                              llm_inputs: LLMInputs,
+                              *,
+                              num_crops: Optional[int] = None):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -405,7 +423,8 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = [
             get_phi3v_image_feature_size(hf_config,
                                          input_width=w,
-                                         input_height=h)
+                                         input_height=h,
+                                         num_crops=num_crops)
         ]
         image_data = [image_data]
     elif is_list_of(image_data, Image.Image):
@@ -415,9 +434,12 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
             image_feature_size.append(
                 get_phi3v_image_feature_size(hf_config,
                                              input_width=w,
-                                             input_height=h))
+                                             input_height=h,
+                                             num_crops=num_crops))
     elif isinstance(image_data, torch.Tensor):
-        image_feature_size = image_data.shape[0]
+        num_images, image_feature_size, hidden_size = image_data.shape
+    elif is_list_of(image_data, torch.Tensor):
+        image_feature_size = [item.shape[1] for item in image_data]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -656,23 +678,27 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
+
+        # TODO(ChristopherCho): This is a temporary fix to load
+        #     the vision weights with CLIPVisionModel.load_weights()
+        vision_weights = []
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            # post_layernorm is not needed in CLIPVisionModel
-            if "vision_model.post_layernorm" in name:
+            # Skip loading the img_processor weights since they are
+            # loaded separately.
+            if "vision_embed_tokens.img_processor" in name:
+                vision_weights.append((name, loaded_weight))
                 continue
+
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                # We only do sharding for language model
-                # and not vision model for now.
-                if "vision_embed_tokens" in name and self.vision_embed_tokens:
-                    continue
                 if weight_name not in name:
                     continue
+
                 param = params_dict[name.replace(weight_name, param_name)]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -686,3 +712,11 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+
+        # We use regex to extract the sub-module name
+        # from "model.vision_embed_tokens.img_processor.*"
+        vision_weights = [
+            (re.search(r"vision_embed_tokens\.img_processor\.(.*)",
+                       n).group(1), w) for n, w in vision_weights
+        ]
+        self.vision_embed_tokens.img_processor.load_weights(vision_weights)

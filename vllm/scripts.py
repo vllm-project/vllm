@@ -1,11 +1,11 @@
 # The CLI entrypoint to vLLM.
 import argparse
-import asyncio
 import os
 import signal
 import sys
 from typing import List, Optional
 
+import uvloop
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -34,7 +34,7 @@ def serve(args: argparse.Namespace) -> None:
     # EngineArgs expects the model name to be passed as --model.
     args.model = args.model_tag
 
-    asyncio.run(run_server(args))
+    uvloop.run(run_server(args))
 
 
 def interactive_cli(args: argparse.Namespace) -> None:
@@ -125,6 +125,15 @@ def main():
     serve_parser.add_argument("model_tag",
                               type=str,
                               help="The model tag to serve")
+    serve_parser.add_argument(
+        "--config",
+        type=str,
+        default='',
+        required=False,
+        help="Read CLI options from a config file."
+        "Must be a YAML with the following options:"
+        "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server"
+    )
     serve_parser = make_arg_parser(serve_parser)
     serve_parser.set_defaults(dispatch_function=serve)
 

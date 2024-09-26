@@ -38,13 +38,13 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA
 
@@ -321,13 +321,13 @@ class PhiMoEAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=True,
-            quant_config=None,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=True,
-            quant_config=None,
+            quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -491,6 +491,10 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
         "o_proj",
         "embed_tokens",
         "lm_head",
+        "w1",
+        "w2",
+        "w3",
+        "gate",
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -600,7 +604,7 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
                     weight_loader(
                         param,
                         loaded_weight,
-                        weight_name,
+                        name,
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
