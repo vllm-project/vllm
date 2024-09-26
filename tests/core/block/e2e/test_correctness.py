@@ -125,7 +125,6 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
         max_tokens=output_len,
         ignore_eos=True,
         temperature=temperature,
-        use_beam_search=True,
         best_of=2,
     )
 

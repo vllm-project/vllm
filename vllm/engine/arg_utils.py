@@ -1046,12 +1046,6 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        if (model_config.get_sliding_window() is not None
-                and scheduler_config.chunked_prefill_enabled):
-            raise ValueError(
-                "Chunked prefill is not supported with sliding window. "
-                "Set --disable-sliding-window to disable sliding window.")
-
         return EngineConfig(
             model_config=model_config,
             cache_config=cache_config,
