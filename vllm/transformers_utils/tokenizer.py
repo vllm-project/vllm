@@ -1,6 +1,7 @@
 import os
 import warnings
 from pathlib import Path
+from types import MethodType
 from typing import Optional, Union
 
 import huggingface_hub
@@ -151,6 +152,23 @@ def get_tokenizer(
                 )
             else:
                 raise e
+
+        if type(tokenizer).__name__ == "ChatGLMTokenizer":
+            assert isinstance(tokenizer, PreTrainedTokenizer)
+            orig_pad = tokenizer._pad
+
+            # Patch _pad method to accept `padding_side`
+            def _pad(self: PreTrainedTokenizer, *args, **kwargs):
+                padding_side: Optional[str] = kwargs.pop("padding_side")
+                if (padding_side is not None
+                        and padding_side != self.padding_side):
+                    msg = ("`padding_side` argument is not supported by "
+                           "ChatGLMTokenizer and will be ignored.")
+                    warnings.warn(msg, stacklevel=2)
+
+                return orig_pad(*args, **kwargs)
+
+            tokenizer._pad = MethodType(_pad, tokenizer)
 
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
