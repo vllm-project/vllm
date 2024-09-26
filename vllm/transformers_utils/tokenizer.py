@@ -158,8 +158,12 @@ def get_tokenizer(
             orig_pad = tokenizer._pad
 
             # Patch _pad method to accept `padding_side`
-            def _pad(self: PreTrainedTokenizer, *args, **kwargs):
-                padding_side: Optional[str] = kwargs.pop("padding_side")
+            def _pad(
+                self: PreTrainedTokenizer,
+                *args,
+                padding_side: Optional[str] = None,
+                **kwargs,
+            ):
                 if (padding_side is not None
                         and padding_side != self.padding_side):
                     msg = ("`padding_side` argument is not supported by "
