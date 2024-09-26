@@ -51,6 +51,9 @@ class ModelInputForNeuron(ModelRunnerInputBase):
 
 class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
+    # NEURON has an upper limit on the top_k
+    _MAX_NEURON_SAMPLING_TOP_K = 256
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -76,15 +79,16 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
-        self.model_config.generation_config = GenerationConfig(
+        self.model_config.sampling_params = GenerationConfig(
             max_length=self.scheduler_config.max_model_len,
             do_sample=True,
             per_batch_line=True,
-            top_k=[1] * self.scheduler_config.max_num_seqs,
-            top_p=[1] * self.scheduler_config.max_num_seqs,
-            temperature=[1] * self.scheduler_config.max_num_seqs,
+            top_k=[self._MAX_NEURON_SAMPLING_TOP_K] \
+                * self.scheduler_config.max_num_seqs,
+            top_p=[1.0] * self.scheduler_config.max_num_seqs,
+            temperature=[1.0] * self.scheduler_config.max_num_seqs,
             dynamic=True,
-            global_top_k=256)
+            global_top_k=self._MAX_NEURON_SAMPLING_TOP_K)
 
     def load_model(self) -> None:
         if find_spec("transformers_neuronx") is not None:
@@ -243,35 +247,38 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                    sampling_metadata=sampling_metadata,
                                    multi_modal_kwargs=multi_modal_kwargs)
 
-    def _update_neuron_generation_config(self, sampling_metadata):
-        # Update Neuron Genetation Config
-        current_generation_config = self.model_config.generation_config
-        assert current_generation_config is not None, (
-            f"Failed to update generation_config, "
-            f"current generation config is {current_generation_config}")
+    def _update_neuron_sampling_params(self, sampling_metadata):
+        # Update Neuron sampling parameters (GenerationConfig in Neuron)
+        current_sampling_params = self.model_config.sampling_params
+        assert current_sampling_params is not None, (
+            f"Failed to update sampling_params, "
+            f"current sampling params is {current_sampling_params}")
 
-        top_k = current_generation_config.top_k.copy()
-        top_p = current_generation_config.top_p.copy()
-        temperature = current_generation_config.temperature.copy()
+        top_k = current_sampling_params.top_k.copy()
+        top_p = current_sampling_params.top_p.copy()
+        temperature = current_sampling_params.temperature.copy()
         for index, sequence_group_to_sample in enumerate(
                 sampling_metadata.seq_groups):
-            top_k[index] = sequence_group_to_sample.sampling_params.top_k
+            top_k[index] = self._convert_to_neuron_top_k(
+                sequence_group_to_sample.sampling_params.top_k)
             top_p[index] = sequence_group_to_sample.sampling_params.top_p
             temperature[index] = \
                 sequence_group_to_sample.sampling_params.temperature
 
-        # Only call update the generation config is the new config is different.
-        # This avoids calling update_generation_config for every token within
-        # the same sequence.
-        if (top_k != current_generation_config.top_k
-                or top_p != current_generation_config.top_p
-                or temperature != current_generation_config.temperature):
-            current_generation_config.top_k = top_k
-            current_generation_config.top_p = top_p
-            current_generation_config.temperature = temperature
+        # Only update the sampling parameters if there is a change.
+        if (top_k != current_sampling_params.top_k
+                or top_p != current_sampling_params.top_p
+                or temperature != current_sampling_params.temperature):
+            current_sampling_params.top_k = top_k
+            current_sampling_params.top_p = top_p
+            current_sampling_params.temperature = temperature
 
-            self.model.model.update_generation_config(
-                current_generation_config)
+            self.model.model.update_generation_config(current_sampling_params)
+
+    def _convert_to_neuron_top_k(self, top_k: int) -> int:
+        if top_k < 0 or top_k > self._MAX_NEURON_SAMPLING_TOP_K:
+            return self._MAX_NEURON_SAMPLING_TOP_K
+        return top_k
 
     @torch.inference_mode()
     def execute_model(
@@ -286,7 +293,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 "NeuronModelRunner does not support multi-step execution.")
 
         # Update Neuron's generation configs from sampling_metadata
-        self._update_neuron_generation_config(model_input.sampling_metadata)
+        self._update_neuron_sampling_params(model_input.sampling_metadata)
 
         hidden_states = self.model(
             input_ids=model_input.input_tokens,
