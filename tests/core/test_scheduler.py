@@ -3,7 +3,7 @@ from collections import deque
 from typing import List, Set, Tuple
 from unittest.mock import MagicMock
 
-import pytest
+import pytest  # noqa
 from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
@@ -20,7 +20,10 @@ from .utils import (append_new_token, append_new_token_seq_group,
 def test_scheduler_add_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(
-        100, 64, 1, )
+        100,
+        64,
+        1,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, cache_dtype="auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -39,7 +42,10 @@ def test_scheduler_add_seq_group():
 def test_scheduler_abort_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(
-        100, 64, 1, )
+        100,
+        64,
+        1,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -66,7 +72,8 @@ def test_scheduler_schedule_simple():
     scheduler_config = SchedulerConfig(
         64,
         num_seq_group,
-        max_model_len,)
+        max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -110,7 +117,7 @@ def test_scheduler_prefill_prioritized():
         max_batched_num_tokens,
         2,
         max_model_len,
-        )
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
@@ -138,7 +145,10 @@ def test_scheduler_schedule_preempt_abort():
     block_size = 4
     max_model_len = 16
     scheduler_config = SchedulerConfig(
-        64, 2, max_model_len, )
+        64,
+        2,
+        max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 2
     cache_config.num_gpu_blocks = 2
@@ -197,7 +207,7 @@ def test_scheduler_max_seqs():
         64,
         max_seq_group,
         max_model_len,
-        )
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -242,7 +252,7 @@ def test_scheduler_delay_factor():
         64,
         16,
         delay_factor=0.5,
-        )
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -343,7 +353,7 @@ def initialize_scheduler(
         max_token_budget,
         max_num_seqs,
         max_model_len,
-        )
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = num_cpu_blocks
     cache_config.num_gpu_blocks = num_gpu_blocks
@@ -373,8 +383,7 @@ def test_prefill_schedule_max_prompt_len():
     Test prompt longer than max_prompt_len is aborted.
     """
     block_size = 4
-    scheduler = initialize_scheduler(max_model_len=30,
-                                     block_size=block_size)
+    scheduler = initialize_scheduler(max_model_len=30, block_size=block_size)
     _, seq_group = create_dummy_prompt("0",
                                        prompt_length=60,
                                        block_size=block_size)

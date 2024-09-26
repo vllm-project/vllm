@@ -33,11 +33,10 @@ def test_simple():
     num_seq_group = 4
     max_model_len = 16
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(
-        max_num_batched_tokens,
-        num_seq_group,
-        max_model_len,
-        enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(max_num_batched_tokens,
+                                       num_seq_group,
+                                       max_model_len,
+                                       enable_chunked_prefill=True)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -82,7 +81,8 @@ def test_chunk():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 32
     cache_config.num_gpu_blocks = 32
@@ -129,7 +129,8 @@ def test_complex():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 64
     cache_config.num_gpu_blocks = 64
@@ -198,7 +199,8 @@ def test_maximal_decoding():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -290,7 +292,8 @@ def test_prompt_limit():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
@@ -348,7 +351,8 @@ def test_swap():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
@@ -403,7 +407,8 @@ def test_running_prefill_prioritized_over_swap():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 32
     cache_config.num_gpu_blocks = 32
@@ -496,7 +501,8 @@ def test_chunked_prefill_preempt():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
@@ -560,7 +566,8 @@ def test_chunked_prefill_max_seqs():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 128
     cache_config.num_gpu_blocks = 128
@@ -613,7 +620,8 @@ def test_perfix_caching():
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
-        enable_chunked_prefill=True,)
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size,
                                1.0,
                                1,
