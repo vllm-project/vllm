@@ -66,16 +66,6 @@ class ChatTtsLlm(nn.Module):
             VocabParallelEmbedding(self.num_audio_tokens, self.model_dim) for _ in range(self.num_output_head)
         ])
         
-        ParallelLMHead(
-                self.num_audio_tokens,
-                self.model_dim,
-                org_num_embeddings=self.num_audio_tokens,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config else lora_config.lora_vocab_padding_size,
-                quant_config=quant_config,
-            )
         self.lm_head = nn.ModuleList([
             ParallelLMHead(
                 self.num_audio_tokens,
