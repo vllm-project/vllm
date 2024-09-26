@@ -58,13 +58,41 @@ You can install vLLM using pip:
         $ # export VLLM_COMMIT=...
         $ # pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
 
+Build from source (without compilation)
+---------------------------------------
+
+If you want to develop vLLM, and you only need to change the Python code, you can build vLLM without compilation.
+
+The first step is to follow the previous instructions to install the latest vLLM wheel:
+
+.. code-block:: console
+
+    $ export VLLM_VERSION=0.6.1.post1
+    $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
+
+After verifying that the installation is successful, we have a script for you to copy and link directories, so that you can edit the Python code directly:
+
+.. code-block:: console
+
+    $ git clone https://github.com/vllm-project/vllm.git
+    $ cd vllm
+    $ python python_only_dev.py
+
+It will:
+
+- Find the installed vLLM in the current environment.
+- Copy built files to the current directory.
+- Rename the installed vLLM
+- Symbolically link the current directory to the installed vLLM.
+
+This way, you can edit the Python code in the current directory, and the changes will be reflected in the installed vLLM.
 
 .. _build_from_source:
 
-Build from source
------------------
+Build from source (with compilation)
+------------------------------------
 
-You can also build and install vLLM from source:
+If you need to touch the C++ or CUDA code, you need to build vLLM from source:
 
 .. code-block:: console
 
