@@ -744,7 +744,8 @@ def create_kv_caches_with_random(
 
 @lru_cache
 def print_warning_once(msg: str) -> None:
-    logger.warning(msg)
+    # Set the stacklevel to 2 to print the caller's line info
+    logger.warning(msg, stacklevel=2)
 
 
 @lru_cache(maxsize=None)
