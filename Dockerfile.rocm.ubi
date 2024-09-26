@@ -203,7 +203,8 @@ RUN umask 002 && \
     useradd --uid 2000 --gid 0 vllm && \
     mkdir -p /licenses && \
     chmod g+rwx $HOME /usr/src /workspace && \
-    chmod 0664 /var/log/rocm_smi_lib
+    chmod 0775 /var/log/rocm_smi_lib && \
+    chmod 0664 /var/log/rocm_smi_lib/*
 
 COPY LICENSE /licenses/vllm.md
 COPY examples/*.jinja /app/data/template/
