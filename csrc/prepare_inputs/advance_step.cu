@@ -211,7 +211,7 @@ void advance_step_flashinfer(
     printf("  num_seqs = %d\n", num_seqs);
     printf("  num_queries = %d\n", num_queries);
     printf("  block_size = %d\n", block_size);
-    printf("  block_tables.stride(0) = %d\n", block_tables.stride(0));
+    printf("  block_tables.stride(0) = %zu\n", block_tables.stride(0));
   }
   // Verify all tensors
   verify_tensor("input_tokens", input_tokens, num_seqs, -1, at::kLong);
