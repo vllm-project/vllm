@@ -115,7 +115,9 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
 
-        kv_caches = [(None, None) for _ in range(num_layers)]
+        kv_caches = [(torch.tensor([], dtype=torch.int, device=self.device),
+                      torch.tensor([], dtype=torch.int, device=self.device))
+                     for _ in range(num_layers)]
         self.model_runner._dummy_run(
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
