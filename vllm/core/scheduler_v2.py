@@ -80,16 +80,16 @@ class Scheduler:
         req_to_new_block_ids: Dict[str, List[int]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
         total_num_scheduled_tokens = 0
-        num_remaining_tokens = self.max_num_scheduled_tokens
+        token_budget = self.max_num_scheduled_tokens
 
         # First, schedule the RUNNING requests.
         while self.running:
-            if num_remaining_tokens == 0:
+            if token_budget == 0:
                 break
 
             request = self.running[0]
             num_tokens = request.num_tokens - request.num_computed_tokens
-            num_tokens = min(num_tokens, num_remaining_tokens)
+            num_tokens = min(num_tokens, token_budget)
 
             new_block_ids: List[int] = []
             while not self.block_manager.can_append_slots(request, num_tokens):
@@ -116,7 +116,7 @@ class Scheduler:
                 req_to_new_block_ids[request.request_id] = new_block_ids
                 num_scheduled_tokens[request.request_id] = num_tokens
                 total_num_scheduled_tokens += num_tokens
-                num_remaining_tokens -= num_tokens
+                token_budget -= num_tokens
 
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens += num_tokens
@@ -130,7 +130,7 @@ class Scheduler:
                 break
             if len(self.running) == self.max_num_running_reqs:
                 break
-            if num_remaining_tokens == 0:
+            if token_budget == 0:
                 break
 
             request = self.waiting[0]
@@ -148,7 +148,7 @@ class Scheduler:
 
             # Number of tokens to be scheduled.
             num_tokens = request.num_tokens - num_computed_tokens
-            num_tokens = min(num_tokens, num_remaining_tokens)
+            num_tokens = min(num_tokens, token_budget)
 
             self.waiting.popleft()
             self.running.append(request)
@@ -163,7 +163,7 @@ class Scheduler:
                 computed_block_ids + new_block_ids)
             num_scheduled_tokens[request.request_id] = num_tokens
             total_num_scheduled_tokens += num_tokens
-            num_remaining_tokens -= num_tokens
+            token_budget -= num_tokens
 
             request.status = RequestStatus.RUNNING
             request.num_computed_tokens = num_computed_tokens + num_tokens
@@ -172,7 +172,7 @@ class Scheduler:
 
         # Check if the scheduling constraints are satisfied.
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
-        assert num_remaining_tokens >= 0
+        assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) == len(self.running))
