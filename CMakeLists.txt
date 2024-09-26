@@ -143,6 +143,19 @@ else()
   message(FATAL_ERROR "Can't find CUDA or HIP installation.")
 endif()
 
+
+#
+# For cuda we want to be able to control which architectures we compile for on 
+# a per-file basis in order to cut down on compile time. So here we extract
+# the set of architectures we want to compile for and remove the from the 
+# CMAKE_CUDA_FLAGS so that they are not applied globally.
+#
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  clear_cuda_arches(CUDA_ARCH_FLAGS)
+  extract_unique_cuda_arches_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
+  message(STATUS "CUDA architectures: ${CUDA_ARCHS}")
+endif()
+
 #
 # Override the GPU architectures detected by cmake/torch and filter them by
 # the supported versions for the current language.
@@ -223,30 +236,51 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
-    "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
-    "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
-    "csrc/quantization/gptq_marlin/gptq_marlin.cu"
-    "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-    "csrc/quantization/gptq_marlin/awq_marlin_repack.cu"
     "csrc/quantization/gguf/gguf_kernel.cu"
-    "csrc/quantization/fp8/fp8_marlin.cu"
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
+    "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu")
+
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_EXT_SRC}"
+    CUDA_ARCHS "${CUDA_ARCHS}"
+    BUILD_PTX_FOR_HIGHEST_ARCH)
+
+  # Only build marlin if we are building for atleast some compatible archs
+  get_minimal_compatible_cuda_archs("8.0;8.6;8.9")
+  if (COMPATIBLE_ARCHS)
+    set(MARLIN_SRCS 
+       "csrc/quantization/fp8/fp8_marlin.cu"
+       "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
+       "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
+       "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
+       "csrc/quantization/gptq_marlin/gptq_marlin.cu"
+       "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
+       "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_SRCS}"
+      CUDA_ARCHS "${COMPATIBLE_ARCHS}"
+      BUILD_PTX_FOR_HIGHEST_ARCH)
+    list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
+  endif()
 
   #
   # The CUTLASS kernels for Hopper require sm90a to be enabled.
   # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
   # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
-    set_source_files_properties(
-          "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
-          PROPERTIES
-          COMPILE_FLAGS
-          "-gencode arch=compute_90a,code=sm_90a")
+  # Only build scaled_mm_c3x if we are building for something compatible with sm90a
+  get_minimal_compatible_cuda_archs("9.0a")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND COMPATIBLE_ARCHS)
+
+    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
+    # No need to BUILD_PTX_FOR_HIGHEST_ARCH since sm90a is not 
+    # forward compatible
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${COMPATIBLE_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C3X=1")
   endif()
 
 
@@ -254,47 +288,56 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Machete kernels
 
   # The machete kernels only work on hopper and require CUDA 12.0 or later.
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
+  # Only build Machete kernels if we are building for something compatible with sm90a
+  get_minimal_compatible_cuda_archs("9.0a")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND COMPATIBLE_ARCHS)
     #
     # For the Machete kernels we automatically generate sources for various 
     # preselected input type pairs and schedules.
     # Generate sources:
-    execute_process(
-      COMMAND ${CMAKE_COMMAND} -E env 
-      PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH 
-        ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py
-      RESULT_VARIABLE machete_generation_result
-      OUTPUT_VARIABLE machete_generation_output
-      OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-      ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-    )
+    set(MACHETE_GEN_SCRIPT 
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
+    file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
 
-    if (NOT machete_generation_result EQUAL 0)
-      message(FATAL_ERROR "Machete generation failed."
-                          " Result: \"${machete_generation_result}\"" 
-                          "\nCheck the log for details: "
-                          "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
+    if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
+        OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env 
+        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH 
+          ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
+        RESULT_VARIABLE machete_generation_result
+        OUTPUT_VARIABLE machete_generation_output
+        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
+        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
+      )
+
+      if (NOT machete_generation_result EQUAL 0)
+        message(FATAL_ERROR "Machete generation failed."
+                            " Result: \"${machete_generation_result}\"" 
+                            "\nCheck the log for details: "
+                            "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
+      else()
+        set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH} 
+            CACHE STRING "Last run machete generate script hash" FORCE)
+        message(STATUS "Machete generation completed successfully.")
+      endif()
     else()
-      message(STATUS "Machete generation completed successfully.")
+      message(STATUS "Machete generation script has not changed, skipping generation.")
     endif()
 
     # Add machete generated sources
     file(GLOB MACHETE_GEN_SOURCES "csrc/quantization/machete/generated/*.cu")
     list(APPEND VLLM_EXT_SRC ${MACHETE_GEN_SOURCES})
-    message(STATUS "Machete generated sources: ${MACHETE_GEN_SOURCES}")
 
-    set_source_files_properties(
-          ${MACHETE_GEN_SOURCES}
-          PROPERTIES
-          COMPILE_FLAGS
-          "-gencode arch=compute_90a,code=sm_90a")
+    # No need to BUILD_PTX_FOR_HIGHEST_ARCH since sm90a is not 
+    # forward compatible
+    set_gencode_flags_for_srcs(
+      SRCS "${MACHETE_GEN_SOURCES}"
+      CUDA_ARCHS "${COMPATIBLE_ARCHS}")
+
+    list(APPEND VLLM_EXT_SRC
+      csrc/quantization/machete/machete_pytorch.cu)
   endif()
-
-  # Add pytorch binding for machete (add on even CUDA < 12.0 so that we can
-  #  raise an error if the user that this was built with an incompatible 
-  #  CUDA version)
-  list(APPEND VLLM_EXT_SRC
-    csrc/quantization/machete/machete_pytorch.cu)
 endif()
 
 message(STATUS "Enabling C extension.")
