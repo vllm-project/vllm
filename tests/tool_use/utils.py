@@ -68,7 +68,7 @@ CONFIGS: Dict[str, ServerConfig] = {
         "meta-llama/Llama-3.2-3B-Instruct",
         "arguments": [
             "--tool-call-parser", "llama3_json", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_llama3_json.jinja")
+            str(VLLM_PATH / "examples/tool_chat_template_llama3.2_json.jinja")
         ],
         "supports_parallel":
         False,
