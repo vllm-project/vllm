@@ -330,6 +330,7 @@ steps:
   commands:
     - pytest -v -s models/embedding/language
     - pytest -v -s models/encoder_decoder/language
+    - pytest -v -s models/encoder_decoder/vision_language
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
