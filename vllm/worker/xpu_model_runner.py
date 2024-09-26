@@ -19,9 +19,10 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs, MultiModalRegistry)
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import DeviceMemoryProfiler, make_tensor_with_pad
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -391,7 +392,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         self.model: nn.Module  # Set after init_Model
 
     def load_model(self) -> None:
-        with DeviceMemoryProfiler() as m:
+        with current_platform.memory_profiler() as m:
             self.model = get_model(
                 model_config=self.model_config,
                 device_config=self.device_config,

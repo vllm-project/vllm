@@ -45,7 +45,6 @@ from vllm.model_executor.models import (has_inner_state, supports_lora,
                                         supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_pin_memory_available
 
 
 @contextmanager
@@ -70,7 +69,7 @@ def device_loading_context(module: torch.nn.Module,
 
     finally:
         # Restore parameters to their original devices, ignoring new parameters
-        pin_memory = is_pin_memory_available()
+        pin_memory = current_platform.is_pin_memory_available()
         for name, p in module.named_parameters():
             if name in original_device_states:
                 original_device: torch.device = original_device_states[name]
@@ -794,8 +793,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             model_name_or_path: str,
             allowed_patterns: List[str],
             revision: Optional[str] = None) -> Tuple[List[str], str]:
-        """Retrieve weight files. Download the files if necessary. 
-        
+        """Retrieve weight files. Download the files if necessary.
+
         Return the weight files and the file pattern."""
         is_local = os.path.isdir(model_name_or_path)
 

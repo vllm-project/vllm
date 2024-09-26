@@ -15,8 +15,9 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
 if TYPE_CHECKING:
@@ -72,7 +73,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.device_config = (device_config
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
-        self.pin_memory = is_pin_memory_available()
+        self.pin_memory = current_platform.is_pin_memory_available()
 
         # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \

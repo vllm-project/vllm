@@ -3,8 +3,8 @@ from typing import Any, Dict, List, Tuple
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
-from vllm.utils import is_pin_memory_available
 
 
 class PoolingMetadata:
@@ -56,7 +56,7 @@ class PoolingTensors:
             device: Device to store the tensors.
         """
         # Convert prompt lengths to tensor
-        pin_memory = is_pin_memory_available()
+        pin_memory = current_platform.is_pin_memory_available()
 
         prompt_lens_t = torch.tensor(
             pooling_metadata.prompt_lens,

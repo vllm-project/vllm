@@ -6,8 +6,8 @@ import torch
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
-                        is_pin_memory_available)
+from vllm.platforms import current_platform
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
 logger = init_logger(__name__)
 
@@ -75,7 +75,8 @@ class CacheEngine:
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        pin_memory = is_pin_memory_available() if device == "cpu" else False
+        pin_memory = current_platform.is_pin_memory_available() \
+                        if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that

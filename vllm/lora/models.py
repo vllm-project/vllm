@@ -27,7 +27,7 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.utils import is_pin_memory_available
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -115,7 +115,8 @@ class LoRAModel(AdapterModel):
         embedding_padding_modules: Optional[List[str]] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
-        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        pin_memory = (str(device) == "cpu"
+                      and current_platform.is_pin_memory_available())
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name)
@@ -177,7 +178,7 @@ class LoRAModel(AdapterModel):
         embedding_padding_modules: Optional[List[str]] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
-        
+
         Args:
             lora_dir: The local path that has lora data.
             expected_lora_modules: Name of modules that are expected to be

@@ -7,9 +7,11 @@ from functools import lru_cache, wraps
 from typing import Callable, List, Tuple, TypeVar
 
 import pynvml
+import torch
 from typing_extensions import ParamSpec
 
 from vllm.logger import init_logger
+from vllm.utils import in_wsl
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
@@ -143,4 +145,20 @@ class CudaPlatform(Platform):
                             " machine has no NVLink equipped.",
                             exc_info=error)
                         return False
+        return True
+
+    @classmethod
+    def current_memory_usage(cls, device: torch.types.Device) -> float:
+        torch.cuda.reset_peak_memory_stats(device)
+        mem = torch.cuda.max_memory_allocated(device)
+        return mem
+
+    @classmethod
+    def synchronize(cls):
+        torch.cuda.synchronize()
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        if in_wsl():
+            return False
         return True

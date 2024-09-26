@@ -4,7 +4,7 @@ from typing import Sequence as GenericSequence
 import torch
 import torch.types
 
-from vllm.utils import is_pin_memory_available
+from vllm.platforms import current_platform
 
 
 class LoRALayerWeights:
@@ -67,7 +67,8 @@ class LoRALayerWeights:
             dtype: torch.dtype,
             device: torch.types.Device,
             embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
-        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        pin_memory = str(device) == "cpu" \
+                        and current_platform.is_pin_memory_available()
         lora_a = torch.zeros([input_dim, rank],
                              dtype=dtype,
                              device=device,

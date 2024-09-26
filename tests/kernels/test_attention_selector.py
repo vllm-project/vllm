@@ -29,7 +29,8 @@ def test_env(name: str, device: str, monkeypatch):
                                         torch.float16, 16)
         assert backend.name == "ROCM_FLASH"
     elif device == "openvino":
-        with patch("vllm.attention.selector.is_openvino", return_value=True):
+        with patch("vllm.attention.selector.current_platform.is_openvino",
+                   return_value=True):
             backend = which_attn_to_use(8, 16, 8, None, torch.float16,
                                         torch.float16, 16)
         assert backend.name == "OPENVINO"
