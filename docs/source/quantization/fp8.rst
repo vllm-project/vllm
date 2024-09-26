@@ -3,12 +3,12 @@
 FP8 W8A8
 ==================
 
-vLLM supports FP8 (8-bit floating point) weight and activation quantization using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x. 
-Currently, only Hopper and Ada Lovelace GPUs are officially supported for W8A8. 
+vLLM supports FP8 (8-bit floating point) weight and activation quantization using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x.
+Currently, only Hopper and Ada Lovelace GPUs are officially supported for W8A8.
 Ampere GPUs are supported for W8A16 (weight-only FP8) utilizing Marlin kernels.
-Quantization of models with FP8 allows for a 2x reduction in model memory requirements and up to a 1.6x improvement in throughput with minimal impact on accuracy.
+Quantization of models with FP8 allows a 2x reduction in model memory requirements and up to a 1.6x improvement in throughput with minimal impact on accuracy.
 
-Please visit the HF collection of `quantized FP8 checkpoints of popular LLMs ready to use with vLLM <https://huggingface.co/collections/neuralmagic/fp8-llms-for-vllm-666742ed2b78b7ac8df13127>`_.
+Visit the HF collection of `quantized FP8 checkpoints of popular LLMs ready to use with vLLM <https://huggingface.co/collections/neuralmagic/fp8-llms-for-vllm-666742ed2b78b7ac8df13127>`_.
 
 The FP8 types typically supported in hardware have two distinct representations, each useful in different scenarios:
 
@@ -29,19 +29,19 @@ In this mode, all Linear modules (except for the final ``lm_head``) have their w
 
 .. code-block:: python
 
-    from vllm import LLM
-    model = LLM("facebook/opt-125m", quantization="fp8")
-    # INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
-    result = model.generate("Hello, my name is")
+   from vllm import LLM
+   model = LLM("facebook/opt-125m", quantization="fp8")
+   # INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
+   result = model.generate("Hello, my name is")
 
 .. warning::
 
-    Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.
+   Currently, you need to load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.
 
 Installation
 ------------
 
-To produce performant FP8 quantized models with vLLM, you'll need to install the `llm-compressor <https://github.com/vllm-project/llm-compressor/>`_ library:
+To produce performant FP8 quantized models with vLLM, you will need to install the `llm-compressor <https://github.com/vllm-project/llm-compressor/>`_ library:
 
 .. code-block:: console
 
@@ -75,12 +75,12 @@ Use ``SparseAutoModelForCausalLM``, which wraps ``AutoModelForCausalLM``, for sa
 2. Applying Quantization
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-For FP8 quantization, we can recover accuracy with simple RTN quantization. We recommend targeting all ``Linear`` layers using the ``FP8_DYNAMIC`` scheme, which uses:
+For FP8 quantization, you can recover accuracy with simple RTN quantization. It is recommended to target all ``Linear`` layers, using the ``FP8_DYNAMIC`` scheme, which uses:
 
-- Static, per-channel quantization on the weights
-- Dynamic, per-token quantization on the activations
+- Static, per-channel quantization on the weights.
+- Dynamic, per-token quantization on the activations.
 
-Since simple RTN does not require data for weight quantization and the activations are quantized dynamically, we do not need any calibration data for this quantization flow.
+Since simple RTN does not require data for weight quantization and the activations are quantized dynamically, you do not need any calibration data for this quantization flow.
 
 .. code-block:: python
 
@@ -142,8 +142,7 @@ Here's an example of the resulting scores:
 Troubleshooting and Support
 ---------------------------
 
-If you encounter any issues or have feature requests, please open an issue on the ``vllm-project/llm-compressor`` GitHub repository.
-
+If you encounter any issues or have feature requests, open an issue on the ``vllm-project/llm-compressor`` GitHub repository.
 
 Deprecated Flow
 ------------------
@@ -153,7 +152,7 @@ Deprecated Flow
    The following information is preserved for reference and search purposes.
    The quantization method described below is deprecated in favor of the ``llmcompressor`` method described above.
 
-For static per-tensor offline quantization to FP8, please install the `AutoFP8 library <https://github.com/neuralmagic/autofp8>`_.
+For static per-tensor offline quantization to FP8, install the `AutoFP8 library <https://github.com/neuralmagic/autofp8>`_.
 
 .. code-block:: bash
 
@@ -179,15 +178,15 @@ You can use AutoFP8 with calibration data to produce per-tensor static scales fo
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir, use_fast=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Load and tokenize 512 dataset samples for calibration of activation scales
+    # Load and tokenize 512 dataset samples for calibration of activation scales.
     ds = load_dataset("mgoin/ultrachat_2k", split="train_sft").select(range(512))
     examples = [tokenizer.apply_chat_template(batch["messages"], tokenize=False) for batch in ds]
     examples = tokenizer(examples, padding=True, truncation=True, return_tensors="pt").to("cuda")
 
-    # Define quantization config with static activation scales
+    # Define quantization config with static activation scales.
     quantize_config = BaseQuantizeConfig(quant_method="fp8", activation_scheme="static")
 
-    # Load the model, quantize, and save checkpoint
+    # Load the model, quantize, and save the checkpoint.
     model = AutoFP8ForCausalLM.from_pretrained(pretrained_model_dir, quantize_config)
     model.quantize(examples)
     model.save_quantized(quantized_model_dir)
@@ -197,8 +196,7 @@ Finally, you can load the quantized model checkpoint directly in vLLM.
 
 .. code-block:: python
 
-    from vllm import LLM
-    model = LLM(model="Meta-Llama-3-8B-Instruct-FP8/")
-    # INFO 06-10 21:15:41 model_runner.py:159] Loading model weights took 8.4596 GB
-    result = model.generate("Hello, my name is")
-
+   from vllm import LLM
+   model = LLM(model="Meta-Llama-3-8B-Instruct-FP8/")
+   # INFO 06-10 21:15:41 model_runner.py:159] Loading model weights took 8.4596 GB
+   result = model.generate("Hello, my name is")

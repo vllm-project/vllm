@@ -2,39 +2,37 @@ vLLM Paged Attention
 ====================
 
 -  Currently, vLLM utilizes its own implementation of a multi-head query
-   attention kernel (``csrc/attention/attention_kernels.cu``). 
+   attention kernel (``csrc/attention/attention_kernels.cu``).
    This kernel is designed to be compatible with
    vLLM's paged KV caches, where the key and value cache are stored in
    separate blocks (note that this block concept differs from the GPU
-   thread block. So in a later document, I will refer to vLLM paged
-   attention block as "block", while refer to GPU thread block as
-   "thread block").
+   thread block. Later in the document, vLLM paged attention block will
+   be referred to as "block", and GPU thread block as "thread block").
 -  To achieve high performance, this kernel relies on a specially
-   designed memory layout and access method, specifically when threads
+   designed memory layout and an access method, specifically when threads
    read data from global memory to shared memory. The purpose of this
    document is to provide a high-level explanation of the kernel
    implementation step by step, aiding those who wish to learn about the
-   vLLM multi-head query attention kernel. After going through this 
-   document, users will likely have a better understanding and feel easier
-   to follow the actual implementation.
--  Please note that this document may not cover all details, such as how
+   vLLM multi-head query attention kernel. Follow this document, to get a
+   better understanding and perform the actual implementation more easily.
+-  Please note that this document may not cover all the details, such as how
    to calculate the correct index for the corresponding data or the dot
    multiplication implementation. However, after reading this document
    and becoming familiar with the high-level logic flow, it should be
-   easier for you to read the actual code and understand the details.
+   easier to read the actual code and understand the details.
 
 Inputs
 ------
 
 -  The kernel function takes a list of arguments for the current thread
    to perform its assigned work. The three most important arguments are
-   the input pointers ``q``, ``k_cache``, and ``v_cache``, which point
+   the ``q``, ``k_cache``, and ``v_cache`` input pointers, which point
    to query, key, and value data on global memory that need to be read
-   and processed. The output pointer ``out`` points to global memory
+   and processed. The ``out`` output pointer points to global memory
    where the result should be written. These four pointers actually
    refer to multi-dimensional arrays, but each thread only accesses the
-   portion of data assigned to it. I have omitted all other runtime
-   parameters here for simplicity.
+   portion of data assigned to it. All other runtime parameters have been
+   omitted here for simplicity.
 
    .. code:: cpp
 
@@ -70,16 +68,16 @@ Inputs
 Concepts
 --------
 
--  Just before we dive into the calculation flow, I want to describe a
-   few concepts that are needed for later sections. However, you may
-   skip this section and return later if you encounter any confusing
-   terminologies.
+The following concepts will help understand the calculation flow presented
+in sections below. However, you may skip this section and return later if
+you encounter any confusing terminologies.
+
 -  **Sequence**: A sequence represents a client request. For example,
    the data pointed to by ``q`` has a shape of
-   ``[num_seqs, num_heads, head_size]``. That represents there are total
-   ``num_seqs`` of query sequence data are pointed by ``q``. Since this 
-   kernel is a single query attention kernel, each sequence only has one
-   query token. Hence, the ``num_seqs`` equals the total number of tokens 
+   ``[num_seqs, num_heads, head_size]``. That represents the total
+   ``num_seqs`` of query sequence data that are pointed by ``q``. Since this
+   kernel is a single query attention kernel, each sequence has only one
+   query token. Hence, the ``num_seqs`` equals the total number of tokens
    that are processed in the batch.
 -  **Context**: The context consists of the generated tokens from the
    sequence. For instance, ``["What", "is", "your"]`` are the context
@@ -91,13 +89,13 @@ Concepts
    calculate 16 bytes of data at a time. For value data, the vec size
    (``V_VEC_SIZE``) is determined so that each thread can fetch and
    calculate 16 bytes of data at a time. For example, if the
-   ``scalar_t`` is FP16 (2 bytes) and ``THREAD_GROUP_SIZE`` is 2, the 
+   ``scalar_t`` is FP16 (2 bytes) and ``THREAD_GROUP_SIZE`` is 2, the
    ``VEC_SIZE`` will be 4, while the ``V_VEC_SIZE`` will be 8.
 -  **Thread group**: The thread group is a small group of
    threads(\ ``THREAD_GROUP_SIZE``) that fetches and calculates one
    query token and one key token at a time. Each thread handles only a
    portion of the token data. The total number of elements processed by
-   one thread group is referred as ``x``. For example, if the thread
+   one thread group is referred to as ``x``. For example, if the thread
    group contains 2 threads and the head size is 8, then thread 0
    handles the query and key elements at index 0, 2, 4, 6, while thread
    1 handles the elements at index 1, 3, 5, 7.
@@ -129,23 +127,23 @@ Concepts
 Query
 -----
 
--  This section will introduce how query data is stored in memory and
-   fetched by each thread. As mentioned above, each thread group fetches
-   one query token data, while each thread itself only handles a part of
-   one query token data. Within each warp, every thread group will fetch
-   the same query token data, but will multiply it with different key
-   token data.
+This section will introduce how query data is stored in memory and
+fetched by each thread. As mentioned above, each thread group fetches
+one query token data, while each thread itself only handles a part of
+one query token data. Within each warp, every thread group will fetch
+the same query token data, but will multiply it with different key
+token data.
 
-   .. code:: cpp
+.. code:: cpp
 
-      const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
+   const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
 
-   .. figure:: ../../assets/kernel/query.png
-      :alt: query
-      :width: 70%
-      :align: center
+.. figure:: ../../assets/kernel/query.png
+   :alt: query
+   :width: 70%
+   :align: center
 
-      Query data of one token at one head
+   Query data of one token at one head
 
 -  Each thread defines its own ``q_ptr`` which points to the assigned
    query token data on global memory. For example, if ``VEC_SIZE`` is 4
@@ -175,24 +173,24 @@ Query
 Key
 ---
 
--  Similar to the "Query" section, this section introduces memory layout
-   and assignment for keys. While each thread group only handle one
-   query token one kernel run, it may handle multiple key tokens across
-   multiple iterations. Meanwhile, each warp will process multiple blocks
-   of key tokens in multiple iterations, ensuring that all context
-   tokens are processed by the entire thread group after the kernel run.
-   In this context, "handle" refers to performing the dot multiplication
-   between query data and key data.
+Similarly to "Query", this section introduces memory layout
+and assignment for keys. While each thread group only handles one
+query token one kernel run, it may handle multiple key tokens across
+multiple iterations. Meanwhile, each warp will process multiple blocks
+of key tokens in multiple iterations, ensuring that all context
+tokens are processed by the entire thread group after the kernel run.
+In this context, "handle" refers to performing the dot multiplication
+between query data and key data.
 
-   .. code:: cpp
+.. code:: cpp
 
-      const scalar_t* k_ptr = k_cache + physical_block_number * kv_block_stride
-                          + kv_head_idx * kv_head_stride
-                          + physical_block_offset * x;
+   const scalar_t* k_ptr = k_cache + physical_block_number * kv_block_stride
+                       + kv_head_idx * kv_head_stride
+                       + physical_block_offset * x;
 
--  Unlike to ``q_ptr``, ``k_ptr`` in each thread will point to different
-   key token at different iterations. As shown above, that ``k_ptr``
-   points to key token data based on ``k_cache`` at assigned block,
+-  ``k_ptr``, unlike ``q_ptr``, will point to different
+   key token at different iterations in each thread. As shown above, ``k_ptr``
+   points to key token data based on ``k_cache`` at the assigned block,
    assigned head and assigned token.
 
    .. figure:: ../../assets/kernel/key.png
@@ -204,12 +202,12 @@ Key
 
 -  The diagram above illustrates the memory layout for key data. It
    assumes that the ``BLOCK_SIZE`` is 16, ``HEAD_SIZE`` is 128, ``x`` is
-   8, ``THREAD_GROUP_SIZE`` is 2, and there are a total of 4 warps. Each
+   8, ``THREAD_GROUP_SIZE`` is 2, and there is a total of 4 warps. Each
    rectangle represents all the elements for one key token at one head,
    which will be processed by one thread group. The left half shows the
    total 16 blocks of key token data for warp 0, while the right half
    represents the remaining key token data for other warps or
-   iterations. Inside each rectangle, there are a total 32 vecs (128
+   iterations. Inside each rectangle, there is a total of 32 vecs (128
    elements for one token) that will be processed by 2 threads (one
    thread group) separately.
 
@@ -235,18 +233,17 @@ Key
    coalescing. For instance, thread 0 will read vec 0, while thread 1
    will read vec 1. In the next inner loop, thread 0 will read vec 2,
    while thread 1 will read vec 3, and so on.
--  You may still be a little confused about the overall flow. Don't
-   worry, please keep reading the next "QK" section. It will illustrate
-   the query and key calculation flow in a clearer and higher-level
-   manner.
+-  If you are confused about the overall flow, please read the "QK"
+   section below. It illustrates the query and key calculation
+   flow in a clearer and higher-level manner.
 
 QK
 ---
 
--  As shown the pseudo code below, before the entire for loop block, we
+-  As shown in the pseudo code below, before the entire "for" loop block, we
    fetch the query data for one token and store it in ``q_vecs``. Then,
-   in the outer for loop, we iterate through different ``k_ptrs`` that
-   point to different tokens and prepare the ``k_vecs`` in the inner for
+   in the outer "for" loop, we iterate through different ``k_ptrs`` that
+   point to different tokens and prepare ``k_vecs`` in the inner "for"
    loop. Finally, we perform the dot multiplication between the
    ``q_vecs`` and each ``k_vecs``.
 
@@ -263,19 +260,18 @@ QK
       }
 
 -  As mentioned before, for each thread, it only fetches part of the
-   query and key token data at a time. However, there will be a cross
-   thread group reduction happen in the ``Qk_dot<>::dot`` . So ``qk``
+   query and key token data at a time. However, a cross thread group
+   reduction will happen in the ``Qk_dot<>::dot``. Therefore, ``qk``
    returned here is not just between part of the query and key token dot
-   multiplication, but actually a full result between entire query and
+   multiplication but actually a full result between entire query and
    key token data.
 -  For example, if the value of ``HEAD_SIZE`` is 128 and
-   ``THREAD_GROUP_SIZE`` is 2, each thread's ``k_vecs`` will contain
-   total 64 elements. However, the returned ``qk`` is actually the
+   ``THREAD_GROUP_SIZE`` is 2, each thread's ``k_vecs`` will contain a
+   total of 64 elements. However, the returned ``qk`` is actually the
    result of dot multiplication between 128 query elements and 128 key
-   elements. If you want to learn more about the details of the dot
-   multiplication and reduction, you may refer to the implementation of
-   ``Qk_dot<>::dot``. However, for the sake of simplicity, I will not
-   cover it in this document.
+   elements. For more details on the dot multiplication and reduction,
+   you may refer to the implementation of ``Qk_dot<>::dot``. However,
+   for the sake of simplicity, it is not covered in this document.
 
 Softmax
 -------
@@ -312,9 +308,9 @@ Softmax
          qk_max = mask ? qk_max : fmaxf(qk_max, qk);
       }
 
--  Please note that the ``logits`` here is on shared memory, so each
+-  Note that the ``logits`` here is on shared memory, so each
    thread group will set the fields for its own assigned context tokens.
-   Overall, the size of logits should be number of context tokens.
+   Overall, the size of logits should be a number of context tokens.
 
    .. code:: cpp
 
@@ -326,9 +322,9 @@ Softmax
          red_smem[warp_idx] = qk_max;
       }
 
--  Then we need to get the reduced ``qk_max`` across each warp. The main
-   idea is to make threads in warp to communicate with each other and
-   get the final max ``qk`` .
+-  Then, we need to get the reduced ``qk_max`` across each warp. The main
+   idea is to make threads in a warp to communicate with each other and
+   get the final max ``qk``.
 
    .. code:: cpp
 
@@ -337,8 +333,8 @@ Softmax
       }
       qk_max = VLLM_SHFL_SYNC(qk_max, 0);
 
--  Finally, we can get the reduced ``qk_max`` from whole thread block by
-   compare the ``qk_max`` from all warps in this thread block. Then we
+-  Finally, we can get the reduced ``qk_max`` from a whole thread block by
+   comparing the ``qk_max`` from all warps in this thread block. Then, we
    need to broadcast the final result to each thread.
 
 ``exp_sum``
@@ -357,11 +353,11 @@ Softmax
       ...
       exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
 
--  Firstly, sum all exp values from each thread group, and meanwhile,
+-  First, we sum all exp values from each thread group, and meanwhile,
    convert each entry of ``logits`` from ``qk`` to ``exp(qk - qk_max)``.
-   Please note, the ``qk_max`` here is already the max ``qk`` across the
-   whole thread block. And then we can do reduction for ``exp_sum``
-   across whole thread block just like the ``qk_max``.
+   Note that the ``qk_max`` here is already the max ``qk`` across the
+   whole thread block. Then, we can do reduction for ``exp_sum``
+   across whole thread block, just like the ``qk_max``.
 
    .. code:: cpp
 
@@ -371,7 +367,7 @@ Softmax
       }
 
 -  Finally, with the reduced ``qk_max`` and ``exp_sum``, we can obtain
-   the final normalized softmax result as ``logits``. This ``logits``
+   the final normalized softmax result as ``logits``. The ``logits``
    variable will be used for dot multiplication with the value data in
    later steps. Now, it should store the normalized softmax result of
    ``qk`` for all assigned context tokens.
@@ -400,9 +396,9 @@ Value
 
    List of ``v_vec`` for one thread
 
--  Now we need to retrieve the value data and perform dot multiplication
+-  Now, we need to retrieve the value data and perform dot multiplication
    with ``logits``. Unlike query and key, there is no thread group
-   concept for value data. As shown in diagram, different from key token
+   concept for value data. As shown in the diagram, contrary to key token
    memory layout, elements from the same column correspond to the same
    value token. For one block of value data, there are ``HEAD_SIZE`` of
    rows and ``BLOCK_SIZE`` of columns that are split into multiple
@@ -414,8 +410,8 @@ Value
    needs to be dot multiplied with the corresponding ``logits_vec``,
    which is also ``V_VEC_SIZE`` elements from ``logits``. Overall, with
    multiple inner iterations, each warp will process one block of value
-   tokens. And with multiple outer iterations, the whole context value
-   tokens are processd
+   tokens. With multiple outer iterations, the whole context value
+   tokens are processed.
 
    .. code:: cpp
 
@@ -442,16 +438,17 @@ Value
    thread fetches 8 value elements for 8 tokens at a time. Each element
    is from different tokens at the same head position. If ``HEAD_SIZE``
    is 128 and ``WARP_SIZE`` is 32, for each inner loop, a warp needs to
-   fetch ``WARP_SIZE * V_VEC_SIZE = 256`` elements. This means there are
+   fetch ``WARP_SIZE * V_VEC_SIZE = 256`` elements. This means there is
    a total of 128 \* 16 / 256 = 8 inner iterations for a warp to handle
-   a whole block of value tokens. And each ``accs`` in each thread
-   contains 8 elements that accumulated at 8 different head positions.
+   a whole block of value tokens. Each ``accs`` in each thread
+   contains 8 elements that are accumulated at 8 different head positions.
    For the thread 0, the ``accs`` variable will have 8 elements, which
-   are 0th, 32th … 224th elements of a value head that are accumulated
-   from all assigned 8 tokens.
+   are 0th, 32th … 224th elements of a value head. The elements are
+   accumulated from all assigned 8 tokens.
 
 LV
 ---
+
 -  Now, we need to perform reduction for ``accs`` within each warp. This
    process allows each thread to accumulate the ``accs`` for the
    assigned head positions of all tokens in one block.
@@ -468,7 +465,7 @@ LV
 
 -  Next, we perform reduction for ``accs`` across all warps, allowing
    each thread to have the accumulation of ``accs`` for the assigned
-   head positions of all context tokens. Please note that each ``accs``
+   head positions of all context tokens. Note that each ``accs``
    in every thread only stores the accumulation for a portion of
    elements of the entire head for all context tokens. However, overall,
    all results for output have been calculated but are just stored in

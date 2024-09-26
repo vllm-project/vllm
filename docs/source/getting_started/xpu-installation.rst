@@ -3,7 +3,7 @@
 Installation with XPU
 ========================
 
-vLLM initially supports basic model inferencing and serving on Intel GPU platform.
+vLLM initially supports basic model inference and serving on an Intel GPU platform.
 
 Table of contents:
 
@@ -42,21 +42,22 @@ Build from source
 
 - First, install required driver and intel OneAPI 2024.2 or later.
 
-- Second, install Python packages for vLLM XPU backend building:
+- Secondly, install Python packages for building vLLM XPU backend:
 
 .. code-block:: console
 
-    $ source /opt/intel/oneapi/setvars.sh
-    $ pip install --upgrade pip
-    $ pip install -v -r requirements-xpu.txt 
+   $ source /opt/intel/oneapi/setvars.sh
+   $ pip install --upgrade pip
+   $ pip install -v -r requirements-xpu.txt
 
-- Finally, build and install vLLM XPU backend: 
+- Finally, build and install vLLM XPU backend:
 
 .. code-block:: console
 
-    $ VLLM_TARGET_DEVICE=xpu python setup.py install
+   $ VLLM_TARGET_DEVICE=xpu python setup.py install
 
 .. note::
-    - FP16 is the default data type in the current XPU backend. The BF16 data
-      type will be supported in the future.
+
+   FP16 is the default data type in the current XPU backend. The BF16 data
+   type will be supported in the future.
 
