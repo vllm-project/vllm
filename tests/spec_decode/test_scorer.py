@@ -1,11 +1,13 @@
-from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
-from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-from vllm.spec_decode.MQA_scorer import MQAScorer
-from vllm.worker.worker import Worker
-from .utils import create_worker, create_batch
 import pytest
 import torch
+
 from vllm.sequence import ExecuteModelRequest
+from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
+from vllm.spec_decode.MQA_scorer import MQAScorer
+from vllm.worker.worker import Worker
+
+from .utils import create_batch, create_worker
 
 
 def create_proposal(batch_size: int, propose_len: int, vocab_size: int,
@@ -32,7 +34,7 @@ def assert_score_equal(score1: SpeculativeScores,
 def test_scoroer(model_name: str, batch_size: int, propose_len: int,
                  device: str) -> None:
     """
-    Comapre the batch expansion scorer and mqa scorer return the same score
+    Compare the batch expansion scorer and mqa scorer return the same score
     """
     seed = 0
     block_size = 32
@@ -40,7 +42,8 @@ def test_scoroer(model_name: str, batch_size: int, propose_len: int,
     scorer_worker = create_worker(Worker, model_name, block_size,
                                   num_gpu_blocks, seed)
     scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor = True
-    scorer_worker.model_runner.model.sampler.should_modify_greedy_probs_inplace = True
+    scorer_worker.model_runner.model.sampler.\
+        should_modify_greedy_probs_inplace = True
 
     vocab_size = scorer_worker.vocab_size
     proposals = create_proposal(batch_size, propose_len, vocab_size, device)

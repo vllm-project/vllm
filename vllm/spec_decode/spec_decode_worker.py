@@ -593,12 +593,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         execute_model_req.previous_hidden_states = self.previous_hidden_states
         self.previous_hidden_states = None
 
-        print("-------------Start Propose------------------------")
         with Timer() as proposal_timer:
             # Generate proposals using draft worker.
             proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step)
-        print("propose", proposals)
 
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
@@ -607,13 +605,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         execute_model_req.previous_hidden_states = None
 
-        print("-------------Start Verify------------------------")
         with Timer() as scoring_timer:
             proposal_scores = self.scorer.score_proposals(
                 execute_model_req,
                 proposals,
             )
-        print("score", proposal_scores)
 
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
@@ -624,7 +620,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                        scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
 
-        print("accept", accepted_token_ids)
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
             accepted_token_ids,

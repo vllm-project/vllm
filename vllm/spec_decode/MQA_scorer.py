@@ -75,9 +75,12 @@ class MQAScorer(SpeculativeScorer):
         all_logprobs = target_sampler_output.logprobs.reshape(
             bs, k + 1, self._vocab_size)
 
+        hidden_states = target_sampler_output.hidden_states.reshape(
+            bs, (k + 1), -1)
         return SpeculativeScores(probs=all_probs,
                                  token_ids=all_tokens,
-                                 logprobs=all_logprobs)
+                                 logprobs=all_logprobs,
+                                 hidden_states=hidden_states)
 
     def _create_target_seq_id_iterator(
             self, seq_ids: List[SeqId]) -> Iterator[TargetSeqId]:
