@@ -8,6 +8,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.utils import print_warning_once
 
 from .data import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
                    SingletonPromptInputs)
@@ -71,20 +72,21 @@ class InputPreprocessor:
         '''
 
         if not self.is_encoder_decoder_model():
-            logger.warning("Using None for decoder start token id because "
-                           "this is not an encoder/decoder model.")
+            print_warning_once("Using None for decoder start token id because "
+                               "this is not an encoder/decoder model.")
             return None
 
         if (self.model_config is None or self.model_config.hf_config is None):
-            logger.warning("Using None for decoder start token id because "
-                           "model config is not available.")
+            print_warning_once("Using None for decoder start token id because "
+                               "model config is not available.")
             return None
 
         dec_start_token_id = getattr(self.model_config.hf_config,
                                      'decoder_start_token_id', None)
         if dec_start_token_id is None:
-            logger.warning("Falling back on <BOS> for decoder start token id "
-                           "because decoder start token id is not available.")
+            print_warning_once("Falling back on <BOS> for decoder start token "
+                               "id because decoder start token id is not "
+                               "available.")
             dec_start_token_id = self.get_bos_token_id()
 
         return dec_start_token_id
