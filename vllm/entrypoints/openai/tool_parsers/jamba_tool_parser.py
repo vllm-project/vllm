@@ -4,13 +4,14 @@ from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
-from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (DeltaMessage,
-                                              ExtractedToolCallInformation, ToolCall, FunctionCall, DeltaToolCall,
-                                              DeltaFunctionCall)
+from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+                                              DeltaToolCall,
+                                              ExtractedToolCallInformation,
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers import ToolParser
-from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
+from vllm.entrypoints.openai.tool_parsers.utils import (
+    extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizers import MistralTokenizer
@@ -19,13 +20,15 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-
 class JambaToolParser(ToolParser):
+
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
         if isinstance(self.model_tokenizer, MistralTokenizer):
-            raise ValueError("Detected a MistralTokenizer tokenizer when using a Jamba model")
+            raise ValueError(
+                "Detected a MistralTokenizer tokenizer when using a Jamba model"
+            )
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: List[Dict] = []
@@ -37,26 +40,31 @@ class JambaToolParser(ToolParser):
         self.tool_calls_end_token: str = "</tool_calls>"
 
         self.tool_calls_regex = re.compile(
-            rf"{self.tool_calls_start_token}(.*?){self.tool_calls_end_token}", re.DOTALL
-            # rf"{self.tool_calls_start_token}(.*?){self.tool_calls_end_token}|{self.tool_calls_start_token}(.*)", re.DOTALL
-        )
+            rf"{self.tool_calls_start_token}(.*?){self.tool_calls_end_token}",
+            re.DOTALL)
 
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction.")
-        self.tool_calls_start_token_id: int = self.model_tokenizer.vocab.get(self.tool_calls_start_token, None)
-        self.tool_calls_end_token_id: int = self.model_tokenizer.vocab.get(self.tool_calls_end_token, None)
-        if self.tool_calls_start_token_id is None or self.tool_calls_end_token_id is None:
+        self.tool_calls_start_token_id: int = self.model_tokenizer.vocab.get(
+            self.tool_calls_start_token, None)
+        self.tool_calls_end_token_id: int = self.model_tokenizer.vocab.get(
+            self.tool_calls_end_token, None)
+        if (self.tool_calls_start_token_id is None
+                or self.tool_calls_end_token_id is None):
             raise RuntimeError(
                 "Jamba Tool parser could not locate tool calls start/end "
                 "tokens in the tokenizer!")
 
     def load_tool_string(self):
-        # TODO: maybe we want to implement a function that allows the model to make some mistakes
+        # TODO: maybe we want to implement a function that allows
+        #  the model to make some mistakes
         # options:
-        # 1. use json_repair to fix the string. But it behaves wierd
-        # 2. use a regex to extract the string and then load (or not) it
+        # 1. use json_repair to fix the string. But it behaves
+        # weird
+        # 2. use a regex to extract the string and then
+        # load (or not) it
         # Anyway, these are all fallbacks if json.loads fails
         pass
 
@@ -77,7 +85,7 @@ class JambaToolParser(ToolParser):
                 # tag and end-of-string so the result of
                 # findall is an array of tuples where one is a function call and
                 # the other is None
-                function_calls = self.tool_calls_regex.search(model_output).group(1)
+                function_calls = self.tool_calls_regex.findall(model_output)[0]
 
                 # TODO: edit comment
                 # load the JSON, and then use it to build the Function and
@@ -97,11 +105,12 @@ class JambaToolParser(ToolParser):
                     for function_call in raw_function_calls
                 ]
 
-                content = model_output[:model_output.find(self.tool_calls_start_token)]
+                content = model_output[:model_output.
+                                       find(self.tool_calls_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content if content.removeprefix(" ") else None)
+                    content=content if content != " " else None)
 
             except Exception as e:
                 logger.error("Error in extracting tool call from response %s",
@@ -110,15 +119,14 @@ class JambaToolParser(ToolParser):
                                                     tool_calls=[],
                                                     content=model_output)
 
-
     def extract_tool_calls_streaming(
-            self,
-            previous_text: str,
-            current_text: str,
-            delta_text: str,
-            previous_token_ids: Sequence[int],
-            current_token_ids: Sequence[int],
-            delta_token_ids: Sequence[int],
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
 
         # if the tool call token is not in the tokens generated so far, append
@@ -148,7 +156,9 @@ class JambaToolParser(ToolParser):
             # replace BOT token with empty string, and convert single quotes
             # to double to allow parsing as JSON since mistral uses single
             # quotes instead of double for tool calls
-            parsable_arr = current_text.split(self.tool_calls_start_token)[-1].split(self.tool_calls_end_token)[0]
+            parsable_arr = current_text.split(
+                self.tool_calls_start_token)[-1].split(
+                    self.tool_calls_end_token)[0]
 
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
@@ -189,7 +199,7 @@ class JambaToolParser(ToolParser):
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
                                               arguments=diff).model_dump(
-                                              exclude_none=True))
+                                                  exclude_none=True))
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += diff
@@ -218,7 +228,7 @@ class JambaToolParser(ToolParser):
                                       id=f"chatcmpl-tool-{random_uuid()}",
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
-                                          exclude_none=True))
+                                              exclude_none=True))
                     ])
                     self.current_tool_name_sent = True
                 else:
@@ -248,8 +258,8 @@ class JambaToolParser(ToolParser):
                                  cur_arguments_json)
 
                     arguments_delta = cur_arguments_json[:cur_arguments_json.
-                                                          index(new_text) +
-                                                          len(new_text)]
+                                                         index(new_text) +
+                                                         len(new_text)]
                     logger.debug("First tokens in arguments received: %s",
                                  arguments_delta)
                     delta = DeltaMessage(tool_calls=[
@@ -274,7 +284,7 @@ class JambaToolParser(ToolParser):
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
                                           arguments=argument_diff).model_dump(
-                                          exclude_none=True))
+                                              exclude_none=True))
                     ])
                     self.streamed_args_for_tool[
                         self.current_tool_id] += argument_diff

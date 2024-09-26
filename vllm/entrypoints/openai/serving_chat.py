@@ -30,8 +30,9 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     PromptAdapterPath,
                                                     TextTokensPrompt)
 from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
+                                                  JambaToolParser,
                                                   MistralToolParser,
-                                                  ToolParser, JambaToolParser)
+                                                  ToolParser)
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
