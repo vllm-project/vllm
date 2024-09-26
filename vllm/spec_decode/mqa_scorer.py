@@ -75,8 +75,10 @@ class MQAScorer(SpeculativeScorer):
         all_logprobs = target_sampler_output.logprobs.reshape(
             bs, k + 1, self._vocab_size)
 
-        hidden_states = target_sampler_output.hidden_states.reshape(
-            bs, (k + 1), -1)
+        hidden_states = None
+        if target_sampler_output.hidden_states is not None:
+            hidden_states = target_sampler_output.hidden_states.reshape(
+                bs, (k + 1), -1)
         return SpeculativeScores(probs=all_probs,
                                  token_ids=all_tokens,
                                  logprobs=all_logprobs,
