@@ -175,13 +175,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 posterior_alpha=typical_acceptance_sampler_posterior_alpha,
             )
         logger.info(
-            "[Speculative Decoding] Configuring \
-            SpecDecodeWorker with sampler=%s", type(spec_decode_sampler))
+            "[Speculative Decoding] Configuring"
+            " SpecDecodeWorker with sampler=%s", type(spec_decode_sampler))
 
         if scorer_worker.model_runner.attn_backend.get_name() != "flash-attn":
             disable_mqa_scorer = True
             logger.info("[Speculative Decoding] Disabling MQA scorer as the "
                         "MQA is only available with flash attn backend.")
+
+        if ngram_prompt_lookup_max > 0:
+            disable_mqa_scorer = True
+            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
+                        "NGramWorker does not support MQA scorer.")
 
         return SpecDecodeWorker(
             proposer_worker,
