@@ -399,17 +399,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     WITH_SOABI)
 
   message(STATUS "Enabling phi extension.")
-  add_dependencies(default _phi_C)
 endif()
-
-if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
-  message(STATUS "Enabling C extension.")
-  add_dependencies(default _C)
-
-  message(STATUS "Enabling moe extension.")
-  add_dependencies(default _moe_C)
-endif()
-
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
