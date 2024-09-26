@@ -573,7 +573,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 else:
                     out = output
                 ops.paged_attention_rocm(
-                    output[num_prefill_tokens:],
+                    out,
                     exp_sums,
                     max_logits,
                     tmp_output,
