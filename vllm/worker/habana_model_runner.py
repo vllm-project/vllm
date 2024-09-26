@@ -1790,6 +1790,7 @@ class HabanaModelRunner(
                 attn_backend=self.attn_backend,
             ))
 
+    @torch.inference_mode()
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
