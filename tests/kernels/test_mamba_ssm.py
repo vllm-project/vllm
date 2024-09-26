@@ -98,7 +98,8 @@ def selective_scan_ref(u,
                        delta_bias=None,
                        delta_softplus=False,
                        return_last_state=False,
-                       prev_state=None):
+                       prev_state=None,
+                       final_state_out=None):
     """
     u: r(B D L)
     delta: r(B D L)
@@ -138,7 +139,6 @@ def selective_scan_ref(u,
             deltaB_u = torch.einsum('bdl,bdnl,bdl->bdln', delta, B, u)
     if is_variable_C and C.dim() == 4:
         C = repeat(C, "B G N L -> B (G H) N L", H=dim // C.shape[1])
-    last_state = None
     for i in range(u.shape[2]):
         x = deltaA[:, :, i] * x + deltaB_u[:, :, i]
         if not is_variable_C:
@@ -149,14 +149,17 @@ def selective_scan_ref(u,
             else:
                 y = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
         if i == u.shape[2] - 1:
-            last_state = x
+            if final_state_out is None:
+                final_state_out = x
+            else:
+                final_state_out.copy_(x)
         ys.append(y)
     y = torch.stack(ys, dim=2)  # (batch dim L)
     out = y if D is None else y + u * rearrange(D, "d -> d 1")
     if z is not None:
         out = out * F.silu(z)
     out = out.to(dtype=dtype_in)
-    return out if not return_last_state else (out, last_state)
+    return out if not return_last_state else (out, final_state_out)
 
 
 def selective_scan_opcheck_fn(u,
@@ -496,7 +499,8 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
             delta_softplus=delta_softplus,
             return_last_state=return_last_state,
             prev_state=prev_state_ref[cache_indices[i]].unsqueeze(0)
-            if has_initial_state[i] else None)
+            if has_initial_state[i] else None,
+            final_state_out=prev_state_ref[cache_indices[i]].unsqueeze(0))
         outs.append(out_ref_s)
         last_state_refs.append(last_state_ref_s)
     if len(outs) > 1:
