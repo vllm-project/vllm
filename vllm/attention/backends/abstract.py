@@ -107,10 +107,10 @@ class AttentionMetadata:
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
 
-    # The index tensors that relate multi-modal embeddings to the corresponding
+    # The index maps that relate multi-modal embeddings to the corresponding
     # placeholders.
     multi_modal_placeholder_maps: Optional[Dict[
-        str, MultiModalPlaceholderMap.IndexTensors]]
+        str, MultiModalPlaceholderMap.IndexMap]]
 
     @property
     @abstractmethod

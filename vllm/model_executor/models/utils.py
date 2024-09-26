@@ -156,8 +156,7 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
 
 def merge_multimodal_embeddings_from_map(
         inputs_embeds: torch.Tensor, multimodal_embeddings: NestedTensors,
-        placeholder_map: MultiModalPlaceholderMap.IndexTensors
-) -> torch.Tensor:
+        placeholder_map: MultiModalPlaceholderMap.IndexMap) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` using the provided 
     placeholder map .

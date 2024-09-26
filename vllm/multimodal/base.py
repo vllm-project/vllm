@@ -384,9 +384,9 @@ class MultiModalPlaceholderMap:
     Relates multi-modal embeddings to their corresponding placeholders.
     """
 
-    class IndexTensors(NamedTuple):
-        src: torch.Tensor
-        dest: torch.Tensor
+    class IndexMap(NamedTuple):
+        src: List[int]
+        dest: List[int]
 
     src_ranges: List[range]
     """
@@ -490,7 +490,7 @@ class MultiModalPlaceholderMap:
             for r in other.dest_ranges)
         self.dest_len += other.dest_len
 
-    def index_tensors(self, device: str) -> "IndexTensors":
+    def index_map(self) -> "IndexMap":
         src_indices = [i for r in self.src_ranges for i in r]
         dest_indices = [i for r in self.dest_ranges for i in r]
 
@@ -499,6 +499,5 @@ class MultiModalPlaceholderMap:
                 f"The number of source ({len(src_indices)}) and destination "
                 f"indices ({len(dest_indices)}) must be the same.")
 
-        return MultiModalPlaceholderMap.IndexTensors(
-            src=torch.tensor(src_indices, dtype=torch.int64, device=device),
-            dest=torch.tensor(dest_indices, dtype=torch.int64, device=device))
+        return MultiModalPlaceholderMap.IndexMap(src=src_indices,
+                                                 dest=dest_indices)

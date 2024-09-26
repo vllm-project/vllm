@@ -259,7 +259,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                     dtype=torch.int32,
                                     device=device)
         placeholder_maps = {
-            key: placeholder_map.index_tensors(device)
+            key: placeholder_map.index_map()
             for key, placeholder_map in
             self.multimodal_placeholder_maps.items()
         }

@@ -276,7 +276,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
         placeholder_maps = {
-            key: placeholder_map.index_tensors(self.device)
+            key: placeholder_map.index_map()
             for key, placeholder_map in multi_modal_placeholder_maps.items()
         }
 
