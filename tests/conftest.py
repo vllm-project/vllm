@@ -169,6 +169,12 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
         cleanup()
 
 
+@pytest.fixture(autouse=True)
+def dynamo_reset():
+    yield
+    torch._dynamo.reset()
+
+
 @pytest.fixture
 def example_prompts() -> List[str]:
     prompts = []
@@ -675,8 +681,6 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
-        assert sampling_params.logprobs is not None
-
         if images is not None:
             assert len(prompts) == len(images)
 
@@ -754,7 +758,7 @@ class VllmRunner:
             temperature=0.0,
             max_tokens=max_tokens,
             logprobs=num_logprobs,
-            prompt_logprobs=(num_prompt_logprobs),
+            prompt_logprobs=num_prompt_logprobs,
             stop_token_ids=stop_token_ids)
 
         return self.generate_w_logprobs(prompts,
