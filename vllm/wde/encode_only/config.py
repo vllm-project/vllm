@@ -1,26 +1,21 @@
 from dataclasses import dataclass, fields
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.wde.core.config import EngineConfig, ModelConfig
-from vllm.wde.prefill_only.config import PrefillOnlySchedulerConfig
+from vllm.wde.prefill_only.config import (PrefillOnlyParallelConfig,
+                                          PrefillOnlySchedulerConfig)
 
 logger = init_logger(__name__)
 
 _GB = 1 << 30
 
 
-class EncodeOnlyModelConfig(ModelConfig):
-    pass
-
-
-class EncodeOnlySchedulerConfig(PrefillOnlySchedulerConfig):
-    pass
-
-
 @dataclass(frozen=True)
 class EncodeOnlyEngineConfig(EngineConfig):
-    model_config: EncodeOnlyModelConfig
-    scheduler_config: EncodeOnlySchedulerConfig
+    model_config: ModelConfig
+    scheduler_config: PrefillOnlySchedulerConfig
+    parallel_config: Optional[PrefillOnlyParallelConfig]
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs.
@@ -46,3 +41,6 @@ class EncodeOnlyEngineConfig(EngineConfig):
             self.model_config.served_model_name,
             self.scheduler_config.max_num_on_the_fly,
             self.scheduler_config.scheduling)
+        if self.parallel_config is not None:
+            logger.info("Parallel config: data_parallel_size=%d",
+                        self.parallel_config.data_parallel_size)

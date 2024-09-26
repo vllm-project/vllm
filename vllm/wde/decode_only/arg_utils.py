@@ -8,7 +8,8 @@ from vllm.wde.core.config import (DeviceConfig, LoadConfig,
 from vllm.wde.decode_only.config import (DecodeOnlyEmbeddingSchedulerConfig,
                                          DecodeOnlyEngineConfig,
                                          DecodeOnlyModelConfig,
-                                         DecodeOnlySchedulerConfig)
+                                         DecodeOnlySchedulerConfig,
+                                         PrefillOnlyParallelConfig)
 
 logger = init_logger(__name__)
 
@@ -45,6 +46,8 @@ class DecodeOnlyEngineArgs(EngineArgs):
     max_num_seqs: int = 256
     max_num_on_the_fly: int = 3
     scheduling: str = "async"
+
+    data_parallel_size: int = 0
 
     disable_log_stats: bool = False
     revision: Optional[str] = None
@@ -95,6 +98,13 @@ class DecodeOnlyEngineArgs(EngineArgs):
         else:
             scheduler_config = DecodeOnlySchedulerConfig()
 
+        if (model_config.output_last_hidden_states
+                and self.data_parallel_size > 0):
+            parallel_config = PrefillOnlyParallelConfig(
+                data_parallel_size=self.data_parallel_size)
+        else:
+            parallel_config = None
+
         load_config = LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
@@ -105,4 +115,5 @@ class DecodeOnlyEngineArgs(EngineArgs):
         return DecodeOnlyEngineConfig(model_config=model_config,
                                       scheduler_config=scheduler_config,
                                       device_config=device_config,
-                                      load_config=load_config)
+                                      load_config=load_config,
+                                      parallel_config=parallel_config)

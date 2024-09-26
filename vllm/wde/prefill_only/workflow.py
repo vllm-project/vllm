@@ -22,11 +22,25 @@ class PrefillOnlyWorkflow(Workflow):
     @classmethod
     def from_engine(cls, engine):
         workflow = cls()
-        if engine.engine_config.scheduler_config.scheduling in ["sync"]:
-            workflow.Executor += ":GPUExecutor"
-        elif engine.engine_config.scheduler_config.scheduling in [
+
+        if engine.engine_config.parallel_config is None:
+            if engine.engine_config.scheduler_config.scheduling in ["sync"]:
+                workflow.Executor += ":GPUExecutor"
+            elif engine.engine_config.scheduler_config.scheduling in [
+                    "async", "double_buffer"
+            ]:
+                workflow.Executor += ":GPUAsyncExecutor"
+        else:
+            assert engine.engine_config.parallel_config.data_parallel_size > 0
+            assert engine.engine_config.scheduler_config.scheduling in [
                 "async", "double_buffer"
-        ]:
-            workflow.Executor += ":GPUAsyncExecutor"
+            ]
+
+            engine.engine_config.scheduler_config.max_num_on_the_fly *= (
+                engine.engine_config.parallel_config.data_parallel_size)
+
+            workflow.Executor = (
+                "vllm.wde.prefill_only.executor.gpu_data_parallelism_executor:"
+                "GPUDataParallelismExecutor")
 
         return workflow

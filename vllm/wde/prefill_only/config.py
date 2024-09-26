@@ -1,7 +1,7 @@
 from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.wde.core.config import SchedulerConfig
+from vllm.wde.core.config import ParallelConfig, SchedulerConfig
 
 logger = init_logger(__name__)
 
@@ -57,3 +57,12 @@ class PrefillOnlySchedulerConfig(SchedulerConfig):
         if self.scheduling not in ["sync", "async", "double_buffer"]:
             raise ValueError(f"scheduling {self.scheduling} must "
                              f"in sync, async double_buffer")
+
+
+class PrefillOnlyParallelConfig(ParallelConfig):
+
+    def __init__(
+        self,
+        data_parallel_size: int,
+    ):
+        self.data_parallel_size = data_parallel_size

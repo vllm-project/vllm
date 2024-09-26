@@ -5,9 +5,9 @@ from vllm.logger import init_logger
 from vllm.wde.core.arg_utils import EngineArgs
 from vllm.wde.core.config import (DeviceConfig, LoadConfig,
                                   filter_unexpected_fields)
-from vllm.wde.encode_only.config import (EncodeOnlyEngineConfig,
-                                         EncodeOnlyModelConfig,
-                                         EncodeOnlySchedulerConfig)
+from vllm.wde.encode_only.config import (EncodeOnlyEngineConfig, ModelConfig,
+                                         PrefillOnlyParallelConfig,
+                                         PrefillOnlySchedulerConfig)
 
 logger = init_logger(__name__)
 
@@ -35,11 +35,15 @@ class EncodeOnlyEngineArgs(EngineArgs):
     quantization_param_path: Optional[str] = None
     disable_sliding_window: bool = False
     seed: int = 0
+
     max_model_len: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_num_on_the_fly: int = 3
     scheduling: str = "async"
+
+    data_parallel_size: int = 0
+
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -58,7 +62,7 @@ class EncodeOnlyEngineArgs(EngineArgs):
 
     def create_engine_config(self) -> EncodeOnlyEngineConfig:
         device_config = DeviceConfig(device=self.device)
-        model_config = EncodeOnlyModelConfig(
+        model_config = ModelConfig(
             model=self.model,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -77,7 +81,7 @@ class EncodeOnlyEngineArgs(EngineArgs):
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name)
 
-        scheduler_config = EncodeOnlySchedulerConfig(
+        scheduler_config = PrefillOnlySchedulerConfig(
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
@@ -91,7 +95,14 @@ class EncodeOnlyEngineArgs(EngineArgs):
             ignore_patterns=self.ignore_patterns,
         )
 
+        if self.data_parallel_size > 0:
+            parallel_config = PrefillOnlyParallelConfig(
+                data_parallel_size=self.data_parallel_size)
+        else:
+            parallel_config = None
+
         return EncodeOnlyEngineConfig(model_config=model_config,
                                       scheduler_config=scheduler_config,
                                       device_config=device_config,
-                                      load_config=load_config)
+                                      load_config=load_config,
+                                      parallel_config=parallel_config)

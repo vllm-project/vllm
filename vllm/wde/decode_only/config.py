@@ -3,7 +3,8 @@ from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.wde.core.config import EngineConfig, ModelConfig, SchedulerConfig
-from vllm.wde.prefill_only.config import PrefillOnlySchedulerConfig
+from vllm.wde.prefill_only.config import (PrefillOnlyParallelConfig,
+                                          PrefillOnlySchedulerConfig)
 
 logger = init_logger(__name__)
 
@@ -59,6 +60,7 @@ class DecodeOnlyEmbeddingSchedulerConfig(DecodeOnlySchedulerConfig,
 class DecodeOnlyEngineConfig(EngineConfig):
     model_config: DecodeOnlyModelConfig
     scheduler_config: DecodeOnlySchedulerConfig
+    parallel_config: Optional[PrefillOnlyParallelConfig]
 
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs.

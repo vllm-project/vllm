@@ -1,16 +1,21 @@
 import importlib
 import os
+from abc import ABC, abstractmethod
 from typing import Callable, Dict, Optional, Type
 
 from vllm.logger import init_logger
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
+from vllm.wde.core.schema.execute_io import ExecuteInput
 
 logger = init_logger(__name__)
 
 
-class WorkerBase:
-    pass
+class WorkerBase(ABC):
+
+    @abstractmethod
+    def __call__(self, execute_input: ExecuteInput):
+        raise NotImplementedError
 
 
 class WorkerWrapperBase:
@@ -84,3 +89,16 @@ class WorkerWrapperBase:
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e
+
+
+def create_worker(module, envs=None, **kwargs):
+    module_name, class_name = module.split(":")
+    wrapper = WorkerWrapperBase(
+        worker_module_name=module_name,
+        worker_class_name=class_name,
+    )
+    if envs:
+        wrapper.update_environment_variables(envs)
+
+    wrapper.init_worker(**kwargs)
+    return wrapper.worker

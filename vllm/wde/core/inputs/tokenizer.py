@@ -15,7 +15,19 @@ INVALID_TOKEN_ID = -1
 class Tokenizer(object):
 
     def __init__(self, tokenizer_name: str, **kwargs):
-        self.tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, **kwargs)
+        self.tokenizer_name = tokenizer_name
+        self.tokenizer_kwargs = kwargs
+
+        # layzer_load
+        self._tokenizer = None
+
+    @property
+    def tokenizer(self):
+        if self._tokenizer is None:
+            self._tokenizer = get_tokenizer(tokenizer_name=self.tokenizer_name,
+                                            **self.tokenizer_kwargs)
+
+        return self._tokenizer
 
     @classmethod
     def from_engine(cls, engine):
