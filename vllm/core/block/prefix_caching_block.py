@@ -604,11 +604,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                             num_lookahead_slots - block.num_empty_slots,
                             self._block_size)
                 else:
-                    # If the block has a match in the cache and the cached block
-                    # is not referenced, then we still count it as a touched block
+                    # If the block has a match in the cache and the cached
+                    # block is not referenced, then we still count it as a
+                    # touched block
                     if not self.is_block_cached(block) or \
                         (block.content_hash is not None and \
-                        self._cached_blocks[block.content_hash] in self.evictor):
+                        self._cached_blocks[block.content_hash] in \
+                             self.evictor):
                         num_touched_blocks += 1
         return num_touched_blocks
 

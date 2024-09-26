@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Dict
+from typing import Deque, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
@@ -310,7 +310,8 @@ class NaiveBlockAllocator(BlockAllocator):
         for seq_id, blocks in seq_id_blocks.items():
             for block in blocks:
                 if not block.is_full:
-                    if num_unseen_tokens is not None and seq_id in num_unseen_tokens:
+                    if (num_unseen_tokens is not None
+                            and seq_id in num_unseen_tokens):
                         tokens_to_append = num_unseen_tokens[
                             seq_id] + num_lookahead_slots
                         new_block_count += 1

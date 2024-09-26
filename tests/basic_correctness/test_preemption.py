@@ -23,8 +23,10 @@ MODELS = [
 @pytest.fixture(scope="module", autouse=True)
 def check_settings():
     assert ENABLE_ARTIFICIAL_PREEMPT is True, (
-        "Use an env var VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1, VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 "
-        "`VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 pytest "
+        "Use an env var VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1, "
+        "VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1. "
+        "`VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 "
+        "VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 pytest "
         "tests/basic_correctness/test_preemption.py`")
 
 
