@@ -46,14 +46,12 @@ class ModelKeys:
 class MultiModelKeys(ModelKeys):
     language_model: Union[List[str], str] = field(default_factory=list)
     connector: Union[List[str], str] = field(default_factory=list)
-    vision_tower: Union[List[str], str] = field(default_factory=list)
+    # such vision tower and audio tower
+    tower_model: Union[List[str], str] = field(default_factory=list)
     generator: Union[List[str], str] = field(default_factory=list)
 
     def __post_init__(self):
-        # compat
-        for key in [
-                "language_model", "connector", "vision_tower", "generator"
-        ]:
+        for key in ["language_model", "connector", "tower_model", "generator"]:
             v = getattr(self, key)
             if isinstance(v, str):
                 setattr(self, key, [v])

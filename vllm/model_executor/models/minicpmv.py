@@ -404,7 +404,7 @@ class LLMWrapper(nn.Module):
     def forward(self, *args, **kwargs) -> Any:
         return getattr(self, self.model_name)(*args, **kwargs)
 
-    def embed_tokens(self, *args, **kwargs):
+    def embed_tokens(self, *args, **kwargs) -> Any:
         return getattr(self, self.model_name).embed_tokens(*args, **kwargs)
 
 
@@ -646,7 +646,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         """
         return MultiModelKeys(language_model="llm",
                               connector="resampler",
-                              vision_tower="vpm")
+                              tower_model="vpm")
 
     def init_llm(
         self,
@@ -1001,7 +1001,7 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
     bitsandbytes in vLLM. Therefore, it is necessary to separate them.
     """
     # Ensure that the LoRA support check passes when the class is not
-    # initialized,but set all these attributes to empty
+    # initialized, but set all these attributes to empty.
     packed_modules_mapping = {}
     supported_lora_modules = []
     embedding_modules = {}

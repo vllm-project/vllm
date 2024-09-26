@@ -443,7 +443,7 @@ class LoRAModelManager(AdapterModelManager):
                 continue
             # A temporary approach for multimodal models to support LoRA
             # TODO: Remove this restriction
-            if self._filter_unsupported_modules(module_name):
+            if self._filter_unsupported_module(module_name):
                 logger.warning(
                     "Regarding multimodal models, vLLM currently only supports "
                     "adding LoRA to language model, %s will be ignored.",
@@ -501,7 +501,7 @@ class LoRAModelManager(AdapterModelManager):
             if (not self._match_target_modules(module_name)
                     or not isinstance(module, BaseLayerWithLoRA)
                     or isinstance(module, LinearScalingRotaryEmbeddingWithLora)
-                    or self._filter_unsupported_modules(module_name)):
+                    or self._filter_unsupported_module(module_name)):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
@@ -562,7 +562,7 @@ class LoRAModelManager(AdapterModelManager):
                 module_name) or target_module == module_name
             for target_module in self.supported_lora_modules)
 
-    def _filter_unsupported_modules(self, module_name: str) -> bool:
+    def _filter_unsupported_module(self, module_name: str) -> bool:
         """
         Regarding multimodal models, vLLM currently only supports adding LoRA to
         language model. LoRA for other modules, such as the vision tower, will 
@@ -572,7 +572,7 @@ class LoRAModelManager(AdapterModelManager):
             prefix = module_name.split(".")[0]
             module_mapping: MultiModelKeys = self.model.get_mm_mapping()
             return (prefix in module_mapping.connector
-                    or prefix in module_mapping.vision_tower)
+                    or prefix in module_mapping.tower_model)
         return False
 
     def _register_packed_modules(self, module_full_name: str) -> None:
