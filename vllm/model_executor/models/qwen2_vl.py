@@ -66,7 +66,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
                                                      Qwen2VLVisionConfig)
 from vllm.transformers_utils.processor import get_processor
-from vllm.utils import is_cpu
+from vllm.utils import is_cpu, print_warning_once
 
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
@@ -215,7 +215,7 @@ class Qwen2VisionAttention(nn.Module):
                 if is_flash_attn_2_available():
                     self._use_flash_attn = True
                 else:
-                    logger.warning(
+                    print_warning_once(
                         "Current Qwen2-VL implementation has a bug with "
                         "`vllm-flash-attn` inside vision module, so we use "
                         "xformers backend instead. You can run `pip install "
