@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_sort_g_idx, replace_tensor, verify_marlin_supported,
     verify_marlin_supports_shape)
 
+
 class AWQConfig(QuantizationConfig):
     """Config class for AWQ.
 
@@ -181,13 +182,11 @@ class AWQLinearMethod(LinearMethodBase):
             out.add_(bias)
         return out.reshape(out_shape)
 
+
 class AWQMoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
-        self.num_bits = self.quant_config.weight_bits
-        self.packed_factor = self.quant_config.pack_factor
-        self.group_size = self.quant_config.group_size
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
@@ -255,61 +254,60 @@ class AWQMoEMethod(FusedMoEMethodBase):
                               requires_grad=False)
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
-    
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_qweight.shape[0]
         device = layer.w13_qweight.device
 
         layer.w13_g_idx = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32,
-                        device=device),
+            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
             requires_grad=False,
         )
         layer.w2_g_idx = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32,
-                        device=device),
+            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
             requires_grad=False,
         )
         layer.w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32,
-                        device=device),
+            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
             requires_grad=False,
         )
         layer.w2_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32,
-                        device=device),
+            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
             requires_grad=False,
         )
+
         marlin_w13_qweight = ops.gptq_marlin_moe_repack(
             layer.w13_qweight,
             layer.w13_g_idx_sort_indices,
-            layer.w13_qweight.shape[1],
-            layer.w13_qweight.shape[2] * self.packed_factor,
-            self.num_bits,
+            size_k=layer.w13_qweight.shape[1],
+            size_n=layer.w13_qweight.shape[2] * self.quant_config.pack_factor,
+            num_bits=self.quant_config.weight_bits,
         )
         replace_tensor(layer, "w13_qweight", marlin_w13_qweight)
+
         marlin_w2_qweight = ops.gptq_marlin_moe_repack(
             layer.w2_qweight,
             layer.w2_g_idx_sort_indices,
-            layer.w2_qweight.shape[1],
-            layer.w2_qweight.shape[2] * self.packed_factor,
-            self.num_bits,
+            size_k=layer.w2_qweight.shape[1],
+            size_n=layer.w2_qweight.shape[2] * self.quant_config.pack_factor,
+            num_bits=self.quant_config.weight_bits,
         )
         replace_tensor(layer, "w2_qweight", marlin_w2_qweight)
-        # Repack scales
+
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_scales,
             size_k=layer.intermediate_size_per_partition,
             size_n=layer.w13_scales.shape[2],
-            group_size=self.group_size
+            group_size=self.quant_config.group_size,
         )
-       
+        # for @eliza: why do we need to apply a pack factor to the scales?
+        # they're not in packed format?
         replace_tensor(layer, "w13_scales", marlin_w13_scales)
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
-            size_k=layer.w2_scales.shape[1] ,
-            size_n=layer.w2_scales.shape[2] * self.packed_factor,
-            group_size=self.group_size,
+            size_k=layer.w2_scales.shape[1] * self.quant_config.pack_factor,
+            size_n=layer.w2_scales.shape[2],
+            group_size=self.quant_config.group_size,
         )
         replace_tensor(layer, "w2_scales", marlin_w2_scales)
 
@@ -352,4 +350,5 @@ class AWQMoEMethod(FusedMoEMethodBase):
             g_idx2=layer.w2_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
-            num_bits=self.num_bits)
+            num_bits=self.quant_config.weight_bits,
+        )
