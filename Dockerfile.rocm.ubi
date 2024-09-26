@@ -181,6 +181,11 @@ ENV PATH=$VIRTUAL_ENV/bin:$PATH
 RUN microdnf install -y --setopt=install_weak_deps=0 --nodocs gcc && \
     microdnf clean all
 
+# Install libsodium for Tensorizer encryption
+RUN --mount=type=bind,from=libsodium-builder,src=/usr/src/libsodium,target=/usr/src/libsodium \
+    cd /usr/src/libsodium \
+    && make install
+
 RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
     --mount=type=bind,from=build_flashattention,src=/install,target=/install/flashattention \
     --mount=type=bind,from=build_vllm,src=/workspace/dist,target=/install/vllm/ \
@@ -199,11 +204,6 @@ RUN umask 002 && \
     mkdir -p /licenses && \
     chmod g+rwx $HOME /usr/src /workspace && \
     chmod 0664 /var/log/rocm_smi_lib
-
-# Install libsodium for Tensorizer encryption
-RUN --mount=type=bind,from=libsodium-builder,src=/usr/src/libsodium,target=/usr/src/libsodium \
-    cd /usr/src/libsodium \
-    && make install
 
 COPY LICENSE /licenses/vllm.md
 COPY examples/*.jinja /app/data/template/
