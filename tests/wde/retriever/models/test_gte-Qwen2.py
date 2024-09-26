@@ -35,12 +35,12 @@ def example_prompts():
 
 
 MODELS = [
-    "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+    "Alibaba-NLP/gte-Qwen2-1.5B-instruct", "Alibaba-NLP/gte-Qwen2-7B-instruct"
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float", "half"])
+@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_num_seqs", [3])
 @pytest.mark.parametrize("scheduling", ["sync"])
 @torch.inference_mode

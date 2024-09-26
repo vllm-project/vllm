@@ -9,15 +9,7 @@ class Qwen2Workflow(PrefillOnlyWorkflow):
     @classmethod
     def from_engine(cls, engine):
         workflow = cls()
-        if engine.engine_config.model_config.switch_to_gte_Qwen2:
-            workflow.ModelInputBuilder = ("vllm.wde.retriever.modelzoo."
-                                          "gte_qwen.model_input_builder:"
-                                          "GTEQwenModelInputBuilder")
-            workflow.OutputProcessor = ("vllm.wde.retriever.modelzoo."
-                                        "gte_qwen.output_processor:"
-                                        "GTEQwenOutputProcessor")
-
-        elif engine.engine_config.model_config.output_last_hidden_states:
+        if engine.engine_config.model_config.output_last_hidden_states:
             workflow.OutputProcessor = (
                 "vllm.wde.decode_only.processor."
                 "output_processor:"
