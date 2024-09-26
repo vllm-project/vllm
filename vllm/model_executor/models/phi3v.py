@@ -307,7 +307,7 @@ def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
 
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L90
-def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
+def _calc_hd_transform_size(*, width: int, height: int, hd_num: int):
     transposed = False
     if width < height:
         width, height = height, width
@@ -337,8 +337,10 @@ def get_phi3v_image_feature_size(
     *,
     input_height: int,
     input_width: int,
+    num_crops: int,
 ) -> int:
-    num_crops = hf_config.get("num_crops", 16)
+    if num_crops is None:
+        num_crops = hf_config.get("num_crops", 16)
     new_width, new_height = _calc_hd_transform_size(width=input_width,
                                                     height=input_height,
                                                     hd_num=num_crops)
@@ -347,20 +349,26 @@ def get_phi3v_image_feature_size(
         + (new_height // 336 + 1) * 12
 
 
-def get_max_phi3v_image_tokens(ctx: InputContext):
+def get_max_phi3v_image_tokens(ctx: InputContext,
+                               *,
+                               num_crops: Optional[int] = None):
 
     return get_phi3v_image_feature_size(
         ctx.get_hf_image_processor_config(),
         input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+        num_crops=num_crops,
     )
 
 
-def dummy_data_for_phi3v(ctx: InputContext, seq_len: int,
-                         mm_counts: Mapping[str, int]):
+def dummy_data_for_phi3v(ctx: InputContext,
+                         seq_len: int,
+                         mm_counts: Mapping[str, int],
+                         *,
+                         num_crops: Optional[int] = None):
     num_images = mm_counts["image"]
 
-    image_feature_size = get_max_phi3v_image_tokens(ctx)
+    image_feature_size = get_max_phi3v_image_tokens(ctx, num_crops=num_crops)
 
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
@@ -398,7 +406,10 @@ def _get_image_placeholder_token_ids(model_config: ModelConfig,
     return image_placeholder_token_ids
 
 
-def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_phi3v(ctx: InputContext,
+                              llm_inputs: LLMInputs,
+                              *,
+                              num_crops: Optional[int] = None):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -412,7 +423,8 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = [
             get_phi3v_image_feature_size(hf_config,
                                          input_width=w,
-                                         input_height=h)
+                                         input_height=h,
+                                         num_crops=num_crops)
         ]
         image_data = [image_data]
     elif is_list_of(image_data, Image.Image):
@@ -422,7 +434,8 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
             image_feature_size.append(
                 get_phi3v_image_feature_size(hf_config,
                                              input_width=w,
-                                             input_height=h))
+                                             input_height=h,
+                                             num_crops=num_crops))
     elif isinstance(image_data, torch.Tensor):
         num_images, image_feature_size, hidden_size = image_data.shape
     elif is_list_of(image_data, torch.Tensor):

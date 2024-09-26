@@ -83,10 +83,24 @@ def run_phi3v(question, modality):
 
     # In this example, we override max_num_seqs to 5 while
     # keeping the original context length of 128k.
+
+    # num_crops is an override kwarg to the multimodal image processor;
+    # For some models, e.g., Phi-3.5-vision-instruct, it is recommended
+    # to use 16 for single frame scenarios, and 4 for multi-frame.
+    #
+    # Generally speaking, a larger value for num_crops results in more
+    # tokens per image instance, because it may scale the image more in
+    # the image preprocessing. Some references in the model docs and the
+    # formula for image tokens after the preprocessing
+    # transform can be found below.
+    #
+    # https://huggingface.co/microsoft/Phi-3.5-vision-instruct#loading-the-model-locally
+    # https://huggingface.co/microsoft/Phi-3.5-vision-instruct/blob/main/processing_phi3_v.py#L194
     llm = LLM(
         model="microsoft/Phi-3-vision-128k-instruct",
         trust_remote_code=True,
         max_num_seqs=5,
+        mm_processor_kwargs={"num_crops": 16},
     )
     stop_token_ids = None
     return llm, prompt, stop_token_ids
@@ -228,6 +242,29 @@ def run_qwen2_vl(question, modality):
     return llm, prompt, stop_token_ids
 
 
+# LLama
+def run_mllama(question, modality):
+    assert modality == "image"
+
+    model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+    # Note: The default setting of max_num_seqs (256) and
+    # max_model_len (131072) for this model may cause OOM.
+    # You may lower either to run this example on lower-end GPUs.
+
+    # The configuration below has been confirmed to launch on a
+    # single H100 GPU.
+    llm = LLM(
+        model=model_name,
+        max_num_seqs=16,
+        enforce_eager=True,
+    )
+
+    prompt = f"<|image|><|begin_of_text|>{question}"
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -242,6 +279,7 @@ model_example_map = {
     "internvl_chat": run_internvl,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
+    "mllama": run_mllama,
 }
 
 
