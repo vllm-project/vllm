@@ -145,7 +145,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install -v -U \
-        ninja "cmake>=3.26" packaging && \
+        ninja setuptools-scm>=8 "cmake>=3.26" packaging && \
     python3 setup.py bdist_wheel --dist-dir=dist
 
 ##################################################################################################
