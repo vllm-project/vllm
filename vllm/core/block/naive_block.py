@@ -284,8 +284,8 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_num_blocks_touched(self,
                                seq_id_blocks: Dict[int, List[Block]],
-                               num_unseen_tokens: Optional[Dict[int,
-                                                                int]] = None,
+                               seq_id_num_unseen_tokens: Optional[Dict[
+                                   int, int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         """Determine the number of blocks that will be touched by
         swapping in/out the given blocks from certain sequence
@@ -310,15 +310,15 @@ class NaiveBlockAllocator(BlockAllocator):
         for seq_id, blocks in seq_id_blocks.items():
             for block in blocks:
                 if not block.is_full:
-                    if (num_unseen_tokens is not None
-                            and seq_id in num_unseen_tokens):
-                        tokens_to_append = num_unseen_tokens[
-                            seq_id] + num_lookahead_slots
-                        new_block_count += 1
-                        if tokens_to_append > block.num_empty_slots:
-                            new_block_count += cdiv(
-                                tokens_to_append - block.num_empty_slots,
-                                self._block_size)
+                    tokens_to_append = num_lookahead_slots
+                    new_block_count += 1
+                    if (seq_id_num_unseen_tokens is not None
+                            and seq_id in seq_id_num_unseen_tokens):
+                        tokens_to_append += seq_id_num_unseen_tokens[seq_id]
+                    if tokens_to_append > block.num_empty_slots:
+                        new_block_count += cdiv(
+                            tokens_to_append - block.num_empty_slots,
+                            self._block_size)
                 else:
                     old_block_set.add(block.block_id)
         num_touched_blocks = new_block_count + len(old_block_set)

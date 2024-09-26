@@ -599,7 +599,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             for block in blocks:
                 if not block.is_full:
                     num_touched_blocks += 1
-                    if num_lookahead_slots > block.num_empty_slots:
+                    num_tokens_to_append = num_lookahead_slots
+                    if (seq_id_num_unseen_tokens is not None
+                            and seq_id in seq_id_num_unseen_tokens):
+                        num_tokens_to_append += seq_id_num_unseen_tokens[
+                            seq_id]
+                    if num_tokens_to_append > block.num_empty_slots:
                         num_touched_blocks += cdiv(
                             num_lookahead_slots - block.num_empty_slots,
                             self._block_size)
