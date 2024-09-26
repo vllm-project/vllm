@@ -6,6 +6,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
                     Tuple, Type, TypeVar)
 
 import torch
+from torch import nn
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import (ModelRunnerBase,
@@ -181,7 +182,8 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
+    def plan(self, model_input: "ModelRunnerInputBase",
+             model: nn.Module) -> None:
         """Prepare state for forward pass."""
         ...
 

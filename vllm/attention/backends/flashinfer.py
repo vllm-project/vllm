@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
-from os.path import commonprefix
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
@@ -237,9 +236,14 @@ class FlashInferState(AttentionState):
                                     is_encoder_decoder_model: bool = False):
         return
 
-    def begin_forward(self, model_input):
+    def plan(self, model_input, model):
         assert not self._is_graph_capturing
         state = self
+        scale = getattr(model.model.layers[0].self_attn.attn.impl, 'scale',
+                        None)
+        logits_soft_cap = getattr(model.model.layers[0].self_attn.attn.impl,
+                                  'logits_soft_cap', None)
+
         if model_input.attn_metadata.use_cuda_graph:
             raise NotImplementedError(
                 "current implementation does not support CUDA Graph")
@@ -247,7 +251,7 @@ class FlashInferState(AttentionState):
             # state = (self.runner.graph_runners[model_input.virtual_engine]
             #          [batch_size].attn_state)
         model_input.attn_metadata.wrapper = state._get_wrapper()
-        model_input.attn_metadata.begin_forward()
+        model_input.attn_metadata.plan(scale, logits_soft_cap)
 
 
 @dataclass
@@ -310,62 +314,102 @@ class FlashInferMetadata(AttentionMetadata):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
-    def begin_forward(self):
+    def plan(self, scale: Optional[float], logits_soft_cap: Optional[float]):
         """
-        Prepares input tensors.
+        Prepares wrapper inputs
         """
-        if self.paged_kv_indices is None:
-            return
-        if self.is_profile_run:
-            return
 
-        assert self.wrapper is not None
-        assert self.query_start_loc is not None
-        assert self.paged_kv_indptr is not None
-        assert self.paged_kv_last_page_len is not None
-        assert self.block_table_bound is not None
-        assert self.seq_lens_tensor is not None
-        assert self.second_layer_kv_indptr is not None
-        assert self.second_layer_kv_indices is not None
-        assert self.second_layer_kv_last_page_len is not None
+        if self.num_prefill_tokens > 0:
+            if self.paged_kv_indices is None:
+                return
 
-        batch_size = self.query_start_loc.shape[0] - 1
-        assert batch_size >= 0
+            assert self.wrapper is not None
+            assert self.query_start_loc is not None
+            assert self.paged_kv_indices is not None
+            assert self.paged_kv_indptr is not None
+            assert self.paged_kv_last_page_len is not None
+            assert self.second_layer_kv_indices is not None
+            assert self.second_layer_kv_indptr is not None
+            assert self.second_layer_kv_last_page_len is not None
+            assert self.block_table_bound is not None
+            assert self.seq_lens_tensor is not None
+            batch_size = self.query_start_loc.shape[0] - 1
+            assert batch_size >= 0
 
-        self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
-        self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
-            self.device)
-        self.block_table_bound = self.block_table_bound.to(
-            self.device) if self.block_table_bound is not None else None
-        self.seq_lens_tensor = self.seq_lens_tensor.to(
-            self.device) if self.seq_lens_tensor is not None else None
-        self.paged_kv_indices = self.paged_kv_indices.to(self.device)
-        self.second_layer_kv_indices = self.second_layer_kv_indices.to(
-            self.device)
-        self.second_layer_kv_indptr = self.second_layer_kv_indptr.to(
-            self.device)
-        self.second_layer_kv_last_page_len = self.second_layer_kv_last_page_len.to(  # noqa: E501
-            self.device)
+            # We will use flash attention for profiling to
+            # determine the number of blocks. Therefore,
+            # we don't need to prepare the input for flashinfer for profile run.
 
-    def plan(self, scale: Optional[float],
-             logits_soft_cap: Optional[float]) -> None:
-        """
-        Set and prepare parameters for the kernel wrapper
-        """
-        assert self.wrapper is not None
-        self.wrapper.plan(
-            [self.query_start_loc, self.second_level_query_start_loc],
-            [self.paged_kv_indptr, self.second_layer_kv_indptr],
-            [self.paged_kv_indices, self.second_layer_kv_indices],
-            [self.paged_kv_last_page_len, self.second_layer_kv_last_page_len],
-            self.num_qo_heads,
-            self.num_kv_heads,
-            self.head_dim,
-            self.page_size,
-            causal=True,
-            sm_scale=scale,
-            logits_soft_cap=logits_soft_cap,
-        )
+            if not self.is_profile_run:
+                self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
+                self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
+                    self.device)
+                self.block_table_bound = self.block_table_bound.to(self.device)
+                self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
+                self.paged_kv_indices = self.paged_kv_indices.to(self.device)
+                self.second_layer_kv_indices = self.second_layer_kv_indices.to(
+                    self.device)
+                self.second_layer_kv_indptr = self.second_layer_kv_indptr.to(
+                    self.device)
+                self.second_layer_kv_last_page_len = self.second_layer_kv_last_page_len.to(  # noqa: E501
+                    self.device)
+
+                self.wrapper.plan(
+                    [self.query_start_loc, self.second_level_query_start_loc],
+                    [self.paged_kv_indptr, self.second_layer_kv_indptr],
+                    [self.paged_kv_indices, self.second_layer_kv_indices], [
+                        self.paged_kv_last_page_len,
+                        self.second_layer_kv_last_page_len
+                    ],
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.page_size,
+                    causal=True,
+                    sm_scale=scale,
+                    logits_soft_cap=logits_soft_cap)
+
+        else:
+            assert self.paged_kv_indices is not None
+            assert self.paged_kv_indptr is not None
+            assert self.paged_kv_last_page_len is not None
+            assert self.second_layer_kv_indices is not None
+            assert self.second_layer_kv_indptr is not None
+            assert self.second_layer_kv_last_page_len is not None
+
+            self.paged_kv_indices = self.paged_kv_indices.to(self.device)
+            self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
+            self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
+                self.device)
+            self.second_layer_kv_indices = self.second_layer_kv_indices.to(
+                self.device)
+            self.second_layer_kv_indptr = self.second_layer_kv_indptr.to(
+                self.device)
+            self.second_layer_kv_last_page_len = self.second_layer_kv_last_page_len.to(  # noqa: E501
+                self.device)
+
+            # handle model warmup path
+            if self.block_table_bound is not None:
+                self.block_table_bound = self.block_table_bound.to(self.device)
+            if self.seq_lens_tensor is not None:
+                self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
+
+            assert self.wrapper is not None
+
+            self.wrapper.plan(
+                [self.query_start_loc, self.second_level_query_start_loc],
+                [self.paged_kv_indptr, self.second_layer_kv_indptr],
+                [self.paged_kv_indices, self.second_layer_kv_indices], [
+                    self.paged_kv_last_page_len,
+                    self.second_layer_kv_last_page_len
+                ],
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.page_size,
+                causal=True,
+                sm_scale=scale,
+                logits_soft_cap=logits_soft_cap)
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -565,7 +609,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         """
         Updates the shared level kv tensors
         """
-        if len(common_prefix) == 0:
+        if not common_prefix:
             # if we don't have common prefixes, we only use the unique level
             # so we fill the first level indices, indptr, last page len with 0s
             # to conform with multilevel wrapper input requirements
@@ -587,22 +631,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         """
         Returns a list of consecutive shared blocks across sequence groups
         """
-        block_id_lists = [
-            list(data.block_tables.values()) for data in inter_data_list
-            if data.block_tables
-        ]
-
-        flattened_lists = [
-            item for sublist in block_id_lists for item in sublist
-        ]
-        # if only one request, we return an empty list
-        if len(flattened_lists) == 1:
+        if len(inter_data_list) == 1:
             return []
 
-        common_prefix = commonprefix(flattened_lists)
-        for i in range(1, len(common_prefix)):
-            if common_prefix[i] != common_prefix[i - 1] + 1:
-                return common_prefix[:i]
+        flattened_lists = []
+        for data in inter_data_list:
+            if data.block_tables:
+                flattened_lists += list(data.block_tables.values())
+
+        common_prefix: List[int] = []
+        for i, block_tuple in enumerate(zip(*flattened_lists)):
+            if all(block == block_tuple[0] for block in block_tuple):
+                if i > 0 and block_tuple[0] != common_prefix[-1] + 1:
+                    break
+                common_prefix.append(block_tuple[0])
+            else:
+                break
+
         return common_prefix
 
     def build(self, seq_lens: List[int], query_lens: List[int],
@@ -619,7 +664,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # common_prefix = self.get_shared_blocks_nums(
         #     self.input_builder.inter_data_list
         # )
-        # currently, we set common_prefix to empty list since
+        # FIXME: we set common_prefix to empty list now since
         # shared level is not working yet.
         common_prefix: List[int] = []
 
@@ -629,7 +674,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                 common_prefix)
 
         self._update_shared_kv_tensors(common_prefix, len(query_lens))
-
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
 
@@ -702,7 +746,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                      dtype=query_start_loc.dtype,
                      out=second_level_query_start_loc[1:])
 
-        if len(common_prefix) == 0:
+        if not common_prefix:
             # if no common prefix, we only use the unique kv level, so
             # we just set the first level query start loc the same as
             # the second levels
@@ -850,8 +894,6 @@ class FlashInferImpl(AttentionImpl):
         if attn_metadata.num_decode_tokens > 0:
             assert attn_metadata.num_prefill_tokens == 0, (
                 "Chunked prefill is not supported with flashinfer yet.")
-
-        attn_metadata.plan(self.scale, self.logits_soft_cap)
 
         if kv_cache is not None:
             # Use the same reshape and cache kernel as flash attention.
