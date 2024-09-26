@@ -245,6 +245,17 @@ def pad_list(list, k, v):
     return list + [v] * padding
 
 
+def precompute_indices_and_offsets(block_size, slot_mapping, is_prompt):
+    slot_mapping = slot_mapping.flatten()
+    indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    if is_prompt:
+        indices = indices.unflatten(0, (-1, block_size))[:, 0]
+        offsets = None
+    else:
+        offsets = torch.fmod(slot_mapping, block_size)
+    return indices, offsets
+
+
 class HpuModelAdapter():
 
     def __init__(self, model, block_size, dtype, enforce_eager):
@@ -890,11 +901,15 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                        dtype=torch.long,
                                        device=self.device)
 
+        block_indices, block_offsets = precompute_indices_and_offsets(
+            self.block_size, slot_mapping, True)
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             block_list=None,
             block_mapping=None,
             block_usage=None,
+            block_indices=block_indices,
+            block_offsets=block_offsets,
             attn_bias=None,
             seq_lens_tensor=seq_lens_tensor,
             num_prefills=real_num_seqs,
@@ -1044,11 +1059,15 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                     dtype=torch.long,
                                     device=self.device)
 
+        block_indices, block_offsets = precompute_indices_and_offsets(
+            self.block_size, slot_mapping, False)
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             block_list=block_list,
             block_mapping=block_mapping,
             block_usage=block_usage,
+            block_indices=block_indices,
+            block_offsets=block_offsets,
             attn_bias=None,
             seq_lens_tensor=None,
             num_prefills=0,
@@ -1266,7 +1285,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # input_hash("abc") != input_hash("cba")
         attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
             'attn_bias', 'seq_lens_tensor', 'block_list', 'block_mapping',
-            'block_usage', 'slot_mapping', 'is_prompt'
+            'block_usage', 'slot_mapping', 'is_prompt', 'block_indices',
+            'block_offsets'
         ])
         return attention_metadata
 
