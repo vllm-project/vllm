@@ -277,7 +277,7 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
     prompt, seq_group = create_dummy_prompt("1", prompt_length=block_size - 1)
     prompt.status = SequenceStatus.WAITING
     block_manager.allocate(seq_group)
-    
+
     # Emulate a forward pass by appending a single token.
     # The block manager then knows how many unprocessed
     # tokens will be written in the next forward pass.
