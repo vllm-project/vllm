@@ -20,10 +20,10 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
-                                             GraniteConfig, InternVLChatConfig,
-                                             JAISConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
-                                             MPTConfig, NemotronConfig,
+                                             InternVLChatConfig, JAISConfig,
+                                             MedusaConfig, MllamaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             NemotronConfig, Qwen2VLConfig,
                                              RWConfig, SolarConfig,
                                              UltravoxConfig)
 # yapf: enable
@@ -57,9 +57,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "nemotron": NemotronConfig,
     "solar": SolarConfig,
     "ultravox": UltravoxConfig,
-    # Granite can be removed from here once we have upgraded to
-    # transformers 4.45+
-    "granite": GraniteConfig,
+    "qwen2_vl": Qwen2VLConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
