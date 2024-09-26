@@ -260,8 +260,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return current_swap_mapping
 
     def get_num_blocks_touched(self,
-                               blocks: List[Block],
+                               seq_id_blocks: dict[int, List[Block]],
                                device: Device,
+                               num_unseen_tokens: Optional[dict[int, int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         """Returns the number of blocks that will be touched by
         swapping in/out the given blocks on to the 'device'.

@@ -469,15 +469,18 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         """
         # First determine the number of blocks that will be touched to swap the 
         # already full blocks.
-        blocks = []
+        blocks : dict[int, List[Block]] = dict()
+        num_unseen_tokens : dict[int, int] = dict() 
         for seq in seq_group.get_seqs(status=status):
             block_table = self.block_tables[seq.seq_id]
             if block_table.blocks is not None:
-                for block in block_table.blocks:
-                    if block.is_full:
-                       blocks.append(block)
+                blocks[seq.id] = block_table.blocks
+                num_unseen_tokens[seq.id] = len(
+                    block_table.get_unseen_token_ids(seq.get_token_ids()))
+
         num_blocks_touched = self.block_allocator.get_num_blocks_touched(
-            blocks, device, num_lookahead_slots = 0)
+            blocks, device, num_unseen_tokens=num_unseen_tokens,
+            num_lookahead_slots = 0)
         # Next determine the number of blocks that will be touched to swap the 
         # the partially full appendable blocks.
         for seq in seq_group.get_seqs(status=status):

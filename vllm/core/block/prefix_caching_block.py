@@ -577,7 +577,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         ])
 
     def get_num_blocks_touched(self,
-                               blocks: List[Block],
+                               blocks: dict[int, List[Block]],
+                               device: Device,
+                               num_unseen_tokens: Optional[dict[int, int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         """Determine the number of blocks that will be touched by
         swapping in/out the given blocks from certain sequence

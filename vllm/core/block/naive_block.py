@@ -1,8 +1,9 @@
 from collections import deque
+from collections import defaultdict
 from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
-                                    get_all_blocks_recursively)
+                                    get_all_blocks_recursively, get_num_blocks_touched_by_append_slots)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.utils import cdiv
 
@@ -283,7 +284,9 @@ class NaiveBlockAllocator(BlockAllocator):
         raise NotImplementedError("There is no promotion for naive blocks")
 
     def get_num_blocks_touched(self,
-                               blocks: List[Block],
+                               seq_id_blocks: dict[int, List[Block]],
+                               device: Device,
+                               num_unseen_tokens: Optional[dict[int, int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         """Determine the number of blocks that will be touched by
         swapping in/out the given blocks from certain sequence
@@ -305,15 +308,18 @@ class NaiveBlockAllocator(BlockAllocator):
         old_block_set = set()
         new_block_count = 0
         # TODO(cade): make sure the logic is correct and clean it up.
-        for block in blocks:
-            if not block.is_full and num_lookahead_slots != 0:
-                new_block_count += 1
-                if num_lookahead_slots > block.num_empty_slots:
-                    new_block_count += cdiv(
-                        num_lookahead_slots - block.num_empty_slots,
-                        self._block_size)
-            else:
-                old_block_set.add(block.block_id)
+        for seq_id, blocks in seq_id_blocks.items():
+            for block in blocks:
+                if not block.is_full:
+                    if num_unseen_tokens is not None and seq_id in num_unseen_tokens:
+                        tokens_to_append = num_unseen_tokens[seq_id] + num_lookahead_slots
+                        new_block_count += 1
+                        if tokens_to_append > block.num_empty_slots:
+                            new_block_count += cdiv(
+                                tokens_to_append - block.num_empty_slots,
+                                self._block_size)
+                else:
+                    old_block_set.add(block.block_id)
         num_touched_blocks = new_block_count + len(old_block_set)
         return num_touched_blocks
 

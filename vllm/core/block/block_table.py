@@ -330,26 +330,6 @@ class BlockTable:
         """
         return self._num_full_slots
 
-    def get_num_blocks_touched_by_append_slots(
-            self, token_ids: List[int], num_lookahead_slots: int) -> int:
-        """Determine how many blocks will be "touched" by appending the token
-        ids.
-
-        This is required for the scheduler to determine whether a sequence can
-        continue generation, or if it must be preempted.
-        """
-        # Math below is equivalent to:
-        # all_token_ids = token_ids + [-1] * num_lookahead_slots
-        # token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
-        # return len(token_blocks)
-
-        num_token_ids = len(token_ids) + num_lookahead_slots
-        first_chunk_size = self._block_size - (self._num_full_slots %
-                                               self._block_size)
-        num_token_blocks = (1 + math.ceil(
-            (num_token_ids - first_chunk_size) / self._block_size))
-        return num_token_blocks
-
     def _chunk_token_blocks_for_append(
             self, token_ids: List[int]) -> List[List[int]]:
         """Split the token ids into block-sized chunks so they can be easily
@@ -369,3 +349,24 @@ class BlockTable:
         token_blocks.extend(
             chunk_list(token_ids[first_chunk_size:], self._block_size))
         return token_blocks
+
+    def get_num_blocks_touched_by_append_slots(
+        self, token_ids: List[int], num_lookahead_slots: int) -> int:
+        """Determine how many blocks will be "touched" by appending the token
+        ids.
+
+        This is required for the scheduler to determine whether a sequence can
+        continue generation, or if it must be preempted.
+        """
+        # Math below is equivalent to:
+        # all_token_ids = token_ids + [-1] * num_lookahead_slots
+        # token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
+        # return len(token_blocks)
+
+        num_token_ids = len(token_ids) + num_lookahead_slots
+        first_chunk_size = self._block_size - (self._num_full_slots %
+                                                self._block_size)
+        num_token_blocks = (1 + math.ceil(
+            (num_token_ids - first_chunk_size) / self._block_size))
+        return num_token_blocks
+
