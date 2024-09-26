@@ -90,9 +90,21 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=requirements-build.txt,target=requirements-build.txt \
     uv pip install -r requirements-build.txt
 
-# install compiler cache to speed up compilation leveraging local or remote caching
 # git is required for the cutlass kernels
-RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && rpm -ql epel-release && microdnf install -y git ccache && microdnf clean all
+RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && rpm -ql epel-release && microdnf install -y git && microdnf clean all
+
+# Install sccache for remote build caching
+RUN echo "Installing sccache..." \
+    && curl -L -o sccache.tar.gz https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz \
+    && tar -xzf sccache.tar.gz \
+    && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
+    && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl
+# Configure sccache to point to public vllm cache for now
+ENV SCCACHE_BUCKET_NAME=vllm-build-sccache
+ENV SCCACHE_REGION_NAME=us-west-2
+ENV SCCACHE_S3_NO_CREDENTIALS=0
+ENV SCCACHE_IDLE_TIMEOUT=0
+
 # install build dependencies
 
 # copy input files
@@ -125,14 +137,15 @@ ENV PATH=/usr/local/cuda/bin:$PATH
 COPY vllm vllm
 
 ENV CCACHE_DIR=/root/.cache/ccache
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=.git,target=/workspace/.git \
-    env CFLAGS="-march=haswell" \
+    sccache --show-stats \
+    && env CFLAGS="-march=haswell" \
         CXXFLAGS="$CFLAGS $CXXFLAGS" \
         CMAKE_BUILD_TYPE=Release \
-        python3 setup.py bdist_wheel --dist-dir=dist
+        python3 setup.py bdist_wheel --dist-dir=dist \
+    && sccache --show-stats
 
 #################### libsodium Build IMAGE ####################
 FROM base as libsodium-builder
