@@ -160,18 +160,18 @@ def selective_scan_ref(u,
 
 
 def selective_scan_opcheck_fn(u,
-                      delta,
-                      A,
-                      B,
-                      C,
-                      D=None,
-                      z=None,
-                      delta_bias=None,
-                      delta_softplus=False,
-                      cu_seq_len=None,
-                      cache_indices=None,
-                      has_initial_state=None,
-                      ssm_states=None):
+                              delta,
+                              A,
+                              B,
+                              C,
+                              D=None,
+                              z=None,
+                              delta_bias=None,
+                              delta_softplus=False,
+                              cu_seq_len=None,
+                              cache_indices=None,
+                              has_initial_state=None,
+                              ssm_states=None):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate).
     """
@@ -199,7 +199,7 @@ def selective_scan_opcheck_fn(u,
     # Disable test_autograd_registration for now as it seems to trigger
     # a bogus error.
     opcheck(torch.ops._C.selective_scan_fwd,
-            (u, delta, A, B, C, D, z, delta_bias, delta_softplus, cu_seq_len, 
+            (u, delta, A, B, C, D, z, delta_bias, delta_softplus, cu_seq_len,
              cache_indices, has_initial_state, ssm_states),
             test_utils=["test_schema", "test_faketensor"])
 
@@ -217,8 +217,8 @@ def selective_scan_opcheck_fn(u,
 @pytest.mark.parametrize("is_variable_B", [True])
 @pytest.mark.parametrize("scan_chunks", [1, 2, 3])
 def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
-                        has_z, has_delta_bias, delta_softplus,
-                        seqlen, itype, wtype, scan_chunks):
+                        has_z, has_delta_bias, delta_softplus, seqlen, itype,
+                        wtype, scan_chunks):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
     device = 'cuda'
@@ -269,12 +269,10 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
              torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
     delta_ref = delta.clone()
     state_shape = (batch_size, u.shape[1], int(A.shape[1]))
-    state = torch.randn(
-        state_shape,
-        device=u.device,
-        dtype=itype,
-        requires_grad=False
-    )
+    state = torch.randn(state_shape,
+                        device=u.device,
+                        dtype=itype,
+                        requires_grad=False)
     state_ref = state.clone()
     out = None
     out_ref = None
@@ -313,16 +311,17 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
     if len(outs) > 1:
         out = torch.cat(outs, dim=-1)
 
-    out_ref, state_ref,*rest = selective_scan_ref(u_ref,
-                                        delta_ref,
-                                        A_ref,
-                                        B_ref,
-                                        C_ref,
-                                        D_ref,
-                                        z=z_ref,
-                                        delta_bias=delta_bias,
-                                        delta_softplus=delta_softplus,
-                                        return_last_state=True)
+    out_ref, state_ref, *rest = selective_scan_ref(
+        u_ref,
+        delta_ref,
+        A_ref,
+        B_ref,
+        C_ref,
+        D_ref,
+        z=z_ref,
+        delta_bias=delta_bias,
+        delta_softplus=delta_softplus,
+        return_last_state=True)
 
     assert out is not None and out_ref is not None
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
@@ -330,15 +329,15 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
     assert torch.allclose(state, state_ref.to(itype), rtol=rtol, atol=atol)
 
     selective_scan_opcheck_fn(u,
-            delta,
-            A,
-            B,
-            C,
-            D,
-            z,
-            delta_bias=delta_bias,
-            delta_softplus=delta_softplus,
-            ssm_states=state)
+                              delta,
+                              A,
+                              B,
+                              C,
+                              D,
+                              z,
+                              delta_bias=delta_bias,
+                              delta_softplus=delta_softplus,
+                              ssm_states=state)
 
 
 @pytest.mark.parametrize("itype",
@@ -431,10 +430,8 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
                  torch.tensor([seqlen - 1])])).tolist())
     assert sum(seqlens[-1]) == seqlen
     assert all(s > 0 for s in seqlens[-1])
-    cumsum = torch.cumsum(
-        torch.tensor(seqlens[0]),
-        dim=0
-    ).to(torch.int32).cuda()
+    cumsum = torch.cumsum(torch.tensor(seqlens[0]),
+                          dim=0).to(torch.int32).cuda()
 
     dim = 4
     dstate = 8
@@ -463,12 +460,10 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
     out = None
     out_ref = None
     prev_state_shape = (cumsum.shape[0], u.shape[0], int(A.shape[1]))
-    prev_state = torch.randn(
-        prev_state_shape,
-        device=u.device,
-        dtype=itype,
-        requires_grad=False
-    )
+    prev_state = torch.randn(prev_state_shape,
+                             device=u.device,
+                             dtype=itype,
+                             requires_grad=False)
     prev_state_ref = prev_state.clone()
     cache_indices = torch.randperm(cumsum.shape[0],
                                    dtype=torch.int32,
@@ -478,10 +473,9 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
                                       2, (cumsum.shape[0], ),
                                       dtype=torch.bool,
                                       device=u.device)
-    out = selective_scan_fn(u, delta, A, B, C, D, z,
-                                        delta_bias, delta_softplus,
-                                        cumsum, cache_indices,
-                                        has_initial_state, prev_state)
+    out = selective_scan_fn(u, delta, A, B, C, D, z, delta_bias,
+                            delta_softplus, cumsum, cache_indices,
+                            has_initial_state, prev_state)
     outs = []
     last_state_refs = []
     splits = [
@@ -515,27 +509,14 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
 
     print("Output diff max", (out - out_ref[0]).max())
     print("Output diff mean", (out - out_ref[0]).mean())
-    print("Output state diff max", (last_state - last_state_ref).max())
-    print("Output state diff mean", (last_state - last_state_ref).mean())
-    assert torch.allclose(last_state, last_state_ref, rtol=rtol, atol=atol)
+    print("Output state diff max", (prev_state - last_state_ref).max())
+    print("Output state diff mean", (prev_state - last_state_ref).mean())
+    assert torch.allclose(prev_state, last_state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out, out_ref[0], rtol=rtol, atol=atol)
 
-    selective_scan_opcheck_fn(
-        u,
-        delta,
-        A,
-        B,
-        C,
-        D,
-        z,
-        delta_bias,
-        delta_softplus,
-        cumsum,
-        cache_indices,
-        has_initial_state,
-        prev_state
-    )
-
+    selective_scan_opcheck_fn(u, delta, A, B, C, D, z, delta_bias,
+                              delta_softplus, cumsum, cache_indices,
+                              has_initial_state, prev_state)
 
 
 @pytest.mark.parametrize("itype",

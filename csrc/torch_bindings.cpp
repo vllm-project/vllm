@@ -294,7 +294,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
       "Tensor? bias_,"
-      "Tensor? conv_states,"
+      "Tensor!? conv_states,"
       "Tensor? cu_seq_len,"
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"

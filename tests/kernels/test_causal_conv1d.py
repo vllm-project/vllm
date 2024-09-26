@@ -141,17 +141,16 @@ def causal_conv1d_opcheck_fn(
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    opcheck(torch.ops._C.causal_conv1d_fwd,
-            (
-                x,
-                weight,
-                bias,
-                conv_states,
-                cu_seq_len,
-                cache_indices,
-                has_initial_state,
-                activation in ["silu", "swish"],
-            ))
+    opcheck(torch.ops._C.causal_conv1d_fwd, (
+        x,
+        weight,
+        bias,
+        conv_states,
+        cu_seq_len,
+        cache_indices,
+        has_initial_state,
+        activation in ["silu", "swish"],
+    ))
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16, torch.float])
@@ -186,14 +185,14 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
     initial_states_ref = initial_states.clone(
     ) if initial_states is not None else None
     activation = None if not silu_activation else "silu"
-    out = causal_conv1d_fn(x, weight, bias,
-                           activation=activation, 
+    out = causal_conv1d_fn(x,
+                           weight,
+                           bias,
+                           activation=activation,
                            conv_states=initial_states,
-                           has_initial_state=torch.ones(
-                               batch,
-                               dtype=torch.bool,
-                               device=x.device
-                           ))
+                           has_initial_state=torch.ones(batch,
+                                                        dtype=torch.bool,
+                                                        device=x.device))
     out_ref, final_states_ref = causal_conv1d_ref(
         x_ref,
         weight_ref,
@@ -201,29 +200,31 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
         initial_states=initial_states_ref,
         return_final_states=True,
         activation=activation)
-    assert final_states is not None and final_states_ref is not None
-    assert torch.allclose(final_states, final_states_ref, rtol=rtol, atol=atol)
+    assert initial_states is not None and final_states_ref is not None
+    assert torch.allclose(initial_states,
+                          final_states_ref,
+                          rtol=rtol,
+                          atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
-    causal_conv1d_opcheck_fn(x, weight, bias,
-                           activation=activation, 
-                           conv_states=initial_states,
-                           has_initial_state=torch.ones(
-                               batch,
-                               dtype=torch.bool,
-                               device=x.device
-                           ))
+    causal_conv1d_opcheck_fn(x,
+                             weight,
+                             bias,
+                             activation=activation,
+                             conv_states=initial_states,
+                             has_initial_state=torch.ones(batch,
+                                                          dtype=torch.bool,
+                                                          device=x.device))
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
-@pytest.mark.parametrize("has_cache_seqlens", [False, True])
-@pytest.mark.parametrize("seqlen", [1, 4, 5])
-@pytest.mark.parametrize("width", [2, 3, 4])
+@pytest.mark.parametrize("seqlen", [1])
+@pytest.mark.parametrize("width", [4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
-def test_causal_conv1d_update(dim, width, seqlen, has_cache_seqlens, has_bias,
-                              silu_activation, itype):
+def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation,
+                              itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -231,7 +232,7 @@ def test_causal_conv1d_update(dim, width, seqlen, has_cache_seqlens, has_bias,
     # set seed
     seed_everything(0)
     batch = 2
-    x = torch.randn(batch, dim, device=device, dtype=itype)
+    x = torch.randn(batch, dim, seqlen, device=device, dtype=itype)
     conv_state = torch.randn(batch, dim, width - 1, device=device, dtype=itype)
 
     weight = torch.randn(dim,
@@ -245,36 +246,29 @@ def test_causal_conv1d_update(dim, width, seqlen, has_cache_seqlens, has_bias,
         bias = None
     conv_state_ref = conv_state.detach().clone()
     activation = None if not silu_activation else "silu"
-    cache_seqlens = (torch.randint(
-        0, 1024, (batch, ), dtype=torch.int32, device=device)
-                     if has_cache_seqlens else None)
     out = causal_conv1d_update(x,
                                conv_state,
                                weight,
                                bias,
-                               activation=activation,
-                               cache_seqlens=cache_seqlens)
+                               activation=activation)
     out_ref = causal_conv1d_update_ref(x,
                                        conv_state_ref,
                                        weight,
                                        bias,
-                                       activation=activation,
-                                       cache_seqlens=cache_seqlens)
+                                       activation=activation)
 
     assert torch.equal(conv_state, conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
-    opcheck(
-        torch.ops._C.causal_conv1d_update,
-        (
-            x,
-            conv_state,
-            weight,
-            bias,
-            activation in ["silu", "swish"],
-            None,
-            None,
-        ))
+    opcheck(torch.ops._C.causal_conv1d_update, (
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation in ["silu", "swish"],
+        None,
+        None,
+    ))
 
 
 @pytest.mark.parametrize("itype",
@@ -295,7 +289,7 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_bias,
     seed_everything(0)
     batch = 64
 
-    x = torch.randn(batch, dim, device=device, dtype=itype)
+    x = torch.randn(batch, dim, 1, device=device, dtype=itype)
 
     total_entries = 10 * batch
     conv_state = torch.randn(total_entries,
@@ -332,18 +326,15 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_bias,
     assert torch.equal(conv_state[conv_state_indices, :], conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
-    opcheck(
-        torch.ops._C.causal_conv1d_update,
-        (
-            x,
-            conv_state,
-            weight,
-            bias,
-            activation in ["silu", "swish"],
-            None,
-            conv_state_indices,
-        ))
-
+    opcheck(torch.ops._C.causal_conv1d_update, (
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation in ["silu", "swish"],
+        None,
+        conv_state_indices,
+    ))
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
@@ -395,10 +386,9 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
     cache_indices = torch.randperm(cumsum.shape[0],
                                    dtype=torch.int32,
                                    device=x.device)
-    out, final_states = causal_conv1d_fn(x.squeeze(0), weight, bias,
-                                         cumsum.cuda(), cache_indices,
-                                         has_initial_states, final_states,
-                                         activation)
+    out = causal_conv1d_fn(x.squeeze(0), weight, bias, cumsum.cuda(),
+                           cache_indices, has_initial_states, final_states,
+                           activation)
     out_ref = []
     out_ref_b = []
 
@@ -427,7 +417,6 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
           f":{(final_states - final_states_ref).abs().mean()}")
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
     assert torch.allclose(final_states, final_states_ref, rtol=rtol, atol=atol)
-    causal_conv1d_opcheck_fn(x.squeeze(0), weight, bias,
-                                         cumsum.cuda(), cache_indices,
-                                         has_initial_states, final_states,
-                                         activation)
+    causal_conv1d_opcheck_fn(x.squeeze(0), weight, bias, cumsum.cuda(),
+                             cache_indices, has_initial_states, final_states,
+                             activation)

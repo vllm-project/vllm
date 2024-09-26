@@ -118,13 +118,11 @@ def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
             }) as hf_model:
         non_chunked = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            enable_chunked_prefill=True,
-            max_num_batched_tokens=5,
-            max_num_seqs=2 
-    ) as vllm_model:
+    with vllm_runner(model,
+                     dtype=dtype,
+                     enable_chunked_prefill=True,
+                     max_num_batched_tokens=5,
+                     max_num_seqs=2) as vllm_model:
         chunked = vllm_model.generate_greedy(example_prompts,
                                              max_tokens=max_tokens)
 

@@ -383,23 +383,11 @@ def selective_scan_fn(u,
     if C.dim() == 2 and cu_seq_len is not None:
         C = C.unsqueeze(0)
 
-    ops.selective_scan_fwd(
-        u,
-        delta,
-        A,
-        B,
-        C,
-        D,
-        z,
-        delta_bias,
-        delta_softplus,
-        cu_seq_len,
-        cache_indices,
-        has_initial_state,
-        ssm_states
-    )
+    ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
+                           cu_seq_len, cache_indices, has_initial_state,
+                           ssm_states)
 
     if z is None:
-        return delta # output written inplace to delta
+        return delta  # output written inplace to delta
     else:
-        return z # output written inplace to z
+        return z  # output written inplace to z

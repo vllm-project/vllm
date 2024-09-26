@@ -138,14 +138,10 @@ class JambaMambaMixer(nn.Module):
         self.c_layernorm = RMSNorm(self.ssm_state_size,
                                    eps=config.rms_norm_eps)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor
-    ):
-                      
+    def forward(self, hidden_states: torch.Tensor,
+                attn_metadata: AttentionMetadata, conv_state: torch.Tensor,
+                ssm_state: torch.Tensor):
+
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
         hidden_states, gate = projected_states.chunk(2, dim=-2)
@@ -169,17 +165,16 @@ class JambaMambaMixer(nn.Module):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
-                cu_seq_len=attn_metadata.query_start_loc[1:]
-            )
+                cu_seq_len=attn_metadata.query_start_loc[1:])
         else:
             hidden_states = causal_conv1d_update(
-                    hidden_states.transpose(0,1),
-                    conv_state,
-                    conv_weights,
-                    self.conv1d.bias,
-                    self.activation,
-                )
-            hidden_states = hidden_states.transpose(0,1)
+                hidden_states.transpose(0, 1),
+                conv_state,
+                conv_weights,
+                self.conv1d.bias,
+                self.activation,
+            )
+            hidden_states = hidden_states.transpose(0, 1)
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
@@ -213,26 +208,25 @@ class JambaMambaMixer(nn.Module):
                 delta_softplus=True,
                 ssm_states=ssm_state,
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
-                cu_seq_len=attn_metadata.query_start_loc[1:]
-            )
+                cu_seq_len=attn_metadata.query_start_loc[1:])
         else:
             scan_outputs = selective_state_update(
                 ssm_state,
-                hidden_states.transpose(0,1),
-                discrete_time_step.transpose(0,1),
+                hidden_states.transpose(0, 1),
+                discrete_time_step.transpose(0, 1),
                 self.A,
                 B,
                 C,
                 self.D,
-                gate.transpose(0,1),
+                gate.transpose(0, 1),
                 time_proj_bias,
                 dt_softplus=True,
-                )
-            scan_outputs = scan_outputs.transpose(0,1)
-
+            )
+            scan_outputs = scan_outputs.transpose(0, 1)
 
         # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(-2, -1))[0]
+        contextualized_states = self.out_proj(scan_outputs.transpose(-2,
+                                                                     -1))[0]
         return contextualized_states
 
 
