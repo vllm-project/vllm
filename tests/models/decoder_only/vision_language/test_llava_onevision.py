@@ -255,7 +255,7 @@ def run_image_test(
     with vllm_runner(model,
                      dtype=dtype,
                      max_num_seqs=1,
-                     max_model_len=10240,
+                     max_model_len=16384,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,

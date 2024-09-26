@@ -135,7 +135,7 @@ def _run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
-                     max_model_len=16384,
+                     max_model_len=10240,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
