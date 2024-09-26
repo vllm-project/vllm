@@ -46,7 +46,7 @@ class ModelKeys:
 class MultiModelKeys(ModelKeys):
     language_model: Union[List[str], str] = field(default_factory=list)
     connector: Union[List[str], str] = field(default_factory=list)
-    # such vision tower and audio tower
+    # vision tower and audio tower
     tower_model: Union[List[str], str] = field(default_factory=list)
     generator: Union[List[str], str] = field(default_factory=list)
 
