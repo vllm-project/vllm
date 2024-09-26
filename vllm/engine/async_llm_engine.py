@@ -787,7 +787,8 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
         if not self.is_running:
             if self.start_engine_loop:
@@ -807,7 +808,9 @@ class AsyncLLMEngine:
             arrival_time=arrival_time or time.time(),
             lora_request=lora_request,
             trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+            priority=priority,
+        )
 
         return stream.generator()
 
@@ -818,7 +821,8 @@ class AsyncLLMEngine:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
@@ -836,6 +840,8 @@ class AsyncLLMEngine:
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
+            priority: The priority of the request.
+                Only applicable with priority scheduling.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine
@@ -891,6 +897,7 @@ class AsyncLLMEngine:
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
+                priority=priority,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
 
