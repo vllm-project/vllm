@@ -1253,3 +1253,77 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+def is_encrypted_api_ready():
+    return envs.VLLM_RSA256_PRIVATE_KEY is not None
+
+def get_default_private_key():
+    return envs.VLLM_RSA256_PRIVATE_KEY
+
+def get_default_public_key() -> rsa.RSAPublicKey:
+    if envs.VLLM_RSA256_PRIVATE_KEY is not None:
+        return envs.VLLM_RSA256_PRIVATE_KEY.public_key()
+    
+    return None
+
+# Encrypt message using the public key
+def rsa_encrypt_message(message: str, public_key = get_default_public_key()):
+    encrypted_message = public_key.encrypt(
+        message.encode('utf-8') if not isinstance(message, bytes) else message, 
+        asym_padding.OAEP(
+            mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return encrypted_message
+
+# Decrypt message using the private key
+def rsa_decrypt_message(encrypted_message: str, private_key = get_default_private_key(), decode=True):
+    decrypted_message = private_key.decrypt(
+        encrypted_message.encode('utf-8') if not isinstance(encrypted_message, bytes) else encrypted_message,
+        asym_padding.OAEP(
+            mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    
+    if not decode:
+        return decrypted_message
+    
+    return decrypted_message.decode('utf-8')  # Convert bytes back to string
+
+
+# AES encryption
+def aes_encrypt_message(message, key, iv):
+    if isinstance(message, str):
+        message = message.encode()
+
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    padder = padding.PKCS7(algorithms.AES.block_size).padder()
+
+    padded_data = padder.update(message) + padder.finalize()  # Pad the message
+    return encryptor.update(padded_data) + encryptor.finalize()
+
+
+# AES decryption
+def aes_decrypt_message(ciphertext, key, iv):
+    if isinstance(ciphertext, str):
+        ciphertext = ciphertext.encode()
+
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    decryptor = cipher.decryptor()
+    unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+    
+    decrypted_padded = decryptor.update(ciphertext) + decryptor.finalize()
+    return unpadder.update(decrypted_padded) + unpadder.finalize()

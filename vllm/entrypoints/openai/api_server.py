@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount
 from typing_extensions import assert_never
+import base64
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -38,7 +39,11 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               LoadLoraAdapterRequest,
                                               TokenizeRequest,
                                               TokenizeResponse,
-                                              UnloadLoraAdapterRequest)
+                                              UnloadLoraAdapterRequest, 
+                                              EncryptedChatCompletionRequest,
+                                              EncryptedCompletionRequest,
+                                              EncryptedStreamingResponse, 
+                                              EncryptedJSONResponse)
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
 from vllm.entrypoints.openai.rpc.server import run_rpc_server
 # yapf: enable
@@ -49,7 +54,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
+from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path, get_default_public_key, is_encrypted_api_ready
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -311,6 +316,94 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
+
+@router.post("/v1/chat/enc-completions")
+async def create_encrypted_chat_completion(request: EncryptedChatCompletionRequest,
+                                 raw_request: Request):
+    
+    if not is_encrypted_api_ready():
+        return JSONResponse(
+            content={"error": "API server is not ready for encrypted requests."},
+            status_code=500
+        )
+
+    generator = await openai_serving_chat.create_chat_completion(
+        request, raw_request)
+
+    if isinstance(generator, ErrorResponse):
+        return EncryptedJSONResponse(
+            aes_key=request.aes_key,
+            aes_iv=request.aes_iv,
+            content=generator.model_dump(),
+            status_code=generator.code)
+
+    elif isinstance(generator, ChatCompletionResponse):
+        return EncryptedJSONResponse(
+            aes_key=request.aes_key,
+            aes_iv=request.aes_iv,
+            content=generator.model_dump()
+        )
+
+    return EncryptedStreamingResponse(
+        aes_key=request.aes_key, 
+        aes_iv=request.aes_iv, 
+        content=generator, 
+        media_type="text/event-stream"
+    )
+
+
+@router.post("/v1/enc-completions")
+async def create_encrypted_completion(request: EncryptedCompletionRequest, raw_request: Request):
+    generator = await openai_serving_completion.create_completion(
+        request, raw_request)
+    
+    if not is_encrypted_api_ready():
+        return JSONResponse(
+            content={"error": "API server is not ready for encrypted requests."},
+            status_code=500
+        )
+
+    if isinstance(generator, ErrorResponse):
+        return EncryptedJSONResponse(
+            aes_key=request.aes_key,
+            aes_iv=request.aes_iv,
+            content=generator.model_dump(),
+            status_code=generator.code
+        )
+
+    elif isinstance(generator, CompletionResponse):
+        return EncryptedJSONResponse(
+            aes_key=request.aes_key,
+            aes_iv=request.aes_iv,
+            content=generator.model_dump()
+        )
+
+    return EncryptedStreamingResponse(
+        aes_key=request.aes_key,
+        aes_iv=request.aes_iv,
+        content=generator, 
+        media_type="text/event-stream"
+    )
+    
+@router.get("/v1/enc-public-key")
+async def get_encrypted_public_key():
+    
+    if not is_encrypted_api_ready():
+        return JSONResponse(
+            content={"error": "API server is not ready for encrypted requests."},
+            status_code=500
+        )
+
+    pub = get_default_public_key()
+    
+    if pub is None:
+        return JSONResponse(
+            content={"error": "Failed to generate public key."}, 
+            status_code=500
+        )
+    
+    pub_str = base64.b64encode(pub.public_bytes()).decode('utf-8')
+    return JSONResponse(content={"b64_public_key": pub_str})
 
 @router.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):

@@ -2,7 +2,7 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
 from argparse import Namespace
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union, Mapping
 
 import torch
 from openai.types.chat import ChatCompletionContentPartParam
@@ -16,7 +16,11 @@ from vllm.sampling_params import (LogitsProcessor, RequestOutputKind,
                                   SamplingParams)
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_uuid
+from vllm.utils import random_uuid, rsa_decrypt_message, aes_encrypt_message, aes_decrypt_message
+import json
+import base64
+from fastapi.responses import StreamingResponse, JSONResponse
+from starlette.types import Send
 
 # torch is mocked during docs generation,
 # so we have to provide the values as literals
@@ -60,6 +64,97 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
 class OpenAIBaseModel(BaseModel):
     # OpenAI API does not allow extra fields
     model_config = ConfigDict(extra="forbid")
+
+
+class OpenAIEncryptedBaseModel(OpenAIBaseModel):
+    aes_key: bytes
+    aes_iv: bytes
+    secret: str
+
+    def __init__(self, **data):
+        if all(k in data for k in ['ciphertext', 'secret']):
+            raw_secret, raw_ciphertext = data.pop('secret'), data.pop('ciphertext')
+
+            kiv = rsa_decrypt_message(base64.b64decode(raw_secret), decode=False)
+            key, iv = kiv[:-16], kiv[-16:]
+
+            data = json.loads(aes_decrypt_message(base64.b64decode(raw_ciphertext), key, iv))
+
+        super().__init__(**data, aes_key=key, aes_iv=iv, secret=raw_secret)
+        
+    def json(self, **kwargs):
+        return {
+            "ciphertext": base64.b64encode(aes_encrypt_message(
+                json.dumps({
+                    e: getattr(self, e) 
+                    for e in self.model_fields_set 
+                    if e not in ['aes_key', 'aes_iv', 'secret']
+                }),
+                self.aes_key,
+                self.aes_iv
+            )), # b64
+            'secret': self.secret # b64
+        }
+
+    def model_dump_json(
+        self, 
+        *args, 
+        **kwargs
+    ) -> str:
+        return json.dumps(self.json())
+
+    def model_dump(self, *args, **kwargs) -> Mapping[str, Any]:
+        return self.json()
+    
+class EncryptedStreamingResponse(StreamingResponse):
+    def __init__(self, aes_key, aes_iv, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.aes_key = aes_key
+        self.aes_iv = aes_iv
+
+    async def stream_response(self, send: Send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self.status_code,
+                "headers": self.raw_headers,
+            }
+        )
+
+        async for chunk in self.body_iterator:
+            if not isinstance(chunk, (bytes, memoryview)):
+                chunk = chunk.encode(self.charset)
+
+            await send({
+                "type": "http.response.body", 
+                "body": aes_encrypt_message(chunk, self.aes_key, self.aes_iv), 
+                "more_body": True
+            })
+
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+class EncryptedJSONResponse(JSONResponse):
+    def __init__(self, aes_key, aes_iv, *args, **kwargs):
+        self.aes_key = aes_key
+        self.aes_iv = aes_iv
+        super().__init__(*args, **kwargs)
+
+    def render(self, content: Any) -> bytes:
+        return json.dumps(
+            {
+                'ciphertext': base64.b64encode(
+                    aes_encrypt_message(
+                        json.dumps(content), 
+                        self.aes_key, self.aes_iv
+                    )
+                ).decode('utf-8'),
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
 
 
 class ErrorResponse(OpenAIBaseModel):
@@ -426,6 +521,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         " of the specified `tools`")
         return data
 
+class EncryptedChatCompletionRequest(OpenAIEncryptedBaseModel, ChatCompletionRequest):
+    pass
 
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -605,6 +702,8 @@ class CompletionRequest(OpenAIBaseModel):
 
         return data
 
+class EncryptedCompletionRequest(OpenAIEncryptedBaseModel, CompletionRequest):
+    pass
 
 class EmbeddingRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation

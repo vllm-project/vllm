@@ -1,6 +1,10 @@
 import os
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+from cryptography.hazmat.backends import default_backend
+
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -61,7 +65,7 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
-
+    VLLM_RSA256_PRIVATE_KEY: Optional[RSAPrivateKey] = None
 
 def get_default_cache_root():
     return os.getenv(
@@ -412,6 +416,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
      ("1", "true")),
+
+    "VLLM_RSA256_PRIVATE_KEY": lambda: serialization.load_ssh_private_key(
+        os.environ.get("VLLM_RSA256_PRIVATE_KEY").encode(),
+        password=None,
+        backend=default_backend()
+    ) if os.environ.get("VLLM_RSA256_PRIVATE_KEY") else None,
 }
 
 # end-env-vars-definition
