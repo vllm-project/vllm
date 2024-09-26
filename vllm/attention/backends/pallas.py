@@ -158,7 +158,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             kv_cache[0] = [num_kv_heads, num_blocks, block_size, head_size]
             kv_cache[1] = [num_kv_heads, num_blocks, block_size, head_size]
                 NOTE: kv_cache[0] and kv_cache[1] will be an empty tensor 
-                with shape [] for profiling run.
+                with shape [0] for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
