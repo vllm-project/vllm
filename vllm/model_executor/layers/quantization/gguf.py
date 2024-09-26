@@ -165,7 +165,7 @@ class GGUFUninitializedParameter(UninitializedParameter):
     data_container: List[torch.Tensor] = []
 
     def materialize_nested(self) -> Parameter:
-        nested_data = torch.nested.nested_tensor(self.data_container)
+        nested_data = torch.nested.nested_tensor(self.data_container, device=self.device, dtype=torch.uint8)
         self.data_container.clear()
         param = torch.Tensor._make_subclass(self.cls_to_become, nested_data, require_grad=False)
         for k, v in self.__dict__.items():
