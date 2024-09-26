@@ -674,8 +674,9 @@ def input_processor_for_qwen(ctx: InputContext,
     prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
     image_data = multi_modal_data["image"]
     if isinstance(image_data, torch.Tensor):
         num_dims = len(image_data.shape)
@@ -735,8 +736,9 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
         return MultiModalInputs()
 
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
 
     image_pair_tok = tokenizer.encode(IMG_START + IMG_END,
                                       add_special_tokens=False,
@@ -824,8 +826,9 @@ def dummy_data_for_qwen(
     # We have a visual component - use images to warm up
     num_images = mm_counts["image"]
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
 
     # Build the image prompts with no imgpads; the tokenizer will add img pads
     image_prompt = ''.join(

@@ -18,9 +18,14 @@ PG_WAIT_TIMEOUT = 1800
 
 try:
     import ray
-    from ray._private.state import available_resources_per_node
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
+    try:
+        from ray._private.state import available_resources_per_node
+    except ImportError:
+        # Ray 2.9.x doesn't expose `available_resources_per_node`
+        from ray._private.state import state as _state
+        available_resources_per_node = _state._available_resources_per_node
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
