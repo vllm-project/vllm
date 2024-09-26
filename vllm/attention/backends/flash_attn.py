@@ -246,13 +246,13 @@ class FlashAttentionMetadata(AttentionMetadata):
     #                                   |-- query_len ---|
 
     # Maximum query length in the batch.
-    max_query_len: int
+    max_query_len: Optional[int]
 
     # Number of query tokens for each request in the batch.
     # Currently, we require that all requests have the same number of query
     # tokens during the decoding phase. When speculavie decoding is enabled,
     # decode_query_len might be greater than 1. In all other cases, it is 1.
-    decode_query_len: int
+    decode_query_len: Optional[int]
 
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
