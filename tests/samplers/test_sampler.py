@@ -596,8 +596,12 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     generation_config = GenerationConfig(top_k=top_k,
                                          top_p=top_p,
                                          do_sample=True)
-    warpers = generation_model._get_logits_warper(generation_config, device)
-    assert len(warpers) == 2  # top_p and top_k
+    processors = generation_model._get_logits_processor(generation_config,
+                                                        None,
+                                                        None,
+                                                        None, [],
+                                                        device=device)
+    assert len(processors) == 2  # top_p and top_k
 
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
     seq_lens: List[int] = []
@@ -639,7 +643,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     assert sample_probs is not None
 
-    hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
+    hf_probs = processors(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     torch.testing.assert_close(hf_probs, sample_probs, rtol=0.0, atol=1e-5)
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))

@@ -167,7 +167,7 @@ def get_lora_tokenizer(lora_request: LoRARequest, *args,
         return None
     try:
         tokenizer = get_tokenizer(lora_request.lora_path, *args, **kwargs)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         # No tokenizer was found in the LoRA folder,
         # use base model tokenizer
         logger.warning(
