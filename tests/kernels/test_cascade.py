@@ -7,8 +7,8 @@ import torch
 from vllm.utils import seed_everything
 
 
-@pytest.mark.parametrize("beam_width", [16, 24, 32])
-@pytest.mark.parametrize("seq_lens", [[(2048, 2048)]])
+@pytest.mark.parametrize("beam_width", [16, 32])
+@pytest.mark.parametrize("seq_lens", [[(4096, 4096)]])
 @pytest.mark.parametrize("num_heads", [(16, 16)])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("dtype", [torch.float16])
@@ -21,7 +21,7 @@ def test_cascade_speedup(beam_width, seq_lens, num_heads, head_size, dtype,
                          block_size, num_runs, max_num_blocks_per_seq,
                          soft_cap):
     """
-    Compares the performance of flashinfer multilevel kernel and batch prefill.
+    Compares the performance of flashinfer multilevel kernel and batch decode.
     """
 
     cascade_outputs, time_taken_cascade = run_multilevel_cascade_attention_wrapper(  # noqa: E501
@@ -37,7 +37,7 @@ def test_cascade_speedup(beam_width, seq_lens, num_heads, head_size, dtype,
         soft_cap=soft_cap,
     )
 
-    batchprefill_outputs, time_taken_batchprefill = run_flashinfer_batchprefill_beam_search(  # noqa: E501
+    batchdecode_outputs, time_taken_batchdecode = run_flashinfer_batchdecode_beam_search(  # noqa: E501
         num_heads=num_heads,
         head_size=head_size,
         dtype=dtype,
@@ -50,32 +50,31 @@ def test_cascade_speedup(beam_width, seq_lens, num_heads, head_size, dtype,
     )
 
     assert len(cascade_outputs) == len(
-        batchprefill_outputs
+        batchdecode_outputs
     ), "Output length mismatch between the two methods."
 
     max_diff = 0
 
-    for cascade_output, batchprefill_output in zip(cascade_outputs,
-                                                   batchprefill_outputs):
-        assert cascade_output.shape == batchprefill_output.shape, "Shape mismatch between outputs."  # noqa: E501
+    for cascade_output, batchdecode_output in zip(cascade_outputs,
+                                                   batchdecode_outputs):
+        assert cascade_output.shape == batchdecode_output.shape, "Shape mismatch between outputs."  # noqa: E501
 
         isclose = torch.isclose(cascade_output,
-                                batchprefill_output,
+                                batchdecode_output,
                                 rtol=1e-2,
-                                atol=1e-2)
-
+                                atol=1e-3)
         if not isclose.all():
-            diff = torch.abs(cascade_output - batchprefill_output)
+            diff = torch.abs(cascade_output - batchdecode_output)
             current_max_diff = torch.max(diff).item()
             max_diff = max(max_diff, current_max_diff)
 
-    speedup = time_taken_batchprefill / time_taken_cascade
+    speedup = time_taken_batchdecode / time_taken_cascade
 
     assert speedup > 1.0, f"No speedup with cascade infer: {speedup}"
-    assert max_diff <= 1e-2, f"Max difference too large: {max_diff}"
+    assert max_diff <= 1e-3, f"Max difference too large: {max_diff}"
 
 
-def run_flashinfer_batchprefill_beam_search(
+def run_flashinfer_batchdecode_beam_search(
     num_heads: Tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
