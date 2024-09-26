@@ -280,7 +280,7 @@ Multimodal Language Models
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     -
   * - :code:`Qwen2VLForConditionalGeneration`
-    - Qwen2-VL (see note)
+    - Qwen2-VL
     - Image\ :sup:`+` / Video\ :sup:`+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
@@ -297,15 +297,6 @@ Multimodal Language Models
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
-.. note::
-  For :code:`Qwen2-VL`, the latest release of :code:`huggingface/transformers` doesn't work yet, so we need to use a developer version (:code:`21fac7abba2a37fae86106f87fcf9974fd1e3830`) for now.
-  This can be installed by running the following command: 
-
-  .. code-block:: bash
-    
-    pip install git+https://github.com/huggingface/transformers.git@21fac7abba2a37fae86106f87fcf9974fd1e3830
-
-----
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
