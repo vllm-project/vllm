@@ -247,7 +247,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}"
     BUILD_PTX_FOR_HIGHEST_ARCH)
 
-  # Only build marlin if we are building for atleast some compatible archs
+  # Only build marlin if we are building for at least some compatible archs
   get_minimal_compatible_cuda_archs("8.0;8.6;8.9")
   if (COMPATIBLE_ARCHS)
     set(MARLIN_SRCS 

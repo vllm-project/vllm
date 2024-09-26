@@ -1,4 +1,4 @@
-import vllm._custom_ops
+import vllm._custom_ops # noqa: F401
 import torch
 import pytest
 
