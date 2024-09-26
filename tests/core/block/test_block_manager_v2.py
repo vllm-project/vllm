@@ -312,6 +312,54 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
 
 
 @pytest.mark.parametrize("block_size", [8])
+@pytest.mark.parametrize("num_cpu_blocks", [1])
+@pytest.mark.parametrize("num_gpu_blocks", [1])
+@pytest.mark.parametrize("num_lookahead_slots", [0, 2, 10])
+@pytest.mark.parametrize("enable_caching", [False, True])
+def test_swap_in_infeasible(block_size, num_cpu_blocks, num_gpu_blocks,
+                            num_lookahead_slots, enable_caching):
+    """Verify blocks number on src/desc device is correct after swapping in/out
+        sequence group (not missing or extra blocks).
+    """
+    block_manager = BlockSpaceManagerV2(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0,
+                                        enable_caching=enable_caching)
+    prompt, seq_group = create_dummy_prompt("1", prompt_length=block_size - 1)
+    prompt.status = SequenceStatus.WAITING
+    block_manager.allocate(seq_group)
+    # Emulate a forward pass by appending a single token.
+    # The block manager then knows how many unprocessed
+    # tokens will be written in the next forward pass.
+    token_id = 0
+    prompt.status = SequenceStatus.RUNNING
+    prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
+
+    # Swap seq group from GPU -> CPU.
+    gpu_blocks = block_manager.get_block_table(prompt)
+    assert block_manager.can_swap_out(seq_group)
+    mapping = block_manager.swap_out(seq_group)
+    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    assert before_cpu_blocks == after_cpu_blocks + len(gpu_blocks)
+    assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
+    prompt.status = SequenceStatus.SWAPPED
+
+    # Swap seq group from CPU -> GPU.
+    assert block_manager.can_swap_in(seq_group, num_lookahead_slots)
+    before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    mapping = block_manager.swap_in(seq_group)
+    cpu_blocks = block_manager.get_block_table(prompt)
+    mapping_keys = [key for key, _ in mapping]
+    assert mapping_keys == [cpu_blocks[0]]
+    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    assert before_gpu_blocks == after_gpu_blocks + len(cpu_blocks)
+
+
+@pytest.mark.parametrize("block_size", [8])
 @pytest.mark.parametrize("num_gpu_blocks", [4])
 @pytest.mark.parametrize("num_lookahead_slots", [3, 8, 10])
 @pytest.mark.parametrize("enable_caching", [True, False])

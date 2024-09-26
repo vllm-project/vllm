@@ -306,21 +306,27 @@ class NaiveBlockAllocator(BlockAllocator):
         # needed.
         old_block_set = set()
         new_block_count = 0
+        seq_id_empty_slots: Dict[int, int] = dict()
         # TODO(cade): make sure the logic is correct and clean it up.
         for seq_id, blocks in seq_id_blocks.items():
+            seq_id_empty_slots[seq_id] = 0
             for block in blocks:
-                if not block.is_full:
-                    tokens_to_append = num_lookahead_slots
-                    new_block_count += 1
-                    if (seq_id_num_unseen_tokens is not None
-                            and seq_id in seq_id_num_unseen_tokens):
-                        tokens_to_append += seq_id_num_unseen_tokens[seq_id]
-                    if tokens_to_append > block.num_empty_slots:
-                        new_block_count += cdiv(
-                            tokens_to_append - block.num_empty_slots,
-                            self._block_size)
-                else:
+                if block.is_full:
                     old_block_set.add(block.block_id)
+                else:
+                    seq_id_empty_slots[seq_id] = block.num_empty_slots
+
+        new_block_count = 0
+        for seq_id, _ in seq_id_blocks.items():
+            num_tokens_to_append = num_lookahead_slots
+            if (seq_id_num_unseen_tokens is not None
+                    and seq_id in seq_id_num_unseen_tokens):
+                num_tokens_to_append += seq_id_num_unseen_tokens[seq_id]
+            if num_tokens_to_append > 0:
+                new_block_count += (
+                    1 + cdiv(num_tokens_to_append - seq_id_empty_slots[seq_id],
+                             self._block_size))
+        print('new_block_count ' + str(new_block_count))
         num_touched_blocks = new_block_count + len(old_block_set)
         return num_touched_blocks
 

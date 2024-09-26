@@ -124,8 +124,9 @@ class TestNaiveBlockAllocator:
         src_blocks = [allocate_block() for _ in range(num_blocks - 1)]
 
         # All blocks are cached
-        assert allocator_dst.get_num_blocks_touched(
-            src_blocks) == num_blocks - 1
+        fake_seq_id: int = 1
+        assert allocator_dst.get_num_blocks_touched({fake_seq_id: src_blocks
+                                                     }) == num_blocks - 1
 
         # Insert one non-full block in the src
         allocate_non_full_block = \
@@ -137,8 +138,19 @@ class TestNaiveBlockAllocator:
         src_blocks[-1].append_token_ids([0])
 
         assert allocator_dst.get_num_blocks_touched(
-            src_blocks, num_lookahead_slots=1) == num_blocks
+            {fake_seq_id: src_blocks}, num_lookahead_slots=1) == num_blocks
         assert allocator_dst.get_num_blocks_touched(
-            src_blocks, num_lookahead_slots=block_size - 1) == num_blocks
+            {fake_seq_id: src_blocks},
+            num_lookahead_slots=block_size - 1) == num_blocks
         assert allocator_dst.get_num_blocks_touched(
-            src_blocks, num_lookahead_slots=block_size) == (num_blocks + 1)
+            {fake_seq_id: src_blocks},
+            num_lookahead_slots=block_size) == (num_blocks + 1)
+        # Test with seq_id_num_unseen_tokens set
+        assert allocator_dst.get_num_blocks_touched(
+            {fake_seq_id: src_blocks},
+            seq_id_num_unseen_tokens={fake_seq_id: block_size - 1},
+            num_lookahead_slots=block_size) == block_size + 2
+        assert allocator_dst.get_num_blocks_touched(
+            {fake_seq_id: src_blocks},
+            seq_id_num_unseen_tokens={fake_seq_id: block_size + 1},
+            num_lookahead_slots=block_size) == block_size + 3

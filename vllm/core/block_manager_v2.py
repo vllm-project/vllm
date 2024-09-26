@@ -477,12 +477,15 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 seq_id_blocks[seq.seq_id] = block_table.blocks
                 seq_id_num_unseen_tokens[seq.seq_id] = len(
                     block_table.get_unseen_token_ids(seq.get_token_ids()))
+                print('seq.seq_id ' +
+                      str(seq_id_num_unseen_tokens[seq.seq_id]))
 
         num_blocks_touched = self.block_allocator.get_num_blocks_touched(
             seq_id_blocks,
             device,
             seq_id_num_unseen_tokens=seq_id_num_unseen_tokens,
             num_lookahead_slots=0)
+        print('num_blocks_touched ' + str(num_blocks_touched))
         watermark_blocks = 0
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks

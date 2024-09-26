@@ -346,28 +346,41 @@ class TestPrefixCachingBlockAllocator:
                 token_ids=token_ids,
                 allocator=allocator_src,
             )
+        fake_seq_id: int = 1
 
         # All blocks are cached
-        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in) == 0
+        assert allocator_dst.get_num_blocks_touched(
+            {fake_seq_id: blocks_to_swap_in}) == 0
 
         # Free the first block in the dst
         allocator_dst.free(cached_blocks[0])
 
         # Now the first block becomes dangling, the swapped blocks need
         # to reclaim the first block in the dst
-        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in) == 1
+        assert allocator_dst.get_num_blocks_touched(
+            {fake_seq_id: blocks_to_swap_in}) == 1
 
         # Insert one non-full block in the src
         non_full_block = allocator_src.allocate_mutable_block(
             blocks_to_swap_in[-1])
         non_full_block.append_token_ids([0])
         blocks_to_swap_in.append(non_full_block)
-        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in,
-                                                    num_lookahead_slots=1) == 2
         assert allocator_dst.get_num_blocks_touched(
-            blocks_to_swap_in, num_lookahead_slots=block_size - 1) == 2
+            {fake_seq_id: blocks_to_swap_in}, num_lookahead_slots=1) == 2
         assert allocator_dst.get_num_blocks_touched(
-            blocks_to_swap_in, num_lookahead_slots=block_size) == 3
+            {fake_seq_id: blocks_to_swap_in},
+            num_lookahead_slots=block_size - 1) == 2
+        assert allocator_dst.get_num_blocks_touched(
+            {fake_seq_id: blocks_to_swap_in},
+            num_lookahead_slots=block_size) == 3
+        assert allocator_dst.get_num_blocks_touched(
+            {fake_seq_id: blocks_to_swap_in},
+            seq_id_num_unseen_tokens={fake_seq_id: block_size},
+            num_lookahead_slots=block_size) == 3
+        assert allocator_dst.get_num_blocks_touched(
+            {fake_seq_id: blocks_to_swap_in},
+            seq_id_num_unseen_tokens={fake_seq_id: 2 * block_size - 1},
+            num_lookahead_slots=block_size) == 4
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1024])
