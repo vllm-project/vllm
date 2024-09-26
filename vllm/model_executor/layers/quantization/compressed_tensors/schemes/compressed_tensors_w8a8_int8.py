@@ -14,7 +14,6 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -57,25 +56,21 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                                               requires_grad=False)
                 layer.input_zero_point = None
             else:
-                # Static asymmetric quantization has not been tested yet.
-                # Kernel and ops support exists and is tested, it's just the
-                # following integration code that is untested.
-                print_warning_once(
-                    "Support for models with static asymmetric quantized"
-                    " activations has been implemented but is untested.")
-
                 # reconstruct the ranges
                 int8_traits = torch.iinfo(torch.int8)
+                azps = layer.input_zero_point.to(dtype=torch.int32)
                 range_max = (layer.input_scale *
-                             (int8_traits.max - layer.input_zero_point)).max()
+                             (int8_traits.max - azps)).max()
                 range_min = (layer.input_scale *
-                             (int8_traits.min - layer.input_zero_point)).min()
+                             (int8_traits.min - azps)).min()
 
                 scale = (range_max - range_min) / (int8_traits.max -
                                                    int8_traits.min)
                 layer.input_scale = Parameter(scale, requires_grad=False)
 
-                azp = int8_traits.min - range_min / scale
+                # AZP loaded as int8 but used as int32
+                azp = (int8_traits.min -
+                       range_min / scale).to(dtype=torch.int32)
                 layer.input_zero_point = Parameter(azp, requires_grad=False)
 
         else:
@@ -134,10 +129,9 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", input_scale)
 
             if not self.input_symmetric:
-                # Static asymmetric quantization has not been tested yet
-                # See comment in process_weights_after_loading
                 # Note: compressed-tensors stores the zp using the same dtype
                 # as the weights
+                # AZP loaded as int8 but used as int32
                 input_zero_point = BasevLLMParameter(
                     data=torch.empty(1, dtype=torch.int8),
                     weight_loader=weight_loader)

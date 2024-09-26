@@ -2,6 +2,7 @@
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
+from typing import Optional
 
 import pytest
 import torch
@@ -34,15 +35,16 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         down_proj = layer.mlp.down_proj
 
         # assert zp for symmetric and asymmetric cases
-        qkv_zp = (qkv_proj.input_zero_point is None
-                  if is_symmetric else qkv_proj.input_zero_point is not None)
-        o_zp = (o_proj.input_zero_point is None
-                if is_symmetric else o_proj.input_zero_point is not None)
-        gate_zp = (gate_up_proj.input_zero_point is None if is_symmetric else
-                   gate_up_proj.input_zero_point is not None)
-        down_zp = (down_proj.input_zero_point is None
-                   if is_symmetric else down_proj.input_zero_point is not None)
-        assert (qkv_zp and o_zp and gate_zp and down_zp)
+        def zp_valid(zp: Optional[torch.Tensor]):
+            if is_symmetric:
+                return zp is None
+
+            return zp is not None and zp.dtype is torch.int32
+
+        assert zp_valid(qkv_proj.input_zero_point)
+        assert zp_valid(o_proj.input_zero_point)
+        assert zp_valid(gate_up_proj.input_zero_point)
+        assert zp_valid(down_proj.input_zero_point)
 
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
         assert isinstance(o_proj.quant_method, CompressedTensorsLinearMethod)
