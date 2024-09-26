@@ -4,7 +4,6 @@
 # found in the LICENSE file.
 
 # Modified version of: https://chromium.googlesource.com/chromium/tools/depot_tools.git/+/refs/heads/main/post_build_ninja_summary.py
-
 """Summarize the last ninja build, invoked with ninja's -C syntax.
 
 This script is designed to be automatically run after each ninja build in
@@ -60,7 +59,6 @@ import os
 import sys
 from collections import defaultdict
 
-
 # The number of long build times to report:
 long_count = 10
 # The number of long times by extension to report
@@ -69,6 +67,7 @@ long_ext_count = 10
 
 class Target:
     """Represents a single line read for a .ninja_log file."""
+
     def __init__(self, start, end):
         """Creates a target object by passing in the start/end times in seconds
         as a float."""
@@ -99,8 +98,8 @@ class Target:
         # Allow for modest floating-point errors
         epsilon = 0.000002
         if (self.weighted_duration > self.Duration() + epsilon):
-          print('%s > %s?' % (self.weighted_duration, self.Duration()))
-        assert(self.weighted_duration <= self.Duration() + epsilon)
+            print('%s > %s?' % (self.weighted_duration, self.Duration()))
+        assert (self.weighted_duration <= self.Duration() + epsilon)
         return self.weighted_duration
 
     def DescribeTargets(self):
@@ -111,7 +110,7 @@ class Target:
         result = ', '.join(self.targets)
         max_length = 65
         if len(result) > max_length:
-          result = result[:max_length] + '...'
+            result = result[:max_length] + '...'
         return result
 
 
@@ -128,10 +127,10 @@ def ReadTargets(log, show_all):
     for line in log:
         parts = line.strip().split('\t')
         if len(parts) != 5:
-          # If ninja.exe is rudely halted then the .ninja_log file may be
-          # corrupt. Silently continue.
-          continue
-        start, end, _, name, cmdhash = parts # Ignore restat.
+            # If ninja.exe is rudely halted then the .ninja_log file may be
+            # corrupt. Silently continue.
+            continue
+        start, end, _, name, cmdhash = parts  # Ignore restat.
         # Convert from integral milliseconds to float seconds.
         start = int(start) / 1000.0
         end = int(end) / 1000.0
@@ -145,68 +144,68 @@ def ReadTargets(log, show_all):
             targets_dict = {}
         target = None
         if cmdhash in targets_dict:
-          target = targets_dict[cmdhash]
-          if not show_all and (target.start != start or target.end != end):
-            # If several builds in a row just run one or two build steps then
-            # the end times may not go backwards so the last build may not be
-            # detected as such. However in many cases there will be a build step
-            # repeated in the two builds and the changed start/stop points for
-            # that command, identified by the hash, can be used to detect and
-            # reset the target dictionary.
-            targets_dict = {}
-            target = None
+            target = targets_dict[cmdhash]
+            if not show_all and (target.start != start or target.end != end):
+                # If several builds in a row just run one or two build steps
+                # then the end times may not go backwards so the last build may
+                # not be detected as such. However in many cases there will be a
+                # build step repeated in the two builds and the changed
+                # start/stop points for that command, identified by the hash,
+                # can be used to detect and reset the target dictionary.
+                targets_dict = {}
+                target = None
         if not target:
-          targets_dict[cmdhash] = target = Target(start, end)
+            targets_dict[cmdhash] = target = Target(start, end)
         last_end_seen = end
         target.targets.append(name)
     return list(targets_dict.values())
 
 
 def GetExtension(target, extra_patterns):
-  """Return the file extension that best represents a target.
+    """Return the file extension that best represents a target.
 
   For targets that generate multiple outputs it is important to return a
   consistent 'canonical' extension. Ultimately the goal is to group build steps
   by type."""
-  for output in target.targets:
-    if extra_patterns:
-      for fn_pattern in extra_patterns.split(';'):
-        if fnmatch.fnmatch(output, '*' + fn_pattern + '*'):
-          return fn_pattern
-    # Not a true extension, but a good grouping.
-    if output.endswith('type_mappings'):
-      extension = 'type_mappings'
-      break
+    for output in target.targets:
+        if extra_patterns:
+            for fn_pattern in extra_patterns.split(';'):
+                if fnmatch.fnmatch(output, '*' + fn_pattern + '*'):
+                    return fn_pattern
+        # Not a true extension, but a good grouping.
+        if output.endswith('type_mappings'):
+            extension = 'type_mappings'
+            break
 
-    # Capture two extensions if present. For example: file.javac.jar should be
-    # distinguished from file.interface.jar.
-    root, ext1 = os.path.splitext(output)
-    _, ext2 = os.path.splitext(root)
-    extension = ext2 + ext1 # Preserve the order in the file name.
+        # Capture two extensions if present. For example: file.javac.jar should
+        # be distinguished from file.interface.jar.
+        root, ext1 = os.path.splitext(output)
+        _, ext2 = os.path.splitext(root)
+        extension = ext2 + ext1  # Preserve the order in the file name.
 
-    if len(extension) == 0:
-      extension = '(no extension found)'
+        if len(extension) == 0:
+            extension = '(no extension found)'
 
-    if ext1 in ['.pdb', '.dll', '.exe']:
-      extension = 'PEFile (linking)'
-      # Make sure that .dll and .exe are grouped together and that the
-      # .dll.lib files don't cause these to be listed as libraries
-      break
-    if ext1 in ['.so', '.TOC']:
-      extension = '.so (linking)'
-      # Attempt to identify linking, avoid identifying as '.TOC'
-      break
-    # Make sure .obj files don't get categorized as mojo files
-    if ext1 in ['.obj', '.o']:
-      break
-    # Jars are the canonical output of java targets.
-    if ext1 == '.jar':
-      break
-    # Normalize all mojo related outputs to 'mojo'.
-    if output.count('.mojom') > 0:
-      extension = 'mojo'
-      break
-  return extension
+        if ext1 in ['.pdb', '.dll', '.exe']:
+            extension = 'PEFile (linking)'
+            # Make sure that .dll and .exe are grouped together and that the
+            # .dll.lib files don't cause these to be listed as libraries
+            break
+        if ext1 in ['.so', '.TOC']:
+            extension = '.so (linking)'
+            # Attempt to identify linking, avoid identifying as '.TOC'
+            break
+        # Make sure .obj files don't get categorized as mojo files
+        if ext1 in ['.obj', '.o']:
+            break
+        # Jars are the canonical output of java targets.
+        if ext1 == '.jar':
+            break
+        # Normalize all mojo related outputs to 'mojo'.
+        if output.count('.mojom') > 0:
+            extension = 'mojo'
+            break
+    return extension
 
 
 def SummarizeEntries(entries, extra_step_types):
@@ -224,13 +223,13 @@ def SummarizeEntries(entries, extra_step_types):
     latest = 0
     total_cpu_time = 0
     for target in entries:
-      if earliest < 0 or target.start < earliest:
-        earliest = target.start
-      if target.end > latest:
-        latest = target.end
-      total_cpu_time += target.Duration()
-      task_start_stop_times.append((target.start, 'start', target))
-      task_start_stop_times.append((target.end, 'stop', target))
+        if earliest < 0 or target.start < earliest:
+            earliest = target.start
+        if target.end > latest:
+            latest = target.end
+        total_cpu_time += target.Duration()
+        task_start_stop_times.append((target.start, 'start', target))
+        task_start_stop_times.append((target.end, 'stop', target))
     length = latest - earliest
     weighted_total = 0.0
 
@@ -250,55 +249,55 @@ def SummarizeEntries(entries, extra_step_types):
     last_weighted_time = 0.0
     # Scan all start/stop events.
     for event in task_start_stop_times:
-      time, action_name, target = event
-      # Accumulate weighted time up to now.
-      num_running = len(running_tasks)
-      if num_running > 0:
-        # Update the total weighted time up to this moment.
-        last_weighted_time += (time - last_time) / float(num_running)
-      if action_name == 'start':
-        # Record the total weighted task time when this task starts.
-        running_tasks[target] = last_weighted_time
-      if action_name == 'stop':
-        # Record the change in the total weighted task time while this task ran.
-        weighted_duration = last_weighted_time - running_tasks[target]
-        target.SetWeightedDuration(weighted_duration)
-        weighted_total += weighted_duration
-        del running_tasks[target]
-      last_time = time
-    assert(len(running_tasks) == 0)
+        time, action_name, target = event
+        # Accumulate weighted time up to now.
+        num_running = len(running_tasks)
+        if num_running > 0:
+            # Update the total weighted time up to this moment.
+            last_weighted_time += (time - last_time) / float(num_running)
+        if action_name == 'start':
+            # Record the total weighted task time when this task starts.
+            running_tasks[target] = last_weighted_time
+        if action_name == 'stop':
+            # Record the change in the total weighted task time while this task
+            # ran.
+            weighted_duration = last_weighted_time - running_tasks[target]
+            target.SetWeightedDuration(weighted_duration)
+            weighted_total += weighted_duration
+            del running_tasks[target]
+        last_time = time
+    assert (len(running_tasks) == 0)
 
     # Warn if the sum of weighted times is off by more than half a second.
     if abs(length - weighted_total) > 500:
-      print('Warning: Possible corrupt ninja log, results may be '
-            'untrustworthy. Length = %.3f, weighted total = %.3f' % (
-            length, weighted_total))
+        print('Warning: Possible corrupt ninja log, results may be '
+              'untrustworthy. Length = %.3f, weighted total = %.3f' %
+              (length, weighted_total))
 
     entries_by_ext = defaultdict(list)
     for target in entries:
-      extension = GetExtension(target, extra_step_types)
-      entries_by_ext[extension].append(target)
-      
+        extension = GetExtension(target, extra_step_types)
+        entries_by_ext[extension].append(target)
+
     for key, values in entries_by_ext.items():
-      print('    Longest build steps for %s:' % key)
-      values.sort(key=lambda x: x.WeightedDuration())
-      for target in values[-long_count:]:
-        print('      %8.1f weighted s to build %s (%.1f s elapsed time)' % (
-              target.WeightedDuration(),
-              target.DescribeTargets(), target.Duration()))
+        print('    Longest build steps for %s:' % key)
+        values.sort(key=lambda x: x.WeightedDuration())
+        for target in values[-long_count:]:
+            print('      %8.1f weighted s to build %s (%.1f s elapsed time)' %
+                  (target.WeightedDuration(), target.DescribeTargets(),
+                   target.Duration()))
 
     print('    %.1f s weighted time (%.1f s elapsed time sum, %1.1fx '
-          'parallelism)' % (length, total_cpu_time,
-          total_cpu_time * 1.0 / length))
-    print('    %d build steps completed, average of %1.2f/s' % (
-          len(entries), len(entries) / (length)))
+          'parallelism)' %
+          (length, total_cpu_time, total_cpu_time * 1.0 / length))
+    print('    %d build steps completed, average of %1.2f/s' %
+          (len(entries), len(entries) / (length)))
 
 
 def main():
     log_file = '.ninja_log'
     parser = argparse.ArgumentParser()
-    parser.add_argument('-C', dest='build_directory',
-                        help='Build directory.')
+    parser.add_argument('-C', dest='build_directory', help='Build directory.')
     parser.add_argument(
         '-s',
         '--step-types',
@@ -310,23 +309,18 @@ def main():
         log_file = os.path.join(args.build_directory, log_file)
     if args.log_file:
         log_file = args.log_file
-    if not args.step_types:
-      # Offer a convenient way to add extra step types automatically, including
-      # when this script is run by autoninja. get() returns None if the variable
-      # isn't set.
-      args.step_types = os.environ.get('chromium_step_types')
     if args.step_types:
-      # Make room for the extra build types.
-      global long_ext_count
-      long_ext_count += len(args.step_types.split(';'))
+        # Make room for the extra build types.
+        global long_ext_count
+        long_ext_count += len(args.step_types.split(';'))
 
     try:
-      with open(log_file, 'r') as log:
-        entries = ReadTargets(log, False)
-        SummarizeEntries(entries, args.step_types)
+        with open(log_file, 'r') as log:
+            entries = ReadTargets(log, False)
+            SummarizeEntries(entries, args.step_types)
     except IOError:
-      print('Log file %r not found, no build summary created.' % log_file)
-      return errno.ENOENT
+        print('Log file %r not found, no build summary created.' % log_file)
+        return errno.ENOENT
 
 
 if __name__ == '__main__':
