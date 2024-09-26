@@ -3,7 +3,8 @@
     {%- set tools = custom_tools %}
 {%- endif %}
 {%- if not tools_in_user_message is defined %}
-    {%- set tools_in_user_message = false %}
+    {#- Llama 3.1 doesn't pass all tests if the tools are in the system prompt #}
+    {%- set tools_in_user_message = true %}
 {%- endif %}
 {%- if not date_string is defined %}
     {%- if strftime_now is defined %}
