@@ -153,7 +153,9 @@ def get_tokenizer(
             else:
                 raise e
 
-        if type(tokenizer).__name__ == "ChatGLMTokenizer":
+        # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
+        if type(tokenizer).__name__ in ("ChatGLMTokenizer",
+                                        "ChatGLM4Tokenizer"):
             assert isinstance(tokenizer, PreTrainedTokenizer)
             orig_pad = tokenizer._pad
 
