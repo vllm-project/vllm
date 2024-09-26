@@ -2,31 +2,13 @@ import asyncio
 import time
 import weakref
 from functools import partial
-from typing import (
-    Any,
-    AsyncGenerator,
-    Callable,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Set,
-    Tuple,
-    Type,
-    Union,
-)
+from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
+                    Mapping, Optional, Set, Tuple, Type, Union)
 from weakref import ReferenceType
 
 import vllm.envs as envs
-from vllm.config import (
-    DecodingConfig,
-    EngineConfig,
-    LoRAConfig,
-    ModelConfig,
-    ParallelConfig,
-    SchedulerConfig,
-)
+from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
@@ -585,7 +567,7 @@ class AsyncLLMEngine:
                 executor_class = RayXPUExecutorAsync
             elif distributed_executor_backend == "mp":
                 from vllm.executor.multiproc_xpu_executor import (
-                    MultiprocessingXPUExecutorAsync, )
+                    MultiprocessingXPUExecutorAsync)
 
                 executor_class = MultiprocessingXPUExecutorAsync
             else:
@@ -597,7 +579,7 @@ class AsyncLLMEngine:
             executor_class = RayGPUExecutorAsync
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
-                MultiprocessingGPUExecutorAsync, )
+                MultiprocessingGPUExecutorAsync)
 
             executor_class = MultiprocessingGPUExecutorAsync
         else:
