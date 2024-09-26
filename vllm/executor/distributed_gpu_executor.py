@@ -56,6 +56,10 @@ class DistributedGPUExecutor(GPUExecutor):
         # have GPUs.
         logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
+        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
+                           self.model_config.max_model_len)
+        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                    self.model_config.max_model_len, max_concurrency)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
