@@ -302,6 +302,8 @@ def run_image_test(
         )
 
 
+# FIXME: Swap to a smaller model for this architecture
+@pytest.mark.skip(reason="Model OOMing on CI")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
