@@ -13,6 +13,7 @@ from typing import Set, Tuple, Union, cast
 import msgspec
 import torch
 
+from vllm.inputs import EncoderDecoderLLMInputs, LLMInputs
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -21,7 +22,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
-    from vllm.inputs import LLMInputs
     from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
@@ -471,7 +471,15 @@ class Sequence:
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        return self.inputs.get("multi_modal_data") or {}
+        if self.inputs.get("multi_modal_data") and self.inputs.get(
+                "encoder_multi_modal_data"):
+            raise ValueError(
+                "Multi-modal data in both encoder and decoder is not supported."
+            )
+        inputs = self.inputs
+        return self.inputs.get("multi_modal_data") or (cast(
+            EncoderDecoderLLMInputs,
+            inputs).get("encoder_multi_modal_data")) or {}
 
     @property
     def lora_int_id(self) -> int:
