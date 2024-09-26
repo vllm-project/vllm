@@ -70,10 +70,9 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     Represents an encoder/decoder model input prompt,
     comprising an explicit encoder prompt and a decoder prompt.
 
-    The encoder and decoder prompts, respectively,
-    may formatted according to any of the
-    :class:`SingletonPrompt` schemas, and are not
-    required to have the same schema.
+    The encoder and decoder prompts, respectively, may be formatted
+    according to any of the :class:`SingletonPrompt` schemas,
+    and are not required to have the same schema.
 
     Only the encoder prompt may have multi-modal data.
 
