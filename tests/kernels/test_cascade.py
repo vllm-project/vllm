@@ -50,13 +50,12 @@ def test_cascade_speedup(beam_width, seq_lens, num_heads, head_size, dtype,
     )
 
     assert len(cascade_outputs) == len(
-        batchdecode_outputs
-    ), "Output length mismatch between the two methods."
+        batchdecode_outputs), "Output length mismatch between the two methods."
 
     max_diff = 0
 
     for cascade_output, batchdecode_output in zip(cascade_outputs,
-                                                   batchdecode_outputs):
+                                                  batchdecode_outputs):
         assert cascade_output.shape == batchdecode_output.shape, "Shape mismatch between outputs."  # noqa: E501
 
         isclose = torch.isclose(cascade_output,
@@ -143,7 +142,7 @@ def run_flashinfer_batchdecode_beam_search(
     outputs = []
 
     # index of the next block that we append for each sequence
-    next_block_index = [num// block_size + 1 for num in kv_lens]
+    next_block_index = [num // block_size + 1 for num in kv_lens]
 
     kv_indptr: List[int] = [0]
     kv_indices: List[List[int]] = []
