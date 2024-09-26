@@ -48,6 +48,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # see https://github.com/pytorch/pytorch/pull/123243
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+# Override the arch list for flash-attn to reduce the binary size
+ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
+ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 #################### BASE BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -76,14 +79,13 @@ ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
-ARG buildkite_commit
-ENV BUILDKITE_COMMIT=${buildkite_commit}
-
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=.git,target=.git \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
         && curl -L -o sccache.tar.gz https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz \
@@ -92,6 +94,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
         && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
         && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
+        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
@@ -102,6 +105,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=.git,target=.git  \
     if [ "$USE_SCCACHE" != "1" ]; then \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
@@ -180,10 +184,6 @@ FROM vllm-base AS test
 ADD . /vllm-workspace/
 
 # install development dependencies (for testing)
-# A newer setuptools is required for installing some test dependencies from source that do not publish python 3.12 wheels
-# This installation must complete before the test dependencies are collected and installed.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install "setuptools>=74.1.1"
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-dev.txt
 
@@ -202,7 +202,7 @@ FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate hf_transfer 'modelscope!=1.15.0'
+    pip install accelerate hf_transfer 'modelscope!=1.15.0' bitsandbytes>=0.44.0 timm==0.9.10
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 

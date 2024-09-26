@@ -22,8 +22,9 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
                                              GraniteConfig, InternVLChatConfig,
                                              JAISConfig, MedusaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
-                                             NemotronConfig, RWConfig,
+                                             MllamaConfig, MLPSpeculatorConfig,
+                                             MPTConfig, NemotronConfig,
+                                             RWConfig, SolarConfig,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
@@ -36,6 +37,10 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
+
+_CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
+    "mllama": MllamaConfig
+}
 
 _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
@@ -50,15 +55,20 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
+    "solar": SolarConfig,
     "ultravox": UltravoxConfig,
     # Granite can be removed from here once we have upgraded to
     # transformers 4.45+
     "granite": GraniteConfig,
+    **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
     with contextlib.suppress(ValueError):
-        AutoConfig.register(name, cls)
+        if name in _CONFIG_REGISTRY_OVERRIDE_HF:
+            AutoConfig.register(name, cls, exist_ok=True)
+        else:
+            AutoConfig.register(name, cls)
 
 
 class ConfigFormat(str, enum.Enum):

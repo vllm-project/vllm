@@ -43,13 +43,15 @@ steps:
   fast_check: true
   source_file_dependencies:
   - vllm/
+  - tests/mq_llm_engine
   - tests/async_engine
   - tests/test_inputs
   - tests/multimodal
   - tests/test_utils
   - tests/worker
   commands:
-  - pytest -v -s async_engine # Async Engine
+  - pytest -v -s mq_llm_engine # MQLLMEngine
+  - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
   - pytest -v -s test_inputs.py
   - pytest -v -s multimodal
@@ -68,7 +70,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
-  
+
 - label: Core Test # 10min
   mirror_hardwares: [amd]
   fast_check: true
@@ -82,14 +84,17 @@ steps:
 - label: Entrypoints Test # 20min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
+  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
+  - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
   - pytest -v -s entrypoints/openai
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
@@ -163,13 +168,6 @@ steps:
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
 
-- label: torch compile integration test
-  source_file_dependencies:
-  - vllm/
-  commands:
-    - pytest -v -s ./compile/test_full_graph.py
-    - pytest -v -s ./compile/test_wrapper.py
-
 - label: Prefix Caching Test # 7min
   #mirror_hardwares: [amd]
   source_file_dependencies:
@@ -211,6 +209,21 @@ steps:
   - tests/lora
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
+
+- label: "PyTorch Fullgraph Smoke Test"
+  fast_check: true
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  - pytest -v -s compile/test_full_graph_smoke.py
+
+- label: "PyTorch Fullgraph Test"
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 30min each
   mirror_hardwares: [amd]
@@ -258,6 +271,13 @@ steps:
   - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
+
+- label: Encoder Decoder tests # 5min
+  source_file_dependencies:
+  - vllm/
+  - tests/encoder_decoder
+  commands:
+    - pytest -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
   fast_check: false
@@ -348,7 +368,10 @@ steps:
   - vllm/executor/
   - vllm/model_executor/models/
   - tests/distributed/
+  - vllm/compilation
   commands:
+  - pytest -v -s ./compile/test_full_graph_multi_gpu.py
+  - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
   # Avoid importing model tests that cause CUDA reinitialization error

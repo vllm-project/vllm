@@ -3,8 +3,11 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from tests.kernels.utils import opcheck
+from vllm import _custom_ops as ops  # noqa: F401
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn, selective_state_update)
+from vllm.utils import seed_everything
 
 
 def selective_state_update_ref(state,
@@ -160,6 +163,59 @@ def selective_scan_ref(u,
     return out if not return_last_state else (out, last_state)
 
 
+def selective_scan_opcheck_fn(u,
+                              delta,
+                              A,
+                              B,
+                              C,
+                              D=None,
+                              z=None,
+                              delta_bias=None,
+                              delta_softplus=False,
+                              return_last_state=False,
+                              position_indices=None,
+                              prev_state=None):
+    """if return_last_state is True, returns (out, last_state)
+    last_state has shape (batch, dim, dstate).
+    """
+    if u.stride(-1) != 1:
+        u = u.contiguous()
+    if delta.stride(-1) != 1:
+        delta = delta.contiguous()
+    if D is not None:
+        D = D.contiguous()
+    if B.stride(-1) != 1:
+        B = B.contiguous()
+    if C.stride(-1) != 1:
+        C = C.contiguous()
+    if z is not None and z.stride(-1) != 1:
+        z = z.contiguous()
+    if B.dim() == 3:
+        B = B.unsqueeze(1)
+    if C.dim() == 3:
+        C = C.unsqueeze(1)
+    n_chunks = int((u.shape[-1] + 2048 - 1) / 2048)
+    x = torch.zeros((
+        u.shape[0],
+        u.shape[1],
+        n_chunks,
+        int(A.shape[1] * 2),
+    ),
+                    device=u.device,
+                    dtype=torch.float32,
+                    requires_grad=False)
+    x[:, :, 0, 0::2] = 1
+    if prev_state is not None:
+        x[:, :, 0, 1::2].copy_(prev_state)
+
+    # Disable test_autograd_registration for now as it seems to trigger
+    # a bogus error.
+    opcheck(torch.ops._C.selective_scan_fwd,
+            (u, delta, A, B, C, D, z, delta_bias, delta_softplus,
+             position_indices, x),
+            test_utils=["test_schema", "test_faketensor"])
+
+
 @pytest.mark.parametrize('wtype', [torch.float32])
 @pytest.mark.parametrize('itype', [torch.float32])
 @pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
@@ -186,7 +242,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         rtolw = max(rtolw, rtol)
         atolw = max(atolw, atol)
     # set seed
-    torch.random.manual_seed(0)
+    seed_everything(0)
     batch_size = 2
     dim = 4
     dstate = 8
@@ -273,6 +329,17 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         assert state is not None and state_ref is not None
         assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
 
+    selective_scan_opcheck_fn(u,
+                              delta,
+                              A,
+                              B,
+                              C,
+                              D,
+                              z=z,
+                              delta_bias=delta_bias,
+                              delta_softplus=delta_softplus,
+                              return_last_state=return_last_state)
+
 
 @pytest.mark.parametrize("itype",
                          [torch.float32, torch.float16, torch.bfloat16])
@@ -287,7 +354,7 @@ def test_selective_state_update(dim, dstate, has_z, itype):
         if torch.version.hip:
             atol *= 2
     # set seed
-    torch.random.manual_seed(0)
+    seed_everything(0)
     batch_size = 1
     state = torch.randn(batch_size, dim, dstate, dtype=itype, device=device)
     x = torch.randn(batch_size, dim, device=device, dtype=itype)
@@ -321,4 +388,150 @@ def test_selective_state_update(dim, dstate, has_z, itype):
                                          dt_softplus=True)
 
     assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("itype",
+                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_z", [False, True])
+@pytest.mark.parametrize("dstate", [16, 32, 64])
+@pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
+def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
+    if itype == torch.bfloat16:
+        rtol, atol = 7e-2, 7e-2
+        if torch.version.hip:
+            atol *= 2
+    # set seed
+    torch.random.manual_seed(0)
+    batch_size = 16
+
+    total_entries = 10 * batch_size
+    state = torch.randn(total_entries, dim, dstate, dtype=itype, device=device)
+    state_indices = torch.randperm(total_entries)[:batch_size].to(
+        dtype=torch.int32, device=device)
+
+    x = torch.randn(batch_size, dim, device=device, dtype=itype)
+    dt = torch.randn(batch_size, dim, device=device, dtype=itype)
+    dt_bias = torch.rand(dim, device=device) - 4.0
+    A = -torch.rand(dim, dstate, device=device) - 1.0
+    B = torch.randn(batch_size, dstate, device=device)
+    C = torch.randn(batch_size, dstate, device=device)
+    D = torch.randn(dim, device=device)
+    z = torch.randn_like(x) if has_z else None
+    state_ref = state[state_indices, :].detach().clone()
+    out = selective_state_update(state,
+                                 x,
+                                 dt,
+                                 A,
+                                 B,
+                                 C,
+                                 D=D,
+                                 z=z,
+                                 dt_bias=dt_bias,
+                                 dt_softplus=True,
+                                 state_batch_indices=state_indices)
+    out_ref = selective_state_update_ref(state_ref,
+                                         x,
+                                         dt,
+                                         A,
+                                         B,
+                                         C,
+                                         D=D,
+                                         z=z,
+                                         dt_bias=dt_bias,
+                                         dt_softplus=True)
+
+    assert torch.allclose(state[state_indices, :],
+                          state_ref,
+                          rtol=rtol,
+                          atol=atol)
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("itype",
+                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_z", [False, True])
+@pytest.mark.parametrize("tie_hdim", [False, True])
+@pytest.mark.parametrize("ngroups", [1, 2, 4])
+@pytest.mark.parametrize("dstate", [16, 32, 64])
+@pytest.mark.parametrize("dim", [2048, 4096])
+def test_selective_state_update_with_heads_with_batch_indices(
+        dim, dstate, ngroups, has_z, tie_hdim, itype):
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 3e-2)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-1, 1e-1
+    # set seed
+    torch.random.manual_seed(0)
+    batch_size = 16
+    headdim = 64
+    nheads = dim // headdim
+
+    total_entries = 10 * batch_size
+    state = torch.randn(total_entries,
+                        nheads,
+                        headdim,
+                        dstate,
+                        dtype=itype,
+                        device=device)
+    state_indices = torch.randperm(total_entries)[:batch_size].to(
+        dtype=torch.int32, device=device)
+
+    x = torch.randn(batch_size, nheads, headdim, device=device, dtype=itype)
+    if not tie_hdim:
+        dt = torch.randn(batch_size,
+                         nheads,
+                         headdim,
+                         device=device,
+                         dtype=itype)
+        dt_bias = torch.rand(nheads, headdim, device=device) - 4.0
+        A = -torch.rand(nheads, headdim, dstate, device=device) - 1.0
+        D = torch.randn(nheads, headdim, device=device)
+    else:
+        dt = repeat(torch.randn(batch_size, nheads, device=device,
+                                dtype=itype),
+                    "b h -> b h p",
+                    p=headdim)
+        dt_bias = repeat(torch.rand(nheads, device=device) - 4.0,
+                         "h -> h p",
+                         p=headdim)
+        A = repeat(-torch.rand(nheads, device=device) - 1.0,
+                   "h -> h p n",
+                   p=headdim,
+                   n=dstate)
+        D = repeat(torch.randn(nheads, device=device), "h -> h p", p=headdim)
+    B = torch.randn(batch_size, ngroups, dstate, device=device)
+    C = torch.randn(batch_size, ngroups, dstate, device=device)
+    z = torch.randn_like(x) if has_z else None
+    state_ref = state[state_indices, :].detach().clone()
+    out = selective_state_update(state,
+                                 x,
+                                 dt,
+                                 A,
+                                 B,
+                                 C,
+                                 D=D,
+                                 z=z,
+                                 dt_bias=dt_bias,
+                                 dt_softplus=True,
+                                 state_batch_indices=state_indices)
+    out_ref = selective_state_update_ref(state_ref,
+                                         x,
+                                         dt,
+                                         A,
+                                         B,
+                                         C,
+                                         D=D,
+                                         z=z,
+                                         dt_bias=dt_bias,
+                                         dt_softplus=True)
+
+    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
+    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
+    assert torch.allclose(state[state_indices, :],
+                          state_ref,
+                          rtol=rtol,
+                          atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)

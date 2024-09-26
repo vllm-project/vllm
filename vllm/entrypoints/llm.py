@@ -1,5 +1,8 @@
+import itertools
 from contextlib import contextmanager
-from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
+from dataclasses import dataclass
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
+                    Union, cast, overload)
 
 from tqdm import tqdm
 
@@ -27,6 +30,37 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class BeamSearchSequence:
+    """A sequence for beam search.
+    It keeps track of the tokens and the log probability of the sequence.
+    The text field is optional and will only be filled when the sequence is
+    about to be returned to the user.
+    """
+    # The tokens includes the prompt.
+    tokens: List[int]
+    cum_logprob: float = 0.0
+    text: Optional[str] = None
+
+
+@dataclass
+class BeamSearchOutput:
+    """The output of beam search.
+    It contains the list of the best beam search sequences.
+    The length of the list is equal to the beam width.
+    """
+    sequences: List[BeamSearchSequence]
+
+
+class BeamSearchInstance:
+
+    def __init__(self, prompt_tokens: List[int]):
+        self.beams: List[BeamSearchSequence] = [
+            BeamSearchSequence(tokens=prompt_tokens)
+        ]
+        self.completed: List[BeamSearchSequence] = []
 
 
 class LLM:
@@ -88,7 +122,9 @@ class LLM:
             to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode.
+            to eager mode. Additionally for encoder-decoder models, if the
+            sequence length of the encoder input is larger than this, we fall
+            back to the eager mode.
         disable_custom_all_reduce: See ParallelConfig
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
@@ -131,15 +167,14 @@ class LLM:
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         '''
         LLM constructor.
 
         Note: if enforce_eager is unset (enforce_eager is None)
-        it defaults to False for decoder-only models and True
-        for encoder/decoder models, since encoder/decoder models
-        do not currently support CUDAGraph.
+        it defaults to False.
         '''
 
         if "disable_log_stats" not in kwargs:
@@ -173,6 +208,7 @@ class LLM:
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
+            mm_processor_kwargs=mm_processor_kwargs,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(
@@ -284,7 +320,8 @@ class LLM:
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None
+                                               GuidedDecodingRequest]] = None,
+        priority: Optional[List[int]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -303,6 +340,8 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
+            priority: The priority of the requests, if any.
+                Only applicable when priority scheduling policy is enabled.
 
         Returns:
             A list of ``RequestOutput`` objects containing the
@@ -343,20 +382,122 @@ class LLM:
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
-            guided_options=guided_options_request)
+            guided_options=guided_options_request,
+            priority=priority)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
+    def beam_search(
+        self,
+        prompts: List[Union[str, List[int]]],
+        beam_width: int,
+        max_tokens: int,
+        ignore_eos: bool = False,
+    ) -> List[BeamSearchOutput]:
+        """
+        Generate sequences using beam search.
+
+        Args:
+            prompts: A list of prompts. Each prompt can be a string or a list
+                of token IDs.
+            beam_width: The number of beams to keep at each step.
+            max_tokens: The max number of tokens to generate for each prompt.
+        
+        TODO: how does beam search work together with length penalty, frequency
+        penalty, and stopping criteria, etc.?
+        """
+
+        tokenizer = self.get_tokenizer()
+        # generate 2 * beam_width candidates at each step
+        # following the huggingface transformers implementation
+        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
+        beam_search_params = SamplingParams(logprobs=2 * beam_width,
+                                            max_tokens=1,
+                                            temperature=0.0)
+        instances: List[BeamSearchInstance] = []
+
+        for prompt in prompts:
+            prompt_tokens = prompt if isinstance(
+                prompt, list) else tokenizer.encode(prompt)
+            instances.append(BeamSearchInstance(prompt_tokens))
+
+        for _ in range(max_tokens):
+            all_beams: List[BeamSearchSequence] = list(
+                sum((instance.beams for instance in instances), []))
+            pos = [0] + list(
+                itertools.accumulate(
+                    len(instance.beams) for instance in instances))
+            instance_start_and_end: List[Tuple[int, int]] = list(
+                zip(pos[:-1], pos[1:]))
+
+            if len(all_beams) == 0:
+                break
+
+            prompts_batch = [
+                TokensPrompt(prompt_token_ids=beam.tokens)
+                for beam in all_beams
+            ]
+
+            # only runs for one step
+            # we don't need to use tqdm here
+            output = self.generate(prompts_batch,
+                                   sampling_params=beam_search_params,
+                                   use_tqdm=False)
+
+            for (start, end), instance in zip(instance_start_and_end,
+                                              instances):
+                instance_new_beams = []
+                for i in range(start, end):
+                    current_beam = all_beams[i]
+                    result = output[i]
+
+                    if result.outputs[0].logprobs is not None:
+                        # if `result.outputs[0].logprobs` is None, it means
+                        # the sequence is completed because of the max-model-len
+                        # or abortion. we don't need to add it to the new beams.
+                        logprobs = result.outputs[0].logprobs[0]
+                        for token_id, logprob_obj in logprobs.items():
+                            new_beam = BeamSearchSequence(
+                                tokens=current_beam.tokens + [token_id],
+                                cum_logprob=current_beam.cum_logprob +
+                                logprob_obj.logprob)
+
+                            if token_id == tokenizer.eos_token_id and \
+                                not ignore_eos:
+                                instance.completed.append(new_beam)
+                            else:
+                                instance_new_beams.append(new_beam)
+                sorted_beams = sorted(instance_new_beams,
+                                      key=lambda x: x.cum_logprob,
+                                      reverse=True)
+                instance.beams = sorted_beams[:beam_width]
+
+        outputs = []
+        for instance in instances:
+            instance.completed.extend(instance.beams)
+            sorted_completed = sorted(instance.completed,
+                                      key=lambda x: x.cum_logprob,
+                                      reverse=True)
+            best_beams = sorted_completed[:beam_width]
+
+            for beam in best_beams:
+                beam.text = tokenizer.decode(beam.tokens)
+            outputs.append(BeamSearchOutput(sequences=best_beams))
+
+        return outputs
+
     def chat(
         self,
-        messages: List[ChatCompletionMessageParam],
+        messages: Union[List[ChatCompletionMessageParam],
+                        List[List[ChatCompletionMessageParam]]],
         sampling_params: Optional[Union[SamplingParams,
                                         List[SamplingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> List[RequestOutput]:
         """
         Generate responses for a chat conversation.
@@ -369,8 +510,9 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            messages: A single conversation represented as a list of messages.
-                Each message is a dictionary with 'role' and 'content' keys.
+            messages: A list of conversations or a single conversation. 
+                - Each conversation is represented as a list of messages.
+                - Each message is a dictionary with 'role' and 'content' keys.
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
@@ -387,40 +529,56 @@ class LLM:
             A list of ``RequestOutput`` objects containing the generated
             responses in the same order as the input messages.
         """
+        list_of_messages: List[List[ChatCompletionMessageParam]]
 
-        tokenizer = self.get_tokenizer()
-        model_config = self.llm_engine.get_model_config()
-
-        conversation, mm_data = parse_chat_messages(messages, model_config,
-                                                    tokenizer)
-
-        prompt: Union[str, List[int]]
-        if isinstance(tokenizer, MistralTokenizer):
-            prompt = apply_mistral_chat_template(
-                tokenizer,
-                messages=messages,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-            )
+        # Handle multi and single conversations
+        if is_list_of(messages, list):
+            # messages is List[List[...]]
+            list_of_messages = messages
         else:
-            prompt = apply_hf_chat_template(
-                tokenizer,
-                conversation=conversation,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-            )
+            # messages is List[...]
+            list_of_messages = [messages]
 
-        inputs: PromptInputs
-        if is_list_of(prompt, int):
-            inputs = TokensPrompt(prompt_token_ids=prompt)
-        else:
-            inputs = TextPrompt(prompt=prompt)
+        prompts: List[Union[TokensPrompt, TextPrompt]] = []
 
-        if mm_data is not None:
-            inputs["multi_modal_data"] = mm_data
+        for msgs in list_of_messages:
+            tokenizer = self.get_tokenizer()
+            model_config = self.llm_engine.get_model_config()
+
+            conversation, mm_data = parse_chat_messages(
+                msgs, model_config, tokenizer)
+
+            prompt_data: Union[str, List[int]]
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt_data = apply_mistral_chat_template(
+                    tokenizer,
+                    messages=msgs,
+                    chat_template=chat_template,
+                    add_generation_prompt=add_generation_prompt,
+                    tools=tools,
+                )
+            else:
+                prompt_data = apply_hf_chat_template(
+                    tokenizer,
+                    conversation=conversation,
+                    chat_template=chat_template,
+                    add_generation_prompt=add_generation_prompt,
+                    tools=tools,
+                )
+
+            prompt: Union[TokensPrompt, TextPrompt]
+            if is_list_of(prompt_data, int):
+                prompt = TokensPrompt(prompt_token_ids=prompt_data)
+            else:
+                prompt = TextPrompt(prompt=prompt_data)
+
+            if mm_data is not None:
+                prompt["multi_modal_data"] = mm_data
+
+            prompts.append(prompt)
 
         return self.generate(
-            inputs,
+            prompts,
             sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -628,6 +786,7 @@ class LLM:
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
+        priority: Optional[List[int]] = None,
     ) -> None:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
@@ -657,6 +816,7 @@ class LLM:
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,
+                priority=priority[i] if priority else 0,
             )
 
     def _add_request(
@@ -665,6 +825,7 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(
@@ -673,6 +834,7 @@ class LLM:
             params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            priority=priority,
         )
 
     def _add_guided_processor(

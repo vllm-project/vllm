@@ -1,7 +1,7 @@
 from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
                                          apply_mistral_chat_template,
                                          load_chat_template,
@@ -16,7 +16,8 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               TokenizeRequest,
                                               TokenizeResponse)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
+                                                    LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import MistralTokenizer
@@ -29,17 +30,17 @@ class OpenAIServingTokenization(OpenAIServing):
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        engine_client: EngineClient,
         model_config: ModelConfig,
-        served_model_names: List[str],
+        base_model_paths: List[BaseModelPath],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
     ):
-        super().__init__(async_engine_client=async_engine_client,
+        super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         served_model_names=served_model_names,
+                         base_model_paths=base_model_paths,
                          lora_modules=lora_modules,
                          prompt_adapters=None,
                          request_logger=request_logger)
@@ -66,7 +67,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
         prompt: Union[str, List[int]]
         if isinstance(request, TokenizeChatRequest):
@@ -132,7 +133,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
         self._log_inputs(request_id,
                          request.tokens,
