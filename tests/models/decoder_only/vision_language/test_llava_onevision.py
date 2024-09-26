@@ -1,7 +1,6 @@
 from typing import List, Optional, Tuple, Type, overload
 
 import pytest
-import transformers
 from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
                           BatchEncoding)
 
@@ -166,8 +165,6 @@ def run_video_test(
         )
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.45",
-                    reason="Waiting for next transformers release")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -211,8 +208,6 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
     )
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.45",
-                    reason="Waiting for next transformers release")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
@@ -307,8 +302,6 @@ def run_image_test(
         )
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.45",
-                    reason="Waiting for next transformers release")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
