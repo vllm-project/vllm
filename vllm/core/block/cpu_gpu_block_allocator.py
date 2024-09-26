@@ -260,9 +260,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return current_swap_mapping
 
     def get_num_blocks_touched(self,
-                               seq_id_blocks: dict[int, List[Block]],
+                               seq_id_blocks: Dict[int, List[Block]],
                                device: Device,
-                               num_unseen_tokens: Optional[dict[int, int]] = None,
+                               seq_id_num_unseen_tokens: Optional[Dict[
+                                   int, int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         """Returns the number of blocks that will be touched by
         swapping in/out the given blocks on to the 'device'.
@@ -278,7 +279,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 swapping in/out the given blocks on to the 'device'.
         """
         return self._allocators[device].get_num_blocks_touched(
-            blocks, num_lookahead_slots)
+            seq_id_blocks,
+            seq_id_num_unseen_tokens=seq_id_num_unseen_tokens,
+            num_lookahead_slots=num_lookahead_slots)
 
     def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of

@@ -331,7 +331,7 @@ class BlockTable:
         return self._num_full_slots
 
     def get_num_blocks_touched_by_append_slots(
-        self, token_ids: List[int], num_lookahead_slots: int) -> int:
+            self, token_ids: List[int], num_lookahead_slots: int) -> int:
         """Determine how many blocks will be "touched" by appending the token
         ids.
 
@@ -345,7 +345,7 @@ class BlockTable:
 
         num_token_ids = len(token_ids) + num_lookahead_slots
         first_chunk_size = self._block_size - (self._num_full_slots %
-                                                self._block_size)
+                                               self._block_size)
         num_token_blocks = (1 + math.ceil(
             (num_token_ids - first_chunk_size) / self._block_size))
         return num_token_blocks

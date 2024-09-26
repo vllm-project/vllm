@@ -467,27 +467,22 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             AllocStatus: The AllocStatus for swapping in/out the given 
                 sequence_group on to the 'device'.
         """
-        # First determine the number of blocks that will be touched to swap the 
+        # First determine the number of blocks that will be touched to swap the
         # already full blocks.
-        blocks : dict[int, List[Block]] = dict()
-        num_unseen_tokens : dict[int, int] = dict() 
+        seq_id_blocks: Dict[int, List[Block]] = dict()
+        seq_id_num_unseen_tokens: Dict[int, int] = dict()
         for seq in seq_group.get_seqs(status=status):
             block_table = self.block_tables[seq.seq_id]
             if block_table.blocks is not None:
-                blocks[seq.id] = block_table.blocks
-                num_unseen_tokens[seq.id] = len(
+                seq_id_blocks[seq.seq_id] = block_table.blocks
+                seq_id_num_unseen_tokens[seq.seq_id] = len(
                     block_table.get_unseen_token_ids(seq.get_token_ids()))
 
         num_blocks_touched = self.block_allocator.get_num_blocks_touched(
-            blocks, device, num_unseen_tokens=num_unseen_tokens,
-            num_lookahead_slots = 0)
-        # Next determine the number of blocks that will be touched to swap the 
-        # the partially full appendable blocks.
-        for seq in seq_group.get_seqs(status=status):
-            block_table = self.block_tables[seq.seq_id]
-            num_blocks_touched += block_table.get_num_blocks_touched_by_append_slots(
-                block_table.get_unseen_token_ids(seq.get_token_ids()),
-                num_lookahead_slots=num_lookahead_slots)
+            seq_id_blocks,
+            device,
+            seq_id_num_unseen_tokens=seq_id_num_unseen_tokens,
+            num_lookahead_slots=0)
         watermark_blocks = 0
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks

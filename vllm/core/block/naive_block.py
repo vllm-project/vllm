@@ -1,9 +1,8 @@
 from collections import deque
-from collections import defaultdict
-from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Dict
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
-                                    get_all_blocks_recursively, get_num_blocks_touched_by_append_slots)
+                                    get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.utils import cdiv
 
@@ -284,9 +283,9 @@ class NaiveBlockAllocator(BlockAllocator):
         raise NotImplementedError("There is no promotion for naive blocks")
 
     def get_num_blocks_touched(self,
-                               seq_id_blocks: dict[int, List[Block]],
-                               device: Device,
-                               num_unseen_tokens: Optional[dict[int, int]] = None,
+                               seq_id_blocks: Dict[int, List[Block]],
+                               num_unseen_tokens: Optional[Dict[int,
+                                                                int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         """Determine the number of blocks that will be touched by
         swapping in/out the given blocks from certain sequence
@@ -312,7 +311,8 @@ class NaiveBlockAllocator(BlockAllocator):
             for block in blocks:
                 if not block.is_full:
                     if num_unseen_tokens is not None and seq_id in num_unseen_tokens:
-                        tokens_to_append = num_unseen_tokens[seq_id] + num_lookahead_slots
+                        tokens_to_append = num_unseen_tokens[
+                            seq_id] + num_lookahead_slots
                         new_block_count += 1
                         if tokens_to_append > block.num_empty_slots:
                             new_block_count += cdiv(

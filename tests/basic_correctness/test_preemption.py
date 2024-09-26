@@ -208,7 +208,7 @@ def test_swap_infeasible(
     max_tokens: int,
     beam_width: int,
     worker_use_ray: bool,
-    use_v2_block_manager:bool,
+    use_v2_block_manager: bool,
 ) -> None:
     """Verify infeasible swap request will be ignored."""
     BLOCK_SIZE = 16

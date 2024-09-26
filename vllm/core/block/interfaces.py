@@ -182,9 +182,9 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def get_num_blocks_touched(self,
-                               seq_id_blocks: dict[int, List[Block]],
-                               device: Device,
-                               num_unseen_tokens: Optional[dict[int, int]] = None,
+                               seq_id_blocks: Dict[int, List[Block]],
+                               seq_id_num_unseen_tokens: Optional[Dict[
+                                   int, int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         pass
 
@@ -263,9 +263,10 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def get_num_blocks_touched(self,
-                               seq_id_blocks: dict[int, List[Block]],
+                               seq_id_blocks: Dict[int, List[Block]],
                                device: Device,
-                               num_unseen_tokens: Optional[dict[int, int]] = None,
+                               seq_id_num_unseen_tokens: Optional[Dict[
+                                   int, int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         pass
 

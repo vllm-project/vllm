@@ -577,9 +577,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         ])
 
     def get_num_blocks_touched(self,
-                               blocks: dict[int, List[Block]],
-                               device: Device,
-                               num_unseen_tokens: Optional[dict[int, int]] = None,
+                               seq_id_blocks: Dict[int, List[Block]],
+                               seq_id_num_unseen_tokens: Optional[Dict[
+                                   int, int]] = None,
                                num_lookahead_slots: int = 0) -> int:
         """Determine the number of blocks that will be touched by
         swapping in/out the given blocks from certain sequence
@@ -595,20 +595,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 swapping in/out the given blocks and num_lookahead_slots.
         """
         num_touched_blocks = 0
-        for block in blocks:
-            if not block.is_full:
-                num_touched_blocks += 1
-                if num_lookahead_slots > block.num_empty_slots:
-                    num_touched_blocks += cdiv(
-                        num_lookahead_slots - block.num_empty_slots,
-                        self._block_size)
-            else:
-                # If the block has a match in the cache and the cached block
-                # is not referenced, then we still count it as a touched block
-                if not self.is_block_cached(block) or \
-                    (block.content_hash is not None and \
-                     self._cached_blocks[block.content_hash] in self.evictor):
+        for seq_id, blocks in seq_id_blocks.items():
+            for block in blocks:
+                if not block.is_full:
                     num_touched_blocks += 1
+                    if num_lookahead_slots > block.num_empty_slots:
+                        num_touched_blocks += cdiv(
+                            num_lookahead_slots - block.num_empty_slots,
+                            self._block_size)
+                else:
+                    # If the block has a match in the cache and the cached block
+                    # is not referenced, then we still count it as a touched block
+                    if not self.is_block_cached(block) or \
+                        (block.content_hash is not None and \
+                        self._cached_blocks[block.content_hash] in self.evictor):
+                        num_touched_blocks += 1
         return num_touched_blocks
 
     def swap_out(self, blocks: List[Block]) -> None:
