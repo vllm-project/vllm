@@ -1,5 +1,6 @@
 import itertools
 import random
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock, patch
 
@@ -596,6 +597,13 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     generation_config = GenerationConfig(top_k=top_k,
                                          top_p=top_p,
                                          do_sample=True)
+
+    @dataclass
+    class MockConfig:
+        is_encoder_decoder: bool = False
+
+    generation_model.config = MockConfig()  # needed by the following method
+    generation_model._prepare_special_tokens(generation_config, device=device)
     processors = generation_model._get_logits_processor(generation_config,
                                                         None,
                                                         None,

@@ -16,6 +16,11 @@ BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 
 
 @dataclass
+class MockHFConfig:
+    model_type: str = "any"
+
+
+@dataclass
 class MockModelConfig:
     tokenizer = MODEL_NAME
     trust_remote_code = False
@@ -24,6 +29,7 @@ class MockModelConfig:
     tokenizer_revision = None
     embedding_mode = False
     multimodal_config = MultiModalConfig()
+    hf_config = MockHFConfig()
 
 
 @dataclass
