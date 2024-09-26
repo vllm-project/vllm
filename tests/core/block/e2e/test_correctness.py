@@ -125,7 +125,6 @@ def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
         max_tokens=output_len,
         ignore_eos=True,
         temperature=temperature,
-        best_of=2,
     )
 
     print('Getting token ids from block manager v1')
