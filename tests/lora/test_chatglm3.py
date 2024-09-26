@@ -1,5 +1,7 @@
 from typing import List
 
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -37,6 +39,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+# FIXME: fix config loading for lora
+@pytest.mark.skip(
+    reason="Loading AutoConfig for lora has changed in transformers v4.45.0")
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
