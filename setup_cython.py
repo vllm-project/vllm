@@ -18,6 +18,7 @@ infiles += [
     "vllm/core/scheduler.py",
     "vllm/sequence.py",
     "vllm/core/block_manager_v1.py",
+    "vllm/core/block_manager_v2.py",
 ]
 
 infiles += [
