@@ -190,6 +190,17 @@ def neuron_platform_plugin() -> Optional[str]:
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 
+def tt_platform_plugin() -> Optional[str]:
+    is_tt = False
+    try:
+        import ttnn  # assume ttnn is installed if and only if machine has TT devices
+        is_tt = True
+    except Exception:
+        pass
+
+    return "vllm.platforms.tt.TTPlatform" if is_tt else None
+
+
 builtin_platform_plugins = {
     'tpu': tpu_platform_plugin,
     'cuda': cuda_platform_plugin,
@@ -198,6 +209,7 @@ builtin_platform_plugins = {
     'xpu': xpu_platform_plugin,
     'cpu': cpu_platform_plugin,
     'neuron': neuron_platform_plugin,
+    'tt': tt_platform_plugin,
 }
 
 
