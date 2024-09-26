@@ -39,11 +39,11 @@ CONFIGS: Dict[str, ServerConfig] = {
         "skip_parallel":
         False
     },
-    "internlm2_5": {
+    "internlm": {
         "model":
         "internlm/internlm2_5-7b-chat",
         "arguments": [
-            "--tool-call-parser", "internlm2_5", "--chat-template",
+            "--tool-call-parser", "internlm", "--chat-template",
             str(VLLM_PATH /
                 "examples/tool_chat_template_internlm2_tool.jinja"),
             "--trust_remote_code"

@@ -157,7 +157,7 @@ vLLM will use guided decoding to ensure the response matches the tool parameter 
 To enable this feature, you should set the following flags:
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
 deems appropriate.
-* `--tool-call-parser` -- select the tool parser to use - currently either `hermes` or `mistral` or `internlm2_5` or `internlm2`. Additional tool parsers 
+* `--tool-call-parser` -- select the tool parser to use - currently either `hermes` or `mistral` or `internlm`. Additional tool parsers 
 will continue to be added in the future, and also can register your own tool parsers in the `--tool-parser-plugin`.
 * `--tool-parser-plugin` -- **optional** tool parser plugin used to register user defined tool parsers into vllm, the registered tool parser name can be specified in `--tool-call-parser`.
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
@@ -205,7 +205,9 @@ Supported models:
 * Additional internlm2.5 function-calling models are compatible as well
 
 Known issues:
-* Although this implementation also supports Internlm2, the tool call results are not ideal when testing with the `internlm/internlm2-chat-7b` model.
+* Although this implementation also supports Internlm2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
+
+Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
 
 
 ### How to write a tool parser plugin

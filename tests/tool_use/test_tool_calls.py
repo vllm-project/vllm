@@ -119,7 +119,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     assert isinstance(streamed_args.get("city"), str)
     assert isinstance(streamed_args.get("state"), str)
     assert streamed_args.get("city") == "Dallas"
-    assert parsed_arguments.get("state") == "TX"
+    assert streamed_args.get("state") == "TX"
 
     # make sure everything matches non-streaming except for ID
     assert function_name == tool_calls[0].function.name

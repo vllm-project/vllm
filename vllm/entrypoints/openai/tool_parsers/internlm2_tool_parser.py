@@ -20,7 +20,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module(["internlm2", "internlm2_5"])
+@ToolParserManager.register_module(["internlm"])
 class Internlm2ToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):
