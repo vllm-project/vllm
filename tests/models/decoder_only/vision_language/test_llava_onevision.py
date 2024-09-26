@@ -1,7 +1,6 @@
 from typing import List, Optional, Tuple, Type, overload
 
 import pytest
-import transformers
 from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
                           BatchEncoding)
 
@@ -166,8 +165,6 @@ def run_video_test(
         )
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.45",
-                    reason="Waiting for next transformers release")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -211,8 +208,6 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
     )
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.45",
-                    reason="Waiting for next transformers release")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
@@ -259,7 +254,9 @@ def run_image_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
-                     max_model_len=32768,
+                     max_num_seqs=1,
+                     max_model_len=16384,
+                     gpu_memory_utilization=0.98,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
@@ -305,8 +302,8 @@ def run_image_test(
         )
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.45",
-                    reason="Waiting for next transformers release")
+# FIXME: Swap to a smaller model for this architecture
+@pytest.mark.skip(reason="Model OOMing on CI")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])

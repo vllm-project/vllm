@@ -83,7 +83,6 @@ steps:
 
 - label: Entrypoints Test # 20min
   working_dir: "/vllm-workspace/tests"
-  soft_fail: true
   fast_check: true
   mirror_hardwares: [amd]
   source_file_dependencies:
@@ -96,7 +95,8 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -178,7 +178,6 @@ steps:
     - pytest -v -s prefix_caching
 
 - label: Samplers Test # 18min
-  soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
@@ -206,7 +205,6 @@ steps:
 
 - label: LoRA Test %N # 30min each
   mirror_hardwares: [amd]
-  soft_fail: true
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -311,7 +309,6 @@ steps:
     - pytest -v -s models/decoder_only/language
 
 - label: Decoder-only Multi-Modal Models Test # 56min
-  soft_fail: true
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -463,7 +460,7 @@ steps:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
-  - TARGET_TEST_SUITE=A100 pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed_2_gpus
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: LM Eval Large Models # optional

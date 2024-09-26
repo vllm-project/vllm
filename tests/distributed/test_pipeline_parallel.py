@@ -8,8 +8,6 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import os
 
 import pytest
-from packaging import version
-from transformers import __version__ as transformers_version
 
 from vllm.logger import init_logger
 
@@ -48,11 +46,6 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
     if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
-
-    # Skip tests that require transformers>=4.45.0
-    if "Qwen2-VL" in MODEL_NAME and version.parse(
-            transformers_version) < version.parse("4.45.0.dev0"):
-        pytest.skip("This test requires transformers>=4.45.0")
 
     pp_args = [
         # use half precision for speed and memory savings in CI environment
