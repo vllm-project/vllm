@@ -22,7 +22,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, ToolCall, UsageInfo)
+    DeltaToolCall, ErrorResponse, FunctionCall, RequestResponseMetadata,
+    ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing,
@@ -151,13 +152,13 @@ class OpenAIServingChat(OpenAIServing):
                     **(request.chat_template_kwargs or {}),
                 )
         except Exception as e:
-            logger.error("Error in applying chat template from request: %s", e)
+            logger.exception("Error in applying chat template from request")
             return self.create_error_response(str(e))
 
         try:
             mm_data = await mm_data_future
         except Exception as e:
-            logger.error("Error in loading multi-modal data: %s", e)
+            logger.exception("Error in loading multi-modal data")
             return self.create_error_response(str(e))
 
         # validation for OpenAI tools
@@ -175,6 +176,11 @@ class OpenAIServingChat(OpenAIServing):
                 "--enable-auto-tool-choice and --tool-call-parser to be set")
 
         request_id = f"chat-{random_uuid()}"
+
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         try:
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
@@ -241,11 +247,13 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation, tokenizer)
+                request, result_generator, request_id, conversation, tokenizer,
+                request_metadata)
 
         try:
             return await self.chat_completion_full_generator(
-                request, result_generator, request_id, conversation, tokenizer)
+                request, result_generator, request_id, conversation, tokenizer,
+                request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -262,6 +270,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         model_name = self.base_model_paths[0].name
         created_time = int(time.time())
@@ -300,6 +309,8 @@ class OpenAIServingChat(OpenAIServing):
             async for res in result_generator:
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
+                    if res.encoder_prompt_token_ids is not None:
+                        num_prompt_tokens += len(res.encoder_prompt_token_ids)
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -580,6 +591,13 @@ class OpenAIServingChat(OpenAIServing):
                     exclude_unset=True, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
+            # report to FastAPI middleware aggregate usage across all choices
+            num_completion_tokens = sum(previous_num_tokens)
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=num_completion_tokens,
+                total_tokens=num_prompt_tokens + num_completion_tokens)
+
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             logger.error("error in chat completion stream generator: %s", e)
@@ -595,6 +613,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = self.base_model_paths[0].name
@@ -707,6 +726,8 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
+        if final_res.encoder_prompt_token_ids is not None:
+            num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
         usage = UsageInfo(
@@ -714,6 +735,9 @@ class OpenAIServingChat(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
+
+        request_metadata.final_usage_info = usage
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,

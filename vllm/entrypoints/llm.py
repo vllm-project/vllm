@@ -320,7 +320,8 @@ class LLM:
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None
+                                               GuidedDecodingRequest]] = None,
+        priority: Optional[List[int]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -339,6 +340,8 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
+            priority: The priority of the requests, if any.
+                Only applicable when priority scheduling policy is enabled.
 
         Returns:
             A list of ``RequestOutput`` objects containing the
@@ -379,7 +382,8 @@ class LLM:
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
-            guided_options=guided_options_request)
+            guided_options=guided_options_request,
+            priority=priority)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
@@ -485,7 +489,8 @@ class LLM:
 
     def chat(
         self,
-        messages: List[ChatCompletionMessageParam],
+        messages: Union[List[ChatCompletionMessageParam],
+                        List[List[ChatCompletionMessageParam]]],
         sampling_params: Optional[Union[SamplingParams,
                                         List[SamplingParams]]] = None,
         use_tqdm: bool = True,
@@ -505,8 +510,9 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            messages: A single conversation represented as a list of messages.
-                Each message is a dictionary with 'role' and 'content' keys.
+            messages: A list of conversations or a single conversation. 
+                - Each conversation is represented as a list of messages.
+                - Each message is a dictionary with 'role' and 'content' keys.
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
@@ -523,42 +529,56 @@ class LLM:
             A list of ``RequestOutput`` objects containing the generated
             responses in the same order as the input messages.
         """
+        list_of_messages: List[List[ChatCompletionMessageParam]]
 
-        tokenizer = self.get_tokenizer()
-        model_config = self.llm_engine.get_model_config()
-
-        conversation, mm_data = parse_chat_messages(messages, model_config,
-                                                    tokenizer)
-
-        prompt: Union[str, List[int]]
-        if isinstance(tokenizer, MistralTokenizer):
-            prompt = apply_mistral_chat_template(
-                tokenizer,
-                messages=messages,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                tools=tools,
-            )
+        # Handle multi and single conversations
+        if is_list_of(messages, list):
+            # messages is List[List[...]]
+            list_of_messages = messages
         else:
-            prompt = apply_hf_chat_template(
-                tokenizer,
-                conversation=conversation,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                tools=tools,
-            )
+            # messages is List[...]
+            list_of_messages = [messages]
 
-        inputs: PromptInputs
-        if is_list_of(prompt, int):
-            inputs = TokensPrompt(prompt_token_ids=prompt)
-        else:
-            inputs = TextPrompt(prompt=prompt)
+        prompts: List[Union[TokensPrompt, TextPrompt]] = []
 
-        if mm_data is not None:
-            inputs["multi_modal_data"] = mm_data
+        for msgs in list_of_messages:
+            tokenizer = self.get_tokenizer()
+            model_config = self.llm_engine.get_model_config()
+
+            conversation, mm_data = parse_chat_messages(
+                msgs, model_config, tokenizer)
+
+            prompt_data: Union[str, List[int]]
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt_data = apply_mistral_chat_template(
+                    tokenizer,
+                    messages=msgs,
+                    chat_template=chat_template,
+                    add_generation_prompt=add_generation_prompt,
+                    tools=tools,
+                )
+            else:
+                prompt_data = apply_hf_chat_template(
+                    tokenizer,
+                    conversation=conversation,
+                    chat_template=chat_template,
+                    add_generation_prompt=add_generation_prompt,
+                    tools=tools,
+                )
+
+            prompt: Union[TokensPrompt, TextPrompt]
+            if is_list_of(prompt_data, int):
+                prompt = TokensPrompt(prompt_token_ids=prompt_data)
+            else:
+                prompt = TextPrompt(prompt=prompt_data)
+
+            if mm_data is not None:
+                prompt["multi_modal_data"] = mm_data
+
+            prompts.append(prompt)
 
         return self.generate(
-            inputs,
+            prompts,
             sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -766,6 +786,7 @@ class LLM:
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
+        priority: Optional[List[int]] = None,
     ) -> None:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
@@ -795,6 +816,7 @@ class LLM:
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,
+                priority=priority[i] if priority else 0,
             )
 
     def _add_request(
@@ -803,6 +825,7 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(
@@ -811,6 +834,7 @@ class LLM:
             params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            priority=priority,
         )
 
     def _add_guided_processor(
