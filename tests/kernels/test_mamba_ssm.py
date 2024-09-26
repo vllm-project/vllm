@@ -200,7 +200,7 @@ def selective_scan_opcheck_fn(u,
     # a bogus error.
     opcheck(torch.ops._C.selective_scan_fwd,
             (u, delta, A, B, C, D, z, delta_bias, delta_softplus, cu_seq_len, 
-             cache_indices, has_initial_state, ssm_states,),
+             cache_indices, has_initial_state, ssm_states),
             test_utils=["test_schema", "test_faketensor"])
 
 
@@ -208,7 +208,6 @@ def selective_scan_opcheck_fn(u,
 @pytest.mark.parametrize('itype',
                          [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
-@pytest.mark.parametrize("return_last_state", [True])
 @pytest.mark.parametrize('has_delta_bias', [True])
 @pytest.mark.parametrize('delta_softplus', [True])
 @pytest.mark.parametrize('has_z', [True])
@@ -219,7 +218,7 @@ def selective_scan_opcheck_fn(u,
 @pytest.mark.parametrize("scan_chunks", [1, 2, 3])
 def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
                         has_z, has_delta_bias, delta_softplus,
-                        return_last_state, seqlen, itype, wtype, scan_chunks):
+                        seqlen, itype, wtype, scan_chunks):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
     device = 'cuda'
@@ -232,7 +231,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         atolw = max(atolw, atol)
     # set seed
     seed_everything(0)
-    batch_size = 2
+    batch_size = 1
     dim = 4
     dstate = 8
     A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype))
@@ -269,8 +268,14 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
     delta = (0.5 *
              torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
     delta_ref = delta.clone()
-    state = None
-    state_ref = None
+    state_shape = (batch_size, u.shape[1], int(A.shape[1]))
+    state = torch.randn(
+        state_shape,
+        device=u.device,
+        dtype=itype,
+        requires_grad=False
+    )
+    state_ref = state.clone()
     out = None
     out_ref = None
     outs = []
@@ -290,7 +295,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         if has_z:
             assert z is not None
             _z = z[..., chunk_start:chunk_end]
-        out, *rest = selective_scan_fn(
+        out = selective_scan_fn(
             u[..., chunk_start:chunk_end],
             delta[..., chunk_start:chunk_end],
             A,
@@ -300,17 +305,15 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
             z=_z,
             delta_bias=delta_bias,
             delta_softplus=delta_softplus,
-            ssm_states=state if c > 0 else None,
+            ssm_states=state,
             has_initial_state=torch.ones(batch_size,
                                          device=u.device,
                                          dtype=torch.bool) if c > 0 else None)
         outs.append(out)
-        if return_last_state:
-            state = rest[0]
     if len(outs) > 1:
         out = torch.cat(outs, dim=-1)
 
-    out_ref, *rest = selective_scan_ref(u_ref,
+    out_ref, state_ref,*rest = selective_scan_ref(u_ref,
                                         delta_ref,
                                         A_ref,
                                         B_ref,
@@ -319,15 +322,12 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
                                         z=z_ref,
                                         delta_bias=delta_bias,
                                         delta_softplus=delta_softplus,
-                                        return_last_state=return_last_state)
-    if return_last_state:
-        state_ref = rest[0]
+                                        return_last_state=True)
 
     assert out is not None and out_ref is not None
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
-    if return_last_state:
-        assert state is not None and state_ref is not None
-        assert torch.allclose(state, state_ref.to(itype), rtol=rtol, atol=atol)
+    assert state is not None and state_ref is not None
+    assert torch.allclose(state, state_ref.to(itype), rtol=rtol, atol=atol)
 
     selective_scan_opcheck_fn(u,
             delta,

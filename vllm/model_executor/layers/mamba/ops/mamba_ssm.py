@@ -383,7 +383,7 @@ def selective_scan_fn(u,
     if C.dim() == 2 and cu_seq_len is not None:
         C = C.unsqueeze(0)
 
-    out, *rest = ops.selective_scan_fwd(
+    ops.selective_scan_fwd(
         u,
         delta,
         A,
@@ -400,7 +400,6 @@ def selective_scan_fn(u,
     )
 
     if z is None:
-        return out
+        return delta # output written inplace to delta
     else:
-        out_z = rest[0]
-        return out_z
+        return z # output written inplace to z

@@ -499,8 +499,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     }
 }
 
-std::vector<torch::Tensor>
-selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
+void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const torch::Tensor &A, const torch::Tensor &B, const torch::Tensor &C,
                   const c10::optional<torch::Tensor> &D_,
                   const c10::optional<torch::Tensor> &z_,
@@ -673,8 +672,5 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
         selective_scan_fwd_cuda<input_t, weight_t>(params, stream);
     });
-    std::vector<at::Tensor> result = {out};
-    if (has_z) { result.push_back(out_z); }
-    return result;
 }
 
