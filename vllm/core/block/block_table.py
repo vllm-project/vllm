@@ -330,26 +330,6 @@ class BlockTable:
         """
         return self._num_full_slots
 
-    def _chunk_token_blocks_for_append(
-            self, token_ids: List[int]) -> List[List[int]]:
-        """Split the token ids into block-sized chunks so they can be easily
-        appended to blocks. The first such "token block" may have less token ids
-        than the block size, since the last allocated block may be partially
-        full.
-
-        If no token ids are provided, then no chunks are returned.
-        """
-
-        if not token_ids:
-            return []
-
-        first_chunk_size = self._block_size - (self._num_full_slots %
-                                               self._block_size)
-        token_blocks = [token_ids[:first_chunk_size]]
-        token_blocks.extend(
-            chunk_list(token_ids[first_chunk_size:], self._block_size))
-        return token_blocks
-
     def get_num_blocks_touched_by_append_slots(
         self, token_ids: List[int], num_lookahead_slots: int) -> int:
         """Determine how many blocks will be "touched" by appending the token
@@ -370,3 +350,22 @@ class BlockTable:
             (num_token_ids - first_chunk_size) / self._block_size))
         return num_token_blocks
 
+    def _chunk_token_blocks_for_append(
+            self, token_ids: List[int]) -> List[List[int]]:
+        """Split the token ids into block-sized chunks so they can be easily
+        appended to blocks. The first such "token block" may have less token ids
+        than the block size, since the last allocated block may be partially
+        full.
+
+        If no token ids are provided, then no chunks are returned.
+        """
+
+        if not token_ids:
+            return []
+
+        first_chunk_size = self._block_size - (self._num_full_slots %
+                                               self._block_size)
+        token_blocks = [token_ids[:first_chunk_size]]
+        token_blocks.extend(
+            chunk_list(token_ids[first_chunk_size:], self._block_size))
+        return token_blocks
