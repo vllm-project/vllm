@@ -1740,7 +1740,7 @@ def _get_and_verify_max_len(
                     "with rope_scaling. Please raise an issue so we can "
                     "investigate.")
 
-            if rope_type in ("mrope", "default"):
+            if rope_type == "mrope":
                 scaling_factor = 1
             else:
                 assert "factor" in rope_scaling

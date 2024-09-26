@@ -174,6 +174,14 @@ def get_config(
                 else:
                     raise e
 
+        # Replace unrecognized "default" rope scaling type with "mrope"
+        # See https://github.com/huggingface/transformers/issues/33401
+        hf_rope_scaling = getattr(config, "rope_scaling", None)
+        if hf_rope_scaling is not None:
+            for type_key in ("type", "rope_type"):
+                if hf_rope_scaling.get(type_key) == "default":
+                    hf_rope_scaling[type_key] = "mrope"
+
     elif config_format == ConfigFormat.MISTRAL:
         config = load_params_config(model, revision)
     else:
