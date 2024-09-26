@@ -256,7 +256,7 @@ def run_image_test(
                      dtype=dtype,
                      max_num_seqs=1,
                      max_model_len=16384,
-                     gpu_memory_utilization = 0.98,
+                     gpu_memory_utilization=0.98,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
