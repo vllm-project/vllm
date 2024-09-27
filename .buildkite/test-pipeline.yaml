@@ -332,14 +332,11 @@ steps:
 
 - label: Custom Models Test
   #mirror_hardwares: [amd]
-  working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
   optional: true
   commands:
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
     # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
-    - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
