@@ -833,10 +833,6 @@ class LLMEngine:
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
 
-        # Defensive copy of SamplingParams, which are used by the sampler,
-        # this doesn't deep-copy LogitsProcessor objects
-        sampling_params = sampling_params.clone()
-
         sampling_params.update_from_generation_config(
             self.generation_config_fields, seq.eos_token_id)
 
