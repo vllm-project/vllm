@@ -115,6 +115,10 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
 
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
         kv_caches = [(torch.tensor([], dtype=torch.float32,
                                    device=self.device),
                       torch.tensor([], dtype=torch.float32,
