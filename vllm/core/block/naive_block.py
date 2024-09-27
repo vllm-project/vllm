@@ -326,15 +326,10 @@ class NaiveBlockAllocator(BlockAllocator):
             if (seq_id_num_unseen_tokens is not None
                     and seq_id in seq_id_num_unseen_tokens):
                 num_tokens_to_append += seq_id_num_unseen_tokens[seq_id]
-            print('num_tokens_to_append ' + str(num_tokens_to_append))
-            print('seq_id_empty_slots[seq_id] ' +
-                  str(seq_id_empty_slots[seq_id]))
             if num_tokens_to_append > 0:
                 new_block_count += get_num_blocks_touched_by_append_slots(
                     num_tokens_to_append, seq_id_empty_slots[seq_id],
                     self._block_size)
-        print('new_block_count ' + str(new_block_count))
-        print('len(old_block_set) ' + str(len(old_block_set)))
         num_touched_blocks = new_block_count + len(old_block_set)
         return num_touched_blocks
 

@@ -367,12 +367,17 @@ def get_num_blocks_touched_by_append_slots(num_token_ids: int,
     """Determine how many blocks will be "touched" by appending the token
     ids.
 
-    This is required for the scheduler to determine whether a sequence can
-    continue generation, or if it must be preempted.
+    Args:
+        num_token_ids: The number of token_ids to append
+        empty_slots_in_unfilled_blocks: The number of empty slots in
+            the partially filled blocks if any for the sequence.
+        block_size: The size of the blocks.
     """
     num_token_blocks = 0
     first_chunk_size = 0
     if empty_slots_in_unfilled_blocks > 0:
+        # If there any partially filled blocks then the first chunk size
+        # will be the number of empty slots in the block.
         first_chunk_size = empty_slots_in_unfilled_blocks
         num_token_blocks += 1
     num_token_blocks += math.ceil(
