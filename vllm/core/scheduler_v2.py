@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import Device
-
 from vllm.request import Request, RequestStatus
 from vllm.sampling_params import SamplingParams
 from vllm.multimodal import MultiModalDataDict
@@ -79,7 +78,6 @@ class Scheduler:
 
         req_to_new_block_ids: Dict[str, List[int]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
-        total_num_scheduled_tokens = 0
         token_budget = self.max_num_scheduled_tokens
 
         # First, schedule the RUNNING requests.
@@ -115,14 +113,8 @@ class Scheduler:
 
                 req_to_new_block_ids[request.request_id] = new_block_ids
                 num_scheduled_tokens[request.request_id] = num_tokens
-                total_num_scheduled_tokens += num_tokens
                 token_budget -= num_tokens
-
                 request.status = RequestStatus.RUNNING
-                request.num_computed_tokens += num_tokens
-                if request.num_tokens == request.num_computed_tokens:
-                    # TODO(woosuk): Consider speculative decoding.
-                    request.num_output_tokens += 1
 
         # Next, schedule the WAITING requests.
         while self.waiting:
@@ -159,18 +151,14 @@ class Scheduler:
             else:
                 assert False, f"Invalid request status: {request.status}"
 
-            req_to_new_block_ids[request.request_id] = (
-                computed_block_ids + new_block_ids)
+            req_to_new_block_ids[request.request_id] = (computed_block_ids +
+                                                        new_block_ids)
             num_scheduled_tokens[request.request_id] = num_tokens
-            total_num_scheduled_tokens += num_tokens
             token_budget -= num_tokens
-
             request.status = RequestStatus.RUNNING
-            request.num_computed_tokens = num_computed_tokens + num_tokens
-            if request.num_tokens == request.num_computed_tokens:
-                request.num_output_tokens += 1
 
         # Check if the scheduling constraints are satisfied.
+        total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
@@ -179,18 +167,19 @@ class Scheduler:
 
         # Construct the scheduler output.
         new_reqs_data = [
-            NewRequestData.from_request(
-                req, req_to_new_block_ids[req.request_id])
+            NewRequestData.from_request(req,
+                                        req_to_new_block_ids[req.request_id],
+                                        num_computed_tokens)
             for req in scheduled_new_reqs
         ]
         resumed_reqs_data = [
             ResumedRequestData.from_request(
-                req, req_to_new_block_ids[req.request_id])
+                req, req_to_new_block_ids[req.request_id], num_computed_tokens)
             for req in scheduled_resumed_reqs
         ]
         running_reqs_data = [
             RunningRequestData.from_request(
-                req, req_to_new_block_ids[req.request_id])
+                req, req_to_new_block_ids[req.request_id], num_computed_tokens)
             for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
@@ -207,6 +196,12 @@ class Scheduler:
 
         self.finished_req_ids = set()
         self.aborted_req_ids = set()
+        for request in self.running:
+            num_tokens = num_scheduled_tokens[request.request_id]
+            request.num_computed_tokens = num_computed_tokens + num_tokens
+            if request.num_tokens == request.num_computed_tokens:
+                # TODO: Consider speculative decoding.
+                request.num_output_tokens += 1
         return scheduler_output
 
     def add_request(self, request: Request) -> None:
@@ -248,7 +243,7 @@ class Scheduler:
                     request.status = RequestStatus.FINISHED_STOPPED
                     stopped_reqs.append(request)
                     request_ids.remove(request.request_id)
-            
+
             for request in stopped_reqs:
                 queue.remove(request)
                 self.finished_req_ids.add(request.request_id)
@@ -258,8 +253,9 @@ class Scheduler:
         stopped_reqs: List[Request] = []
         # TODO: Optimize this.
         for request in self.running:
-            if (request.num_tokens >= self.max_model_len 
-                or request.num_output_tokens >= request.max_tokens):
+            assert request.max_tokens is not None
+            if (request.num_tokens >= self.max_model_len
+                    or request.num_output_tokens >= request.max_tokens):
                 request.status = RequestStatus.FINISHED_LENGTH_CAPPED
                 stopped_reqs.append(request)
         for request in stopped_reqs:
@@ -269,13 +265,13 @@ class Scheduler:
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
-        self.block_manager.free(request)                
-
-    def has_unfinished_requests(self) -> bool:
-        return self.waiting or self.running
+        self.block_manager.free(request)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
+
+    def has_unfinished_requests(self) -> bool:
+        return self.get_num_unfinished_requests() > 0
 
 
 @dataclass
@@ -294,6 +290,7 @@ class NewRequestData:
         cls,
         request: Request,
         block_ids: List[int],
+        num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -302,6 +299,7 @@ class NewRequestData:
             multi_modal_data=request.inputs.get("multi_modal_data"),
             sampling_params=request.sampling_params,
             block_ids=block_ids,
+            num_computed_tokens=num_computed_tokens,
         )
 
 
@@ -317,10 +315,12 @@ class ResumedRequestData:
         cls,
         request: Request,
         block_ids: List[int],
+        num_computed_tokens: int,
     ) -> "ResumedRequestData":
         return cls(
             req_id=request.request_id,
             block_ids=block_ids,
+            num_computed_tokens=num_computed_tokens,
         )
 
 
@@ -336,10 +336,12 @@ class RunningRequestData:
         cls,
         request: Request,
         new_block_ids: List[int],
+        num_computed_tokens: int,
     ) -> "RunningRequestData":
         return cls(
             req_id=request.request_id,
             new_block_ids=new_block_ids,
+            num_computed_tokens=num_computed_tokens,
         )
 
 
