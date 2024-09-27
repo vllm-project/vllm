@@ -1462,17 +1462,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         batch_size: int,
         virtual_engine: int,
     ) -> None:
-        """Cuda graph capture a model for a specific batch size.
-
-        Note that CUDA graph's performance gain is negligible if number
-        of batched tokens are larger than 200. And since CUDA graph
-        requires fixed sized tensors, supporting large/variable batch
-        size requires high GPU memory overhead. Thus, vLLM only captures
-        decoding requests. Mixed batch (chunked prefill + decoding) or
-        prefill requests are not captured.
-
-        Since it is used for decoding-only, it assumes there's only 1 token
-        per sequence in the batch.
+        """Cuda graph capture a model for a specific batch size and virtual engine.
         """
         # The CUDA graph for this batch has been captured before.
         if batch_size in self.graph_runners[virtual_engine]:
