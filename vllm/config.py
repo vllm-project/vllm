@@ -285,9 +285,15 @@ class ModelConfig:
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
                 if quantization_override:
-                    quant_method = quantization_override
-                    self.quantization = quantization_override
-                    break
+                    if is_hip():
+                        if quantization_override in rocm_supported_quantization:
+                            quant_method = quantization_override
+                            self.quantization = quantization_override
+                            break
+                    else:
+                        quant_method = quantization_override
+                        self.quantization = quantization_override
+                        break
 
             # Verify quantization configurations.
             if self.quantization is None:
