@@ -236,22 +236,35 @@ class FlashInferState(AttentionState):
                                     is_encoder_decoder_model: bool = False):
         return
 
-    def plan(self, model_input, model):
+    def begin_forward(self, model_input, model):
         assert not self._is_graph_capturing
         state = self
-        scale = getattr(model.model.layers[0].self_attn.attn.impl, 'scale',
-                        None)
-        logits_soft_cap = getattr(model.model.layers[0].self_attn.attn.impl,
-                                  'logits_soft_cap', None)
+
+        try:
+            scale = getattr(model.model.layers[0].self_attn.attn.impl, "scale",
+                            None)
+        except AttributeError as e:
+            raise AttributeError("Failed to retrieve 'scale'. \
+                    Check if 'self_attn.attn.impl' contains 'scale'.") from e
+
+        try:
+            logits_soft_cap = getattr(
+                model.model.layers[0].self_attn.attn.impl, "logits_soft_cap",
+                None)
+        except AttributeError as e:
+            raise AttributeError("Failed to retrieve 'logits_soft_cap'. \
+                    Check if 'self_attn.attn.impl' contains 'logits_soft_cap'."
+                                 ) from e
 
         if model_input.attn_metadata.use_cuda_graph:
             raise NotImplementedError(
-                "current implementation does not support CUDA Graph")
+                "Current implementation does not support CUDA Graph")
             # batch_size = model_input.input_tokens.shape[0]
             # state = (self.runner.graph_runners[model_input.virtual_engine]
             #          [batch_size].attn_state)
+
         model_input.attn_metadata.wrapper = state._get_wrapper()
-        model_input.attn_metadata.plan(scale, logits_soft_cap)
+        model_input.attn_metadata.begin_forward(scale, logits_soft_cap)
 
 
 @dataclass
@@ -314,7 +327,8 @@ class FlashInferMetadata(AttentionMetadata):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
-    def plan(self, scale: Optional[float], logits_soft_cap: Optional[float]):
+    def begin_forward(self, scale: Optional[float],
+                      logits_soft_cap: Optional[float]):
         """
         Prepares wrapper inputs
         """
