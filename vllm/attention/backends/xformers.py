@@ -445,7 +445,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         key: Optional[torch.Tensor],
         value: Optional[torch.Tensor],
-        kv_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
         k_scale: float = 1.0,
         v_scale: float = 1.0,
@@ -489,6 +489,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
             attn_type: Select attention type, between encoder attention,
                        decoder self-attention, or encoder/decoder cross-
@@ -522,7 +524,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
 
-        if (attn_type != AttentionType.ENCODER and kv_cache is not None):
+        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
             # KV-cache during decoder-self- or
             # encoder-decoder-cross-attention, but not
             # during encoder attention.
@@ -588,7 +590,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
