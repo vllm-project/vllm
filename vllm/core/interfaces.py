@@ -65,23 +65,6 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def can_swap_in(self, request: Request,
-                    num_lookahead_slots: int) -> AllocStatus:
-        pass
-
-    @abstractmethod
-    def swap_in(self, request: Request) -> List[Tuple[int, int]]:
-        pass
-
-    @abstractmethod
-    def can_swap_out(self, request: Request) -> bool:
-        pass
-
-    @abstractmethod
-    def swap_out(self, request: Request) -> List[Tuple[int, int]]:
-        pass
-
-    @abstractmethod
     def free(self, request: Request) -> None:
         pass
 
