@@ -1846,9 +1846,10 @@ class LLMEngine:
             sampling_params.logit_bias = None
             sampling_params.allowed_token_ids = None
 
-        if len(logits_processors) > 0:
+        if logits_processors:
             if sampling_params.logits_processors is None:
-                sampling_params.logits_processors = []
-            sampling_params.logits_processors.extend(logits_processors)
+                sampling_params.logits_processors = logits_processors
+            else:
+                sampling_params.logits_processors.extend(logits_processors)
 
         return sampling_params
