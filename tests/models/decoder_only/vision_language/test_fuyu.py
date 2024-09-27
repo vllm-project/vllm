@@ -65,8 +65,8 @@ def run_test(
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
-                     max_model_len=2560,
-                     max_num_seqs=1,
+                     max_model_len=2048,
+                     max_num_seqs=2,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
@@ -80,8 +80,6 @@ def run_test(
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model:
-        hf_model.model.get_output_embeddings = lambda: \
-            hf_model.model.language_model.get_output_embeddings()
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
