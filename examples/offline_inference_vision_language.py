@@ -71,7 +71,7 @@ def run_fuyu(question, modality):
     assert modality == "image"
 
     prompt = f"{question}\n"
-    llm = LLM(model="adept/fuyu-8b", max_model_len=2560, max_num_seqs=2)
+    llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
