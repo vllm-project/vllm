@@ -1,4 +1,4 @@
-# Copied code from
+# Adapted from
 #  https://github.com/modelscope/ms-swift/blob/v2.4.2/swift/utils/module_mapping.py
 
 from dataclasses import dataclass, field
@@ -44,16 +44,26 @@ class ModelKeys:
 
 @dataclass
 class MultiModelKeys(ModelKeys):
-    language_model: Union[List[str], str] = field(default_factory=list)
-    connector: Union[List[str], str] = field(default_factory=list)
+    language_model: List[str] = field(default_factory=list)
+    connector: List[str] = field(default_factory=list)
     # vision tower and audio tower
-    tower_model: Union[List[str], str] = field(default_factory=list)
-    generator: Union[List[str], str] = field(default_factory=list)
+    tower_model: List[str] = field(default_factory=list)
+    generator: List[str] = field(default_factory=list)
 
-    def __post_init__(self):
-        for key in ["language_model", "connector", "tower_model", "generator"]:
-            v = getattr(self, key)
-            if isinstance(v, str):
-                setattr(self, key, [v])
-            if v is None:
-                setattr(self, key, [])
+    @staticmethod
+    def from_string_field(language_model: Union[str, List[str]] = None,
+                          connector: Union[str, List[str]] = None,
+                          tower_model: Union[str, List[str]] = None,
+                          generator: Union[str, List[str]] = None,
+                          **kwargs) -> 'MultiModelKeys':
+
+        def to_list(value):
+            if value is None:
+                return []
+            return [value] if isinstance(value, str) else list(value)
+
+        return MultiModelKeys(language_model=to_list(language_model),
+                              connector=to_list(connector),
+                              tower_model=to_list(tower_model),
+                              generator=to_list(generator),
+                              **kwargs)

@@ -627,9 +627,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         """
         Get the module prefix in multimodal models
         """
-        return MultiModelKeys(language_model="llm",
-                              connector="resampler",
-                              tower_model="vpm")
+        return MultiModelKeys.from_string_field(language_model="llm",
+                                                connector="resampler",
+                                                tower_model="vpm")
 
     def init_llm(
         self,
