@@ -44,7 +44,7 @@ class XPUExecutor(GPUExecutor):
         self.cache_config = cache_config
         self.load_config = load_config
         self.lora_config = lora_config
-        self.parallel_config = parallel_config
+        self.parallel_config = _verify_and_get_parallel_config(parallel_config)
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.prompt_adapter_config = prompt_adapter_config
@@ -93,4 +93,13 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
             "CUDA graph is not supported on XPU, fallback to the eager "
             "mode.")
         config.enforce_eager = True
+    return config
+
+def _verify_and_get_parallel_config(config: ParallelConfig) -> ParallelConfig:
+    if (config.distributed_executor_backend is not None
+            and config.distributed_executor_backend != "ray"):
+        logger.warning(
+            "%s is not supported on XPU, fallback to ray distributed executor "
+            "backend.", config.distributed_executor_backend)
+        config.distributed_executor_backend = "ray"
     return config
