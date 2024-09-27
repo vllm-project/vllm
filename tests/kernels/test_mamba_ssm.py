@@ -394,10 +394,8 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 
 
 @pytest.mark.parametrize('wtype', [torch.float32])
-@pytest.mark.parametrize('itype',
-                         [torch.float32])
-@pytest.mark.parametrize('seqlen',
-                         [1, 128, 129, 256, 512, 1024, 2048, 4096])
+@pytest.mark.parametrize('itype', [torch.float32])
+@pytest.mark.parametrize('seqlen', [1, 128, 129, 256, 512, 1024, 2048, 4096])
 @pytest.mark.parametrize("return_last_state", [True])
 @pytest.mark.parametrize('has_delta_bias', [True])
 @pytest.mark.parametrize('delta_softplus', [True])
@@ -479,7 +477,7 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
     out = selective_scan_fn(u, delta, A, B, C, D, z, delta_bias,
                             delta_softplus, cumsum, cache_indices,
                             has_initial_state, prev_state)
-    outs = []
+    outs_ref = []
     splits = [
         torch.split(var, seqlens[0], dim=-1)
         for var in (u_ref, delta_ref, B_ref, C_ref, z_ref)
@@ -500,11 +498,8 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
             prev_state=prev_state_ref[cache_indices[i]].unsqueeze(0)
             if has_initial_state[i] else None,
             final_state_out=prev_state_ref[cache_indices[i]].unsqueeze(0))
-        outs.append(out_ref_s)
-    if len(outs) > 1:
-        out_ref = torch.cat(outs, dim=-1)
-    else:
-        out_ref = outs[0]
+        outs_ref.append(out_ref_s)
+    out_ref = torch.cat(outs_ref, dim=-1) if len(outs_ref) > 1 else outs_ref[0]
 
     print("Output diff max", (out - out_ref[0]).max())
     print("Output diff mean", (out - out_ref[0]).mean())
@@ -573,8 +568,8 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
     print("Output diff max", (out - out_ref[0]).max())
     print("Output diff mean", (out - out_ref[0]).mean())
     print("Output state diff max", (state[state_indices, :] - state_ref).max())
-    print("Output state diff mean", (state[state_indices, :] - state_ref)
-          .mean())
+    print("Output state diff mean",
+          (state[state_indices, :] - state_ref).mean())
     assert torch.allclose(state[state_indices, :],
                           state_ref,
                           rtol=rtol,
