@@ -505,7 +505,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+    ops = torch.ops._C_cpu if a.device.type == "cpu" else torch.ops._C
+    ops.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out
 
