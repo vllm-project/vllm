@@ -28,6 +28,8 @@ def _can_p2p(rank: int, world_size: int) -> bool:
     for i in range(world_size):
         if i == rank:
             continue
+        if envs.VLLM_SKIP_P2P_CHECK:
+            return torch.cuda.can_device_access_peer(rank, i)
         if not gpu_p2p_access_check(rank, i):
             return False
     return True
