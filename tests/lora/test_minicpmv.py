@@ -6,6 +6,8 @@ import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 
+from ..utils import multi_gpu_test
+
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
 PROMPT_TEMPLATE = (
@@ -73,7 +75,7 @@ def test_minicpmv_lora(minicpmv_lora_files):
         assert output2[i] == EXPECTED_OUTPUT[i]
 
 
-# @pytest.mark.skip("Requires multiple GPUs")
+@multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("fully_sharded", [True, False])
 @pytest.mark.parametrize("tp", [2, 4])
 def test_minicpmv_tensor_parallel(minicpmv_lora_files, fully_sharded, tp):

@@ -52,6 +52,7 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2Model
+from vllm.model_executor.models.utils import LLMWrapper
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
@@ -388,24 +389,6 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
             batch_data["slice_end_id"] = data[0]["slice_end_id"]
 
     return MultiModalInputs(batch_data)
-
-
-class LLMWrapper(nn.Module):
-    """
-    To align with the key names of LoRA trained with PEFT, we need to add an 
-    additional layer to the llm's implementation.
-    """
-
-    def __init__(self, llm: nn.Module, name: str) -> None:
-        super().__init__()
-        self.model_name = name
-        setattr(self, name, llm)
-
-    def forward(self, *args, **kwargs) -> Any:
-        return getattr(self, self.model_name)(*args, **kwargs)
-
-    def embed_tokens(self, *args, **kwargs) -> Any:
-        return getattr(self, self.model_name).embed_tokens(*args, **kwargs)
 
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
@@ -904,9 +887,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
-        # return Qwen2Model(config,
-        #                   cache_config=cache_config,
-        #                   quant_config=quant_config)
 
         return LLMWrapper(Qwen2Model(config,
                                      cache_config=cache_config,
