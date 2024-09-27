@@ -81,8 +81,6 @@ def input_processor_for_mllama(ctx: InputContext,
         inputs["prompt_token_ids"] = inputs["encoder_prompt_token_ids"]
 
     # process multi-modal data
-    assert "multi_modal_data" not in inputs, \
-        "multi-modal data should be put in encoder message of mllama"
     multi_modal_data = inputs.get("encoder_multi_modal_data")
 
     if multi_modal_data is None or "image" not in multi_modal_data \
