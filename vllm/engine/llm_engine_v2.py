@@ -266,8 +266,7 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = Scheduler(
-            scheduler_config, cache_config, lora_config)
+        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
 
         # Metric Logging.
         if self.log_stats:
@@ -410,7 +409,10 @@ class LLMEngine:
 
         # TODO(woosuk): Check max_logprobs
         # TODO(woosuk): Support encoder-decoder models.
-        req = Request(request_id, processed_inputs, arrival_time, sampling_params=params)
+        req = Request(request_id,
+                      processed_inputs,
+                      arrival_time,
+                      sampling_params=params)
         self.scheduler.add_req(req)
 
     def stop_remote_worker_execution_loop(self) -> None:
