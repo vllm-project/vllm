@@ -1,21 +1,24 @@
 from typing import Any, Dict, List, Set, Tuple
 
-from vllm.executor.executor_base import ExecutorBase
+from vllm.executor.executor_base import ExecutorBase, ExecutorAsyncBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
+from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
 
 class TTExecutor(ExecutorBase):
     
+    uses_ray: bool = False
+    
     def _init_executor(self) -> None:
         assert not self.scheduler_config.chunked_prefill_enabled, (
-            "Chunked prefill is not yet supported for TPU backend")
+            "Chunked prefill is not yet supported for TT backend")
         assert not self.speculative_config, (
-            "Speculative decoding is not yet supported for TPU backend")
+            "Speculative decoding is not yet supported for TT backend")
         assert self.parallel_config.tensor_parallel_size == self.parallel_config.pipeline_parallel_size == 1, (
             "TTExecutor does not support distributed execution")
         
@@ -67,32 +70,48 @@ class TTExecutor(ExecutorBase):
     
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError(
-            "LoRA is currently not supported by the TPU backend.")
+            "LoRA is currently not supported by the TT backend.")
 
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError(
-            "LoRA is currently not supported by the TPU backend.")
+            "LoRA is currently not supported by the TT backend.")
 
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError(
-            "LoRA is currently not supported by the TPU backend.")
+            "LoRA is currently not supported by the TT backend.")
 
     def list_loras(self) -> Set[int]:
         raise NotImplementedError(
-            "LoRA is currently not supported by the TPU backend.")
+            "LoRA is currently not supported by the TT backend.")
 
     def add_prompt_adapter(self, prompt_adapter_request) -> bool:
         raise NotImplementedError(
-            "Soft prompt is currently not supported by the TPU backend.")
+            "Soft prompt is currently not supported by the TT backend.")
 
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         raise NotImplementedError(
-            "Soft prompt is currently not supported by the TPU backend.")
+            "Soft prompt is currently not supported by the TT backend.")
 
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         raise NotImplementedError(
-            "Soft prompt is currently not supported by the TPU backend.")
+            "Soft prompt is currently not supported by the TT backend.")
 
     def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError(
-            "Soft prompt is currently not supported by the TPU backend.")
+            "Soft prompt is currently not supported by the TT backend.")
+   
+class TTExecutorAsync(TTExecutor, ExecutorAsyncBase):
+
+    def __init__(self, *args, **kwargs):
+        logger.warning("TTExecutorAsync currently executes models synchronously since TT models are not yet thread safe.")
+        super().__init__(*args, **kwargs)
+
+    async def execute_model_async(
+        self,
+        execute_model_req: ExecuteModelRequest,
+    ) -> SamplerOutput:
+        # TODO: async execution of the TT model is currently not supported, make call async when supported
+        # output = await make_async(self.driver_worker.execute_model
+        #                           )(execute_model_req)
+        output = self.driver_worker.execute_model(execute_model_req)
+        return output

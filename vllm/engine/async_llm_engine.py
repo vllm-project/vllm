@@ -637,6 +637,12 @@ class AsyncLLMEngine(EngineClient):
             else:
                 raise RuntimeError(
                     "Not supported distributed execution model on XPU device.")
+        elif engine_config.device_config.device_type == "tt":
+            assert distributed_executor_backend is None, (
+                "Distributed execution is not supported with "
+                "the TT backend.")
+            from vllm.executor.tt_executor import TTExecutorAsync
+            executor_class = TTExecutorAsync
         elif distributed_executor_backend == "ray":
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
             executor_class = RayGPUExecutorAsync

@@ -55,3 +55,8 @@ Steps:
 ```python
 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py
 ```
+
+## Running the server example (experimental)
+```python
+WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/server_example_tt.py
+```
