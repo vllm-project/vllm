@@ -53,8 +53,7 @@ class VideoPlugin(ImagePlugin):
     ) -> MultiModalInputs:
         model_config = ctx.model_config
 
-        # single video input as np.ndarray
-        if isinstance(data, np.ndarray):
+        if isinstance(data, np.ndarray) or is_list_of(data, np.ndarray):
             video_processor = self._get_hf_video_processor(model_config)
             if video_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "
@@ -66,9 +65,8 @@ class VideoPlugin(ImagePlugin):
                 raise
 
             return MultiModalInputs(batch_data)
-        elif is_list_of(data, np.ndarray):
-            raise NotImplementedError(
-                "Multi video for a prompt is not supported yet")
+        else:
+            raise NotImplementedError("Multi batch is not supported yet")
 
         raise TypeError(f"Invalid video type: {type(data)}")
 

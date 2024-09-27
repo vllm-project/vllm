@@ -88,6 +88,7 @@ def dummy_image_for_clip(
 def dummy_video_for_clip(
     hf_config: CLIPVisionConfig,
     num_frames: int,
+    num_videos: int = 1,
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -99,7 +100,8 @@ def dummy_video_for_clip(
         image_height_override=image_height_override)
     np_frame = np.array(pil_frame["image"])
     mm_data_per_video = np.repeat([np_frame], num_frames, axis=0)
-    mm_data = {"video": mm_data_per_video}
+    video_data = [mm_data_per_video] * num_videos
+    mm_data = {"video": video_data}
     return mm_data
 
 
