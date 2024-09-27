@@ -1688,7 +1688,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             if self.model_config.lazy_capture_cuda_graph:
-                self.capture_model_for_batch(
+                self.lazy_capture_model_for_batch(
                     kv_caches=kv_caches,
                     batch_size=graph_batch_size,
                     virtual_engine=virtual_engine,
