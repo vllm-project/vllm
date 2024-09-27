@@ -3,7 +3,7 @@ import pytest
 from ....utils import multi_gpu_test
 
 
-@multi_gpu_test(num_gpus=2)
+@multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
 @pytest.mark.parametrize("model", [
     "meta-llama/Llama-3.2-11B-Vision-Instruct",
@@ -14,7 +14,7 @@ def test_models(hf_runner, vllm_runner, image_assets,
     dtype = "half"
     max_tokens = 5
     num_logprobs = 5
-    tensor_parallel_size = 2
+    tensor_parallel_size = 4
 
     if model.startswith("meta-llama/Llama-3.2-11B-Vision-Instruct"):
         from .test_mllama import models, run_test

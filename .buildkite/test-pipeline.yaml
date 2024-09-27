@@ -113,6 +113,7 @@ steps:
   commands:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
+  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_4_gpus
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2 
@@ -333,13 +334,13 @@ steps:
 - label: Custom Models Test
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_gpus: 4
   optional: true
   commands:
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
     # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
-    - pytest -v -s models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
+    - pytest -v -s models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_4_gpus
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -391,7 +392,6 @@ steps:
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m distributed_2_gpus
   - pytest models/decoder_only/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
-  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
