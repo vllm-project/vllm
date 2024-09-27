@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Callable, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import pytest
 import torch
@@ -311,7 +311,7 @@ def test_input_mapper_override(model: str, image_assets: _ImageAssets,
     (4, 781),
     (16, 2653),
 ])
-def test_max_tokens_override(get_max_phi3v_image_tokens: Callable, model: str,
+def test_max_tokens_override(get_max_phi3v_image_tokens, model: str,
                              num_crops: int, expected_max_tokens: int):
     """Ensure get_max_phi3v_image_tokens handles num_crops properly."""
     # NOTE: mm_processor_kwargs on the context in this test is unused, since
@@ -343,7 +343,7 @@ def test_max_tokens_override(get_max_phi3v_image_tokens: Callable, model: str,
     (16, 2653, 1),
     (16, 2653, 2),
 ])
-def test_dummy_data_override(dummy_data_for_phi3v: Callable, model: str,
+def test_dummy_data_override(dummy_data_for_phi3v, model: str,
                              num_crops: int, toks_per_img: int, num_imgs: int):
     """Ensure dummy_data_for_phi3v handles num_crops properly."""
     # Same as the previous test - don't initialize mm_processor_kwargs
@@ -374,7 +374,7 @@ def test_dummy_data_override(dummy_data_for_phi3v: Callable, model: str,
     (16, 1921, 1),
     (16, 1921, 2),
 ])
-def test_input_processor_override(input_processor_for_phi3v: Callable,
+def test_input_processor_override(input_processor_for_phi3v,
                                   image_assets: _ImageAssets, model: str,
                                   num_crops: int, expected_toks_per_img: int,
                                   num_imgs: int):
@@ -397,11 +397,8 @@ def test_input_processor_override(input_processor_for_phi3v: Callable,
                           prompt=prompt,
                           multi_modal_data={"image": images})
 
-    processed_inputs = input_processor_for_phi3v(
-        ctx=ctx,
-        processed_inputs=inputs,
-        num_crops=num_crops,
-    )
+    processed_inputs = input_processor_for_phi3v(ctx, inputs,
+                                                 num_crops=num_crops)
 
     # Ensure we have the right number of placeholders per num_crops size
     img_tok_count = processed_inputs["prompt_token_ids"].count(_IMAGE_TOKEN_ID)
