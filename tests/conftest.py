@@ -169,6 +169,12 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
         cleanup()
 
 
+@pytest.fixture(autouse=True)
+def dynamo_reset():
+    yield
+    torch._dynamo.reset()
+
+
 @pytest.fixture
 def example_prompts() -> List[str]:
     prompts = []
@@ -675,8 +681,6 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
-        assert sampling_params.logprobs is not None
-
         if images is not None:
             assert len(prompts) == len(images)
 
@@ -695,7 +699,6 @@ class VllmRunner:
         if videos is not None:
             for i, video in enumerate(videos):
                 inputs[i]["multi_modal_data"] = {"video": video}
-        print(f"[INPUTS!!!!]: {inputs}, {sampling_params}")
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -754,7 +757,7 @@ class VllmRunner:
             temperature=0.0,
             max_tokens=max_tokens,
             logprobs=num_logprobs,
-            prompt_logprobs=(num_prompt_logprobs),
+            prompt_logprobs=num_prompt_logprobs,
             stop_token_ids=stop_token_ids)
 
         return self.generate_w_logprobs(prompts,
@@ -797,6 +800,20 @@ class VllmRunner:
                                             max_tokens=max_tokens)
         outputs = self.generate(prompts, beam_search_params)
         return outputs
+
+    def generate_beam_search_new(
+        self,
+        prompts: Union[List[str], List[List[int]]],
+        beam_width: int,
+        max_tokens: int,
+    ) -> List[Tuple[List[List[int]], List[str]]]:
+        outputs = self.model.beam_search(prompts, beam_width, max_tokens)
+        returned_outputs = []
+        for output in outputs:
+            token_ids = [x.tokens for x in output.sequences]
+            texts = [x.text for x in output.sequences]
+            returned_outputs.append((token_ids, texts))
+        return returned_outputs
 
     def encode(self, prompts: List[str]) -> List[List[float]]:
         req_outputs = self.model.encode(prompts)
