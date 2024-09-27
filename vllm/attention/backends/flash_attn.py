@@ -342,9 +342,13 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
-    def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata",
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
                      sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int, num_seqs: int, num_queries: int):
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
         """
         Update metadata in-place to advance one decode step.
         """
@@ -354,6 +358,23 @@ class FlashAttentionMetadata(AttentionMetadata):
         if num_seqs != num_queries:
             assert num_seqs > num_queries
             assert self.use_cuda_graph
+
+        if turn_prefills_into_decodes:
+            # When Mutli-Step is enabled with Chunked-Prefill, prefills and
+            # decodes are scheduled together. In the first step, all the
+            # prefills turn into decodes. This update reflects that
+            # conversion.
+            assert self.num_decode_tokens + self.num_prefills == num_seqs
+            self.num_decode_tokens += self.num_prefills
+            self.num_prefills = 0
+            self.num_prefill_tokens = 0
+            self.max_prefill_seq_len = 0
+            self.max_query_len = 1
+
+            self.slot_mapping = self.slot_mapping[:num_seqs]
+        else:
+            assert self.seq_lens is not None
+            assert self.max_decode_seq_len == max(self.seq_lens)
 
         assert self.num_prefills == 0
         assert self.num_prefill_tokens == 0
@@ -366,7 +387,6 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.seq_lens_tensor.shape == (num_seqs, )
         assert self.max_query_len == 1
         assert self.max_prefill_seq_len == 0
-        assert self.max_decode_seq_len == max(self.seq_lens)
 
         assert self.query_start_loc is not None
         assert self.query_start_loc.shape == (num_queries + 1, )
@@ -706,8 +726,10 @@ class FlashAttentionImpl(AttentionImpl):
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-        assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+        assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                    f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
+        assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                    f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
 
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
