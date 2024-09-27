@@ -248,10 +248,10 @@ RUN --mount=type=bind,from=export_pytorch,src=/,target=/install \
 RUN python3 -m pip install --upgrade numba scipy huggingface-hub[cli]
 
 RUN git clone -b nvtx_enabled https://github.com/ROCm/rocmProfileData.git \
-    && cd rocmProfileData/rpd_tracer
+    && cd rocmProfileData/rpd_tracer \
     && pip install -r requirements.txt && cd ../ \
     && make && make install \
-    cd hipMarker && python setup.py install
+    && cd hipMarker && python setup.py install
 
 # Install vLLM (and gradlib)
 # Make sure punica kernels are built (for LoRA)
