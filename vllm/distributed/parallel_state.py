@@ -431,20 +431,42 @@ class GroupCoordinator:
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
-        # Allocate output tensor.
-        if self.rank_in_group == dst:
-            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+
+        if current_platform.is_xpu():
+            input_size = input_.size()
+            # Allocate output tensor.
+            output_tensor = torch.empty((world_size, ) + input_size,
+                                        dtype=input_.dtype,
+                                        device=input_.device)
+            # All-gather.
+            torch.distributed.all_gather_into_tensor(output_tensor,
+                                                    input_,
+                                                    group=self.device_group)
+            if self.rank_in_group == dst:
+                # Reshape
+                output_tensor = output_tensor.movedim(0, dim)
+                output_tensor = output_tensor.reshape(input_size[:dim] +
+                                                    (world_size *
+                                                    input_size[dim], ) +
+                                                    input_size[dim + 1:])
+            else:
+                output_tensor = None
         else:
-            gather_list = None
-        # Gather.
-        torch.distributed.gather(input_,
-                                 gather_list,
-                                 dst=self.ranks[dst],
-                                 group=self.device_group)
-        if self.rank_in_group == dst:
-            output_tensor = torch.cat(gather_list, dim=dim)
-        else:
-            output_tensor = None
+            # Allocate output tensor.
+            if self.rank_in_group == dst:
+                gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+            else:
+                gather_list = None
+            # Gather.
+            torch.distributed.gather(input_,
+                                    gather_list,
+                                    dst=self.ranks[dst],
+                                    group=self.device_group)
+            if self.rank_in_group == dst:
+                output_tensor = torch.cat(gather_list, dim=dim)
+            else:
+                output_tensor = None
+
         return output_tensor
 
     def broadcast(self, input_: torch.Tensor, src: int = 0):
