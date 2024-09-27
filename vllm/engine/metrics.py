@@ -318,6 +318,44 @@ def get_throughput(tracked_stats: List[int], now: float,
     return float(np.sum(tracked_stats) / (now - last_log))
 
 
+class AvgTracker:
+    """Tracks running average of a value."""
+
+    def __init__(self) -> None:
+        self.avg = 0.0
+        self.count = 0
+
+    def update(self, new_val: float) -> None:
+        self.count += 1
+        self.avg += (new_val - self.avg) / self.count
+
+
+class GlobalStatLogger(StatLoggerBase):
+    """GlobalStatLogger is used in LLMEngine to track stats across the entire generation"""
+    
+    def __init__(self) -> None:
+        self.time_to_first_token = AvgTracker()
+        self.time_per_output_token = AvgTracker()
+        
+    def log(self, stats: Stats) -> None:
+        """Called by LLMEngine. Updates stats at end of each step"""
+        
+        def avg_list(list):
+            return sum(list) / len(list)
+        
+        if len(stats.time_to_first_tokens_iter) > 0:
+            self.time_to_first_token.update(avg_list(stats.time_to_first_tokens_iter))
+        if len(stats.time_per_output_tokens_iter) > 0:
+            self.time_per_output_token.update(avg_list(stats.time_per_output_tokens_iter))
+            
+    def reset(self) -> None:
+        self.time_to_first_token = AvgTracker()
+        self.time_per_output_token = AvgTracker()
+        
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
+        raise NotImplementedError
+
+
 class LoggingStatLogger(StatLoggerBase):
     """LoggingStatLogger is used in LLMEngine to log to Stdout."""
 

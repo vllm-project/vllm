@@ -36,18 +36,27 @@ def run_inference(
 
     # Create an LLM.
     ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-70B", block_size=64, max_num_seqs=max_seqs_in_batch, max_model_len=4096)
+    llm = LLM(model="meta-llama/Meta-Llama-3.1-70B", block_size=64, max_num_seqs=max_seqs_in_batch, max_model_len=4096, disable_log_stats=False)
 
     if measure_perf:
-        # TODO: Double check how many different seq lengths need to be compiled for decode
+        # Note: disable_log_stats=False is required for llm to use stat loggers
+        prompts = prompts[:max_seqs_in_batch]  # Only run a single batch for performance measurement
+        sampling_params = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
+        sampling_params.max_tokens = 2  # 1 prefill output token + 1 decode output token
         print("Starting compile run")
-        sampling_params_compile = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
-        generate_tokens(llm, prompts[:max_seqs_in_batch], sampling_params_compile, print_output=False)
+        generate_tokens(llm, prompts, sampling_params, print_output=False)
         print("Finished compile run")
+        llm.llm_engine.stat_loggers['global'].reset()  # Reset stats before inference run
 
     print("Starting inference run")
-    generate_tokens(llm, prompts, sampling_params)
+    generate_tokens(llm, prompts, sampling_params, print_output=(not measure_perf))
     print("Finished inference run")
+    
+    if measure_perf:
+        ttft = llm.llm_engine.stat_loggers['global'].time_to_first_token.avg
+        tpot = llm.llm_engine.stat_loggers['global'].time_per_output_token.avg
+        print(f"Average time to first token (batch): {ttft} s")
+        print(f"Average decode throughput: {1/tpot} t/s/u")
     
 
 def generate_tokens(llm : LLM, prompts, sampling_params : List[SamplingParams], print_output=True):
@@ -65,6 +74,7 @@ def generate_tokens(llm : LLM, prompts, sampling_params : List[SamplingParams], 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompts_json", type=str, default="tt_metal/prompts.json", help="Path to JSON file containing prompts")
+    parser.add_argument("--measure_perf", action="store_true", help="Measure performance")
     args = parser.parse_args()
 
-    run_inference(args.prompts_json)
+    run_inference(args.prompts_json, measure_perf=args.measure_perf)
