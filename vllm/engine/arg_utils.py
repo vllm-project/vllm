@@ -464,14 +464,7 @@ class EngineArgs:
                             'for maximal performance and flexibility.')
         parser.add_argument('--lazy-capture-cuda-graph',
                             action='store_true',
-                            help='TODO',
-                            type=int,
-                            default=EngineArgs.max_context_len_to_capture,
-                            help='Maximum context length covered by CUDA '
-                            'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode. '
-                            '(DEPRECATED. Use --max-seq-len-to-capture instead'
-                            ')')
+                            help='TODO')
         parser.add_argument('--max-seq-len-to-capture',
                             type=int,
                             default=EngineArgs.max_seq_len_to_capture,
