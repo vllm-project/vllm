@@ -43,19 +43,20 @@ MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
-_MAX_NUM_VIDEOS = 1
+_MAX_NUM_VIDEOS = 8
 
 
 class LlavaOnevisionVideoPixelInputs(TypedDict):
     type: Literal["pixel_values_videos"]
     data: Union[torch.Tensor, List[torch.Tensor]]
     """
-    Shape: `(batch_size, num_frames, num_channels, height, width)`
+    Shape: `(batch_size, num_videos, num_frames, num_channels, height, width)`
 
-    Note that `num_frames` may be different for each batch, in which case
-    the data is passed as a list instead of a batched tensor.
+    Note that `num_videos` may be different for each batch, and 'num_frames'
+    may be different for each video, in which case the data is passed as a
+    list instead of a batched tensor.
 
-    Note that it only supports one video input for one batch.
+    Note that it only supports single batch.
     """
 
 
@@ -232,7 +233,9 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             image_feature_size_override=video_feature_size,
         )
 
-        mm_data = dummy_video_for_clip(vision_config, num_frames=num_frames)
+        mm_data = dummy_video_for_clip(vision_config,
+                                       num_frames=num_frames,
+                                       num_videos=num_videos)
         return seq_data, mm_data
     elif isinstance(vision_config, SiglipVisionConfig):
         seq_data = dummy_seq_data_for_siglip(
@@ -243,7 +246,9 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             image_feature_size_override=video_feature_size,
         )
 
-        mm_data = dummy_video_for_siglip(vision_config, num_frames=num_frames)
+        mm_data = dummy_video_for_siglip(vision_config,
+                                         num_frames=num_frames,
+                                         num_videos=num_videos)
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -336,8 +341,25 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
                             multi_modal_data=multi_modal_data)
 
     elif is_list_of(video_data, np.ndarray):
-        raise NotImplementedError(
-            "Processing multiple videos is not supported")
+        video_feature_size = []
+        for video in video_data:
+            num_frames = video.shape[0]
+            video_feature_size.append(
+                get_llava_onevision_video_tokens(ctx, num_frames))
+
+        tokenizer = cached_get_tokenizer(model_config.tokenizer)
+        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+            tokenizer,
+            llm_inputs.get("prompt"),
+            llm_inputs["prompt_token_ids"],
+            placeholder_token_id=hf_config.video_token_index,
+            repeat_count=video_feature_size,
+        )
+        return LLMInputs(prompt_token_ids=new_token_ids,
+                         prompt=new_prompt,
+                         multi_modal_data=multi_modal_data)
+    else:
+        raise TypeError(f"Invalid video type: {type(video_data)}")
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -732,7 +754,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         b, num_videos, frames, c, h, w = pixel_values.shape
-        assert (num_videos == _MAX_NUM_VIDEOS)
+        assert (num_videos <= _MAX_NUM_VIDEOS)
         pixel_values = pixel_values.reshape(b * num_videos * frames, c, h, w)
         video_features = vision_tower(pixel_values)
         video_features = self._select_image_features(
@@ -742,9 +764,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         video_features = self.multi_modal_projector(video_features)
         video_features = self.apply_pooling(video_features)
         video_features = video_features.reshape(
-            b, frames * video_features.shape[1], -1)
-        image_newline = self.image_newline[None, None, :].repeat(b, 1, 1).to(
-            video_features.device)
+            b * num_videos, frames * video_features.shape[1], -1)
+        image_newline = self.image_newline[None, None, :].repeat(
+            b * num_videos, 1, 1).to(video_features.device)
         video_features = torch.cat((video_features, image_newline), dim=1)
         video_features = video_features.flatten(0, 1)
 
