@@ -20,8 +20,10 @@ if not current_platform.is_tpu():
 if current_platform.is_rocm():
     import vllm._rocm_C  # noqa: F401
 
+supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
+    supports_moe_ops = True
 
 
 def hint_on_error(fn):
@@ -253,9 +255,7 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                   b_g_idx, use_exllama, bit)
 
 
-# TODO: has to be a better way to do this
-try:
-    torch.ops._C.gptq_gemm  # noqa B018
+if hasattr(torch.ops._C, "gptq_gemm"):
 
     @torch.library.register_fake("_C::gptq_gemm")
     def _gptq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -265,8 +265,6 @@ try:
         return torch.empty((a.size(0), b_q_weight.size(1)),
                            dtype=a.dtype,
                            device=a.device)
-except Exception:
-    pass
 
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
@@ -292,9 +290,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
-# TODO: has to be a better way to do this
-try:
-    torch.ops._C.gptq_marlin_24_gemm  # noqa B018
+if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @torch.library.register_fake("_C::gptq_marlin_24_gemm")
     def _gptq_marlin_24_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -420,8 +416,8 @@ try:
     @torch.library.register_fake("_C::machete_gemm")
     def machete_gemm_fake(
         a: torch.Tensor,
-        b_q: torch.
-        Tensor,  # Should be the tensor returned by machete_prepack_B
+        # Should be the tensor returned by machete_prepack_B
+        b_q: torch.Tensor,
         b_type: ScalarType,
         b_scales: Optional[torch.Tensor] = None,
         b_zeros: Optional[torch.Tensor] = None,
@@ -451,10 +447,10 @@ try:
         return torch.empty_like(x)
 
     @torch.library.register_fake("_C::causal_conv1d_update")
-    def causal_conv1d_update_fake(x: torch.Tensor, conv_state: torch.Tensor,
-                                  weight: torch.Tensor,
-                                  bias_: Optional[torch.Tensor],
-                                  silu_activation: bool) -> torch.Tensor:
+    def causal_conv1d_update_fake(
+            x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
+            bias_: Optional[torch.Tensor], silu_activation: bool,
+            conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
         return torch.empty_like(x)
 
     @torch.library.register_fake("_C::selective_scan_fwd")
@@ -465,20 +461,11 @@ try:
             delta_softplus: bool, index_: Optional[torch.Tensor],
             x: Optional[torch.Tensor]) -> List[torch.Tensor]:
         a = torch.empty_like(u)
-        if x is not None:
-            b = x
-        else:
-            b = torch.empty((u.size(0), u.size(1), A.size(1)),
-                            dtype=u.dtype,
-                            device=u.device)
         if z_ is not None:
             c = torch.empty_like(z_)
-            return [a, b, c]
+            return [a, c]
         else:
-            return [a, b]
-
-except Exception:
-    pass
+            return [a]
 
 
 # cutlass
@@ -626,16 +613,12 @@ def machete_prepack_B(b_q_weight: torch.Tensor,
     return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
 
 
-# TODO: has to be a better way to do this
-try:
-    torch.ops._C.permute_cols  # noqa B018
+if hasattr(torch.ops._C, "permute_cols"):
 
     @torch.library.register_fake("_C::permute_cols")
     def _permute_cols_fake(a: torch.Tensor,
                            perm: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(a)
-except Exception:
-    pass
 
 
 def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
@@ -826,6 +809,24 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  gating_output: float) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
                                   token_expert_indicies, gating_output)
+
+
+if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
+
+    @torch.library.register_fake("_moe_C::marlin_gemm_moe")
+    def marlin_gemm_moe_fake(a: torch.Tensor, b_q_weights: torch.Tensor,
+                             sorted_ids: torch.Tensor,
+                             topk_weights: torch.Tensor,
+                             topk_ids: torch.Tensor, b_scales: torch.Tensor,
+                             g_idx: torch.Tensor, perm: torch.Tensor,
+                             workspace: torch.Tensor, b_q_type: ScalarType,
+                             size_m: int, size_n: int, size_k: int,
+                             is_k_full: bool, num_experts: int, topk: int,
+                             moe_block_size: int, replicate_input: bool,
+                             apply_weights: bool) -> torch.Tensor:
+        return torch.empty((size_m, topk, size_n),
+                           dtype=a.dtype,
+                           device=a.device)
 
 
 def reshape_and_cache(

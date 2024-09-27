@@ -19,7 +19,7 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import InternVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -230,8 +230,9 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
 
     prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
@@ -278,8 +279,9 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
                                   use_thumbnail=use_thumbnail) for img in data
         ]
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
     image_token_id = tokenizer.encode(IMG_CONTEXT,
                                       add_special_tokens=False,
                                       return_tensors="pt")[0]
@@ -298,8 +300,9 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int,
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
 
     seq_data = dummy_seq_data_for_clip(
         vision_config,
@@ -375,6 +378,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         self.img_context_token_id = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+        if hasattr(self.language_model, "sampler"):
+            self.sampler = self.language_model.sampler
+        else:
+            self.sampler = Sampler()
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()

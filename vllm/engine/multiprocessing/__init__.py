@@ -43,10 +43,6 @@ class RPCAbortRequest:
     request_id: str
 
 
-class RPCHealthRequest:
-    pass
-
-
 class RPCStartupRequest(Enum):
     IS_SERVER_READY = 1
 
@@ -56,8 +52,13 @@ class RPCStartupResponse:
     tracing_enabled: bool
 
 
-RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCHealthRequest,
-                      RPCStartupRequest]
+class RPCUProfileRequest(Enum):
+    START_PROFILE = 1
+    STOP_PROFILE = 2
+
+
+RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
+                      RPCUProfileRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
 
