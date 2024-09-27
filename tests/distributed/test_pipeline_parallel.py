@@ -37,6 +37,7 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
         (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-1B", "mp"),
         (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-2B", "mp"),
         (1, 2, 1, 0, 1, "OpenGVLab/InternVL2-4B", "mp"),
+        (1, 2, 0, 1, 0, "Qwen/Qwen2-VL-2B-Instruct", "mp")
     ],
 )
 @fork_new_process_for_each_test
