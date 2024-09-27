@@ -880,7 +880,8 @@ class AsyncLLMEngine:
                     "error that caused the background loop to stop "
                     "(AsyncEngineDeadError).")
 
-        if priority != 0 and not self.scheduler_config.policy == "priority":
+        if (priority != 0
+                and not self.engine.scheduler_config.policy == "priority"):
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
 
