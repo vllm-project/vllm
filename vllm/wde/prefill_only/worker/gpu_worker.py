@@ -65,6 +65,9 @@ class Worker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
     def dirty_fix_distributed_environment(self):
+        # This dirty_fix can make ParallelLinear etc. work properly.
+        # Why should tp and model layers be coupled together?
+
         import vllm.distributed.parallel_state
 
         class FakeGroupCoordinator:
@@ -74,7 +77,10 @@ class Worker(WorkerBase):
             local_rank: int = 0
             rank_in_group: int = 0
 
-        vllm.distributed.parallel_state._TP = FakeGroupCoordinator
+            def destroy(self):
+                pass
+
+        vllm.distributed.parallel_state._TP = FakeGroupCoordinator()
 
     @torch.inference_mode
     def load_model(self):
