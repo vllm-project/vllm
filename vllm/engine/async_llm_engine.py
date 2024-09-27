@@ -363,11 +363,18 @@ class _AsyncLLMEngine(LLMEngine):
                 self.cached_scheduler_outputs[
                     virtual_engine] = SchedulerOutputState()
 
+            # is_first_step_output is True only when the num_steps of all
+            # the sequences are 1. When the num_steps > 1,
+            # multi_step_model_runner does the first-step output append.
+            is_first_step_output: bool = False if not seq_group_metadata_list \
+                else seq_group_metadata_list[0].state.num_steps == 1
+
             ctx.append_output(outputs=outputs,
                               seq_group_metadata_list=seq_group_metadata_list,
                               scheduler_outputs=scheduler_outputs,
                               is_async=allow_async_output_proc,
-                              is_last_step=True)
+                              is_last_step=True,
+                              is_first_step_output=is_first_step_output)
 
             if outputs and allow_async_output_proc:
                 assert len(
