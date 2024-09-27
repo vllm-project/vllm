@@ -107,7 +107,7 @@ def validate_generated_texts(hf_runner,
                      quantization='bitsandbytes',
                      load_format='bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
-                     enforce_eager=True,
+                     enforce_eager=False,
                      gpu_memory_utilization=0.8) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")

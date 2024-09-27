@@ -157,10 +157,10 @@ vLLM will use guided decoding to ensure the response matches the tool parameter 
 To enable this feature, you should set the following flags:
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
 deems appropriate.
-* `--tool-call-parser` -- select the tool parser to use - currently either `hermes` or `mistral`. Additional tool parsers 
+* `--tool-call-parser` -- select the tool parser to use - currently either `hermes`, `mistral` or `llama3_json`. Additional tool parsers 
 will continue to be added in the future.
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
-that contain previously generated tool calls. Hermes and Mistral models have tool-compatible chat templates in their 
+that contain previously generated tool calls. Hermes, Mistral and Llama models have tool-compatible chat templates in their 
 `tokenizer_config.json` files, but you can specify a custom template. This argument can be set to `tool_use` if your model has a tool use-specific chat 
 template configured in the `tokenizer_config.json`. In this case, it will be used per the `transformers` specification. More on this [here](https://huggingface.co/docs/transformers/en/chat_templating#why-do-some-models-have-multiple-templates)
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json)
@@ -197,3 +197,25 @@ when tools are provided, that results in much better reliability when working wi
 
 
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+
+#### Llama Models
+Supported models:
+* `meta-llama/Meta-Llama-3.1-8B-Instruct`
+* `meta-llama/Meta-Llama-3.1-70B-Instruct`
+* `meta-llama/Meta-Llama-3.1-405B-Instruct`
+* `meta-llama/Meta-Llama-3.1-405B-Instruct-FP8`
+
+The tool calling that is supported is the [JSON based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling).
+Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
+
+Known issues:
+1. Parallel tool calls are not supported. 
+2. The model can generate parameters with a wrong format, such as generating
+   an array serialized as string instead of an array.
+
+The `tool_chat_template_llama3_json.jinja` file contains the "official" Llama chat template, but tweaked so that
+it works better with vLLM.
+
+Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
+
+
