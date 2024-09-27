@@ -503,7 +503,7 @@ class _AsyncLLMEngine(LLMEngine):
 
         logger.debug(
             "Building guided decoding logits processor in "
-            "AsyncLLMEngine. Params: %v", guided_decoding)
+            "AsyncLLMEngine. Params: %s", guided_decoding)
 
         tokenizer = self.get_tokenizer(lora_request=lora_request)
         guided_decoding.backend = guided_decoding.backend or \

@@ -584,7 +584,7 @@ class MQLLMEngineClient:
 
         logger.debug(
             "Building guided decoding logits processor in "
-            "AsyncEngineRPCClient. Params: %v", guided_decoding)
+            "AsyncEngineRPCClient. Params: %s", guided_decoding)
 
         tokenizer = await self.get_tokenizer(lora_request=lora_request)
         guided_decoding.backend = guided_decoding.backend or \
