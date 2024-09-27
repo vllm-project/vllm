@@ -97,7 +97,8 @@ class ModelConfig:
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
             If None, the user did not specify, so default to False.
-        lazy_capture_cuda_graph: If true, CUDA graph will only be captured when 
+        lazy_capture_cuda_graph: If true, CUDA graph will only be captured when
+            needed during inference time.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).

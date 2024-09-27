@@ -464,7 +464,8 @@ class EngineArgs:
                             'for maximal performance and flexibility.')
         parser.add_argument('--lazy-capture-cuda-graph',
                             action='store_true',
-                            help='')
+                            help='Capture CUDA graph for a batch size '
+                            'only when needed.')
         parser.add_argument('--max-context-len-to-capture',
                             type=int,
                             default=EngineArgs.max_context_len_to_capture,
