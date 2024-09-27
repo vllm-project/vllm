@@ -8,7 +8,7 @@ from tests.kernels.utils import opcheck
 from vllm.utils import seed_everything
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
-HEAD_SIZES = [128, 256]
+HEAD_SIZES = [4, 60, 80, 128, 256]
 BLOCK_SIZES = [16, 32]
 DTYPES = [torch.float16, torch.bfloat16]
 # one value large enough to test overflow in index calculation.
