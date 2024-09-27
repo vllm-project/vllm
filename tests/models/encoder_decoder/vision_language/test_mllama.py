@@ -201,6 +201,7 @@ def _run_test(
     AutoConfig.register("mllama", MllamaConfigHf, exist_ok=True)
     with hf_runner(model,
                    dtype=dtype,
+                   model_kwargs={"device_map": "auto"},
                    postprocess_inputs=process,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [

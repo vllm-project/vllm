@@ -113,7 +113,6 @@ steps:
   commands:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
-  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_4_gpus
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2 
@@ -340,7 +339,7 @@ steps:
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
     # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
-    - pytest -v -s models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_4_gpus
+    - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -391,6 +390,7 @@ steps:
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m distributed_2_gpus
+  - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
   - pytest models/decoder_only/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
