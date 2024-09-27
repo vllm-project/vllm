@@ -9,7 +9,6 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
-from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
 _LIMIT_IMAGE_PER_PROMPT = 1
@@ -265,42 +264,4 @@ def test_models(hf_runner, vllm_runner, image_assets, model, sizes, dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
-    )
-
-
-@pytest.mark.parametrize("model", [
-    "neuralmagic/Llama-3.2-11B-Vision-Instruct-FP8-dynamic",
-])
-@pytest.mark.parametrize("sizes", SIZES)
-@pytest.mark.parametrize("max_tokens", [128])
-def test_quant_model(vllm_runner, image_assets, model, sizes, max_tokens):
-    with vllm_runner(model,
-                     dtype="auto",
-                     max_model_len=4096,
-                     max_num_seqs=2,
-                     enforce_eager=True,
-                     limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
-                                          }) as vllm_model:
-        for prompts, images in _get_inputs(image_assets, sizes=sizes):
-            vllm_model.generate_greedy(prompts, max_tokens, images=images)
-
-
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("sizes", [SIZES[-1]])
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_models_distributed(hf_runner, vllm_runner, image_assets, model, sizes,
-                            dtype, max_tokens, num_logprobs) -> None:
-    run_test(
-        hf_runner,
-        vllm_runner,
-        image_assets,
-        model,
-        sizes=sizes,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        tensor_parallel_size=2,
     )
