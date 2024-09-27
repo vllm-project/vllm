@@ -245,6 +245,8 @@ class StatefulModelInput(BroadcastableModelInput):
         if not get_pp_group().is_last_rank:
             return
 
+        assert self.frozen_model_input is not None
+        assert self.frozen_model_input.sampling_metadata is not None
         self.frozen_model_input.sampling_metadata.selected_token_indices =  \
             async_tensor_h2d(list(range(self.num_queries)),
                              dtype=torch.long,
@@ -292,6 +294,7 @@ class StatefulModelInput(BroadcastableModelInput):
             input_positions=fmi_new_input_positions)
 
         self.maybe_advance_sampling_metadata(device, pin_memory)
+
 
 # MutableModelInputForGPUWithMultiStepMetadata is not subclass of
 # ModelInputForGPU but it wraps the actual input dataclass and adds multi-step
@@ -602,7 +605,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
     def _advance_step(self, model_input: StatefulModelInput,
                       out: SamplerOutput) -> StatefulModelInput:
 
-        model_input.maybe_advance_frozen_model_input(self.device, self.pin_memory)
+        model_input.maybe_advance_frozen_model_input(self.device,
+                                                     self.pin_memory)
         frozen_model_input = model_input.frozen_model_input
         assert frozen_model_input is not None
         assert frozen_model_input.input_tokens is not None

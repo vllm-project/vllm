@@ -1190,8 +1190,8 @@ class Scheduler:
             return False
 
         is_prefill = seq_group.is_prefill()
-        num_lookahead_slots = self._get_num_lookahead_slots(is_prefill,
-                                                             enable_chunking)
+        num_lookahead_slots = self._get_num_lookahead_slots(
+            is_prefill, enable_chunking)
 
         if is_prefill and num_lookahead_slots > 0:
             # Appending prefill slots only happens multi-step and
@@ -1199,8 +1199,7 @@ class Scheduler:
             assert self.scheduler_config.is_multi_step and enable_chunking
 
         return self.block_manager.can_append_slots(
-            seq_group=seq_group,
-            num_lookahead_slots=num_lookahead_slots)
+            seq_group=seq_group, num_lookahead_slots=num_lookahead_slots)
 
     def _allow_async_output_proc(self, seq_group: SequenceGroup) -> bool:
         no_beam_search = seq_group.sampling_params is None or (
