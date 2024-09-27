@@ -16,6 +16,7 @@ NUM_PROMPTS = [10]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
@@ -28,6 +29,7 @@ def test_multi_step_llm(
     model: str,
     dtype: str,
     tp_size: int,
+    enable_chunked_prefill: bool,
     max_tokens: int,
     enforce_eager: int,
     num_scheduler_steps: int,
@@ -51,6 +53,7 @@ def test_multi_step_llm(
       model: model under test (same for single- and multi-step engines)
       dtype: tensor datatype for engine to utilize
       tp_size: degree of tensor-parallelism
+      enable_chunked_prefill: chunked-prefill on/off
       max_tokens: the maximum number of tokens to generate
       enforce_eager
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
@@ -73,6 +76,7 @@ def test_multi_step_llm(
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
             use_v2_block_manager=True,
+            enable_chunked_prefill=enable_chunked_prefill,
             num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
         vllm_outputs = (vllm_model.generate_greedy(prompts, max_tokens)

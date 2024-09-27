@@ -52,7 +52,7 @@ __global__ void advance_step_flashattn_kernel(
   slot_mapping_ptr[cur_query_id] = slot_num;
 }
 
-inline void verify_tensor(std::string const& name, torch::Tensor& t,
+inline void verify_tensor(std::string const& name, torch::Tensor const& t,
                           int64_t const size_0, int64_t const size_1,
                           c10::ScalarType const type) {
   bool size_0_cond = true;

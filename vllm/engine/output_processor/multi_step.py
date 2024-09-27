@@ -170,6 +170,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 token_id=output_token_id,
                 logprobs=output_logprob,
             )
+            seq.data.update_num_computed_tokens(1)
 
             self._process_decode_and_stop(seq, sampling_params)
 
