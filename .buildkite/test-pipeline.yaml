@@ -337,7 +337,7 @@ steps:
   commands:
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
-    # *To limit CI cost, remember to REMOVE them before merging the PR*
+    # *To avoid merge conflicts, remember to REMOVE them before merging the PR*
     - pytest -v -s models/decoder_only/vision_language/test_llava_onevision.py
     - pytest -v -s models/decoder_only/vision_language/test_fuyu.py
     - pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
