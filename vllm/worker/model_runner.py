@@ -470,7 +470,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # already computed) and sequence length (total number of tokens).
         context_len = seq_data.get_num_computed_tokens()
         seq_len = seq_data.get_len()
-        if token_chunk_size > 1:
+        if inter_data.is_prompt:
             seq_len = min(seq_len, context_len + token_chunk_size)
 
         # Compute tokens.
