@@ -699,7 +699,6 @@ class VllmRunner:
         if videos is not None:
             for i, video in enumerate(videos):
                 inputs[i]["multi_modal_data"] = {"video": video}
-        print(f"[INPUTS!!!!]: {inputs}, {sampling_params}")
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)

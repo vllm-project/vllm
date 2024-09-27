@@ -1,7 +1,6 @@
 from typing import List, Optional, Tuple, Type, overload
 
 import pytest
-import transformers
 from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
 
 from vllm.multimodal.utils import (rescale_video_size, resize_video,
@@ -158,8 +157,6 @@ def run_test(
         )
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.45",
-                    reason="Waiting for next transformers release")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -203,8 +200,6 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
     )
 
 
-@pytest.mark.skipif(transformers.__version__ < "4.45",
-                    reason="Waiting for next transformers release")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",

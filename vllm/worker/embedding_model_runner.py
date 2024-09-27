@@ -97,7 +97,13 @@ class EmbeddingModelRunner(
             model_executable = self.model
 
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        kv_caches = [
+            torch.tensor([], dtype=torch.float32, device=self.device)
+        ] * num_layers
 
         execute_model_kwargs = {
             "input_ids":
