@@ -3,7 +3,8 @@ from os.path import commonprefix
 from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
-                                    get_all_blocks_recursively)
+                                    get_all_blocks_recursively,
+                                    get_num_blocks_touched_by_append_slots)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
@@ -594,6 +595,39 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             int: the number of blocks that will be touched by
                 swapping in/out the given blocks and num_lookahead_slots.
         """
+        # NOTE: for naive block, we use set to eliminate common blocks among
+        # seqs, also we compare the empty slots in the mutable blocks with
+        # lookahead slots to get the number of unique new block that are
+        # needed.
+        num_touched_blocks = 0
+        seq_id_empty_slots: Dict[int, int] = dict()
+        # TODO(cade): make sure the logic is correct and clean it up.
+        for seq_id, blocks in seq_id_blocks.items():
+            seq_id_empty_slots[seq_id] = 0
+            for block in blocks:
+                if block.is_full:
+                    # If the block has a match in the cache and the cached
+                    # block is not referenced, then we still count it as a
+                    # touched block
+                    if not self.is_block_cached(block) or \
+                        (block.content_hash is not None and \
+                        self._cached_blocks[block.content_hash] in \
+                             self.evictor):
+                        num_touched_blocks += 1
+                else:
+                    seq_id_empty_slots[seq_id] = block.num_empty_slots
+
+        for seq_id, _ in seq_id_blocks.items():
+            num_tokens_to_append = num_lookahead_slots
+            if (seq_id_num_unseen_tokens is not None
+                    and seq_id in seq_id_num_unseen_tokens):
+                num_tokens_to_append += seq_id_num_unseen_tokens[seq_id]
+            if num_tokens_to_append > 0:
+                num_touched_blocks += get_num_blocks_touched_by_append_slots(
+                    num_tokens_to_append, seq_id_empty_slots[seq_id],
+                    self._block_size)
+        return num_touched_blocks
+
         num_touched_blocks = 0
         for seq_id, blocks in seq_id_blocks.items():
             for block in blocks:

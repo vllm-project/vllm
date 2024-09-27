@@ -472,8 +472,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         seq_id_blocks: Dict[int, List[Block]] = dict()
         seq_id_num_unseen_tokens: Dict[int, int] = dict()
         for seq in seq_group.get_seqs(status=status):
+            print('seq_id ' + str(seq.seq_id))
             block_table = self.block_tables[seq.seq_id]
             if block_table.blocks is not None:
+                print('len(block_table.blocks) ' +
+                      str(len(block_table.blocks)))
                 seq_id_blocks[seq.seq_id] = block_table.blocks
                 seq_id_num_unseen_tokens[seq.seq_id] = len(
                     block_table.get_unseen_token_ids(seq.get_token_ids()))
@@ -484,18 +487,23 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             seq_id_blocks,
             device,
             seq_id_num_unseen_tokens=seq_id_num_unseen_tokens,
-            num_lookahead_slots=0)
+            num_lookahead_slots=num_lookahead_slots)
         print('num_blocks_touched ' + str(num_blocks_touched))
+        print('num_total_blocks ' +
+              str(self.block_allocator.get_num_total_blocks(device)))
         watermark_blocks = 0
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks
         if self.block_allocator.get_num_total_blocks(
                 device) < num_blocks_touched:
+            print('AllocStatus.NEVER')
             return AllocStatus.NEVER
         elif self.block_allocator.get_num_free_blocks(
                 device) - num_blocks_touched >= watermark_blocks:
+            print('AllocStatus.OK')
             return AllocStatus.OK
         else:
+            print('AllocStatus.NEVER')
             return AllocStatus.LATER
 
     def _get_blocks_for_swap(self, seq_group: SequenceGroup,

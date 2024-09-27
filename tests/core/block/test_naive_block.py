@@ -136,6 +136,7 @@ class TestNaiveBlockAllocator:
             )
         src_blocks.append(allocate_non_full_block())
         src_blocks[-1].append_token_ids([0])
+        print('src_blocks[-1] ' + str(src_blocks[-1].num_empty_slots))
 
         assert allocator_dst.get_num_blocks_touched(
             {fake_seq_id: src_blocks}, num_lookahead_slots=1) == num_blocks
@@ -149,8 +150,20 @@ class TestNaiveBlockAllocator:
         assert allocator_dst.get_num_blocks_touched(
             {fake_seq_id: src_blocks},
             seq_id_num_unseen_tokens={fake_seq_id: block_size - 1},
-            num_lookahead_slots=block_size) == block_size + 2
+            num_lookahead_slots=block_size) == num_blocks + 1
         assert allocator_dst.get_num_blocks_touched(
             {fake_seq_id: src_blocks},
             seq_id_num_unseen_tokens={fake_seq_id: block_size + 1},
-            num_lookahead_slots=block_size) == block_size + 3
+            num_lookahead_slots=block_size) == num_blocks + 2
+
+        # Fill up the last source block and then invoke
+        # get_num_blocks_touched
+        src_blocks[-1].append_token_ids([0] * (block_size - 1))
+        print('len(src_blocks) ' + str(src_blocks))
+        print('len(src_blocks) ' + str(len(src_blocks)))
+        print('src_blocks[-1]-1 ' + str(src_blocks[-1].num_empty_slots))
+        print('src_blocks[-1]-2 ' + str(src_blocks[-1].is_full))
+        assert allocator_dst.get_num_blocks_touched(
+            {fake_seq_id: src_blocks},
+            seq_id_num_unseen_tokens={fake_seq_id: block_size + 1},
+            num_lookahead_slots=block_size) == num_blocks + 3

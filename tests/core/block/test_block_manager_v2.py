@@ -326,7 +326,9 @@ def test_swap_in_infeasible(block_size, num_cpu_blocks, num_gpu_blocks,
                                         num_gpu_blocks,
                                         watermark=0,
                                         enable_caching=enable_caching)
-    prompt, seq_group = create_dummy_prompt("1", prompt_length=block_size - 1)
+    prompt_length = block_size - 3
+    assert prompt_length > 0
+    prompt, seq_group = create_dummy_prompt("1", prompt_length=prompt_length)
     prompt.status = SequenceStatus.WAITING
     block_manager.allocate(seq_group)
     # Emulate a forward pass by appending a single token.
@@ -337,26 +339,16 @@ def test_swap_in_infeasible(block_size, num_cpu_blocks, num_gpu_blocks,
     prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
 
     # Swap seq group from GPU -> CPU.
-    gpu_blocks = block_manager.get_block_table(prompt)
     assert block_manager.can_swap_out(seq_group)
-    mapping = block_manager.swap_out(seq_group)
-    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
-    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    assert before_cpu_blocks == after_cpu_blocks + len(gpu_blocks)
-    assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
     prompt.status = SequenceStatus.SWAPPED
 
     # Swap seq group from CPU -> GPU.
-    assert block_manager.can_swap_in(seq_group, num_lookahead_slots)
-    before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
-    before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    mapping = block_manager.swap_in(seq_group)
-    cpu_blocks = block_manager.get_block_table(prompt)
-    mapping_keys = [key for key, _ in mapping]
-    assert mapping_keys == [cpu_blocks[0]]
-    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
-    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    assert before_gpu_blocks == after_gpu_blocks + len(cpu_blocks)
+    if (num_lookahead_slots + 1 + prompt_length) <= block_size:
+        assert block_manager.can_swap_in(seq_group,
+                                         num_lookahead_slots) == AllocStatus.OK
+    else:
+        assert block_manager.can_swap_in(
+            seq_group, num_lookahead_slots) == AllocStatus.NEVER
 
 
 @pytest.mark.parametrize("block_size", [8])

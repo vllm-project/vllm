@@ -2,9 +2,9 @@ from collections import deque
 from typing import Deque, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
-                                    get_all_blocks_recursively)
+                                    get_all_blocks_recursively,
+                                    get_num_blocks_touched_by_append_slots)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
-from vllm.utils import cdiv
 
 Refcount = int
 
@@ -305,7 +305,6 @@ class NaiveBlockAllocator(BlockAllocator):
         # lookahead slots to get the number of unique new block that are
         # needed.
         old_block_set = set()
-        new_block_count = 0
         seq_id_empty_slots: Dict[int, int] = dict()
         # TODO(cade): make sure the logic is correct and clean it up.
         for seq_id, blocks in seq_id_blocks.items():
@@ -322,11 +321,15 @@ class NaiveBlockAllocator(BlockAllocator):
             if (seq_id_num_unseen_tokens is not None
                     and seq_id in seq_id_num_unseen_tokens):
                 num_tokens_to_append += seq_id_num_unseen_tokens[seq_id]
+            print('num_tokens_to_append ' + str(num_tokens_to_append))
+            print('seq_id_empty_slots[seq_id] ' +
+                  str(seq_id_empty_slots[seq_id]))
             if num_tokens_to_append > 0:
-                new_block_count += (
-                    1 + cdiv(num_tokens_to_append - seq_id_empty_slots[seq_id],
-                             self._block_size))
+                new_block_count += get_num_blocks_touched_by_append_slots(
+                    num_tokens_to_append, seq_id_empty_slots[seq_id],
+                    self._block_size)
         print('new_block_count ' + str(new_block_count))
+        print('len(old_block_set) ' + str(len(old_block_set)))
         num_touched_blocks = new_block_count + len(old_block_set)
         return num_touched_blocks
 
