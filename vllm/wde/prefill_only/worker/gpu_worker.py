@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import List, Optional
 
 import torch
 
@@ -70,17 +70,9 @@ class Worker(WorkerBase):
 
         import vllm.distributed.parallel_state
 
-        class FakeGroupCoordinator:
-            rank: int = 0
-            ranks: List[int] = [0]
-            world_size: int = 1
-            local_rank: int = 0
-            rank_in_group: int = 0
-
-            def destroy(self):
-                pass
-
-        vllm.distributed.parallel_state._TP = FakeGroupCoordinator()
+        fake_parallel_group = FakeGroupCoordinator()
+        vllm.distributed.parallel_state._TP = fake_parallel_group
+        vllm.distributed.parallel_state._PP = fake_parallel_group
 
     @torch.inference_mode
     def load_model(self):
@@ -104,3 +96,42 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 f"{compute_capability[0]}.{compute_capability[1]}. "
                 "You can use float16 instead by explicitly setting the"
                 "`dtype` flag in CLI, for example: --dtype=half.")
+
+
+class FakeGroupCoordinator:
+    rank: int = 0
+    ranks: List[int] = [0]
+    world_size: int = 1
+    local_rank: int = 0
+    rank_in_group: int = 0
+
+    def destroy(self):
+        pass
+
+    @property
+    def first_rank(self):
+        return self.ranks[0]
+
+    @property
+    def last_rank(self):
+        return self.ranks[-1]
+
+    @property
+    def is_first_rank(self):
+        return self.rank == self.first_rank
+
+    @property
+    def is_last_rank(self):
+        return self.rank == self.last_rank
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        return input_
+
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        return input_
+
+    def gather(self,
+               input_: torch.Tensor,
+               dst: int = 0,
+               dim: int = -1) -> Optional[torch.Tensor]:
+        return input_
