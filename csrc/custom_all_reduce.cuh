@@ -131,15 +131,26 @@ DINLINE O downcast(array_t<float, O::size> val) {
 }
 
 static DINLINE void st_flag_release(FlagType* flag_addr, FlagType flag) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
   asm volatile("st.release.sys.global.u32 [%1], %0;" ::"r"(flag),
                "l"(flag_addr));
+#else
+  asm volatile("membar.sys; st.volatile.global.u32 [%1], %0;" ::"r"(flag),
+               "l"(flag_addr));
+#endif
 }
 
 static DINLINE FlagType ld_flag_acquire(FlagType* flag_addr) {
   FlagType flag;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
   asm volatile("ld.acquire.sys.global.u32 %0, [%1];"
                : "=r"(flag)
                : "l"(flag_addr));
+#else
+  asm volatile("ld.volatile.global.u32 %0, [%1]; membar.gl;"
+               : "=r"(flag)
+               : "l"(flag_addr));
+#endif
   return flag;
 }
 

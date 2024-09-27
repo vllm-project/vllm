@@ -27,6 +27,14 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
+# Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
+# as it was causing spam when compiling the CUTLASS kernels
+RUN apt-get install -y gcc-10 g++-10
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10
+RUN <<EOF
+gcc --version
+EOF
+
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
@@ -67,6 +75,7 @@ COPY csrc csrc
 COPY setup.py setup.py
 COPY cmake cmake
 COPY CMakeLists.txt CMakeLists.txt
+COPY README.md README.md
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 COPY pyproject.toml pyproject.toml
@@ -202,7 +211,7 @@ FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate hf_transfer 'modelscope!=1.15.0'
+    pip install accelerate hf_transfer 'modelscope!=1.15.0' bitsandbytes>=0.44.0 timm==0.9.10
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 

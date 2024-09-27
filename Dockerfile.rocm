@@ -120,7 +120,7 @@ COPY . .
 
 # Package upgrades for useful functionality or to avoid dependency issues
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --upgrade numba scipy huggingface-hub[cli]
+    python3 -m pip install --upgrade numba scipy huggingface-hub[cli] pytest-shard
 
 
 # Workaround for ray >= 2.10.0
