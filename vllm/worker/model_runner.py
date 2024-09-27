@@ -1456,13 +1456,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
 
     @torch.inference_mode()
-    def capture_model_for_batch(
+    def lazy_capture_model_for_batch(
         self,
         kv_caches: List[torch.Tensor],
         batch_size: int,
         virtual_engine: int,
     ) -> None:
         """Cuda graph capture a model for a specific batch size and virtual engine.
+
+        If the CUDA graph has been captured for the given batch size and virtual engine before,
+        this function will early return.
         """
         # The CUDA graph for this batch has been captured before.
         if batch_size in self.graph_runners[virtual_engine]:
@@ -1566,7 +1569,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
         # This usually takes < 1 seconds.
-        logger.info(f"Graph capturing for batch size {batch_size: 0.f} finished in {elapsed_time} secs.")
+        logger.info(f"Graph capturing for batch size {batch_size} finished in {elapsed_time:.1f} secs.")
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
