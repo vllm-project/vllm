@@ -401,6 +401,7 @@ def test_swap_in_infeasible(num_lookahead_slots, enable_caching):
 
     # Swap seq group from GPU -> CPU.
     assert block_manager.can_swap_out(seq_group)
+    block_manager.swap_out(seq_group)
     prompt.status = SequenceStatus.SWAPPED
 
     # Swap seq group from CPU -> GPU.
@@ -444,7 +445,6 @@ def test_sliding_window(block_size, prompt_len, num_slots_to_append,
         if max_n is None:
             max_n = min_n
         used = num_gpu_blocks - block_manager.get_num_free_gpu_blocks()
-        #print("check", min_n, used, max_n)
         assert min_n <= used
         assert used <= max_n
 

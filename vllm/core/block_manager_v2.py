@@ -484,10 +484,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             device,
             seq_id_num_unseen_tokens=seq_id_num_unseen_tokens,
             num_lookahead_slots=num_lookahead_slots)
-
+        
         watermark_blocks = 0
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks
+
         if self.block_allocator.get_num_total_blocks(
                 device) < num_blocks_touched:
             return AllocStatus.NEVER
