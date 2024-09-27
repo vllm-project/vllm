@@ -386,7 +386,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
-        if "tool_choice" not in data and "tools" in data:
+        if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
         # if "tool_choice" is specified -- validation

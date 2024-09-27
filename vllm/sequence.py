@@ -487,7 +487,19 @@ class Sequence:
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        return self.inputs.get("multi_modal_data") or {}
+        inputs = self.inputs
+
+        if (inputs.get("multi_modal_data")
+                and inputs.get("encoder_multi_modal_data")):
+            raise ValueError(
+                "Multi-modal data in both encoder and decoder is not supported."
+            )
+
+        return cast(
+            "MultiModalDataDict",
+            (inputs.get("multi_modal_data")
+             or inputs.get("encoder_multi_modal_data") or {}),
+        )
 
     @property
     def lora_int_id(self) -> int:
