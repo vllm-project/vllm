@@ -471,7 +471,7 @@ elif _is_cuda():
     # heterogeneous speculative decoding.
     ext_modules.append(CMakeExtension(name="vllm._C"))
     ext_modules.append(CMakeExtension(name="vllm._C_cpu"))
-elif _is_hip:
+elif _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
