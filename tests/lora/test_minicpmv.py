@@ -3,23 +3,20 @@ from typing import List
 import pytest
 
 import vllm
-from vllm.lora.request import LoRARequest
 from vllm.assets.image import ImageAsset
-
+from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
 PROMPT_TEMPLATE = (
     "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
     "(<image>./</image>)\nWhat is in the image?<|eot_id|>"
-    "<|start_header_id|>assistant<|end_header_id|>\n\n"
-)
+    "<|start_header_id|>assistant<|end_header_id|>\n\n")
 
 IMAGE_ASSETS = [
     ImageAsset("stop_sign"),
     ImageAsset("cherry_blossom"),
 ]
-
 
 # After fine-tuning with LoRA, all generated content should start begin `A`.
 EXPECTED_OUTPUT = [
@@ -35,20 +32,18 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         stop_token_ids=[128001, 128009],  # eos_id, eot_id
     )
 
-    inputs = [
-        {
-            "prompt": PROMPT_TEMPLATE,
-            "multi_modal_data": {"image": asset.pil_image},
-        }
-        for asset in IMAGE_ASSETS
-    ]
+    inputs = [{
+        "prompt": PROMPT_TEMPLATE,
+        "multi_modal_data": {
+            "image": asset.pil_image
+        },
+    } for asset in IMAGE_ASSETS]
 
     outputs = llm.generate(
         inputs,
         sampling_params,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id
-        else None,
+        if lora_id else None,
     )
     # Print the outputs.
     generated_texts: List[str] = []
@@ -96,4 +91,3 @@ def test_minicpmv_tensor_parallel(minicpmv_lora_files, fully_sharded, tp):
 
     for i in range(len(EXPECTED_OUTPUT)):
         assert output_tp[i] == EXPECTED_OUTPUT[i]
-
