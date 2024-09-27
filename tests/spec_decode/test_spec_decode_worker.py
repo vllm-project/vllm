@@ -651,10 +651,12 @@ def test_determine_num_available_blocks(available_gpu_blocks: int,
         draft_worker, target_worker,
         mock_spec_decode_sampler(acceptance_sampler_method), metrics_collector)
 
-    num_gpu_blocks, num_cpu_blocks = worker.determine_num_available_blocks()
+    (num_gpu_blocks, num_cpu_blocks, draft_num_gpu_blocks,
+     draft_num_cpu_blocks) = worker.determine_num_available_blocks()
 
     target_worker.determine_num_available_blocks.assert_called_once()
     assert num_cpu_blocks == available_cpu_blocks
+    assert draft_num_gpu_blocks is None and draft_num_cpu_blocks is None
 
     assert num_gpu_blocks == split_num_cache_blocks_evenly(
         target_cache_block_size_bytes, draft_kv_size_bytes,
