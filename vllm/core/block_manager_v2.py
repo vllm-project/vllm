@@ -467,43 +467,34 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             AllocStatus: The AllocStatus for swapping in/out the given 
                 sequence_group on to the 'device'.
         """
-        # First determine the number of blocks that will be touched to swap the
-        # already full blocks.
+        # First determine the number of blocks that will be touched by this
+        # swap. Then verify if there are available blocks in the device
+        # to perform the swap.
         seq_id_blocks: Dict[int, List[Block]] = dict()
         seq_id_num_unseen_tokens: Dict[int, int] = dict()
         for seq in seq_group.get_seqs(status=status):
-            print('seq_id ' + str(seq.seq_id))
             block_table = self.block_tables[seq.seq_id]
             if block_table.blocks is not None:
-                print('len(block_table.blocks) ' +
-                      str(len(block_table.blocks)))
                 seq_id_blocks[seq.seq_id] = block_table.blocks
                 seq_id_num_unseen_tokens[seq.seq_id] = len(
                     block_table.get_unseen_token_ids(seq.get_token_ids()))
-                print('seq.seq_id ' +
-                      str(seq_id_num_unseen_tokens[seq.seq_id]))
 
         num_blocks_touched = self.block_allocator.get_num_blocks_touched(
             seq_id_blocks,
             device,
             seq_id_num_unseen_tokens=seq_id_num_unseen_tokens,
             num_lookahead_slots=num_lookahead_slots)
-        print('num_blocks_touched ' + str(num_blocks_touched))
-        print('num_total_blocks ' +
-              str(self.block_allocator.get_num_total_blocks(device)))
+
         watermark_blocks = 0
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks
         if self.block_allocator.get_num_total_blocks(
                 device) < num_blocks_touched:
-            print('AllocStatus.NEVER')
             return AllocStatus.NEVER
         elif self.block_allocator.get_num_free_blocks(
                 device) - num_blocks_touched >= watermark_blocks:
-            print('AllocStatus.OK')
             return AllocStatus.OK
         else:
-            print('AllocStatus.NEVER')
             return AllocStatus.LATER
 
     def _get_blocks_for_swap(self, seq_group: SequenceGroup,

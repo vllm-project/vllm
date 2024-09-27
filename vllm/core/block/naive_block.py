@@ -292,7 +292,12 @@ class NaiveBlockAllocator(BlockAllocator):
         group with the provided num_lookahead_slots.
 
         Args:
-            blocks (List[Block]): The potential blocks to swap.
+            seq_id_blocks (Dict[int, List[Block]]):
+                The potential blocks to swap for each sequence. The key is
+                the sequence id and the value is the blocks corresponding
+                to the sequence.
+            seq_id_num_unseen_tokens (Dict[int, int]):
+                The number of unseen tokens if any for each sequence.
             num_lookahead_slots (int): number of lookahead slots (0 for swap 
                 out).
         

@@ -373,6 +373,9 @@ class TestPrefixCachingBlockAllocator:
         assert allocator_dst.get_num_blocks_touched(
             {fake_seq_id: blocks_to_swap_in},
             num_lookahead_slots=block_size) == 3
+        # verify that if unseen tokens in the sequence are
+        # also considered when determining the number of blocks
+        # that will be touched.
         assert allocator_dst.get_num_blocks_touched(
             {fake_seq_id: blocks_to_swap_in},
             seq_id_num_unseen_tokens={fake_seq_id: block_size - 1},
@@ -382,7 +385,7 @@ class TestPrefixCachingBlockAllocator:
             seq_id_num_unseen_tokens={fake_seq_id: 2 * block_size - 1},
             num_lookahead_slots=block_size) == 4
         # Fill up the last mutable block and invoke get_num_blocks_touched.
-        # The last block is not cached so it will be touched.
+        # Note: The last block is not cached so it will be touched.
         non_full_block.append_token_ids([0] * (block_size - 1))
         assert allocator_dst.get_num_blocks_touched(
             {fake_seq_id: blocks_to_swap_in},
