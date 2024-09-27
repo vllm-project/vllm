@@ -1,4 +1,4 @@
-"""Benchmark online serving throughput.
+r"""Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
     vLLM OpenAI API server
