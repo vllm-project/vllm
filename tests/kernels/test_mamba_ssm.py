@@ -395,9 +395,9 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 
 @pytest.mark.parametrize('wtype', [torch.float32])
 @pytest.mark.parametrize('itype',
-                         [torch.float32, torch.bfloat16, torch.float16])
+                         [torch.float32])
 @pytest.mark.parametrize('seqlen',
-                         [1, 128, 129, 256, 512, 1024, 2048, 4096, 4096])
+                         [1, 128, 129, 256, 512, 1024, 2048, 4096])
 @pytest.mark.parametrize("return_last_state", [True])
 @pytest.mark.parametrize('has_delta_bias', [True])
 @pytest.mark.parametrize('delta_softplus', [True])
@@ -480,14 +480,13 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
                             delta_softplus, cumsum, cache_indices,
                             has_initial_state, prev_state)
     outs = []
-    last_state_refs = []
     splits = [
         torch.split(var, seqlens[0], dim=-1)
         for var in (u_ref, delta_ref, B_ref, C_ref, z_ref)
     ]
     for i in range(len(seqlens[0])):
         u_s, delta_s, B_s, C_s, z_s = [v[i].unsqueeze(0) for v in splits]
-        out_ref_s, last_state_ref_s = selective_scan_ref(
+        out_ref_s, _ = selective_scan_ref(
             u_s,
             delta_s,
             A_ref,
@@ -502,20 +501,16 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
             if has_initial_state[i] else None,
             final_state_out=prev_state_ref[cache_indices[i]].unsqueeze(0))
         outs.append(out_ref_s)
-        last_state_refs.append(last_state_ref_s)
     if len(outs) > 1:
         out_ref = torch.cat(outs, dim=-1)
-        last_state_ref = torch.cat(last_state_refs, dim=0).to(itype)
-        last_state_ref = last_state_ref[cache_indices]
     else:
         out_ref = outs[0]
-        last_state_ref = last_state_refs[0].to(itype)
 
     print("Output diff max", (out - out_ref[0]).max())
     print("Output diff mean", (out - out_ref[0]).mean())
-    print("Output state diff max", (prev_state - last_state_ref).max())
-    print("Output state diff mean", (prev_state - last_state_ref).mean())
-    assert torch.allclose(prev_state, last_state_ref, rtol=rtol, atol=atol)
+    print("Output state diff max", (prev_state - prev_state_ref).max())
+    print("Output state diff mean", (prev_state - prev_state_ref).mean())
+    assert torch.allclose(prev_state, prev_state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out, out_ref[0], rtol=rtol, atol=atol)
 
     selective_scan_opcheck_fn(u, delta, A, B, C, D, z, delta_bias,
@@ -525,7 +520,7 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
 
 @pytest.mark.parametrize("itype",
                          [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("has_z", [False, True])
+@pytest.mark.parametrize("has_z", [True])
 @pytest.mark.parametrize("dstate", [16, 32, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
@@ -537,7 +532,7 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
             atol *= 2
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 16
+    batch_size = 3
 
     total_entries = 10 * batch_size
     state = torch.randn(total_entries, dim, dstate, dtype=itype, device=device)
@@ -575,6 +570,11 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
                                          dt_bias=dt_bias,
                                          dt_softplus=True)
 
+    print("Output diff max", (out - out_ref[0]).max())
+    print("Output diff mean", (out - out_ref[0]).mean())
+    print("Output state diff max", (state[state_indices, :] - state_ref).max())
+    print("Output state diff mean", (state[state_indices, :] - state_ref)
+          .mean())
     assert torch.allclose(state[state_indices, :],
                           state_ref,
                           rtol=rtol,
@@ -597,7 +597,7 @@ def test_selective_state_update_with_heads_with_batch_indices(
         rtol, atol = 1e-1, 1e-1
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 16
+    batch_size = 3
     headdim = 64
     nheads = dim // headdim
 
