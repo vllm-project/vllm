@@ -1,9 +1,8 @@
 import os
-from typing import Optional
+from typing import List
 
 import torch
 
-from vllm.config import ParallelConfig
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 from vllm.wde.core.config import (DeviceConfig, EngineConfig, LoadConfig,
@@ -66,29 +65,16 @@ class Worker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
     def dirty_fix_distributed_environment(self):
-        from vllm.config import TokenizerPoolConfig
-        from vllm.utils import get_distributed_init_method, get_open_port
+        import vllm.distributed.parallel_state
 
-        self.parallel_config = ParallelConfig(
-            pipeline_parallel_size=1,
-            tensor_parallel_size=1,
-            worker_use_ray=False,
-            max_parallel_loading_workers=None,
-            disable_custom_all_reduce=False,
-            tokenizer_pool_config=TokenizerPoolConfig.create_config(
-                tokenizer_pool_size=0,
-                tokenizer_pool_type="ray",
-                tokenizer_pool_extra_config=None,
-            ),
-            ray_workers_use_nsight=False,
-            distributed_executor_backend=None)
+        class FakeGroupCoordinator:
+            rank: int = 0
+            ranks: List[int] = [0]
+            world_size: int = 1
+            local_rank: int = 0
+            rank_in_group: int = 0
 
-        ip = "127.0.0.1"
-        port = get_open_port()
-        distributed_init_method = get_distributed_init_method(ip, port)
-
-        init_worker_distributed_environment(self.parallel_config, 0,
-                                            distributed_init_method, 0)
+        vllm.distributed.parallel_state._TP = FakeGroupCoordinator
 
     @torch.inference_mode
     def load_model(self):
@@ -112,22 +98,3 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 f"{compute_capability[0]}.{compute_capability[1]}. "
                 "You can use float16 instead by explicitly setting the"
                 "`dtype` flag in CLI, for example: --dtype=half.")
-
-
-def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
-    rank: int,
-    distributed_init_method: Optional[str] = None,
-    local_rank: int = -1,
-) -> None:
-    from vllm.distributed import (ensure_model_parallel_initialized,
-                                  init_distributed_environment,
-                                  set_custom_all_reduce)
-    """Initialize the distributed environment."""
-    set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
-
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
-
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)

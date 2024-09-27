@@ -1,3 +1,4 @@
+import atexit
 import queue
 from queue import Queue
 from threading import Thread
@@ -96,11 +97,13 @@ class GPUAsyncExecutor(GPUExecutor):
                                                 self.output_to_cpu),
                                           daemon=True)
             self.executor_thread.start()
+            atexit.register(self.shutdown_execute_loop)
 
     def shutdown_execute_loop(self):
         if self.executor_thread.is_alive():
             self.executor_in.put(None)
             self.executor_thread.join()
+            atexit.unregister(self.shutdown_execute_loop)
 
 
 def simple_execute_loop(worker: WorkerBase,

@@ -1,3 +1,4 @@
+import atexit
 from queue import Queue
 from threading import Thread
 from typing import List, Optional
@@ -67,6 +68,7 @@ class GPUDataParallelismExecutor:
                                 daemon=True)
                 worker.start()
                 self.workers.append(worker)
+            atexit.register(self.shutdown_execute_loop)
 
     def shutdown_execute_loop(self):
         if self.workers is not None:
@@ -75,3 +77,4 @@ class GPUDataParallelismExecutor:
             for worker in self.workers:
                 worker.join()
             self.workers = None
+            atexit.unregister(self.shutdown_execute_loop)
