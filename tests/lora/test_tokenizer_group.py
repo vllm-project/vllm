@@ -41,7 +41,7 @@ async def test_tokenizer_group_lora(sql_lora_files, tokenizer_group_type):
             lora_request)
 
 
-def test_get_lora_tokenizer(sql_lora_files, tmpdir):
+def test_get_lora_tokenizer(sql_lora_files, tmp_path):
     lora_request = None
     tokenizer = get_lora_tokenizer(lora_request)
     assert not tokenizer
@@ -50,6 +50,6 @@ def test_get_lora_tokenizer(sql_lora_files, tmpdir):
     tokenizer = get_lora_tokenizer(lora_request)
     assert tokenizer.get_added_vocab()
 
-    lora_request = LoRARequest("1", 1, str(tmpdir))
+    lora_request = LoRARequest("1", 1, str(tmp_path))
     tokenizer = get_lora_tokenizer(lora_request)
     assert not tokenizer
