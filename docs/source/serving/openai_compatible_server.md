@@ -157,7 +157,7 @@ vLLM will use guided decoding to ensure the response matches the tool parameter 
 To enable this feature, you should set the following flags:
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
 deems appropriate.
-* `--tool-call-parser` -- select the tool parser to use - currently either `hermes`, `mistral`, `llama3_json` or `granite`. Additional tool parsers 
+* `--tool-call-parser` -- select the tool parser to use - currently either `hermes`, `mistral`, `llama3_json` or `granite-20b-fc`. Additional tool parsers 
 will continue to be added in the future.
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
 that contain previously generated tool calls. Hermes, Mistral and Llama models have tool-compatible chat templates in their 
@@ -221,13 +221,10 @@ it works better with vLLM.
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
 
 #### IBM Granite
+
 Supported models:
 * `ibm-granite/granite-20b-functioncalling`
 
-Flags: `--tool-call-parser granite`
-
-Known issues:
-1. Tool call parsing is not yet supported in streaming mode.
-
-* `examples/tool_chat_template_granite_response.jinja` - this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+Flags: `--tool-call-parser granite-20b-fc`
+`examples/tool_chat_template_granite20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
