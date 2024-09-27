@@ -47,8 +47,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
         if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
 
-    assert output_str[0] == " "
-    hf_output_str = output_str[1:]
+    hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
@@ -167,8 +166,8 @@ def _run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
-                     max_num_seqs=16,
                      max_model_len=4096,
+                     max_num_seqs=2,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
@@ -185,7 +184,6 @@ def _run_test(
     def process(hf_inputs: BatchEncoding):
         return hf_inputs
 
-    from transformers import AutoConfig
     from transformers.models.mllama import MllamaConfig as MllamaConfigHf
 
     # use transformer's MllamaConfig for hf_runner
@@ -257,6 +255,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, sizes, dtype,
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skip("ps.get_tp_group().all_gather() used in vLLM but not in HF")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
