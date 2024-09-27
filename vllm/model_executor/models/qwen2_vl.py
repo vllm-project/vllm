@@ -23,8 +23,8 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import lru_cache, partial
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple, Type, TypedDict,
-                    Union)
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple, Type,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -820,14 +820,15 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
                 if image_cnt == 0:
                     non_image_tokens = prompt_token_ids[:image_indices[image_cnt]]
                 else:
-                    non_image_tokens = prompt_token_ids[image_indices[image_cnt -
-                                                                    1] +
-                                                        1:image_indices[image_cnt]]
+                    non_image_tokens = prompt_token_ids[
+                        image_indices[image_cnt - 1] + 1:image_indices[image_cnt]
+                    ]
                 prompt_token_ids_with_image.extend(non_image_tokens)
                 prompt_token_ids_with_image.extend(
                     hf_config.image_token_id for _ in range(num_image_tokens))
-            prompt_token_ids_with_image.extend(prompt_token_ids[image_indices[-1] +
-                                                                1:])
+            prompt_token_ids_with_image.extend(
+                prompt_token_ids[image_indices[-1] + 1:]
+            )
         prompt_token_ids = prompt_token_ids_with_image
 
     # Expand video pad tokens.
@@ -849,14 +850,15 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
             if video_cnt == 0:
                 non_video_tokens = prompt_token_ids[:video_indices[video_cnt]]
             else:
-                non_video_tokens = prompt_token_ids[video_indices[video_cnt -
-                                                                  1] +
-                                                    1:video_indices[video_cnt]]
+                non_video_tokens = prompt_token_ids[
+                    video_indices[video_cnt - 1] + 1:video_indices[video_cnt]
+                    ]
             prompt_token_ids_with_video.extend(non_video_tokens)
             prompt_token_ids_with_video.extend(
                 hf_config.video_token_id for _ in range(num_video_tokens))
-        prompt_token_ids_with_video.extend(prompt_token_ids[video_indices[-1] +
-                                                            1:])
+        prompt_token_ids_with_video.extend(
+            prompt_token_ids[video_indices[-1] + 1:]
+            )
         prompt_token_ids = prompt_token_ids_with_video
 
     return LLMInputs(
