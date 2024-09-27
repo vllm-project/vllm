@@ -64,8 +64,6 @@ def _init_sampling_metadata_from_tensor_dict(  # type: ignore
     from vllm.model_executor import SamplingMetadata
 
     selected_token_indices = tensor_dict.pop("selected_token_indices", None)
-    selected_token_indices_multistep = tensor_dict.pop(
-        "selected_token_indices_multistep", None)
     # An empty SamplingMetadata to signal that the worker should skip
     # sampling.
     if selected_token_indices is not None:
@@ -74,7 +72,6 @@ def _init_sampling_metadata_from_tensor_dict(  # type: ignore
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=None,
             num_prompts=0,
-            selected_token_indices_multistep=selected_token_indices_multistep,
         )
     return tensor_dict
 
@@ -89,9 +86,6 @@ def _add_sampling_metadata_broadcastable_dict(
     if sampling_metadata is not None:
         tensor_dict["selected_token_indices"] = (
             sampling_metadata.selected_token_indices)
-        if sampling_metadata.selected_token_indices_multistep is not None:
-            tensor_dict["selected_token_indices_multistep"] = (
-                sampling_metadata.selected_token_indices_multistep)
 
 
 def _init_frozen_model_input_from_tensor_dict(

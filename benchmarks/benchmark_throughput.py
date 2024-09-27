@@ -4,6 +4,7 @@ import json
 import random
 import time
 from typing import List, Optional, Tuple
+import pickle as pkl
 
 import torch
 import uvloop
@@ -126,7 +127,7 @@ def run_vllm(
         sampling_params.append(
             SamplingParams(
                 n=n,
-                temperature=0.0 if use_beam_search else 1.0,
+                temperature=0.0 if use_beam_search else 0.0,
                 top_p=1.0,
                 use_beam_search=use_beam_search,
                 ignore_eos=True,
@@ -135,8 +136,11 @@ def run_vllm(
 
     if not use_new_beam_search_impl:
         start = time.perf_counter()
-        llm.generate(prompts, sampling_params, use_tqdm=True)
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         end = time.perf_counter()
+
+        with open("llm_engine_test.pkl", "wb+")  as f:
+            pkl.dump(outputs, f)
     else:
         assert use_beam_search
         prompts = [prompt for prompt, _, _ in requests]
