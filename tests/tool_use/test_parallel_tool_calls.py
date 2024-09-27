@@ -16,10 +16,12 @@ from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
 @pytest.mark.asyncio
 async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
                                    server_config: ServerConfig):
+    if not server_config.get("supports_parallel", True):
+        pytest.skip("The {} model doesn't support parallel tool calls".format(
+            server_config["model"]))
+
     models = await client.models.list()
     model_name: str = models.data[0].id
-    if server_config.get("skip_parallel", False):
-        pytest.skip(f"skip parallel test for {model_name}")
     chat_completion = await client.chat.completions.create(
         messages=MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
         temperature=0,
@@ -141,10 +143,12 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
                                                 server_config: ServerConfig):
+    if not server_config.get("supports_parallel", True):
+        pytest.skip("The {} model doesn't support parallel tool calls".format(
+            server_config["model"]))
+
     models = await client.models.list()
     model_name: str = models.data[0].id
-    if server_config.get("skip_parallel", False):
-        pytest.skip(f"skip parallel test for {model_name}")
     chat_completion = await client.chat.completions.create(
         messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
         temperature=0,

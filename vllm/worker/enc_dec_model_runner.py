@@ -18,7 +18,8 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
+                             MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
@@ -52,6 +53,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
             "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -194,6 +196,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
+
+        multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -202,6 +206,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
             intermediate_tensors=intermediate_tensors,
+            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                         device=self.device),
             **seqlen_agnostic_kwargs)
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
@@ -288,8 +294,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config)
         if max_mm_tokens > 0:
-            raise NotImplementedError(
-                "Multi-modal encoder-decoder models are not supported yet")
+            logger.info("Starting profile run for multi-modal models.")
 
         batch_size = 0
         for group_id in range(max_num_seqs):
@@ -297,24 +302,39 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, _ = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
+            decoder_seq_data, decoder_dummy_multi_modal_data \
+                = self.input_registry.dummy_data_for_profiling(
+                    self.model_config,
                                           seq_len,
-                                          self.mm_registry)
+                                          self.mm_registry,
+                                          is_encoder_data=False)
+            encoder_seq_data, encoder_dummy_multi_modal_data \
+                = self.input_registry.dummy_data_for_profiling(
+                    self.model_config,
+                                         seq_len,
+                                         self.mm_registry,
+                                         is_encoder_data=True)
 
             # Having more tokens is over-conservative but otherwise fine
-            assert len(seq_data.prompt_token_ids) >= seq_len, (
+            assert len(decoder_seq_data.prompt_token_ids) >= seq_len, (
                 f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(seq_data.prompt_token_ids)}")
+                f"but got: {len(decoder_seq_data.prompt_token_ids)}")
+
+            assert decoder_dummy_multi_modal_data is None or \
+            encoder_dummy_multi_modal_data is None, (
+                "Multi-modal data can't be provided in both encoder and decoder"
+            )
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: seq_data},
+                seq_data={group_id: decoder_seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                encoder_seq_data=seq_data,
+                encoder_seq_data=encoder_seq_data,
                 cross_block_table=None,
+                multi_modal_data=decoder_dummy_multi_modal_data
+                or encoder_dummy_multi_modal_data,
             )
             seqs.append(seq)
 
@@ -435,18 +455,18 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_input_tokens_tensor = self._empty_long_tensor()
             encoder_input_positions_tensor = self._empty_long_tensor()
             cross_slot_mapping_tensor = self._empty_long_tensor()
-
             # Extract cross-attention block tables &
             # seq len from each sequence group metadata.
             # Cross-attention block tables are empty
             # during vLLM memory profiling.
             cross_block_tables = []
             for seq_group_metadata in seq_group_metadata_list:
-                encoder_seq_lens.append(
-                    seq_group_metadata.encoder_seq_data.get_len())
-                cross_block_table = seq_group_metadata.cross_block_table
-                cross_block_tables.append([] if (
-                    cross_block_table is None) else cross_block_table)
+                for _ in range(len(seq_group_metadata.seq_data)):
+                    encoder_seq_lens.append(
+                        seq_group_metadata.encoder_seq_data.get_len())
+                    cross_block_table = seq_group_metadata.cross_block_table
+                    cross_block_tables.append([] if (
+                        cross_block_table is None) else cross_block_table)
 
             if (model_input.attn_metadata is not None
                     and model_input.attn_metadata.use_cuda_graph):

@@ -58,19 +58,70 @@ You can install vLLM using pip:
         $ # export VLLM_COMMIT=...
         $ # pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
 
+Build from source (without compilation)
+---------------------------------------
+
+If you want to develop vLLM, and you only need to change the Python code, you can build vLLM without compilation.
+
+The first step is to follow the previous instructions to install the latest vLLM wheel:
+
+.. code-block:: console
+
+    $ export VLLM_VERSION=0.6.1.post1
+    $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
+
+After verifying that the installation is successful, we have a script for you to copy and link directories, so that you can edit the Python code directly:
+
+.. code-block:: console
+
+    $ git clone https://github.com/vllm-project/vllm.git
+    $ cd vllm
+    $ python python_only_dev.py
+
+It will:
+
+- Find the installed vLLM in the current environment.
+- Copy built files to the current directory.
+- Rename the installed vLLM
+- Symbolically link the current directory to the installed vLLM.
+
+This way, you can edit the Python code in the current directory, and the changes will be reflected in the installed vLLM.
 
 .. _build_from_source:
 
-Build from source
------------------
+Build from source (with compilation)
+------------------------------------
 
-You can also build and install vLLM from source:
+If you need to touch the C++ or CUDA code, you need to build vLLM from source:
 
 .. code-block:: console
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
     $ pip install -e .  # This may take 5-10 minutes.
+
+.. note::
+
+    This will uninstall existing PyTorch, and install the version required by vLLM. If you want to use an existing PyTorch installation, there need to be some changes:
+
+    .. code-block:: console
+
+        $ git clone https://github.com/vllm-project/vllm.git
+        $ cd vllm
+        $ python use_existing_torch.py
+        $ pip install -r requirements-build.txt
+        $ pip install -e . --no-build-isolation
+
+    The differences are:
+
+    - ``python use_existing_torch.py``: This script will remove all the PyTorch versions in the requirements files, so that the existing PyTorch installation will be used.
+    - ``pip install -r requirements-build.txt``: You need to manually install the requirements for building vLLM.
+    - ``pip install -e . --no-build-isolation``: You need to disable build isolation, so that the build system can use the existing PyTorch installation.
+
+    This is especially useful when the PyTorch dependency cannot be easily installed via pip, e.g.:
+
+    - build vLLM with PyTorch nightly or a custom PyTorch build.
+    - build vLLM with aarch64 and cuda (GH200), where the PyTorch wheels are not available on PyPI. Currently, only PyTorch nightly has wheels for aarch64 with CUDA. You can run ``pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124`` to install PyTorch nightly, and then build vLLM on top of it.
 
 .. note::
 

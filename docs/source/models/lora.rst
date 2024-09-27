@@ -159,3 +159,67 @@ Example request to unload a LoRA adapter:
     -d '{
         "lora_name": "sql_adapter"
     }'
+
+
+New format for `--lora-modules`
+-------------------------------
+
+In the previous version, users would provide LoRA modules via the following format, either as a key-value pair or in JSON format. For example:
+
+.. code-block:: bash
+
+    --lora-modules sql-lora=$HOME/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/
+
+This would only include the `name` and `path` for each LoRA module, but did not provide a way to specify a `base_model_name`.
+Now, you can specify a base_model_name alongside the name and path using JSON format. For example:
+
+.. code-block:: bash
+
+    --lora-modules '{"name": "sql-lora", "path": "/path/to/lora", "base_model_name": "meta-llama/Llama-2-7b"}'
+
+To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
+
+
+Lora model lineage in model card
+--------------------------------
+
+The new format of `--lora-modules` is mainly to support the display of parent model information in the model card. Here's an explanation of how your current response supports this:
+
+- The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
+- The `root` field points to the artifact location of the lora adapter.
+
+.. code-block:: bash
+
+    $ curl http://localhost:8000/v1/models
+
+    {
+        "object": "list",
+        "data": [
+            {
+            "id": "meta-llama/Llama-2-7b-hf",
+            "object": "model",
+            "created": 1715644056,
+            "owned_by": "vllm",
+            "root": "~/.cache/huggingface/hub/models--meta-llama--Llama-2-7b-hf/snapshots/01c7f73d771dfac7d292323805ebc428287df4f9/",
+            "parent": null,
+            "permission": [
+                {
+                .....
+                }
+            ]
+            },
+            {
+            "id": "sql-lora",
+            "object": "model",
+            "created": 1715644056,
+            "owned_by": "vllm",
+            "root": "~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/snapshots/0dfa347e8877a4d4ed19ee56c140fa518470028c/",
+            "parent": meta-llama/Llama-2-7b-hf,
+            "permission": [
+                {
+                ....
+                }
+            ]
+            }
+        ]
+    }

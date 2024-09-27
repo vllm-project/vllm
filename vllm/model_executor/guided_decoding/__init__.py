@@ -6,7 +6,6 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest)
 from vllm.sampling_params import LogitsProcessor
-from vllm.transformers_utils.tokenizer import MistralTokenizer
 
 
 async def get_guided_decoding_logits_processor(
@@ -16,23 +15,12 @@ async def get_guided_decoding_logits_processor(
     request = _adapt_request_for_tool_use(request)
 
     if guided_decoding_backend == 'outlines':
-        if isinstance(tokenizer, MistralTokenizer):
-            raise NotImplementedError(
-                "Guided decoding with 'outlines' is currently not supported "
-                "for Mistral tokenizer. Please consider contributing to the "
-                "'outlines' project if you are interested in this feature.")
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_outlines_guided_decoding_logits_processor)
         return await get_outlines_guided_decoding_logits_processor(
             request, tokenizer)
     if guided_decoding_backend == 'lm-format-enforcer':
-        if isinstance(tokenizer, MistralTokenizer):
-            raise NotImplementedError(
-                "Guided decoding with 'lm-format-enforcer' is currently not "
-                "supported for Mistral tokenizer. Please consider contributing "
-                "to the 'lm-format-enforcer' project if you are interested "
-                "in this feature.")
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_lm_format_enforcer_guided_decoding_logits_processor)
         return await get_lm_format_enforcer_guided_decoding_logits_processor(
@@ -49,23 +37,12 @@ def get_local_guided_decoding_logits_processor(
     # request = _adapt_request_for_tool_use(request)
 
     if guided_decoding_backend == 'outlines':
-        if isinstance(tokenizer, MistralTokenizer):
-            raise NotImplementedError(
-                "Guided decoding with 'outlines' is currently not supported "
-                "for Mistral tokenizer. Please consider contributing to the "
-                "'outlines' project if you are interested in this feature.")
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_local_outlines_guided_decoding_logits_processor)
         return get_local_outlines_guided_decoding_logits_processor(
             guided_options, tokenizer)
     if guided_decoding_backend == 'lm-format-enforcer':
-        if isinstance(tokenizer, MistralTokenizer):
-            raise NotImplementedError(
-                "Guided decoding with 'lm-format-enforcer' is currently not "
-                "supported for Mistral tokenizer. Please consider contributing "
-                "to the 'lm-format-enforcer' project if you are interested "
-                "in this feature.")
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
