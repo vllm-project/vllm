@@ -182,7 +182,7 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def plan(self, model_input: "ModelRunnerInputBase",
+    def begin_forward(self, model_input: "ModelRunnerInputBase",
              model: nn.Module) -> None:
         """Prepare state for forward pass."""
         ...
