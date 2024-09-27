@@ -791,7 +791,8 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     # Expand image pad tokens.
     def expand_pad_tokens(inputs, token_id, make_batched_fn, data_type_key):
         indices = [
-            idx for idx, token in enumerate(prompt_token_ids) if token == token_id
+            idx for idx, token in enumerate(prompt_token_ids)
+            if token == token_id
         ]
         inputs = make_batched_fn(inputs)
         assert len(indices) == len(inputs)
