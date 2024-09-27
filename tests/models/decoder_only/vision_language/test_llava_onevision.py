@@ -214,7 +214,7 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
 )
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("num_logprobs", [10])
 @pytest.mark.parametrize("num_frames", [16])
 def test_models_fixed_sizes(hf_runner, vllm_runner, video_assets, model, sizes,
                             dtype, max_tokens, num_logprobs,
