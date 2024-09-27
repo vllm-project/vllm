@@ -818,7 +818,8 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
                     image_processor=image_processor,
                 )
                 if image_cnt == 0:
-                    non_image_tokens = prompt_token_ids[:image_indices[image_cnt]]
+                    end_idx = image_indices[image_cnt]
+                    non_image_tokens = prompt_token_ids[:end_idx]
                 else:
                     non_image_tokens = prompt_token_ids[
                         image_indices[image_cnt - 1] + 1:image_indices[image_cnt]
@@ -848,7 +849,8 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
                 image_processor=image_processor,
             )
             if video_cnt == 0:
-                non_video_tokens = prompt_token_ids[:video_indices[video_cnt]]
+                end_idx = video_indices[video_cnt]
+                non_video_tokens = prompt_token_ids[:end_idx]
             else:
                 non_video_tokens = prompt_token_ids[
                     video_indices[video_cnt - 1] + 1:video_indices[video_cnt]
