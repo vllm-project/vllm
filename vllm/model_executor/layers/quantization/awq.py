@@ -12,11 +12,10 @@ from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_gptq_marlin_linear, check_marlin_supported, marlin_is_k_full,
-    marlin_make_empty_g_idx, marlin_make_workspace, marlin_moe_permute_scales,
-    marlin_permute_scales, marlin_repeat_scales_on_all_ranks,
-    marlin_sort_g_idx, replace_tensor, verify_marlin_supported,
-    verify_marlin_supports_shape)
+    marlin_moe_permute_scales, moe_awq_to_marlin_zero_points,
+    apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
+    marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
+    replace_tensor, verify_marlin_supported, verify_marlin_supports_shape)
 
 
 class AWQConfig(QuantizationConfig):
@@ -276,7 +275,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
 
-        marlin_w13_qweight = ops.gptq_marlin_moe_repack(
+        marlin_w13_qweight = ops.awq_marlin_moe_repack(
             layer.w13_qweight,
             layer.w13_g_idx_sort_indices,
             size_k=layer.w13_qweight.shape[1],
@@ -285,7 +284,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
         )
         replace_tensor(layer, "w13_qweight", marlin_w13_qweight)
 
-        marlin_w2_qweight = ops.gptq_marlin_moe_repack(
+        marlin_w2_qweight = ops.awq_marlin_moe_repack(
             layer.w2_qweight,
             layer.w2_g_idx_sort_indices,
             size_k=layer.w2_qweight.shape[1],
@@ -294,22 +293,37 @@ class AWQMoEMethod(FusedMoEMethodBase):
         )
         replace_tensor(layer, "w2_qweight", marlin_w2_qweight)
 
+        # Why does this take the intermediate size for size_k?
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_scales,
             size_k=layer.intermediate_size_per_partition,
             size_n=layer.w13_scales.shape[2],
             group_size=self.quant_config.group_size,
         )
-        # for @eliza: why do we need to apply a pack factor to the scales?
-        # they're not in packed format?
+
         replace_tensor(layer, "w13_scales", marlin_w13_scales)
+
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
-            size_k=layer.w2_scales.shape[1] * self.quant_config.pack_factor,
+            size_k=layer.intermediate_size_per_partition,
             size_n=layer.w2_scales.shape[2],
             group_size=self.quant_config.group_size,
         )
         replace_tensor(layer, "w2_scales", marlin_w2_scales)
+
+        marlin_w13_zp = moe_awq_to_marlin_zero_points(
+            layer.w13_qzeros,
+            size_k=layer.w13_qzeros.shape[1],
+            size_n=layer.w13_qzeros.shape[2] * self.quant_config.pack_factor,
+            num_bits=self.quant_config.weight_bits)
+        replace_tensor(layer, "w13_qzeros", marlin_w13_zp)
+
+        marlin_w2_zp = moe_awq_to_marlin_zero_points(
+            layer.w2_qzeros,
+            size_k=layer.w2_qzeros.shape[1],
+            size_n=layer.w2_qzeros.shape[2] * self.quant_config.pack_factor,
+            num_bits=self.quant_config.weight_bits)
+        replace_tensor(layer, "w2_qzeros", marlin_w2_zp)
 
     def apply(
         self,
@@ -346,6 +360,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            w1_zeros=layer.w13_qzeros,
+            w2_zeros=layer.w2_qzeros,
             g_idx1=layer.w13_g_idx,
             g_idx2=layer.w2_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,
