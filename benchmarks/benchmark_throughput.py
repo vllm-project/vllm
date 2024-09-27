@@ -83,6 +83,7 @@ def run_vllm(
     enable_prefix_caching: bool,
     enable_chunked_prefill: bool,
     max_num_batched_tokens: int,
+    max_num_seqs: int,
     distributed_executor_backend: Optional[str],
     gpu_memory_utilization: float = 0.9,
     num_scheduler_steps: int = 1,
@@ -111,6 +112,7 @@ def run_vllm(
         download_dir=download_dir,
         enable_chunked_prefill=enable_chunked_prefill,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
         distributed_executor_backend=distributed_executor_backend,
         load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
@@ -172,6 +174,7 @@ async def run_vllm_async(
     enable_prefix_caching: bool,
     enable_chunked_prefill: bool,
     max_num_batched_tokens: int,
+    max_num_seqs: int,
     distributed_executor_backend: Optional[str],
     gpu_memory_utilization: float = 0.9,
     num_scheduler_steps: int = 1,
@@ -200,6 +203,7 @@ async def run_vllm_async(
         download_dir=download_dir,
         enable_chunked_prefill=enable_chunked_prefill,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
         distributed_executor_backend=distributed_executor_backend,
         load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
@@ -341,7 +345,8 @@ def main(args: argparse.Namespace):
             args.enforce_eager, args.kv_cache_dtype,
             args.quantization_param_path, args.device,
             args.enable_prefix_caching, args.enable_chunked_prefill,
-            args.max_num_batched_tokens, args.distributed_executor_backend,
+            args.max_num_batched_tokens, args.max_num_seqs, 
+            args.distributed_executor_backend,
             args.gpu_memory_utilization, args.num_scheduler_steps,
             args.use_v2_block_manager, args.download_dir, args.load_format,
             args.disable_async_output_proc
@@ -493,6 +498,11 @@ if __name__ == "__main__":
                         type=int,
                         default=None,
                         help='maximum number of batched tokens per '
+                        'iteration')
+    parser.add_argument('--max-num-seqs',
+                        type=int,
+                        default=None,
+                        help='maximum number of sequences per '
                         'iteration')
     parser.add_argument('--download-dir',
                         type=str,
