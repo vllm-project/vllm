@@ -904,9 +904,14 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
-        return Qwen2Model(config,
-                          cache_config=cache_config,
-                          quant_config=quant_config)
+        # return Qwen2Model(config,
+        #                   cache_config=cache_config,
+        #                   quant_config=quant_config)
+
+        return LLMWrapper(Qwen2Model(config,
+                                     cache_config=cache_config,
+                                     quant_config=quant_config),
+                          name="model")
 
     def init_vision_module(self) -> nn.Module:
         # A custom version of SiglipVisionTransformer, won't work with TP
