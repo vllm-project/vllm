@@ -484,7 +484,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             device,
             seq_id_num_unseen_tokens=seq_id_num_unseen_tokens,
             num_lookahead_slots=num_lookahead_slots)
-        
+
         watermark_blocks = 0
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks
