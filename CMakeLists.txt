@@ -153,7 +153,7 @@ endif()
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   clear_cuda_arches(CUDA_ARCH_FLAGS)
   extract_unique_cuda_arches_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
-  message(STATUS "CUDA architectures: ${CUDA_ARCHS}")
+  message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
 endif()
 
 #
@@ -263,6 +263,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${COMPATIBLE_ARCHS}"
       BUILD_PTX_FOR_HIGHEST_ARCH)
     list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
+    message(STATUS "Building Marlin kernels for archs: ${COMPATIBLE_ARCHS}")
+  else()
+    message(STATUS "Not building Marlin kernels as no compatible archs found"
+                   "in CUDA target architectures")
   endif()
 
   #
@@ -281,6 +285,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${COMPATIBLE_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C3X=1")
+    message(STATUS "Building scaled_mm_c3x for archs: ${COMPATIBLE_ARCHS}")
+  else()
+    message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
+                   "in CUDA target architectures or CUDA Compiler version is "
+                   "not >= 12.0")
   endif()
 
 
@@ -337,7 +346,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
     list(APPEND VLLM_EXT_SRC
       csrc/quantization/machete/machete_pytorch.cu)
+
+    message(STATUS "Building Machete kernels for archs: ${COMPATIBLE_ARCHS}")
+  else()
+    message(STATUS "Not building Machete kernels as no compatible archs found "
+                   "in CUDA target architectures or CUDA Compiler version is "
+                   "not >= 12.0")
   endif()
+# if CUDA endif
 endif()
 
 message(STATUS "Enabling C extension.")
