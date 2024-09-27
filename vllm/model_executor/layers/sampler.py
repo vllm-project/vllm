@@ -18,6 +18,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+from vllm.utils import rpd_mark
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     import flashinfer.sampling
@@ -200,6 +201,7 @@ class Sampler(nn.Module):
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
 
+    @rpd_mark(name="Sampler Forward")
     def forward(
         self,
         logits: torch.Tensor,
@@ -908,6 +910,7 @@ def _sample_with_torch(
         )
 
 
+@rpd_mark()
 def _sample(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
