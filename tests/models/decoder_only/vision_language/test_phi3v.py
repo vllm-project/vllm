@@ -343,8 +343,8 @@ def test_max_tokens_override(get_max_phi3v_image_tokens, model: str,
     (16, 2653, 1),
     (16, 2653, 2),
 ])
-def test_dummy_data_override(dummy_data_for_phi3v, model: str,
-                             num_crops: int, toks_per_img: int, num_imgs: int):
+def test_dummy_data_override(dummy_data_for_phi3v, model: str, num_crops: int,
+                             toks_per_img: int, num_imgs: int):
     """Ensure dummy_data_for_phi3v handles num_crops properly."""
     # Same as the previous test - don't initialize mm_processor_kwargs
     # in this test and assume that the kwargs will be correctly expanded by
@@ -397,7 +397,8 @@ def test_input_processor_override(input_processor_for_phi3v,
                           prompt=prompt,
                           multi_modal_data={"image": images})
 
-    processed_inputs = input_processor_for_phi3v(ctx, inputs,
+    processed_inputs = input_processor_for_phi3v(ctx,
+                                                 inputs,
                                                  num_crops=num_crops)
 
     # Ensure we have the right number of placeholders per num_crops size
