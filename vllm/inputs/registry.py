@@ -9,7 +9,7 @@ from transformers import PretrainedConfig
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.utils import get_allowed_kwarg_only_overrides
+from vllm.utils import get_allowed_kwarg_only_overrides, print_warning_once
 
 from .data import LLMInputs
 
@@ -235,9 +235,9 @@ class InputRegistry:
         num_tokens = seq_data.prompt_token_ids
         if len(num_tokens) < seq_len:
             if is_encoder_data:
-                logger.warning(
-                    "Expected at least %d dummy encoder tokens for profiling, "
-                    "but found %d tokens instead.", seq_len, len(num_tokens))
+                print_warning_once(
+                    f"Expected at least {seq_len} dummy encoder tokens for "
+                    f"profiling, but found {len(num_tokens)} tokens instead.")
             else:
                 raise AssertionError(
                     f"Expected at least {seq_len} dummy tokens for profiling, "
