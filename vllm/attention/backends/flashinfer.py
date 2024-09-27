@@ -746,7 +746,7 @@ class FlashInferImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
@@ -770,7 +770,7 @@ class FlashInferImpl(AttentionImpl):
         if attn_metadata.num_decode_tokens > 0:
             assert attn_metadata.num_prefill_tokens == 0, (
                 "Chunked prefill is not supported with flashinfer yet.")
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             # Use the same reshape and cache kernel as flash attention.
             ops.reshape_and_cache_flash(
                 key,
@@ -796,7 +796,7 @@ class FlashInferImpl(AttentionImpl):
             # when kv_cache is not provided.
             # This happens when vllm runs the profiling to
             # determine the number of blocks.
-            if kv_cache is None:
+            if kv_cache.numel() == 0:
                 output = torch.ops.vllm.flash_attn_varlen_func(
                     q=query,
                     k=key,
