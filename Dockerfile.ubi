@@ -93,16 +93,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # install compiler cache to speed up compilation leveraging local or remote caching
 # git is required for the cutlass kernels
 RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && rpm -ql epel-release && microdnf install -y git ccache && microdnf clean all
-# install build dependencies
 
-# copy input files
-COPY csrc csrc
-COPY setup.py setup.py
-COPY cmake cmake
-COPY CMakeLists.txt CMakeLists.txt
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
-COPY pyproject.toml pyproject.toml
+COPY . .
 
 ARG TORCH_CUDA_ARCH_LIST
 ENV TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST
@@ -120,9 +112,6 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
 # Make sure the cuda environment is in the PATH
 ENV PATH=/usr/local/cuda/bin:$PATH
-
-# Copy the entire directory before building wheel
-COPY vllm vllm
 
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
