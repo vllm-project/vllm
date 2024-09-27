@@ -1458,7 +1458,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     @torch.inference_mode()
     def lazy_capture_model_for_batch(
         self,
-        kv_caches: List[torch.Tensor],
+        kv_cache: List[torch.Tensor],
         batch_size: int,
         virtual_engine: int,
     ) -> None:
