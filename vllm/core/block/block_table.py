@@ -55,9 +55,12 @@ class BlockTable:
         self._num_full_slots = self._get_num_token_ids()
 
     @staticmethod
-    def get_num_required_blocks(token_ids: List[int], block_size: int) -> int:
+    def get_num_required_blocks(token_ids: List[int],
+                                block_size: int,
+                                num_lookahead_slots: int = 0) -> int:
         """Calculates the minimum number of blocks required to store a given
-        sequence of token IDs.
+        sequence of token IDs along with any look-ahead slots that may be
+        required (like in multi-step + chunked-prefill).
 
         This assumes worst-case scenario, where every block requires a new
         allocation (e.g. ignoring prefix caching).
@@ -66,12 +69,14 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be stored.
             block_size (int): The maximum number of tokens that can be stored in
                 a single block.
+            num_lookahead_slots (int): look-ahead slots that the sequence may
+                require.
 
         Returns:
             int: The minimum number of blocks required to store the given
-                sequence of token IDs.
+                sequence of token IDs along with any required look-ahead slots.
         """
-        return cdiv(len(token_ids), block_size)
+        return cdiv(len(token_ids) + num_lookahead_slots, block_size)
 
     def allocate(self,
                  token_ids: List[int],
