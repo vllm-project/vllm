@@ -54,6 +54,39 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
+def _get_inputs(
+    image_assets: _ImageAssets,
+    *,
+    size_factors: Optional[List[float]] = None,
+    sizes: Optional[List[Tuple[int, int]]] = None,
+) -> List[Tuple[List[str], PromptImageInput]]:
+    images = [asset.pil_image for asset in image_assets]
+
+    if size_factors is not None:
+        inputs_per_image = [(
+            [prompt for _ in size_factors],
+            [rescale_image_size(image, factor) for factor in size_factors],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    elif sizes is not None:
+        inputs_per_image = [(
+            [
+                prompt if size is not None else text_only_prompts[0]
+                for size in sizes
+            ],
+            [
+                image.resize(size) if size is not None else None
+                for size in sizes
+            ],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+        if len(sizes) == 0:
+            inputs_per_image.append(
+                (text_only_prompts, [None] * len(text_only_prompts)))
+    else:
+        raise ValueError("You must provide either `size_factors` or `sizes`")
+
+    return inputs_per_image
+
+
 @overload
 def run_test(
     hf_runner: Type[HfRunner],
@@ -102,39 +135,17 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
-    images = [asset.pil_image for asset in image_assets]
-
-    if size_factors is not None:
-        inputs_per_image = [(
-            [prompt for _ in size_factors],
-            [rescale_image_size(image, factor) for factor in size_factors],
-        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-    elif sizes is not None:
-        inputs_per_image = [(
-            [
-                prompt if size is not None else text_only_prompts[0]
-                for size in sizes
-            ],
-            [
-                image.resize(size) if size is not None else None
-                for size in sizes
-            ],
-        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-        if len(sizes) == 0:
-            inputs_per_image.append(
-                (text_only_prompts, [None] * len(text_only_prompts)))
-    else:
-        raise ValueError("You must provide either `size_factors` or `sizes`")
-
-    _run_test(hf_runner,
-              vllm_runner,
-              inputs_per_image,
-              model,
-              dtype=dtype,
-              max_tokens=max_tokens,
-              num_logprobs=num_logprobs,
-              tensor_parallel_size=tensor_parallel_size,
-              distributed_executor_backend=distributed_executor_backend)
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        _get_inputs(image_assets, size_factors=size_factors, sizes=sizes),
+        model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+    )
 
 
 def _run_test(
@@ -216,26 +227,29 @@ def _run_test(
         )
 
 
+SIZES = [
+    # Text only
+    [],
+    # Single-size
+    [(512, 512)],
+    # Single-size, batched
+    [(512, 512), (512, 512), (512, 512)],
+    # Multi-size, batched
+    [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
+     (1024, 1024), (512, 1536), (512, 2028)],
+    # Multi-size, batched, including text only
+    [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
+     (1024, 1024), (512, 1536), (512, 2028), None],
+    # mllama has 8 possible aspect ratios, carefully set the sizes
+    # to cover all of them
+]
+
+
+@pytest.mark.skip(
+    reason=
+    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize(
-    "sizes",
-    [
-        # Text only
-        [],
-        # Single-size
-        [(512, 512)],
-        # Single-size, batched
-        [(512, 512), (512, 512), (512, 512)],
-        # Multi-size, batched
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
-         (1024, 1024), (512, 1536), (512, 2028)],
-        # Multi-size, batched, including text only
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
-         (1024, 1024), (512, 1536), (512, 2028), None],
-        # mllama has 8 possible aspect ratios, carefully set the sizes
-        # to cover all of them
-    ],
-)
+@pytest.mark.parametrize("sizes", SIZES)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -254,16 +268,27 @@ def test_models(hf_runner, vllm_runner, image_assets, model, sizes, dtype,
     )
 
 
+@pytest.mark.parametrize("model", [
+    "neuralmagic/Llama-3.2-11B-Vision-Instruct-FP8-dynamic",
+])
+@pytest.mark.parametrize("sizes", SIZES)
+@pytest.mark.parametrize("max_tokens", [128])
+def test_quant_model(vllm_runner, image_assets, model, sizes, max_tokens):
+    with vllm_runner(model,
+                     dtype="auto",
+                     max_model_len=4096,
+                     max_num_seqs=2,
+                     enforce_eager=True,
+                     limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
+                                          }) as vllm_model:
+        for prompts, images in _get_inputs(image_assets, sizes=sizes):
+            vllm_model.generate_greedy(prompts, max_tokens, images=images)
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skip("ps.get_tp_group().all_gather() used in vLLM but not in HF")
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize(
-    "sizes",
-    [
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
-         (1024, 1024), (512, 1536), (512, 2028), None],
-    ],
-)
+@pytest.mark.parametrize("sizes", [SIZES[-1]])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
