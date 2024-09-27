@@ -12,6 +12,7 @@ ARG BUILD_PYTORCH="1"
 # This ARG should also be "0" or "1". If "1", the vLLM development directory is obtained via git clone.
 # If "0", it is copied in from the local working directory.
 ARG REMOTE_VLLM="0"
+ARG USE_CYTHON="0"
 
 # -----------------------
 # vLLM base image
@@ -153,6 +154,7 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # vLLM (and gradlib) build stages
 FROM fetch_vllm AS build_vllm
 ARG COMMON_WORKDIR
+ARG USE_CYTHON
 # Install hipblaslt
 RUN --mount=type=bind,from=export_hipblaslt,src=/,target=/install \
 if ls /install/*.deb; then \
@@ -168,7 +170,9 @@ if ls /install/*.whl; then \
 fi
 # Build vLLM
 RUN cd vllm \
-    && python3 setup.py clean --all && python3 setup.py bdist_wheel --dist-dir=dist
+    && python3 setup.py clean --all  \
+    && if [ ${USE_CYTHON} -eq "1" ]; then python3 setup_cython.py build_ext --inplace; fi \
+    && python3 setup.py bdist_wheel --dist-dir=dist
 # Build gradlib
 RUN cd vllm/gradlib \
     && python3 setup.py clean --all && python3 setup.py bdist_wheel --dist-dir=dist
