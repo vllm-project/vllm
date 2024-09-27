@@ -537,13 +537,6 @@ class Scheduler:
         preempted: List[SequenceGroup] = ret.preempted
         swapped_out: List[SequenceGroup] = ret.swapped_out
 
-        # NOTE(woosuk): Preemption happens only when there is no available slot
-        # to keep all the sequence groups in the RUNNING state.
-
-        # Store original running requests for the case of async + preemption
-        if self.use_async_output_proc:
-            orig_running = self.running.copy()
-
         running_queue = self.running
         assert len(self._async_stopped) == 0
         while running_queue:
@@ -552,6 +545,7 @@ class Scheduler:
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
             if num_running_tokens == 0:
+                # No budget => Stop
                 break
 
             running_queue.popleft()
@@ -565,18 +559,8 @@ class Scheduler:
                 self._async_stopped.append(seq_group)
                 continue
 
-            # With async postprocessor, when preemption kicks in, we need
-            # first to drain the async postprocessor, so that all async
-            # block_table freeing is applied before the preemption freeing
-            # is applied.
-            if self.use_async_output_proc and not self._can_append_slots(
-                    seq_group):
-                tmp = self.running
-                self.running = orig_running
-                assert self.output_proc_callback is not None
-                self.output_proc_callback()
-                self.running = tmp
-
+            # NOTE(woosuk): Preemption happens only when there is no available
+            # slot to keep all the sequence groups in the RUNNING state.
             while not self._can_append_slots(seq_group):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
@@ -588,24 +572,43 @@ class Scheduler:
                         and seq_group.lora_int_id in curr_loras):
                     curr_loras.remove(seq_group.lora_int_id)
 
+                # Determine victim sequence
+                cont_loop = True
                 if running_queue:
-                    # Preempt the lowest-priority sequence groups.
+                    # Preempt the lowest-priority sequence group.
                     victim_seq_group = running_queue.pop()
+                else:
+                    # No other sequence group can be preempted.
+                    # Preempt the current sequence group.
+                    # Note: This is also where we stop this loop
+                    # (since there is nothing else to preempt)
+                    victim_seq_group = seq_group
+                    cont_loop = False
+
+                # With async postprocessor, before preempting a sequence
+                # we need to ensure it has no pending async postprocessor
+                do_preempt = True
+                if self.use_async_output_proc:
+                    assert self.output_proc_callback is not None
+                    self.output_proc_callback(
+                        request_id=victim_seq_group.request_id)
+
+                    # It may be that the async pending "victim_seq_group"
+                    # becomes finished, in which case we simply free it.
+                    if victim_seq_group.is_finished():
+                        self._free_finished_seq_group(victim_seq_group)
+                        do_preempt = False
+
+                # Do preemption
+                if do_preempt:
                     preempted_mode = self._preempt(victim_seq_group,
                                                    blocks_to_swap_out)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(victim_seq_group)
                     else:
                         swapped_out.append(victim_seq_group)
-                else:
-                    # No other sequence groups can be preempted.
-                    # Preempt the current sequence group.
-                    preempted_mode = self._preempt(seq_group,
-                                                   blocks_to_swap_out)
-                    if preempted_mode == PreemptionMode.RECOMPUTE:
-                        preempted.append(seq_group)
-                    else:
-                        swapped_out.append(seq_group)
+
+                if not cont_loop:
                     break
             else:
                 self._append_slots(seq_group, blocks_to_copy)
@@ -763,6 +766,79 @@ class Scheduler:
         else:
             return prompt_limit
 
+    def _get_priority(self,
+                      seq_group: SequenceGroup) -> Tuple[Optional[int], float]:
+        """ Get the priority of the sequence group.
+        Highest preference to user-defined priority, followed by arrival time.
+        Args:
+            seq_group: The sequence group input.
+        Returns:
+            The priority of the sequence group.
+        """
+        return seq_group.priority, seq_group.arrival_time
+
+    def _schedule_priority_preemption(
+        self,
+        budget: SchedulingBudget,
+    ) -> int:
+        """Sorts waiting and running queue. Also, force preempt requests
+        from the running queue if their priority is lower.
+        Priority-based preemption is used with the priority policy.
+        Args:
+            budget: The scheduling budget. The argument is in-place updated
+                when any requests are scheduled.
+        Returns:
+            A count of priority-based preemptions.
+        """
+
+        waiting_queue = self.waiting
+
+        running_queue = deque(sorted(self.running, key=self._get_priority))
+
+        blocks_to_swap_out: List[Tuple[int, int]] = []
+        force_preemption_count = 0
+
+        if waiting_queue:
+            seq_group = waiting_queue.popleft()
+            num_new_seqs = seq_group.get_max_num_running_seqs()
+            num_new_tokens = self._get_num_new_tokens(seq_group,
+                                                      SequenceStatus.WAITING,
+                                                      False, budget)
+
+            #Only preempt if priority inversion exists
+            while running_queue and self._get_priority(
+                    running_queue[-1]) > self._get_priority(seq_group):
+                #Only preempt if waiting sequence cannot be allocated
+                can_allocate = self.block_manager.can_allocate(seq_group)
+                if (num_new_tokens and can_allocate == AllocStatus.OK
+                        and budget.can_schedule(num_new_tokens=num_new_tokens,
+                                                num_new_seqs=num_new_seqs)):
+                    break
+
+                #Adjust budget to remove the victim sequence group
+                vseq_group = running_queue.pop()
+                num_running_tokens = self._get_num_new_tokens(
+                    vseq_group, SequenceStatus.RUNNING, False, budget)
+                budget.subtract_num_batched_tokens(vseq_group.request_id,
+                                                   num_running_tokens)
+                num_running_seqs = vseq_group.get_max_num_running_seqs()
+                budget.subtract_num_seqs(vseq_group.request_id,
+                                         num_running_seqs)
+
+                #Preempt out the victim sequence group
+                self._preempt(vseq_group, blocks_to_swap_out,
+                              PreemptionMode.RECOMPUTE)
+                waiting_queue.appendleft(vseq_group)
+                force_preemption_count += 1
+            #Put the sequence back into the waiting queue
+            waiting_queue.appendleft(seq_group)
+
+        waiting_queue = deque(sorted(waiting_queue, key=self._get_priority))
+
+        self.waiting = waiting_queue
+        self.running = running_queue
+        return force_preemption_count
+
     def _schedule_prefills(
         self,
         budget: SchedulingBudget,
@@ -913,6 +989,10 @@ class Scheduler:
             prefills = self._schedule_prefills(budget,
                                                curr_loras,
                                                enable_chunking=False)
+
+        if len(prefills.seq_groups
+               ) == 0 and self.scheduler_config.policy == "priority":
+            self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.
         # NOTE: If `_schedule_prefills` doesn't enable chunking, self.running
@@ -1264,21 +1344,25 @@ class Scheduler:
             if seq.is_finished():
                 self.free_seq(seq)
 
+    def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
+        if seq_group.is_finished():
+            # Free cross-attention block table, if it exists
+            self._free_seq_group_cross_attn_blocks(seq_group)
+
+            # Add the finished requests to the finished requests list.
+            # This list will be used to update the Mamba cache in the
+            # next step.
+            self._finished_requests_ids.append(seq_group.request_id)
+
+        # Free finished seqs
+        self._free_finished_seqs(seq_group)
+
     def free_finished_seq_groups(self) -> None:
         remaining: Deque[SequenceGroup] = deque()
         for seq_group in self.running:
-            if seq_group.is_finished():
-                # Free cross-attention block table, if it exists
-                self._free_seq_group_cross_attn_blocks(seq_group)
-                # Add the finished requests to the finished requests list.
-                # This list will be used to update the Mamba cache in the
-                # next step.
-                self._finished_requests_ids.append(seq_group.request_id)
-            else:
+            self._free_finished_seq_group(seq_group)
+            if not seq_group.is_finished():
                 remaining.append(seq_group)
-
-            # Free finished seqs
-            self._free_finished_seqs(seq_group)
 
         self.running = remaining
 
@@ -1470,14 +1554,14 @@ class Scheduler:
                 # the number of new tokens that is dividable by the block size
                 # to avoid partial block matching.
                 block_size = self.cache_config.block_size
-                reminder = budget.token_budget % block_size
-                if reminder != 0:
+                remainder = budget.token_budget % block_size
+                if remainder != 0:
                     raise ValueError("When enabling chunked prefill and "
                                      "prefix caching, max_num_batched_tokens "
                                      "(chunk size) must be dividable by "
                                      "block size, but got chunk_size "
                                      f"({budget.token_budget}) % block_size "
-                                     f"({block_size}) = {reminder}")
+                                     f"({block_size}) = {remainder}")
                 if remaining_token_budget < num_new_tokens:
                     num_new_tokens = (remaining_token_budget //
                                       block_size) * block_size

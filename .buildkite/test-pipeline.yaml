@@ -43,13 +43,16 @@ steps:
   fast_check: true
   source_file_dependencies:
   - vllm/
+  - tests/mq_llm_engine
   - tests/async_engine
   - tests/test_inputs
   - tests/multimodal
   - tests/test_utils
   - tests/worker
   commands:
-  - pytest -v -s async_engine # Async Engine
+  - pytest -v -s mq_llm_engine # MQLLMEngine
+  - pytest -v -s async_engine # AsyncLLMEngine
+  - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
   - pytest -v -s test_inputs.py
   - pytest -v -s multimodal
   - pytest -v -s test_utils.py # Utils
@@ -67,7 +70,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
-  
+
 - label: Core Test # 10min
   mirror_hardwares: [amd]
   fast_check: true
@@ -81,17 +84,21 @@ steps:
 - label: Entrypoints Test # 20min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
-  - pytest -v -s entrypoints/openai
+  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
+  - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s entrypoints/test_chat_utils.py
-
+  - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
@@ -162,30 +169,6 @@ steps:
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
 
-- label: Models Test # 1hr10min
-  source_file_dependencies:
-  - vllm/
-  - tests/models
-  commands:
-    - pip install -e ./plugins/vllm_add_dummy_model
-    - pytest -v -s models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models -m \"not vlm\" --ignore=models/test_oot_registration.py
-
-- label: torch compile integration test
-  source_file_dependencies:
-  - vllm/
-  commands:
-    - pytest -v -s ./compile/test_full_graph.py
-    - pytest -v -s ./compile/test_wrapper.py
-
-
-- label: Vision Language Models Test # 42min
-  #mirror_hardwares: [amd]
-  source_file_dependencies:
-  - vllm/
-  commands:
-    - pytest -v -s models -m vlm
-
 - label: Prefix Caching Test # 7min
   #mirror_hardwares: [amd]
   source_file_dependencies:
@@ -217,7 +200,8 @@ steps:
   commands:
     # See https://github.com/vllm-project/vllm/issues/5152
     - export VLLM_ATTENTION_BACKEND=XFORMERS
-    - pytest -v -s spec_decode
+    - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
+    - pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
 
 - label: LoRA Test %N # 30min each
   mirror_hardwares: [amd]
@@ -227,7 +211,23 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
 
+- label: "PyTorch Fullgraph Smoke Test"
+  fast_check: true
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  - pytest -v -s compile/test_full_graph_smoke.py
+
+- label: "PyTorch Fullgraph Test"
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  - pytest -v -s compile/test_full_graph.py
+
 - label: Kernels Test %N # 30min each
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/attention
@@ -273,6 +273,13 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
+- label: Encoder Decoder tests # 5min
+  source_file_dependencies:
+  - vllm/
+  - tests/encoder_decoder
+  commands:
+    - pytest -v -s encoder_decoder
+
 - label: OpenAI-Compatible Tool Use # 20 min
   fast_check: false
   mirror_hardwares: [ amd ]
@@ -281,6 +288,45 @@ steps:
     - tests/tool_use
   commands:
     - pytest -v -s tool_use
+
+#####  models test  #####
+
+- label: Basic Models Test # 3min
+  source_file_dependencies:
+  - vllm/
+  - tests/models
+  commands:
+    - pip install -e ./plugins/vllm_add_dummy_model
+    - pytest -v -s models/test_oot_registration.py # it needs a clean process
+    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
+
+- label: Decoder-only Language Models Test # 1h3min
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/language
+  commands:
+    - pytest -v -s models/decoder_only/language
+
+- label: Decoder-only Multi-Modal Models Test # 56min
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/audio_language
+  - tests/models/decoder_only/vision_language
+  commands:
+    - pytest -v -s models/decoder_only/audio_language
+    - pytest -v -s models/decoder_only/vision_language
+
+- label: Other Models Test # 5min
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/embedding/language
+  - tests/models/encoder_decoder/language
+  commands:
+    - pytest -v -s models/embedding/language
+    - pytest -v -s models/encoder_decoder/language
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -307,11 +353,11 @@ steps:
   - tests/distributed/
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
 
 - label: Distributed Tests (2 GPUs) # 28min
   #mirror_hardwares: [amd]
@@ -323,12 +369,14 @@ steps:
   - vllm/executor/
   - vllm/model_executor/models/
   - tests/distributed/
+  - vllm/compilation
   commands:
-  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
-  - TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py
-  - pytest -v -s distributed/test_basic_distributed_correctness_enc_dec.py
-  - pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - pytest -v -s distributed/test_multimodal_broadcast.py
+  - pytest -v -s ./compile/test_full_graph_multi_gpu.py
+  - pytest -v -s ./compile/test_wrapper.py
+  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
+  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
+  # Avoid importing model tests that cause CUDA reinitialization error
+  - pytest models/encoder_decoder/language/test_bart.py models/decoder_only/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
@@ -386,7 +434,18 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
-    - bash weight_loading/run_model_weight_loading_test.sh
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
+
+- label: Weight Loading Multiple GPU Test - Large Models # optional
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  gpu: a100
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/weight_loading
+  commands:
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt 
 
 
 ##### multi gpus test #####
@@ -401,7 +460,7 @@ steps:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
-  - TARGET_TEST_SUITE=A100 pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed_2_gpus
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: LM Eval Large Models # optional
