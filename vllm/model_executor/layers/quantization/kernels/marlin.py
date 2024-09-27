@@ -39,9 +39,9 @@ class MarlinLinearKernel(MPLinearKernel):
                             f"{MARLIN_SUPPORTED_GROUP_SIZES}"
 
         return check_marlin_supports_shape(
-            c.partition_weight_shape[1], # out_features
-            c.partition_weight_shape[0], # in_features
-            c.full_weight_shape[0], # in_features
+            c.partition_weight_shape[1],  # out_features
+            c.partition_weight_shape[0],  # in_features
+            c.full_weight_shape[0],  # in_features
             c.group_size)
 
     # note assumes that
