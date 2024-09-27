@@ -32,7 +32,8 @@ import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import INPUT_REGISTRY, EncoderDecoderInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
+                         EncoderDecoderInputs, InputContext)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -72,7 +73,8 @@ class MllamaImagePixelInputs(TypedDict):
 
 
 def input_processor_for_mllama(ctx: InputContext,
-                               inputs: EncoderDecoderInputs):
+                               inputs: Union[DecoderOnlyInputs,
+                                             EncoderDecoderInputs]):
     # move encoder_prompt to prompt
     if inputs.get("prompt") is None:
         inputs["prompt"] = inputs["encoder_prompt"]
