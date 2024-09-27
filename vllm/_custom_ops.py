@@ -737,8 +737,8 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     input_azp = None if symmetric else torch.empty_like(input_scales,
                                                         dtype=torch.int32)
-    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
-                                           input_azp)
+    ops = torch.ops._C_cpu if input.device.type == "cpu" else torch.ops._C
+    ops.dynamic_scaled_int8_quant(output, input, input_scales, input_azp)
     return output, input_scales, input_azp
 
 
