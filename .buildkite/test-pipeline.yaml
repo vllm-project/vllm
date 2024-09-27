@@ -9,6 +9,7 @@
 # label(str): the name of the test. emoji allowed.
 # fast_check(bool): whether to run this on each commit on fastcheck pipeline.
 # fast_check_only(bool): run this test on fastcheck pipeline only
+# optional(bool): never run this test by default (i.e. need to unblock manually)
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for test. incompatbile with command.
 # mirror_hardwares(list): the list of hardwares to run the test on as well. currently only supports [amd]
@@ -332,12 +333,11 @@ steps:
 - label: Custom Models Test
   #mirror_hardwares: [amd]
   num_gpus: 2
-  # This step should always be run manually. No files should ever match these dependencies.
-  source_file_dependencies: [NEVER]
+  optional: true
   commands:
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
-    # *To avoid merge conflicts, remember to REMOVE them before merging the PR*
+    # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
     - pytest -v -s models/decoder_only/vision_language/test_llava_onevision.py
     - pytest -v -s models/decoder_only/vision_language/test_fuyu.py
     - pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
