@@ -68,7 +68,7 @@ class TTModelInput(ModelRunnerInputBase):
 def top_pk_logits_efficient(logits, p=0.9, k=10, temperature=1.0, return_probs=False):
     # do not keep the entire vocab size after top k. Instead, keep the k size tensor and record the associated indices
     if k == -1:  # no top-k sampling
-        top_k_values, top_k_indices = logits, torch.arange(logits.size(-1))
+        top_k_values, top_k_indices = logits, torch.arange(logits.shape[-1]).unsqueeze(0).repeat(logits.shape[0],1)
     else:
         top_k_values, top_k_indices = torch.topk(logits, k=k)
     top_p_values = TopPLogitsWarper(top_p=p)(None, top_k_values)
