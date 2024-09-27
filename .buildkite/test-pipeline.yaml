@@ -331,9 +331,9 @@ steps:
 
 - label: Custom Models Test
   #mirror_hardwares: [amd]
-  source_file_dependencies:
-  # This step should always be run manually. No files should ever match the dependencies.
-  - NEVER
+  num_gpus: 2
+  # This step should always be run manually. No files should ever match these dependencies.
+  source_file_dependencies: [NEVER]
   commands:
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py

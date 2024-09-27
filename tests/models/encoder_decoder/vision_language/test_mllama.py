@@ -286,7 +286,6 @@ def test_quant_model(vllm_runner, image_assets, model, sizes, max_tokens):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.skip("ps.get_tp_group().all_gather() used in vLLM but not in HF")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("sizes", [SIZES[-1]])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
