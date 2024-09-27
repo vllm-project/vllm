@@ -1,11 +1,11 @@
 from typing import Any, Dict, List, Optional, cast
 
 import torch
-from pydantic import BaseModel
 from compressed_tensors.config import CompressionFormat
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy,
                                              QuantizationType)
+from pydantic import BaseModel
 
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,

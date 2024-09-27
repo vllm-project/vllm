@@ -1,8 +1,8 @@
 from typing import Callable, List, Optional
 
 import torch
-from torch.nn import Parameter
 from compressed_tensors.quantization import QuantizationStrategy
+from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
