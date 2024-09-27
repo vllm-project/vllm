@@ -145,6 +145,7 @@ class ModelConfig:
                  quantization: Optional[str] = None,
                  quantization_param_path: Optional[str] = None,
                  enforce_eager: Optional[bool] = None,
+                 lazy_capture_cuda_graph: Optional[bool] = None,
                  max_context_len_to_capture: Optional[int] = None,
                  max_seq_len_to_capture: Optional[int] = None,
                  max_logprobs: int = 20,
@@ -173,6 +174,7 @@ class ModelConfig:
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
+        self.lazy_capture_cuda_graph = lazy_capture_cuda_graph
         if max_context_len_to_capture is not None:
             raise ValueError("`max_context_len_to_capture` is deprecated. "
                              "Use `max_seq_len_to_capture` instead.")

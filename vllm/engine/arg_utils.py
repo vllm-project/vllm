@@ -122,6 +122,7 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: Optional[bool] = None
+    lazy_capture_cuda_graph: Optional[bool] = None
     max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
@@ -461,7 +462,9 @@ class EngineArgs:
                             help='Always use eager-mode PyTorch. If False, '
                             'will use eager mode and CUDA graph in hybrid '
                             'for maximal performance and flexibility.')
-        parser.add_argument('--max-context-len-to-capture',
+        parser.add_argument('--lazy-capture-cuda-graph',
+                            action='store_true',
+                            help='TODO',
                             type=int,
                             default=EngineArgs.max_context_len_to_capture,
                             help='Maximum context length covered by CUDA '
@@ -824,6 +827,7 @@ class EngineArgs:
             quantization=self.quantization,
             quantization_param_path=self.quantization_param_path,
             enforce_eager=self.enforce_eager,
+            lazy_capture_cuda_graph=self.lazy_capture_cuda_graph,
             max_context_len_to_capture=self.max_context_len_to_capture,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
