@@ -95,6 +95,7 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
         config.enforce_eager = True
     return config
 
+
 def _verify_and_get_parallel_config(config: ParallelConfig) -> ParallelConfig:
     if (config.distributed_executor_backend is not None
             and config.distributed_executor_backend != "ray"):
