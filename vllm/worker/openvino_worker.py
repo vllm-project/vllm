@@ -13,6 +13,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.executor.openvino_executor import is_openvino_cpu
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
@@ -100,7 +101,7 @@ class OpenVINOCacheEngine:
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)[1:]
         kv_cache: List[Tuple[ov.Tensor, ov.Tensor]] = []
 
-        if "CPU" in ov_device:
+        if is_openvino_cpu():
             for _ in range(self.num_layers):
                 key_blocks = ov.Tensor(self.cache_config.cache_dtype,
                                        k_block_shape)
@@ -142,7 +143,7 @@ class OpenVINOCacheEngine:
         if num_blocks == 0:
             return swap_cache
 
-        assert "CPU" not in ov_device, \
+        assert not is_openvino_cpu(), \
             "CPU device isn't supposed to have swap cache"
 
         # Update key_cache shape:
@@ -286,8 +287,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         cache_block_size = self.get_cache_block_size_bytes()
         kvcache_space_bytes = self.cache_config.openvino_kvcache_space_bytes
 
-        ov_device = envs.VLLM_OPENVINO_DEVICE
-        if "CPU" in ov_device:
+        if is_openvino_cpu():
             num_device_blocks = int(kvcache_space_bytes // cache_block_size)
             num_swap_blocks = 0
         else:
@@ -324,7 +324,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         num_device_blocks = num_gpu_blocks
         num_swap_blocks = num_cpu_blocks
 
-        if "CPU" in envs.VLLM_OPENVINO_DEVICE:
+        if is_openvino_cpu():
             assert (num_swap_blocks == 0
                     ), f"{type(self)} does not support swappable cache for CPU"
 
@@ -368,7 +368,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         assert self.kv_cache is not None
 
         # Populate the cache to warmup the memory
-        if "CPU" in ov_device:
+        if is_openvino_cpu():
             for key_cache, value_cache in self.kv_cache:
                 key_cache.data[:] = 0
                 value_cache.data[:] = 0
@@ -416,7 +416,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
             blocks_to_swap_in = data["blocks_to_swap_in"]
             blocks_to_swap_out = data["blocks_to_swap_out"]
 
-        if "CPU" in envs.VLLM_OPENVINO_DEVICE:
+        if is_openvino_cpu():
             assert len(execute_model_req.blocks_to_swap_in) == 0
             assert len(execute_model_req.blocks_to_swap_out) == 0
         else:
@@ -468,7 +468,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
     def profile_run(self) -> int:
         ov_device = envs.VLLM_OPENVINO_DEVICE
 
-        assert "CPU" not in ov_device, \
+        assert not is_openvino_cpu(), \
             "CPU device isn't supposed to use profile run."
 
         import openvino.properties.device as device

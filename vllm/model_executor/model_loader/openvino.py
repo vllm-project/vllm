@@ -12,6 +12,7 @@ from torch import nn
 import vllm.envs as envs
 from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm.config import DeviceConfig, ModelConfig
+from vllm.executor.openvino_executor import is_openvino_cpu
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import (LogitsProcessor,
                                                          _prune_hidden_states)
@@ -134,8 +135,8 @@ class OpenVINOCasualLM(nn.Module):
 
         ov_device = envs.VLLM_OPENVINO_DEVICE
         paged_attention_transformation(pt_model.model)
-        _modify_cache_parameters(pt_model.model, kv_cache_dtype, "CPU"
-                                 in ov_device)
+        _modify_cache_parameters(pt_model.model, kv_cache_dtype,
+                                 is_openvino_cpu())
 
         ov_compiled = ov_core.compile_model(pt_model.model, ov_device)
         self.ov_request = ov_compiled.create_infer_request()
