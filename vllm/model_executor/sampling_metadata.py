@@ -160,7 +160,7 @@ class SamplingMetadata:
 
         Example:
         Let 2 prompts and 2 decodes be scheduled together. Let the
-        num-tokens to process for the 2 prompts be 5 and 8 resply.
+        num-tokens to process for the 2 prompts be 5 and 8 respectively.
 
         In that case, self.sampled_token_indices will be,
         [4, 12, 13, 14] as it is constructed for the first-step in

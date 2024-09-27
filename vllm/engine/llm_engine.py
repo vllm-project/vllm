@@ -974,6 +974,11 @@ class LLMEngine:
                 seq_group_meta: SequenceGroupMetadata, num_outputs: int,
                 is_first_step_output: Optional[bool]) -> None:
             """
+            When multi-step and chunked-prefill are enabled together, the
+            prefill sequence scheduled for multi-step execution turn into
+            decodes in the first step itself. This function accounts
+            for that conversion.
+
             seq_group: SequenceGroup - A prefill seq_group
             seq_group_meta: SequenceGroupMetadata - Metadata of the given
               prefill seq_group
@@ -987,11 +992,6 @@ class LLMEngine:
                 must be None, as num_outputs > 1 indicates that outputs from
                 all the steps in multi-step are submitted in a single burst.
                 When multi-step is disabled, this value is always True.
-
-            When multi-step and chunked-prefill are enabled together, the
-            prefill sequence scheduled for multi-step execution turn into
-            decodes in the first step itself. This function accounts
-            for that conversion.
             """
 
             assert seq_group_meta.is_prompt

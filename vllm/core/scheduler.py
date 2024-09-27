@@ -913,10 +913,9 @@ class Scheduler:
                 break
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
-                    "Input prompt (%d tokens) + lookahead slots "
-                    "({num_lookahead_slots}) is too long"
-                    " and exceeds the capacity of block_manager",
-                    num_new_tokens)
+                    "Input prompt (%d tokens) + lookahead slots (%d) is "
+                    "too long and exceeds the capacity of block_manager",
+                    num_new_tokens, num_lookahead_slots)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
