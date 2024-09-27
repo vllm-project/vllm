@@ -16,7 +16,7 @@ from ...utils import check_logprobs_close
 # Video test
 HF_VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
     "sample_demo_1":
-    "<|im_start|>user\n<video>\nwhy is this video funny?<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+    "<|im_start|>user\n<video>\nwhy is this video funny? Avoid mentioning any colors.<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
 })
 
 models = ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"]
@@ -214,7 +214,7 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
 )
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("num_frames", [16])
 def test_models_fixed_sizes(hf_runner, vllm_runner, video_assets, model, sizes,
                             dtype, max_tokens, num_logprobs,
