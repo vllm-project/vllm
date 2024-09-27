@@ -432,7 +432,7 @@ class LoRAModelManager(AdapterModelManager):
         self.long_lora_context: Optional[LongContextLoRAContext] = None
         if current_platform.is_hpu():
             self.punica_wrapper = GaudiPunicaWrapper(
-                max_num_batched_tokens,
+                3 * max_num_batched_tokens,
                 max_batches=self.max_num_seqs,
                 device="hpu")
         else:

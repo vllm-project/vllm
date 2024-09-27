@@ -1203,9 +1203,9 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if self.lora_config:
             lora_mapping = LoRAMapping(
-                lora_index_mapping,
-                lora_prompt_mapping,
-            )
+                **dict(index_mapping=lora_index_mapping,
+                       prompt_mapping=lora_prompt_mapping,
+                       is_prefill=(num_prefills > 0)))
         else:
             lora_mapping = None
 
@@ -1370,9 +1370,9 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         times = 3 if use_graphs or is_pt_profiler_run else 1
         if self.lora_config and not is_lora_profile_run:
             lora_mapping = LoRAMapping(
-                [0] * batch_size * seq_len,
-                [0] * batch_size * seq_len,
-            )
+                **dict(index_mapping=[0] * batch_size * seq_len,
+                       prompt_mapping=[0] * batch_size * seq_len,
+                       is_prefill=is_prompt))
             self.set_active_loras(set(), lora_mapping)
         if is_prompt:
             seqs = [
@@ -1915,14 +1915,6 @@ class HabanaModelRunner(
             )
 
         if self.lora_config:
-            from vllm.lora.layers import VocabParallelEmbeddingWithLoRA
-            modules = unwrap_model(self.model.model)
-            for module in modules:
-                if isinstance(module, VocabParallelEmbeddingWithLoRA):
-                    for i in range(0, len(module.punica_wrapper.indices_len)):
-                        module.punica_wrapper.indices_len[
-                            i] = sampling_metadata.selected_token_indices.numel(
-                            )
             lora_logits_mask: torch.Tensor = model_input.lora_logits_mask
             LoraMask.setLoraMask(
                 lora_logits_mask.index_select(
