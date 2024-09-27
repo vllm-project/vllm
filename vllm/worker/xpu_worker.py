@@ -204,8 +204,9 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+        # global all_reduce needed for overall oneccl warm up
         torch.distributed.all_reduce(torch.zeros(1).xpu())
         if parallel_config.pipeline_parallel_size > 1:
             # torch-ccl xpu need a collective API warm up
-            # before calling send/recv API
+            # between point and point before calling send/recv API
             get_pp_group().all_reduce(torch.zeros(1).xpu())

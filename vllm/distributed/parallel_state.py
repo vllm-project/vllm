@@ -431,7 +431,8 @@ class GroupCoordinator:
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
-
+        # For xpu path, gather doesn't work properly together with ray cluster so
+        # we use all_gather instead for now. 
         if current_platform.is_xpu():
             input_size = input_.size()
             # Allocate output tensor.
