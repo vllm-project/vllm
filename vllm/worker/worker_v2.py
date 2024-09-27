@@ -143,15 +143,15 @@ class Worker:
             self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
-        return num_gpu_blocks, num_cpu_blocks 
+        return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks."""
         if num_gpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
-                            "Try increasing `gpu_memory_utilization` when "
-                            "initializing the engine.")
+                             "Try increasing `gpu_memory_utilization` when "
+                             "initializing the engine.")
 
         max_seq_len = self.cache_config.block_size * num_gpu_blocks
         max_model_len = self.model_config.max_model_len
@@ -181,7 +181,7 @@ class Worker:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> None:
-        sampler_output = self.model_runner.execute_model(scheduler_output) 
+        sampler_output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
 
 

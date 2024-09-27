@@ -63,8 +63,8 @@ class GPUModelRunner:
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_num_blocks_per_req = (
-            (self.model_config.max_model_len + self.block_size - 1)
-            // self.block_size)
+            (self.model_config.max_model_len + self.block_size - 1) //
+            self.block_size)
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -88,10 +88,9 @@ class GPUModelRunner:
             self.requests.pop(req_id, None)
 
         # Remove the requests from the batched states.
-        stopped_req_ids = (
-            scheduler_output.preempted_req_ids
-            + scheduler_output.finished_req_ids
-            + scheduler_output.aborted_req_ids)
+        stopped_req_ids = (scheduler_output.preempted_req_ids +
+                           scheduler_output.finished_req_ids +
+                           scheduler_output.aborted_req_ids)
         removed_req_indices: List[int] = []
         for req_id in stopped_req_ids:
             req_index = self.batched_states.remove_request(req_id)
@@ -126,9 +125,11 @@ class GPUModelRunner:
         # Add new requests to the cached states.
         for req_data in scheduler_output.scheduled_new_reqs:
             req_id = req_data.req_id
-            prompt_token_ids_cpu = torch.tensor(
-                req_data.prompt_token_ids, device="cpu", pin_memory=self.pin_memory)
-            prompt_token_ids = prompt_token_ids_cpu.to(self.device, non_blocking=True)
+            prompt_token_ids_cpu = torch.tensor(req_data.prompt_token_ids,
+                                                device="cpu",
+                                                pin_memory=self.pin_memory)
+            prompt_token_ids = prompt_token_ids_cpu.to(self.device,
+                                                       non_blocking=True)
 
             self.requests[req_id] = RequestState(
                 req_id=req_id,
@@ -188,8 +189,7 @@ class GPUModelRunner:
             kv_caches=self.kv_caches,
         )
 
-        logits = self.model.compute_logits(hidden_states,
-                                           sampling_metadata)
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
         # Create the sampling metadata.
         sampling_metadata = self.batched_states.get_sampling_metadata()
         # Sample the next token and get logprobs if needed.
@@ -239,44 +239,55 @@ class BatchedRequestStates:
         self.num_reqs = 0
         self.req_ids: List[Optional[str]] = [None] * max_num_reqs
 
-        self.num_computed_tokens = torch.empty(
-            (max_num_reqs,), dtype=torch.int32, device=device)
-        self.num_computed_tokens_cpu = torch.empty(
-            (max_num_reqs,), dtype=torch.int32,
-            device="cpu", pin_memory=pin_memory)
+        self.num_computed_tokens = torch.empty((max_num_reqs, ),
+                                               dtype=torch.int32,
+                                               device=device)
+        self.num_computed_tokens_cpu = torch.empty((max_num_reqs, ),
+                                                   dtype=torch.int32,
+                                                   device="cpu",
+                                                   pin_memory=pin_memory)
 
         # Attention-related.
-        self.block_table = torch.empty(
-            (max_num_reqs, max_num_blocks_per_req),
-            device=self.device, dtype=torch.int32)
+        self.block_table = torch.empty((max_num_reqs, max_num_blocks_per_req),
+                                       device=self.device,
+                                       dtype=torch.int32)
         self.block_table_cpu = torch.empty(
             (max_num_reqs, max_num_blocks_per_req),
-            device="cpu", dtype=torch.int32, pin_memory=pin_memory)
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory)
 
         # Sampling-related.
-        self.temperature = torch.empty(
-            (max_num_reqs,), dtype=torch.float32, device=device)
-        self.temperature_cpu = torch.empty(
-            (max_num_reqs,), dtype=torch.float32,
-            device="cpu", pin_memory=pin_memory)
+        self.temperature = torch.empty((max_num_reqs, ),
+                                       dtype=torch.float32,
+                                       device=device)
+        self.temperature_cpu = torch.empty((max_num_reqs, ),
+                                           dtype=torch.float32,
+                                           device="cpu",
+                                           pin_memory=pin_memory)
         self.greedy_reqs: Set[str] = set()
         self.random_reqs: Set[str] = set()
 
-        self.top_p = torch.empty(
-            (max_num_reqs,), dtype=torch.float32, device=device)
-        self.top_p_cpu = torch.empty(
-            (max_num_reqs,), dtype=torch.float32,
-            device="cpu", pin_memory=pin_memory)
+        self.top_p = torch.empty((max_num_reqs, ),
+                                 dtype=torch.float32,
+                                 device=device)
+        self.top_p_cpu = torch.empty((max_num_reqs, ),
+                                     dtype=torch.float32,
+                                     device="cpu",
+                                     pin_memory=pin_memory)
         self.top_p_reqs: Set[str] = set()
 
-        self.top_k = torch.empty(
-            (max_num_reqs,), dtype=torch.float32, device=device)
-        self.top_k_cpu = torch.empty(
-            (max_num_reqs,), dtype=torch.float32,
-            device="cpu", pin_memory=pin_memory)
+        self.top_k = torch.empty((max_num_reqs, ),
+                                 dtype=torch.float32,
+                                 device=device)
+        self.top_k_cpu = torch.empty((max_num_reqs, ),
+                                     dtype=torch.float32,
+                                     device="cpu",
+                                     pin_memory=pin_memory)
         self.top_k_reqs: Set[str] = set()
 
-        self.generators: List[Optional[torch.Generator]] = [None] * max_num_reqs
+        self.generators: List[Optional[torch.Generator]] = [None
+                                                            ] * max_num_reqs
 
         self.num_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
@@ -287,7 +298,8 @@ class BatchedRequestStates:
         self.num_reqs += 1
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        self.block_table_cpu[req_index, :len(request.block_ids)] = request.block_ids
+        self.block_table_cpu[
+            req_index, :len(request.block_ids)] = request.block_ids
 
         sampling_params = request.sampling_params
         self.temperature_cpu[req_index] = sampling_params.temperature
@@ -341,9 +353,12 @@ class BatchedRequestStates:
 
             # Swap the last request with the empty slot.
             self.req_ids[empty_index] = self.req_ids[last_req_index]
-            self.num_computed_tokens_cpu[empty_index] = self.num_computed_tokens_cpu[last_req_index]
-            self.block_table_cpu[empty_index] = self.block_table_cpu[last_req_index]
-            self.temperature_cpu[empty_index] = self.temperature_cpu[last_req_index]
+            self.num_computed_tokens_cpu[
+                empty_index] = self.num_computed_tokens_cpu[last_req_index]
+            self.block_table_cpu[empty_index] = self.block_table_cpu[
+                last_req_index]
+            self.temperature_cpu[empty_index] = self.temperature_cpu[
+                last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
             self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
             self.generators[empty_index] = self.generators[last_req_index]
