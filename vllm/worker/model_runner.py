@@ -1458,7 +1458,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     @torch.inference_mode()
     def lazy_capture_model_for_batch(
         self,
-        kv_cache: List[torch.Tensor],
+        kv_caches: List[torch.Tensor],
         batch_size: int,
         virtual_engine: int,
     ) -> None:
@@ -1569,7 +1569,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
         # This usually takes < 1 seconds.
-        logger.info(f"Graph capturing for batch size {batch_size} finished in {elapsed_time:.1f} secs.")
+        logger.info(f"Graph capturing for virtual engine {virtual_engine} batch size {batch_size} finished in {elapsed_time:.1f} secs.")
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
