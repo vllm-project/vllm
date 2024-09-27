@@ -67,7 +67,7 @@ def run_test(
     with vllm_runner(
             model,
             max_model_len=2048,
-            max_num_seqs=1,  # Fails on max_num_seqs=2
+            max_num_seqs=1,  # FIXME: Fails on max_num_seqs=2
             dtype=dtype,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
