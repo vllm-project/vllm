@@ -183,12 +183,16 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
 
         # NOTE: the recovered_probs are overwritten by this method.
+        if seeded_seqs and seeded_seqs.get(0, None):
+            device = getattr(seeded_seqs.get(0), "device",
+                             recovered_probs.device)
+            recovered_probs = recovered_probs.to(device)
         recovered_token_ids = _multinomial(
             recovered_probs,
             num_samples=1,
             k=k,
             seeded_seqs=seeded_seqs or {},
-        ).reshape(batch_size, k)
+        ).reshape(batch_size, k).to(accepted.device)
 
         return accepted, recovered_token_ids
 
@@ -236,11 +240,12 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             if generator is None:
                 non_seeded_indices.append(idx)
             else:
-                uniform_rand[idx, :] = torch.rand(1,
-                                                  k + 1,
-                                                  dtype=self.probs_dtype,
-                                                  device=device,
-                                                  generator=generator)
+                uniform_rand[idx, :] = torch.rand(
+                    1,
+                    k + 1,
+                    dtype=self.probs_dtype,
+                    device=generator.device,
+                    generator=generator).to(device)
         if non_seeded_indices:
             uniform_rand[non_seeded_indices, :] = torch.rand(
                 len(non_seeded_indices),

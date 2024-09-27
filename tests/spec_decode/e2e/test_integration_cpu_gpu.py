@@ -33,7 +33,7 @@ MAIN_MODEL = "JackFram/llama-68m"
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("output_len", [32])
-@pytest.mark.parametrize("seed", [None])
+@pytest.mark.parametrize("seed", [1])
 def test_spec_decode_cuda_graph(vllm_runner, common_llm_kwargs,
                                 per_test_common_llm_kwargs,
                                 baseline_llm_kwargs, test_llm_kwargs,
