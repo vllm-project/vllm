@@ -107,6 +107,11 @@ class UsageInfo(OpenAIBaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class RequestResponseMetadata(BaseModel):
+    request_id: str
+    final_usage_info: Optional[UsageInfo] = None
+
+
 class JsonSchemaResponseFormat(OpenAIBaseModel):
     name: str
     description: Optional[str] = None
@@ -381,7 +386,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
-        if "tool_choice" not in data and "tools" in data:
+        if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
         # if "tool_choice" is specified -- validation

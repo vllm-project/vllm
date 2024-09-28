@@ -12,6 +12,10 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.utils import FlexibleArgumentParser
 
+# NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
+# lower-end GPUs.
+# Unless specified, these settings have been tested to work on a single L4.
+
 
 # LLaVA-1.5
 def run_llava(question, modality):
@@ -19,7 +23,7 @@ def run_llava(question, modality):
 
     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf", max_model_len=4096)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -57,7 +61,7 @@ def run_llava_onevision(question, modality):
         <|im_start|>assistant\n"
 
     llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
-              max_model_len=32768)
+              max_model_len=16384)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -67,7 +71,7 @@ def run_fuyu(question, modality):
     assert modality == "image"
 
     prompt = f"{question}\n"
-    llm = LLM(model="adept/fuyu-8b")
+    llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -99,7 +103,8 @@ def run_phi3v(question, modality):
     llm = LLM(
         model="microsoft/Phi-3-vision-128k-instruct",
         trust_remote_code=True,
-        max_num_seqs=5,
+        max_model_len=4096,
+        max_num_seqs=2,
         mm_processor_kwargs={"num_crops": 16},
     )
     stop_token_ids = None
@@ -122,7 +127,7 @@ def run_chameleon(question, modality):
     assert modality == "image"
 
     prompt = f"{question}<image>"
-    llm = LLM(model="facebook/chameleon-7b")
+    llm = LLM(model="facebook/chameleon-7b", max_model_len=4096)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -145,6 +150,8 @@ def run_minicpmv(question, modality):
                                               trust_remote_code=True)
     llm = LLM(
         model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
         trust_remote_code=True,
     )
     # NOTE The stop_token_ids are different for various versions of MiniCPM-V
@@ -177,7 +184,7 @@ def run_internvl(question, modality):
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
-        max_num_seqs=5,
+        max_model_len=4096,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -215,7 +222,8 @@ def run_qwen_vl(question, modality):
     llm = LLM(
         model="Qwen/Qwen-VL",
         trust_remote_code=True,
-        max_num_seqs=5,
+        max_model_len=1024,
+        max_num_seqs=2,
     )
 
     prompt = f"{question}Picture 1: <img></img>\n"
@@ -229,8 +237,10 @@ def run_qwen2_vl(question, modality):
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
+    # Tested on L40
     llm = LLM(
         model=model_name,
+        max_model_len=8192,
         max_num_seqs=5,
     )
 
@@ -238,6 +248,29 @@ def run_qwen2_vl(question, modality):
               "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
               f"{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# LLama
+def run_mllama(question, modality):
+    assert modality == "image"
+
+    model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+    # Note: The default setting of max_num_seqs (256) and
+    # max_model_len (131072) for this model may cause OOM.
+    # You may lower either to run this example on lower-end GPUs.
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    llm = LLM(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=16,
+        enforce_eager=True,
+    )
+
+    prompt = f"<|image|><|begin_of_text|>{question}"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -256,6 +289,7 @@ model_example_map = {
     "internvl_chat": run_internvl,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
+    "mllama": run_mllama,
 }
 
 

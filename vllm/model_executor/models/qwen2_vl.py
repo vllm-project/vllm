@@ -31,12 +31,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from PIL import Image
-from transformers import Qwen2VLConfig
 from transformers.image_utils import (get_image_size,
                                       infer_channel_dimension_format,
                                       to_numpy_array)
-from transformers.models.qwen2_vl.configuration_qwen2_vl import (
-    Qwen2VLVisionConfig)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     make_batched_images, make_batched_videos, smart_resize)
 
@@ -66,7 +63,10 @@ from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
+                                                     Qwen2VLVisionConfig)
 from vllm.transformers_utils.processor import get_processor
+from vllm.utils import is_cpu
 
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
@@ -281,6 +281,21 @@ class Qwen2VisionAttention(nn.Module):
             context_layer = rearrange(output,
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
+        elif is_cpu():
+            seq_length = q.size(1)
+            q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
+            attention_mask = torch.zeros([1, seq_length, seq_length],
+                                         device=q.device,
+                                         dtype=torch.bool)
+            for i in range(1, len(cu_seqlens)):
+                attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
+                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
+            output = F.scaled_dot_product_attention(q,
+                                                    k,
+                                                    v,
+                                                    attention_mask,
+                                                    dropout_p=0.0)
+            context_layer = rearrange(output, "b h s d -> b s h d ")
         else:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
