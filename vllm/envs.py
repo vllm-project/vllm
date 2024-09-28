@@ -62,6 +62,8 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+    VLLM_ALLOW_DEPRECATED_BEAM_SEARCH: bool = False
+    VLLM_SKIP_P2P_CHECK: bool = False
 
 
 def get_default_cache_root():
@@ -194,6 +196,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
+
+    # If set, allowing the use of deprecated beam search implementation
+    "VLLM_ALLOW_DEPRECATED_BEAM_SEARCH":
+    lambda: os.environ.get("VLLM_ALLOW_DEPRECATED_BEAM_SEARCH", "0") == "1",
 
     # Internal flag to enable Dynamo graph capture
     "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
@@ -418,6 +424,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
      ("1", "true")),
+
+    # By default, vLLM will check the peer-to-peer capability itself,
+    # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
+    # If this env var is set to 1, vLLM will skip the peer-to-peer check,
+    # and trust the driver's peer-to-peer capability report.
+    "VLLM_SKIP_P2P_CHECK":
+    lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
 }
 
 # end-env-vars-definition

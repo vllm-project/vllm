@@ -8,6 +8,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.utils import print_warning_once
 
 from .data import (DecoderOnlyInputs, EmptyInputs, EncoderDecoderInputs,
                    PromptType, SingletonPrompt, embed_inputs, empty_inputs,
@@ -64,20 +65,21 @@ class InputPreprocessor:
         '''
 
         if not self.is_encoder_decoder_model():
-            logger.warning("Using None for decoder start token id because "
-                           "this is not an encoder/decoder model.")
+            print_warning_once("Using None for decoder start token id because "
+                               "this is not an encoder/decoder model.")
             return None
 
         if (self.model_config is None or self.model_config.hf_config is None):
-            logger.warning("Using None for decoder start token id because "
-                           "model config is not available.")
+            print_warning_once("Using None for decoder start token id because "
+                               "model config is not available.")
             return None
 
         dec_start_token_id = getattr(self.model_config.hf_config,
                                      'decoder_start_token_id', None)
         if dec_start_token_id is None:
-            logger.warning("Falling back on <BOS> for decoder start token id "
-                           "because decoder start token id is not available.")
+            print_warning_once("Falling back on <BOS> for decoder start token "
+                               "id because decoder start token id is not "
+                               "available.")
             dec_start_token_id = self.get_bos_token_id()
 
         return dec_start_token_id
@@ -121,6 +123,7 @@ class InputPreprocessor:
     def _prepare_decoder_input_ids_for_generation(
         self,
         decoder_input_ids: Optional[List[int]],
+        force_bos: bool = True,
     ) -> List[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
@@ -150,8 +153,8 @@ class InputPreprocessor:
             # use decoder_start_token_id as decoder_input_ids
             decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
 
-        if (len(decoder_input_ids) == 0
-                or decoder_input_ids[0] != decoder_start_token_id):
+        if force_bos and (len(decoder_input_ids) == 0
+                          or decoder_input_ids[0] != decoder_start_token_id):
             decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
 
         return decoder_input_ids
@@ -332,11 +335,10 @@ class InputPreprocessor:
         decoder_inputs: Union[EmptyInputs, DecoderOnlyInputs],
     ) -> EncoderDecoderInputs:
         if encoder_inputs["type"] == "token":
-            if "multi_modal_data" in encoder_inputs:
-                raise ValueError("Multi-modal encoder-decoder models are "
-                                 "not supported yet")
+            pass
         elif encoder_inputs["type"] == "embed":
-            raise NotImplementedError
+            raise NotImplementedError("Embedding inputs are not supported for "
+                                      "encoder-decoder models yet")
         else:
             assert_never(encoder_inputs)
 
@@ -344,13 +346,17 @@ class InputPreprocessor:
             if "prompt_token_ids" in decoder_inputs:
                 decoder_inputs["prompt_token_ids"] = (
                     self._prepare_decoder_input_ids_for_generation(
-                        decoder_inputs["prompt_token_ids"]))
+                        decoder_inputs["prompt_token_ids"],
+                        force_bos=("multi_modal_data" not in encoder_inputs and
+                                   "multi_modal_data" not in decoder_inputs),
+                    ))
 
             if "multi_modal_data" in decoder_inputs:
-                raise ValueError("Multi-modal encoder-decoder models are "
-                                 "not supported yet")
+                raise ValueError("Multi-modal decoder inputs of encoder-"
+                                 "decoder models are not supported yet")
         elif decoder_inputs["type"] == "embed":
-            raise NotImplementedError
+            raise NotImplementedError("Embedding inputs are not supported for "
+                                      "encoder-decoder models yet")
         elif decoder_inputs["type"] == "empty":
             pass
         else:

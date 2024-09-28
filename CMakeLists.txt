@@ -192,6 +192,10 @@ set(VLLM_EXT_SRC
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+
+  # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
+  set(CUTLASS_REVISION "v3.5.1" CACHE STRING "CUTLASS revision to use")
+
   FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
@@ -219,6 +223,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/gguf/gguf_kernel.cu"
     "csrc/quantization/fp8/fp8_marlin.cu"
     "csrc/custom_all_reduce.cu"
+    "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
@@ -311,6 +316,11 @@ set(VLLM_MOE_EXT_SRC
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
+      "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
       "csrc/moe/marlin_moe_ops.cu")
 endif()
 

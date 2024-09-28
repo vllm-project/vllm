@@ -5,14 +5,13 @@ import pytest
 import torch
 from PIL.Image import Image
 
-from vllm.config import ModelConfig
-from vllm.inputs import InputContext, TokenInputs
+from vllm.inputs import InputContext, token_inputs
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer, rescale_image_size
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, ImageAsset, PromptImageInput,
                           VllmRunner, _ImageAssets)
-from ...utils import check_logprobs_close
+from ...utils import build_model_context, check_logprobs_close
 
 text_only_models = [
     "Qwen/Qwen-7B-Chat"  # Has no visual component
@@ -40,32 +39,6 @@ IMG_PAD_ID = 151859
 TOKS_PER_IMG = 256
 VIS_ENC_DIM = 4096
 IMG_SIZE = 448
-
-
-def build_model_context(model_name: str,
-                        tokenizer_name: Optional[str] = None,
-                        trust_remote_code: bool = False):
-    """Creates an InputContext for a given model.
-    
-    Args:
-        model_name: Name of the model being considered.
-        tokenizer_name: Name of the tokenizer being considered.
-        trust_remote_code: Whether or not to allow loading remote code.
-
-    Returns:
-        InputContext for the model being considered.
-    """
-    if tokenizer_name is None:
-        tokenizer_name = model_name
-    model_config = ModelConfig(
-        model_name,
-        tokenizer_name,
-        tokenizer_mode="auto",
-        trust_remote_code=trust_remote_code,
-        dtype="float32",
-        seed=0,
-    )
-    return InputContext(model_config)
 
 
 @pytest.fixture()
@@ -98,7 +71,7 @@ def test_input_processor_valid_mm_data(input_processor_for_qwen,
     """Happy cases for image inputs to Qwen's multimodal input processor."""
     prompt = "".join(
         [f"Picture {num}: <img></img>\n" for num in range(1, num_images + 1)])
-    inputs = TokenInputs(
+    inputs = token_inputs(
         prompt=prompt,
         # When processing multimodal data for a multimodal model, the qwen
         # input processor will overwrite the provided prompt_token_ids with
@@ -161,9 +134,9 @@ def test_input_processor_invalid_mm_data(input_processor_for_qwen,
                                      trust_remote_code=True)
     prompt = "Picture 1: <img></img>\n"
     prompt_token_ids = tokenizer.encode(prompt)
-    inputs = TokenInputs(prompt=prompt,
-                         prompt_token_ids=prompt_token_ids,
-                         multi_modal_data=mm_data)
+    inputs = token_inputs(prompt=prompt,
+                          prompt_token_ids=prompt_token_ids,
+                          multi_modal_data=mm_data)
     # Should fail since we have too many or too few dimensions for embeddings
     with pytest.raises(ValueError):
         input_processor_for_qwen(qwen_vl_context, inputs)

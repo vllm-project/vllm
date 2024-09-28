@@ -46,7 +46,7 @@ from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
+from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available,
                         maybe_slice, supports_dynamo)
 from vllm.worker.model_runner_base import (
@@ -1063,7 +1063,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
-        with CudaMemoryProfiler() as m:
+        with DeviceMemoryProfiler() as m:
             self.model = get_model(model_config=self.model_config,
                                    device_config=self.device_config,
                                    load_config=self.load_config,
@@ -1275,7 +1275,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        kv_caches = [
+            torch.tensor([], dtype=torch.float32, device=self.device)
+        ] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
