@@ -110,5 +110,5 @@ def is_explicit_encoder_decoder_prompt(
 
 
 def is_encoder_decoder_inputs(
-    inputs: ProcessorInputs, ) -> TypeIs[EncoderDecoderInputs]:
+        inputs: ProcessorInputs) -> TypeIs[EncoderDecoderInputs]:
     return "encoder" in inputs and "decoder" in inputs
