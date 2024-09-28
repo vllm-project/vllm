@@ -125,9 +125,9 @@ class GGUFLinearMethod(LinearMethodBase):
             qweight = layer.qweight.unbind(0)
             result = []
             for id in shard_id:
+                q_idx = layer.qweight.shard_id_map[id]
                 qweight_type = layer.qweight_type.shard_weight_type[id]
-                qweight_idx = layer.qweight.shard_id_map[id]
-                result.append(_fuse_mul_mat(x, qweight[qweight_idx], qweight_type))
+                result.append(_fuse_mul_mat(x, qweight[q_idx], qweight_type))
             out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight
@@ -166,9 +166,13 @@ class GGUFUninitializedParameter(UninitializedParameter):
     data_container: List[torch.Tensor]
 
     def materialize_nested(self) -> Parameter:
-        nested_data = torch.nested.nested_tensor(self.data_container, device=self.device, dtype=torch.uint8)
+        nested_data = torch.nested.nested_tensor(self.data_container,
+                                                 device=self.device,
+                                                 dtype=torch.uint8)
         self.data_container.clear()
-        param = torch.Tensor._make_subclass(self.cls_to_become, nested_data, require_grad=False)
+        param = torch.Tensor._make_subclass(self.cls_to_become,
+                                            nested_data,
+                                            require_grad=False)
         for k, v in self.__dict__.items():
             setattr(param, k, v)
         return param

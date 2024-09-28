@@ -776,7 +776,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
             param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             return
-        
+
         if is_gguf_weight:
             tp_size = get_tensor_model_parallel_world_size()
             tp_rank = get_tensor_model_parallel_rank()
