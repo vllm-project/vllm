@@ -471,7 +471,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # to perform the swap.
         num_blocks_touched = 0
         blocks: List[Block] = []
-        
         for seq in seq_group.get_seqs(status=status):
             block_table = self.block_tables[seq.seq_id]
             if block_table.blocks is not None:
