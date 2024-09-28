@@ -1,7 +1,7 @@
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy < 2.0.0
-requests
+requests >= 2.26.0
 tqdm
 py-cpuinfo
 transformers >= 4.45.0  # Required for Llama 3.2.

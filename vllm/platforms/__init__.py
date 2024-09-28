@@ -42,6 +42,15 @@ try:
 except Exception:
     pass
 
+is_xpu = False
+
+try:
+    import torch
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        is_xpu = True
+except Exception:
+    pass
+
 is_cpu = False
 try:
     from importlib.metadata import version
@@ -60,6 +69,9 @@ elif is_cuda:
 elif is_rocm:
     from .rocm import RocmPlatform
     current_platform = RocmPlatform()
+elif is_xpu:
+    from .xpu import XPUPlatform
+    current_platform = XPUPlatform()
 elif is_cpu:
     from .cpu import CpuPlatform
     current_platform = CpuPlatform()
