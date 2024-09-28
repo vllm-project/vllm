@@ -62,6 +62,10 @@ class SequenceGroupOutputProcessor(ABC):
         """Process new token ids for the sequence group. Handles logic such as
         detokenization, stop checking, and freeing/forking sequences in the
         scheduler.
+        
+        Return the number of new tokens generated in the sequence group.
+        The returned value is optional because it is only used for 
+        speculative decoding mqa scorer.
         """
         pass
 

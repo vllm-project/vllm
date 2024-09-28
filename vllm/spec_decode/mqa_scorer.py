@@ -1,6 +1,3 @@
-from itertools import count
-from typing import Iterator, List
-
 from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -25,27 +22,32 @@ class MQAScorer(SpeculativeScorer):
         proposals: SpeculativeProposals,
     ) -> SpeculativeScores:
         target_seq_group_metadata_list = []
-        target_seq_ids_iter = self._create_target_seq_id_iterator(
-            seq_ids=get_all_seq_ids(execute_model_req.seq_group_metadata_list))
+        target_seq_id_start = max(
+            get_all_seq_ids(execute_model_req.seq_group_metadata_list)) + 1
+        all_proposal_tokens = proposals.proposal_token_ids.tolist()
         for i, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
             seq_data_dict = seq_group_metadata.seq_data
+            assert len(seq_data_dict) == 1
             seq_id = next(iter(seq_data_dict.keys()))
 
             seq_data: SequenceData = seq_data_dict[seq_id]
             prompt_token_ids = seq_data.get_prompt_token_ids()
             output_token_ids = seq_data.get_output_token_ids()
-            proposal_token_ids = proposals.proposal_token_ids.tolist()[i]
+            proposal_token_ids = all_proposal_tokens[i]
             new_output_token_ids = [*output_token_ids, *proposal_token_ids]
 
-            target_seq_id = next(target_seq_ids_iter)
+            target_seq_id = target_seq_id_start + i
             new_seq_data = SequenceData.from_seqs(
                 prompt_token_ids=prompt_token_ids,
                 output_token_ids=new_output_token_ids,
             )
             new_seq_data.update_num_computed_tokens(
                 len(prompt_token_ids) + len(output_token_ids) - 1)
-            assert len(output_token_ids) - 1 >= 0
+
+            # Ensure that the new sequence has at least one token
+            # because we only use mqa scorer in the decoding stage.
+            assert len(output_token_ids) >= 1
             new_seq_data_dict = {target_seq_id: new_seq_data}
 
             new_seq_group_metadata = SequenceGroupMetadata(
@@ -83,14 +85,3 @@ class MQAScorer(SpeculativeScorer):
                                  token_ids=all_tokens,
                                  logprobs=all_logprobs,
                                  hidden_states=hidden_states)
-
-    def _create_target_seq_id_iterator(
-            self, seq_ids: List[SeqId]) -> Iterator[TargetSeqId]:
-        """Create an iterator for creating target sequence ids.
-        Target sequence ids are distinct from sequence ids because we create a
-        distinct target sequence id for each proposal token to be scored.
-
-        This implementation increments a counter starting at 1 + max of all
-        provided input sequence ids.
-        """
-        return count(start=max(seq_ids) + 1)

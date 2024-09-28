@@ -84,6 +84,10 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             tokens from the previous step. If this is true, then
             no tokens need to be appended since it is already done
             externally (before the next schedule() call)
+            
+        Returns:
+            The number of tokens appended to the sequence. This is optional
+            because only speculative decode uses this return value.
         """
         # Sequences can be in RUNNING or FINISHED_ABORTED state
         # once scheduled, as a sequence is moved to FINSIHED_ABORTED
