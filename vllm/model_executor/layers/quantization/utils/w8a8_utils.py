@@ -159,7 +159,8 @@ def apply_fp8_linear(
 
             # Making sure the dummy tensor is on the same device as the weight
             global TORCH_DEVICE_IDENTITY
-            if TORCH_DEVICE_IDENTITY.device != weight.device:
+            if (TORCH_DEVICE_IDENTITY is not None
+                    and TORCH_DEVICE_IDENTITY.device != weight.device):
                 TORCH_DEVICE_IDENTITY = TORCH_DEVICE_IDENTITY.to(weight.device)
 
             # GEMM

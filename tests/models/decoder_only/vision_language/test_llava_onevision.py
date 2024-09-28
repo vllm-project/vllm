@@ -16,8 +16,7 @@ from ...utils import check_logprobs_close
 # Video test
 HF_VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
     "sample_demo_1":
-    "<|im_start|>user <video>\nwhy is this video funny? \
-    <|im_end|><|im_start|>assistant\n"
+    "<|im_start|>user\n<video>\nwhy is this video funny?<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
 })
 
 models = ["llava-hf/llava-onevision-qwen2-7b-ov-hf"]
@@ -165,6 +164,9 @@ def run_video_test(
         )
 
 
+@pytest.mark.skip(
+    reason=
+    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -208,6 +210,9 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
     )
 
 
+@pytest.mark.skip(
+    reason=
+    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
@@ -254,9 +259,8 @@ def run_image_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
-                     max_num_seqs=1,
                      max_model_len=16384,
-                     gpu_memory_utilization=0.98,
+                     max_num_seqs=2,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
@@ -302,8 +306,9 @@ def run_image_test(
         )
 
 
-# FIXME: Swap to a smaller model for this architecture
-@pytest.mark.skip(reason="Model OOMing on CI")
+@pytest.mark.skip(
+    reason=
+    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -316,14 +321,10 @@ def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
 
     inputs = [(
         [
-            "<|im_start|>user <image><image>\nDescribe 2 images. \
-                <|im_end|><|im_start|>assistant\n",
-            "<|im_start|>user <image><image>\nDescribe 2 images. \
-                <|im_end|><|im_start|>assistant\n",
-            "<|im_start|>user <image><image><image><image>\nDescribe 4 images. \
-                <|im_end|><|im_start|>assistant\n",
-            "<|im_start|>user <image>\nWhat is the season? \
-                <|im_end|><|im_start|>assistant\n",
+            "<|im_start|>user\n<image><image>\nDescribe 2 images.<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+            "<|im_start|>user\n<image><image>\nDescribe 2 images.<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+            "<|im_start|>user\n<image><image><image><image>\nDescribe 4 images.<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+            "<|im_start|>user\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
         ],
         [
             [stop_sign, cherry_blossom],
