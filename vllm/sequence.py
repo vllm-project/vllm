@@ -743,9 +743,34 @@ class SequenceGroup:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
                          if self.prompt_adapter_request else 0
 
-    def init_multi_step(self, num_scheduler_steps: int) -> None:
-        self.state.num_steps = num_scheduler_steps
+    def init_multi_step(self, num_steps: int) -> None:
+        self.state.num_steps = num_steps
         self.state.current_step = 0
+
+    def init_multi_step_from_lookahead_slots(self, num_lookahead_slots: int,
+                                             num_scheduler_steps: int,
+                                             is_multi_step: bool,
+                                             enable_chunking: bool) -> None:
+
+        if not is_multi_step:
+            self.init_multi_step(num_steps=num_scheduler_steps)
+            return
+
+        # Multi-Step case
+        is_prefill = self.is_prefill()
+
+        # The asserts below reflect the expectations of the current system.
+        if is_prefill and enable_chunking:
+            assert num_lookahead_slots == num_scheduler_steps
+            self.init_multi_step(num_steps=num_lookahead_slots)
+        else:
+            is_decode: bool = not is_prefill
+            # If it is a prefill, num_lookahead_slots must be 0
+            assert num_lookahead_slots == 0 or is_decode
+            # If it is a decode, num_lookahead_slots + 1 must match
+            # the scheduler steps.
+            assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
+            self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
@@ -1010,6 +1035,20 @@ class SequenceGroupMetadata(
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
 
+    # Multi-Step Chunked-Prefill property
+    @property
+    def is_single_step_prompt(self) -> bool:
+        # do_sample is true, only when the token_chunk_size matches the
+        # num_uncomputed_tokens of the sequence. This indicates that
+        # the prompt will finish processing in a single `execute_model`
+        # step.
+        return self.is_prompt and self.do_sample
+
+    def get_first_seq_id(self) -> int:
+        # This is an efficient way of fetching the seq_id when
+        # we know this SequenceGroup has only one sequence.
+        return next(iter(self.seq_data))
+
     def apply_delta(self,
                     sequence_group_metadata_delta: SequenceGroupMetadataDelta):
         for id, delta in sequence_group_metadata_delta.seq_data_delta.items():
@@ -1022,7 +1061,8 @@ class SequenceGroupMetadata(
 
     def finish_step(self) -> None:
         assert self.state is not None
-        assert self.state.current_step < self.state.num_steps
+        assert self.state.current_step < self.state.num_steps, \
+            f"current step {self.state.current_step}, num_steps {self.state.num_steps}" # noqa
         self.state.current_step += 1
 
 

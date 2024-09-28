@@ -37,6 +37,7 @@ DEFAULT_SERVER_ARGS: List[str] = [
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("is_async", [True])
 @pytest.mark.parametrize("attention_backend", ["FLASHINFER", "FLASH_ATTN"])
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
 @pytest.mark.asyncio
 async def test_multi_step(
     example_prompts,
@@ -49,6 +50,7 @@ async def test_multi_step(
     is_async: bool,
     num_logprobs: Optional[int],
     attention_backend: str,
+    enable_chunked_prefill: bool,
     monkeypatch,
 ) -> None:
     """Test vLLM engine with multi-step scheduling in an OpenAI-protocol
@@ -74,6 +76,10 @@ async def test_multi_step(
       num_logprobs: corresponds to the `logprobs` argument to the OpenAI
                     completions endpoint; `None` -> no logprobs
     """
+    if enable_chunked_prefill and \
+        (pp_size > 1 or attention_backend != "FLASH_ATTN"):
+        pytest.skip("Multi-step with Chunked-Prefill only supports"
+                    "PP=1 and FLASH_ATTN backend")
 
     override_backend_env_variable(monkeypatch, attention_backend)
 
@@ -92,6 +98,9 @@ async def test_multi_step(
 
     if eager_mode:
         ms_server_args.append("--enforce-eager")
+
+    if enable_chunked_prefill:
+        ms_server_args.append("--enable-chunked-prefill")
 
     distributed_args = [
         "--tensor-parallel-size",
