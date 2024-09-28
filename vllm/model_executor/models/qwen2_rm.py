@@ -14,21 +14,20 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors
-from vllm.sequence import PoolerOutput
-
+from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .utils import is_pp_missing_parameter
-from vllm.model_executor.models.qwen2 import Qwen2Model
 
 
 class ReLU(nn.Module):
+
     def __init__(self):
         super().__init__()
         self.activation = nn.ReLU()
@@ -89,9 +88,12 @@ class Qwen2ForRewardModel(nn.Module):
         self.model = Qwen2Model(config, cache_config, quant_config)
 
         self.score = nn.Sequential(
-            ColumnParallelLinear(config.hidden_size, config.hidden_size, quant_config=quant_config),
+            ColumnParallelLinear(config.hidden_size,
+                                 config.hidden_size,
+                                 quant_config=quant_config),
             ReLU(),
-            RowParallelLinear(config.hidden_size, 1, quant_config=quant_config),
+            RowParallelLinear(config.hidden_size, 1,
+                              quant_config=quant_config),
         )
         self._pooler = Pooler(pooling_type=PoolingType.ALL, normalize=False)
 
@@ -126,6 +128,7 @@ class Qwen2ForRewardModel(nn.Module):
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
+            # Skip loading lm_head for embedding model
             if name == "lm_head.weight":
                 continue
             if "rotary_emb.inv_freq" in name:
