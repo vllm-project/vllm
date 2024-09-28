@@ -228,6 +228,10 @@ class ModelConfig:
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
     ) -> Optional["MultiModalConfig"]:
         architectures = getattr(self.hf_config, "architectures", [])
+
+        if len(architectures) == 0:
+            raise ValueError("No architectures found in the model config.")
+
         if any(
                 ModelRegistry.is_multimodal_model(arch)
                 for arch in architectures):
