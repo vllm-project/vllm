@@ -185,16 +185,8 @@ class InputRegistry:
         return wrapper
 
     def _get_dummy_encoder_data_factory(self, model_cls: Type[nn.Module]):
-        if model_cls in self._dummy_encoder_factories_by_model_type:
-            dummy_factory = self._dummy_encoder_factories_by_model_type[
-                model_cls]
-        else:
-            logger.warning(
-                "No dummy encoder data factory registered to %s. "
-                "Using the dummy data factory for the model instead.",
-                model_cls)
-            dummy_factory = self._get_dummy_data_factory(model_cls)
-        return dummy_factory
+        return self._dummy_encoder_factories_by_model_type \
+            .get(model_cls, self._default_dummy_data_factory)
 
     def dummy_data_for_profiling(
         self,
