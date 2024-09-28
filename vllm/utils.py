@@ -5,6 +5,7 @@ import datetime
 import enum
 import gc
 import inspect
+import ipaddress
 import os
 import random
 import socket
@@ -533,6 +534,14 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
+def is_valid_ipv6_address(address: str) -> bool:
+    try:
+        ipaddress.IPv6Address(address)
+        return True
+    except ValueError:
+        return False
+
+
 def get_distributed_init_method(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
@@ -735,7 +744,8 @@ def create_kv_caches_with_random(
 
 @lru_cache
 def print_warning_once(msg: str) -> None:
-    logger.warning(msg)
+    # Set the stacklevel to 2 to print the caller's line info
+    logger.warning(msg, stacklevel=2)
 
 
 @lru_cache(maxsize=None)
