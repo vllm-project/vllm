@@ -8,6 +8,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation)
 from vllm.logger import init_logger
+from vllm.utils import is_list_of
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
@@ -70,21 +71,6 @@ class ToolParser:
             "AbstractToolParser.extract_tool_calls_streaming has not been "
             "implemented!")
 
-
-def is_seq_of(seq: Any,
-              expected_type: Union[Type, tuple],
-              seq_type: Union[Type, None] = None) -> bool:
-    if seq_type is None:
-        exp_seq_type = abc.Sequence
-    else:
-        assert isinstance(seq_type, type)
-        exp_seq_type = seq_type
-    if not isinstance(seq, exp_seq_type):
-        return False
-
-    return all(isinstance(item, expected_type) for item in seq)
-
-
 class ToolParserManager:
     tool_parsers: Dict[str, Type] = {}
 
@@ -135,7 +121,7 @@ class ToolParserManager:
             raise TypeError(f'force must be a boolean, but got {type(force)}')
 
         # raise the error ahead of time
-        if not (name is None or isinstance(name, str) or is_seq_of(name, str)):
+        if not (name is None or isinstance(name, str) or is_list_of(name, str)):
             raise TypeError(
                 'name must be None, an instance of str, or a sequence of str, '
                 f'but got {type(name)}')

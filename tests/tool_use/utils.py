@@ -92,7 +92,7 @@ CONFIGS: Dict[str, ServerConfig] = {
             "--trust_remote_code"
         ],
         "supports_parallel":
-        True,
+        False,
         "system_prompt":
         "You are a helpful assistant with access to tools. If a tool"
         " that you have would be helpful to answer a user query, "
