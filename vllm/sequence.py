@@ -198,8 +198,11 @@ class SequenceData(msgspec.Struct,
         output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      output_token_ids)
 
-        return SequenceData(prompt_token_ids_arr,
+        data = SequenceData(prompt_token_ids_arr,
                             _output_token_ids=output_token_ids_arr)
+        data.update_num_computed_tokens(
+            len(output_token_ids_arr) + len(prompt_token_ids_arr) - 1)
+        return data
 
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"

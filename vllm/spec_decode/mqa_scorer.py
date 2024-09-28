@@ -44,8 +44,6 @@ class MQAScorer(SpeculativeScorer):
                 output_token_ids=new_output_token_ids,
             )
             assert len(output_token_ids) - 1 >= 0
-            new_seq_data.update_num_computed_tokens(
-                len(prompt_token_ids) + len(output_token_ids) - 1)
             new_seq_data_dict = {target_seq_id: new_seq_data}
 
             new_seq_group_metadata = SequenceGroupMetadata(
