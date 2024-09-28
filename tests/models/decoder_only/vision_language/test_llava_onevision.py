@@ -16,7 +16,7 @@ from ...utils import check_logprobs_close
 # Video test
 HF_VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
     "sample_demo_1":
-    "<|im_start|>user\n<video>\nwhy is this video funny? Avoid mentioning any colors.<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+    "<|im_start|>user\n<video>\nwhy is this video funny?<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
 })
 
 models = ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"]
