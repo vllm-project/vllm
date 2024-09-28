@@ -300,7 +300,7 @@ def run_image_test(
         )
 
 
-@pytest.skip()
+@pytest.mark.skip()
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
