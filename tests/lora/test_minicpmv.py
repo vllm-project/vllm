@@ -56,7 +56,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
-        max_model_len=1024,
+        max_num_seqs=2,
         enable_lora=True,
         max_loras=4,
         max_lora_rank=64,
