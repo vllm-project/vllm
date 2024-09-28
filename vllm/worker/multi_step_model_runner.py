@@ -326,7 +326,14 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         self.is_multi_step = self.scheduler_config.is_multi_step
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
-        self.pythonization_cache = PythonizationCache()
+        # Using the PythonizationCache in Pipeline-Parallel clobbers the
+        # SequenceOutput and CompletionSequenceGroupOutput object.
+        # When cache-reset happens at the last step of a multi-step
+        # execution, there may be other on-going single-step/multi-step
+        # executions. The current caching implementation does not check
+        # for this.
+        self.pythonization_cache = PythonizationCache() \
+            if self.parallel_config.pipeline_parallel_size == 1 else None
 
     @functools.cached_property
     def _copy_stream(self):
@@ -577,7 +584,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         if model_input.is_last_step:
             outputs = self._final_process_outputs(
                 model_input, model_input.base_output_proc_callback)
-            self.pythonization_cache.reset()
+            if self.pythonization_cache:
+                self.pythonization_cache.reset()
             return outputs
 
         # should be [SamplerOutput]
