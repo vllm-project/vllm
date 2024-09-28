@@ -415,6 +415,8 @@ def get_requirements() -> List[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
+            elif line.startswith("--"):
+                continue
             else:
                 resolved_requirements.append(line)
         return resolved_requirements
