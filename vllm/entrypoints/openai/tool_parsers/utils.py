@@ -112,3 +112,9 @@ def is_complete_json(input_str):
         return True
     except JSONDecodeError:
         return False
+
+
+def consume_space(i, s):
+    while i < len(s) and s[i].isspace():
+        i += 1
+    return i

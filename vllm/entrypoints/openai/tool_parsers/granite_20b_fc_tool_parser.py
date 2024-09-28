@@ -12,7 +12,8 @@ from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser)
-from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
+from vllm.entrypoints.openai.tool_parsers.utils import (consume_space,
+                                                        find_common_prefix,
                                                         is_complete_json,
                                                         partial_json_loads)
 from vllm.logger import init_logger
@@ -121,6 +122,8 @@ class Granite20bFCToolParser(ToolParser):
             is_complete = []
             try:
                 start_idx = len(self.bot_token)
+                start_idx = consume_space(start_idx, current_text)
+
                 while start_idx < len(current_text):
                     (obj,
                      end_idx) = partial_json_loads(current_text[start_idx:],
@@ -128,7 +131,10 @@ class Granite20bFCToolParser(ToolParser):
                     is_complete.append(
                         is_complete_json(current_text[start_idx:start_idx +
                                                       end_idx]))
-                    start_idx += end_idx + len(self.bot_token) + 1
+                    start_idx += end_idx
+                    start_idx = consume_space(start_idx, current_text)
+                    start_idx += len(self.bot_token)
+                    start_idx = consume_space(start_idx, current_text)
                     tool_call_arr.append(obj)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
