@@ -177,10 +177,10 @@ async def test_multi_step_pp_smoke(
 
     # Prompt from the ShareGPT dataset
     prompts = [
-        "Do you know the book Traction by Gino Wickman",
-        "Do you know the book Traction by Gino Wickman",
-        "Do you know the book Traction by Gino Wickman",
-        "Do you know the book Traction by Gino Wickman",
+        "in the jtbd context whats a push?",
+        "in the jtbd context whats a push?",
+        "in the jtbd context whats a push?",
+        "in the jtbd context whats a push?",
     ]
     # Use varying max_tokens to introduce scheduling randomness.
     max_tokens = [10 * i for i in range(1, len(prompts) + 1)]
