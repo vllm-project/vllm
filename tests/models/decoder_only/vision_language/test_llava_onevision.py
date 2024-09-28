@@ -19,7 +19,7 @@ HF_VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
     "<|im_start|>user\n<video>\nwhy is this video funny?<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
 })
 
-models = ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"]
+models = ["llava-hf/llava-onevision-qwen2-7b-ov-hf"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -164,7 +164,9 @@ def run_video_test(
         )
 
 
-@pytest.mark.skip("Different outputs but still reasonable")
+@pytest.mark.skip(
+    reason=
+    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -208,6 +210,9 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
     )
 
 
+@pytest.mark.skip(
+    reason=
+    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
@@ -301,6 +306,9 @@ def run_image_test(
         )
 
 
+@pytest.mark.skip(
+    reason=
+    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
