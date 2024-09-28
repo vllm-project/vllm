@@ -11,6 +11,7 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import (VIDEO_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _VideoAssets)
+from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
 # Video test
@@ -302,8 +303,7 @@ def run_image_test(
         )
 
 
-# FIXME: Swap to a smaller model for this architecture
-@pytest.mark.skip(reason="Model OOMing on CI")
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
