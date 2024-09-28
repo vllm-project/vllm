@@ -325,6 +325,7 @@ steps:
   - vllm/
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
+  - tests/models/encoder_decoder/vision_language
   commands:
     - pytest -v -s models/embedding/language
     - pytest -v -s models/encoder_decoder/language
@@ -333,8 +334,6 @@ steps:
 - label: Custom Models Test
   #mirror_hardwares: [amd]
   optional: true
-  source_file_dependencies:
-  - tests/models/encoder_decoder/vision_language
   commands:
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
