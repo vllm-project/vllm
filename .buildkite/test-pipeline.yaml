@@ -333,6 +333,8 @@ steps:
 - label: Custom Models Test
   #mirror_hardwares: [amd]
   optional: true
+  source_file_dependencies:
+  - tests/models/encoder_decoder/vision_language
   commands:
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
