@@ -797,6 +797,8 @@ class FlashAttentionImpl(AttentionImpl):
             assert prefill_output is not None
             return prefill_output.view(num_prefill_tokens, hidden_size)
 
+        # Chunked prefill does not work with speculative decoding.
+        # Therefore, the query length for decode should be 1 in chunked prefill.
         assert decode_meta is not None
         assert decode_meta.decode_query_len == 1
         decode_output = decode_output.squeeze(1)

@@ -4,7 +4,7 @@ import torch
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import SpeculativeProposals, SpeculativeScores
-from vllm.spec_decode.MQA_scorer import MQAScorer
+from vllm.spec_decode.mqa_scorer import MQAScorer
 from vllm.worker.worker import Worker
 
 from .utils import create_batch, create_worker

@@ -643,7 +643,8 @@ class EngineArgs:
         parser.add_argument(
             '--speculative-disable-mqa-scorer',
             action='store_true',
-            help='If set, the MQA scorer will be disabled in speculative '
+            help=
+            'If set to True, the MQA scorer will be disabled in speculative '
             ' and fall back to batch expansion')
         parser.add_argument(
             '--speculative-draft-tensor-parallel-size',
