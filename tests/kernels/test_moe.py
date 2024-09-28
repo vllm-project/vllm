@@ -9,15 +9,19 @@ import torch
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
+from tests.kernels.utils import opcheck
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe, single_marlin_moe)
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_topk, moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.scalar_type import scalar_types
+from vllm.utils import seed_everything
 
 
 def torch_moe(a, w1, w2, score, topk):
@@ -140,6 +144,7 @@ def compute_max_diff(output, output_ref):
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
+@pytest.mark.parametrize("num_bits", [4, 8])
 def test_fused_marlin_moe(
     m: int,
     n: int,
@@ -148,8 +153,9 @@ def test_fused_marlin_moe(
     topk: int,
     group_size: int,
     act_order: bool,
+    num_bits: int,
 ):
-    torch.manual_seed(7)
+    seed_everything(7)
 
     if topk > e:
         return
@@ -161,13 +167,12 @@ def test_fused_marlin_moe(
         if group_size in (k, n):
             return
 
-    quant_type = scalar_types.uint4b8
+    quant_type = (scalar_types.uint4b8
+                  if num_bits == 4 else scalar_types.uint8b128)
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    for i in range(w2.shape[0]):
-        w2[0] = torch.eye(k, n, device="cuda", dtype=dtype)
 
     w_ref1_l = []
     qweight1_l = []
@@ -240,9 +245,39 @@ def test_fused_marlin_moe(
         topk_ids,
         w1_scale=scales1,
         w2_scale=scales2,
+        num_bits=num_bits,
     )
 
     assert compute_max_diff(marlin_output, triton_output) < 4e-2
+
+    if ops.supports_moe_ops:
+        token_expert_indicies = torch.empty(m,
+                                            topk,
+                                            dtype=torch.int32,
+                                            device=a.device)
+
+        opcheck(torch.ops._moe_C.topk_softmax, (
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            score.float(),
+        ))
+
+        block_size_m = 4
+
+        sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m,
+                                                      e)
+
+        max_workspace_size = ((m + 255) // 256) * (max(2 * n, k) // 64) * 16
+        workspace = torch.zeros(max_workspace_size,
+                                dtype=torch.int,
+                                device="cuda",
+                                requires_grad=False)
+
+        opcheck(torch.ops._moe_C.marlin_gemm_moe,
+                (a, qweight1, sorted_token_ids, topk_weights, topk_ids,
+                 scales1, g_idx1, sort_indices1, workspace, quant_type, m,
+                 2 * n, k, True, e, topk, block_size_m, True, False))
 
 
 @pytest.mark.skip("This test is here for the sake of debugging, "
@@ -254,7 +289,8 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
-def test_marlin_moe_mmm(
+@pytest.mark.parametrize("num_bits", [4, 8])
+def test_single_marlin_moe_multiply(
     m: int,
     n: int,
     k: int,
@@ -262,6 +298,7 @@ def test_marlin_moe_mmm(
     topk: int,
     group_size: int,
     act_order: bool,
+    num_bits: int,
 ):
     if topk > e:
         return
@@ -273,7 +310,8 @@ def test_marlin_moe_mmm(
         if group_size == k:
             return
 
-    quant_type = scalar_types.uint4b8
+    quant_type = (scalar_types.uint4b8
+                  if num_bits == 4 else scalar_types.uint8b128)
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
@@ -308,7 +346,34 @@ def test_marlin_moe_mmm(
                                       g_idx,
                                       sort_indices,
                                       topk,
-                                      renormalize=False)
+                                      renormalize=False,
+                                      num_bits=num_bits)
     torch_output = torch_moe_single(a, w_ref.transpose(1, 2), score, topk)
 
     assert compute_max_diff(marlin_output, torch_output) < 1e-2
+
+
+def test_moe_align_block_size_opcheck():
+    num_experts = 4
+    block_size = 4
+    topk_ids = torch.randint(0,
+                             num_experts, (3, 4),
+                             dtype=torch.int32,
+                             device='cuda')
+
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    sorted_ids = torch.empty((max_num_tokens_padded, ),
+                             dtype=torch.int32,
+                             device=topk_ids.device)
+    sorted_ids.fill_(topk_ids.numel())
+    max_num_m_blocks = max_num_tokens_padded // block_size
+    expert_ids = torch.empty((max_num_m_blocks, ),
+                             dtype=torch.int32,
+                             device=topk_ids.device)
+    num_tokens_post_pad = torch.empty((1),
+                                      dtype=torch.int32,
+                                      device=topk_ids.device)
+
+    opcheck(torch.ops._C.moe_align_block_size,
+            (topk_ids, num_experts, block_size, sorted_ids, expert_ids,
+             num_tokens_post_pad))
