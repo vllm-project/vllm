@@ -88,6 +88,7 @@ class Qwen2VLImagePixelInputs(TypedDict):
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
+
 class Qwen2VLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
@@ -95,8 +96,10 @@ class Qwen2VLImageEmbeddingInputs(TypedDict):
     `hidden_size` must match the hidden size of language model backbone.
     """
 
-Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs, 
+
+Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
                            Qwen2VLImageEmbeddingInputs]
+
 
 class Qwen2VLVideoInputs(TypedDict):
     pixel_values_videos: torch.Tensor
@@ -808,16 +811,12 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
                 end_idx = indices[cnt]
                 non_data_tokens = prompt_token_ids[:end_idx]
             else:
-                non_data_tokens = prompt_token_ids[
-                    indices[cnt - 1] + 1:indices[cnt]
-                ]
+                non_data_tokens = prompt_token_ids[indices[cnt - 1] +
+                                                   1:indices[cnt]]
             prompt_token_ids_with_data.extend(non_data_tokens)
-            prompt_token_ids_with_data.extend(
-                token_id for _ in range(num_tokens)
-            )
-        prompt_token_ids_with_data.extend(
-            prompt_token_ids[indices[-1] + 1:]
-        )
+            prompt_token_ids_with_data.extend(token_id
+                                              for _ in range(num_tokens))
+        prompt_token_ids_with_data.extend(prompt_token_ids[indices[-1] + 1:])
         return prompt_token_ids_with_data
 
     if image_inputs is not None:
@@ -833,25 +832,20 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
             num_pad_tokens = embed_dim // image_cnt
             for idx, token in enumerate(prompt_token_ids):
                 if idx in image_indices:
-                    prompt_token_ids_with_image.extend([token] * num_pad_tokens)
+                    prompt_token_ids_with_image.extend([token] *
+                                                       num_pad_tokens)
                 else:
                     prompt_token_ids_with_image.append(token)
             prompt_token_ids = prompt_token_ids_with_image
         else:
-            prompt_token_ids = expand_pad_tokens(
-                image_inputs,
-                hf_config.image_token_id,
-                make_batched_images,
-                "image"
-            )
+            prompt_token_ids = expand_pad_tokens(image_inputs,
+                                                 hf_config.image_token_id,
+                                                 make_batched_images, "image")
 
     if video_inputs is not None:
-        prompt_token_ids = expand_pad_tokens(
-            video_inputs,
-            hf_config.video_token_id,
-            make_batched_videos,
-             "video"
-        )
+        prompt_token_ids = expand_pad_tokens(video_inputs,
+                                             hf_config.video_token_id,
+                                             make_batched_videos, "video")
 
     return LLMInputs(
         prompt_token_ids=prompt_token_ids,
@@ -945,22 +939,18 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image pixel values. "
-                                f"Got type: {type(pixel_values)}")
+                                 f"Got type: {type(pixel_values)}")
 
-            return Qwen2VLImagePixelInputs(
-                type = "pixel_values",
-                data=pixel_values,
-                image_grid_thw=image_grid_thw
-            )
-        
+            return Qwen2VLImagePixelInputs(type="pixel_values",
+                                           data=pixel_values,
+                                           image_grid_thw=image_grid_thw)
+
         if image_embeds is not None:
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
-            return Qwen2VLImageEmbeddingInputs(
-                type="image_embeds",
-                data=image_embeds
-            )
+            return Qwen2VLImageEmbeddingInputs(type="image_embeds",
+                                               data=image_embeds)
 
     def _parse_and_validate_video_input(
             self, **kwargs: object) -> Optional[Qwen2VLVideoInputs]:
@@ -984,7 +974,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                              image_input: Qwen2VLImageInputs) -> torch.Tensor:
         if image_input["type"] == "image_embeds":
             return image_input["data"].type(self.visual.dtype)
-            
+
         pixel_values = image_input["data"].type(self.visual.dtype)
         image_embeds = self.visual(pixel_values,
                                    grid_thw=image_input["image_grid_thw"])
