@@ -93,6 +93,7 @@ class GGUFLinearMethod(LinearMethodBase):
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
                 "is_gguf_weight": True,
+                "data_container": [],
                 "shard_id": [],
                 "shard_id_map": {},
             })
@@ -162,7 +163,7 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
 
 class GGUFUninitializedParameter(UninitializedParameter):
     cls_to_become = Parameter
-    data_container: List[torch.Tensor] = []
+    data_container: List[torch.Tensor]
 
     def materialize_nested(self) -> Parameter:
         nested_data = torch.nested.nested_tensor(self.data_container, device=self.device, dtype=torch.uint8)
