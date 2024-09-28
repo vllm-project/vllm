@@ -937,7 +937,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         if pixel_values is None and image_embeds is None:
             return None
 
-
         if pixel_values is not None:
             pixel_values = self._validate_and_reshape_mm_tensor(
                 pixel_values, "image pixel values")
@@ -951,7 +950,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             return Qwen2VLImagePixelInputs(
                 type = "pixel_values",
                 data=pixel_values,
-                image_grid_thw=image_grid_thw)
+                image_grid_thw=image_grid_thw
+            )
         
         if image_embeds is not None:
             if not isinstance(image_embeds, torch.Tensor):
@@ -959,8 +959,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                                  f"Got type: {type(image_embeds)}")
             return Qwen2VLImageEmbeddingInputs(
                 type="image_embeds",
-                data=image_embeds)
-
+                data=image_embeds
+            )
 
     def _parse_and_validate_video_input(
             self, **kwargs: object) -> Optional[Qwen2VLVideoInputs]:
