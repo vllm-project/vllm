@@ -723,13 +723,14 @@ def scaled_int8_quant(
     Returns:
       Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
     """
+    ops = torch.ops._C_cpu if input.device.type == "cpu" else torch.ops._C
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
         assert symmetric == (
             azp is
             None), "azp must only be provided for asymmetric quantization."
-        torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
+        ops.static_scaled_int8_quant(output, input, scale, azp)
         return output, scale, None
 
     # dynamic-per-token quantization.
@@ -738,7 +739,6 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     input_azp = None if symmetric else torch.empty_like(input_scales,
                                                         dtype=torch.int32)
-    ops = torch.ops._C_cpu if input.device.type == "cpu" else torch.ops._C
     ops.dynamic_scaled_int8_quant(output, input, input_scales, input_azp)
     return output, input_scales, input_azp
 
