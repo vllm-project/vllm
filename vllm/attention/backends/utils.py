@@ -369,7 +369,7 @@ class CommonAttentionState(AttentionState):
             self._prepare_input_buffers_for_enc_dec_model(
                 attn_metadata, input_buffers)
 
-    def plan(self, model_input, model) -> None:
+    def begin_forward(self, model_input, model) -> None:
         return
 
     def _update_captured_metadata_for_enc_dec_model(self, batch_size: int,
