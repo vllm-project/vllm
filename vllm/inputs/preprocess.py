@@ -1,6 +1,7 @@
 import asyncio
 from typing import List, Optional, Union
 
+import torch
 from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
@@ -171,6 +172,13 @@ class InputPreprocessor:
 
         return prompt_token_ids
 
+    def _validate_embed_inputs(self, prompt_embeds: torch.Tensor):
+        if len(prompt_embeds.shape) != 2:
+            raise ValueError("Embeddings should be a 2D input with shape "
+                             "`(num_tokens, embed_dim)`")
+
+        return prompt_embeds
+
     def _tokenize_prompt(
         self,
         prompt: str,
@@ -339,17 +347,18 @@ class InputPreprocessor:
         elif encoder_inputs["type"] == "embed":
             raise NotImplementedError("Embedding inputs are not supported for "
                                       "encoder-decoder models yet")
+            encoder_inputs["prompt_embeds"] = self._validate_embed_inputs(
+                encoder_inputs["prompt_embeds"])
         else:
             assert_never(encoder_inputs)
 
         if decoder_inputs["type"] == "token":
-            if "prompt_token_ids" in decoder_inputs:
-                decoder_inputs["prompt_token_ids"] = (
-                    self._prepare_decoder_input_ids_for_generation(
-                        decoder_inputs["prompt_token_ids"],
-                        force_bos=("multi_modal_data" not in encoder_inputs and
-                                   "multi_modal_data" not in decoder_inputs),
-                    ))
+            decoder_inputs["prompt_token_ids"] = (
+                self._prepare_decoder_input_ids_for_generation(
+                    decoder_inputs["prompt_token_ids"],
+                    force_bos=("multi_modal_data" not in encoder_inputs
+                               and "multi_modal_data" not in decoder_inputs),
+                ))
 
             if "multi_modal_data" in decoder_inputs:
                 raise ValueError("Multi-modal decoder inputs of encoder-"
@@ -357,6 +366,8 @@ class InputPreprocessor:
         elif decoder_inputs["type"] == "embed":
             raise NotImplementedError("Embedding inputs are not supported for "
                                       "encoder-decoder models yet")
+            decoder_inputs["prompt_embeds"] = self._validate_embed_inputs(
+                decoder_inputs["prompt_embeds"])
         elif decoder_inputs["type"] == "empty":
             pass
         else:
@@ -473,13 +484,13 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> DecoderOnlyInputs:
         if prompt_inputs["type"] == "token":
-            if "prompt_token_ids" in prompt_inputs:
-                prompt_inputs["prompt_token_ids"] = self._apply_prompt_adapter(
-                    prompt_inputs["prompt_token_ids"],
-                    prompt_adapter_request=prompt_adapter_request,
-                )
+            prompt_inputs["prompt_token_ids"] = self._apply_prompt_adapter(
+                prompt_inputs["prompt_token_ids"],
+                prompt_adapter_request=prompt_adapter_request,
+            )
         elif prompt_inputs["type"] == "embed":
-            pass
+            prompt_inputs["prompt_embeds"] = self._validate_embed_inputs(
+                prompt_inputs["prompt_embeds"])
         else:
             assert_never(prompt_inputs)
 
