@@ -73,7 +73,7 @@ def test_phimoe_routing_function():
 @pytest.mark.skipif(condition=is_cpu(),
                     reason="This test takes a lot time to run on CPU, "
                     "and vllm CI's disk space is not enough for this model.")
-@large_gpu_test(min_gb=48)
+@large_gpu_test(min_gb=80)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
