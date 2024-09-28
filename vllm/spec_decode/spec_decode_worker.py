@@ -198,6 +198,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         "draft model max_model_len is smaller than the target "
                         "model max_model_len.")
 
+        if not scorer_worker.model_runner.model_config.enforce_eager:
+            disable_mqa_scorer = True
+            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
+                        "target model is not running in eager mode.")
+
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
