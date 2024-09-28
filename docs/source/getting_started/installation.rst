@@ -48,15 +48,20 @@ You can install vLLM using pip:
 
 .. note::
 
-    vLLM also publishes a subset of wheels (Python 3.10, 3.11 with CUDA 12) for every commit since v0.5.3. You can download them with the following command:
+    vLLM also publishes wheels for Linux running on x86 platform with cuda 12 for every commit since v0.5.3. You can download and install them with the following command:
 
     .. code-block:: console
 
-        $ export VLLM_VERSION=0.6.1.post1 # vLLM's main branch version is currently set to latest released tag
-        $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
-        $ # You can also access a specific commit
-        $ # export VLLM_COMMIT=...
-        $ # pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
+        $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
+        $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+
+    You can also just download the latest wheel by running:
+
+    .. code-block:: console
+
+        $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+
+    Note that the wheels are built with Python 3.8 abi (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about abi), so they are compatible with Python 3.8 and later. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual version of wheels is contained in the wheel metadata.
 
 Build from source (without compilation)
 ---------------------------------------
@@ -67,8 +72,7 @@ The first step is to follow the previous instructions to install the latest vLLM
 
 .. code-block:: console
 
-    $ export VLLM_VERSION=0.6.1.post1
-    $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
+    $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 
 After verifying that the installation is successful, we have a script for you to copy and link directories, so that you can edit the Python code directly:
 
