@@ -407,10 +407,11 @@ def test_swap_in_infeasible(num_lookahead_slots, enable_caching):
     # Swap seq group from CPU -> GPU.
     # The number of unseen tokens is 1. If the number of existing
     # tokens plus the unseen ones and number of lookahead slots exceeds
-    # the block size (we only have 1 GPU block available) then the swap
+    # the total number of available GPU blocks then the swap
     # should fail.
     num_unseen_tokens = 1
-    if (num_lookahead_slots + num_unseen_tokens + prompt_length) <= block_size:
+    if (num_lookahead_slots + num_unseen_tokens +
+            prompt_length) <= (block_size * num_gpu_blocks):
         assert block_manager.can_swap_in(seq_group,
                                          num_lookahead_slots) == AllocStatus.OK
     else:

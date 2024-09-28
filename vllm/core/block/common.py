@@ -1,4 +1,3 @@
-import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple
@@ -359,27 +358,3 @@ def get_all_blocks_recursively(last_block: Block) -> List[Block]:
     all_blocks: List[Block] = []
     recurse(last_block, all_blocks)
     return all_blocks
-
-
-def get_num_blocks_touched_by_append_slots(num_token_ids: int,
-                                           empty_slots_in_unfilled_blocks: int,
-                                           block_size: int) -> int:
-    """Determine how many blocks will be "touched" by appending the token
-    ids.
-
-    Args:
-        num_token_ids: The number of token_ids to append
-        empty_slots_in_unfilled_blocks: The number of empty slots in
-            the partially filled blocks if any for the sequence.
-        block_size: The size of the blocks.
-    """
-    num_token_blocks = 0
-    first_chunk_size = 0
-    if empty_slots_in_unfilled_blocks > 0:
-        # If there any partially filled blocks then the first chunk size
-        # will be the number of empty slots in the block.
-        first_chunk_size = empty_slots_in_unfilled_blocks
-        num_token_blocks += 1
-    num_token_blocks += math.ceil(
-        (num_token_ids - first_chunk_size) / block_size)
-    return num_token_blocks

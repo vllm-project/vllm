@@ -1,9 +1,8 @@
 from collections import deque
-from typing import Deque, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
-                                    get_all_blocks_recursively,
-                                    get_num_blocks_touched_by_append_slots)
+                                    get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 
 Refcount = int
@@ -282,56 +281,26 @@ class NaiveBlockAllocator(BlockAllocator):
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         raise NotImplementedError("There is no promotion for naive blocks")
 
-    def get_num_blocks_touched(self,
-                               seq_id_blocks: Dict[int, List[Block]],
-                               seq_id_num_unseen_tokens: Optional[Dict[
-                                   int, int]] = None,
-                               num_lookahead_slots: int = 0) -> int:
-        """Determine the number of blocks that will be touched by
-        swapping in/out the given blocks from certain sequence
-        group with the provided num_lookahead_slots.
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
+        """Returns the number of full blocks that will be touched by
+        swapping in/out.
 
         Args:
-            seq_id_blocks (Dict[int, List[Block]]):
-                The potential blocks to swap for each sequence. The key is
-                the sequence id and the value is the blocks corresponding
-                to the sequence.
-            seq_id_num_unseen_tokens (Dict[int, int]):
-                The number of unseen tokens if any for each sequence.
-            num_lookahead_slots (int): number of lookahead slots (0 for swap 
-                out).
-        
+            blocks: List of blocks to be swapped.
         Returns:
-            int: the number of blocks that will be touched by
-                swapping in/out the given blocks and num_lookahead_slots.
+            int: the number of full blocks that will be touched by
+                swapping in/out the given blocks. Non full blocks are ignored
+                when deciding the number of blocks to touch.
         """
         # NOTE: for naive block, we use set to eliminate common blocks among
         # seqs, also we compare the empty slots in the mutable blocks with
         # lookahead slots to get the number of unique new block that are
         # needed.
         old_block_set = set()
-        seq_id_empty_slots: Dict[int, int] = dict()
-        # TODO(cade): make sure the logic is correct and clean it up.
-        for seq_id, blocks in seq_id_blocks.items():
-            seq_id_empty_slots[seq_id] = 0
-            for block in blocks:
-                if block.is_full:
-                    old_block_set.add(block.block_id)
-                else:
-                    seq_id_empty_slots[seq_id] = block.num_empty_slots
-
-        new_block_count = 0
-        for seq_id, _ in seq_id_blocks.items():
-            num_tokens_to_append = num_lookahead_slots
-            if (seq_id_num_unseen_tokens is not None
-                    and seq_id in seq_id_num_unseen_tokens):
-                num_tokens_to_append += seq_id_num_unseen_tokens[seq_id]
-            if num_tokens_to_append > 0:
-                new_block_count += get_num_blocks_touched_by_append_slots(
-                    num_tokens_to_append, seq_id_empty_slots[seq_id],
-                    self._block_size)
-        num_touched_blocks = new_block_count + len(old_block_set)
-        return num_touched_blocks
+        for block in blocks:
+            if block.is_full:
+                old_block_set.add(block)
+        return len(old_block_set)
 
     def swap_out(self, blocks: List[Block]) -> None:
         for block in blocks:
