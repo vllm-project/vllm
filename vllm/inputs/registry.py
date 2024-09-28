@@ -11,7 +11,7 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.utils import get_allowed_kwarg_only_overrides, print_warning_once
 
-from .data import DecoderOnlyInputs
+from .data import ProcessorInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -99,7 +99,7 @@ class _MultiModalCounts(UserDict):
             raise KeyError(msg) from exc
 
 
-InputProcessor = Callable[[InputContext, DecoderOnlyInputs], DecoderOnlyInputs]
+InputProcessor = Callable[[InputContext, ProcessorInputs], ProcessorInputs]
 """Preprocess the inputs to the model."""
 
 
@@ -252,9 +252,8 @@ class InputRegistry:
 
         return seq_data, mm_data
 
-    def _default_input_processor(
-            self, ctx: InputContext,
-            inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
+    def _default_input_processor(self, ctx: InputContext,
+                                 inputs: ProcessorInputs) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
 
@@ -286,8 +285,11 @@ class InputRegistry:
         return self._input_processors_by_model_type \
             .get(model_cls, self._default_input_processor)
 
-    def process_input(self, model_config: "ModelConfig",
-                      inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
+    def process_input(
+        self,
+        model_config: "ModelConfig",
+        inputs: ProcessorInputs,
+    ) -> ProcessorInputs:
         """
         Apply an input processor to an instance of model inputs.
 

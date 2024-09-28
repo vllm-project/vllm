@@ -28,9 +28,9 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderInputs, InputRegistry, PromptType)
-from vllm.inputs.parse import is_valid_encoder_decoder_inputs
+from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
+                         PromptType)
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -637,7 +637,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
+        processed_inputs: ProcessorInputs,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -656,7 +656,7 @@ class LLMEngine:
                        lora_request, prompt_adapter_request)
 
         encoder_seq = None
-        if is_valid_encoder_decoder_inputs(processed_inputs):
+        if is_encoder_decoder_inputs(processed_inputs):
             encoder_seq = Sequence(seq_id, processed_inputs, block_size,
                                    eos_token_id, lora_request,
                                    prompt_adapter_request)
@@ -1876,9 +1876,8 @@ class LLMEngine:
         return False, (f"Model {self.model_config.model} does not support "
                        "input embeddings, but prompt_embeds was provided.")
 
-    def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
-                                                   EncoderDecoderInputs]):
-        if is_valid_encoder_decoder_inputs(inputs):
+    def _validate_model_inputs(self, inputs: ProcessorInputs):
+        if is_encoder_decoder_inputs(inputs):
             prompt_ids = inputs["encoder"].get("prompt_token_ids")
             prompt_embeds = inputs["encoder"].get("prompt_embeds")
         else:

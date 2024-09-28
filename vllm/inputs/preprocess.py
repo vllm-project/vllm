@@ -12,8 +12,8 @@ from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_warning_once
 
 from .data import (DecoderOnlyInputs, EmptyInputs, EncoderDecoderInputs,
-                   PromptType, SingletonPrompt, embed_inputs, empty_inputs,
-                   token_inputs)
+                   ProcessorInputs, PromptType, SingletonPrompt, embed_inputs,
+                   empty_inputs, token_inputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
@@ -555,7 +555,7 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> Union[DecoderOnlyInputs, EncoderDecoderInputs]:
+    ) -> ProcessorInputs:
         """Preprocess the input prompt."""
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of
@@ -583,7 +583,7 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> Union[DecoderOnlyInputs, EncoderDecoderInputs]:
+    ) -> ProcessorInputs:
         """Async version of :meth:`preprocess`."""
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of

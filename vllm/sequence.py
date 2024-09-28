@@ -13,7 +13,7 @@ from typing import Set, Tuple, Union, cast
 import msgspec
 import torch
 
-from vllm.inputs.parse import is_valid_encoder_decoder_inputs
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -439,7 +439,7 @@ class Sequence:
     def prompt(self) -> Optional[str]:
         # Select decoder or encoder input prompt str, as appropriate
         inputs = self.inputs
-        if is_valid_encoder_decoder_inputs(inputs):
+        if is_encoder_decoder_inputs(inputs):
             prompt = inputs["encoder"].get("prompt")
         else:
             prompt = cast(Optional[str], inputs.get("prompt"))
@@ -450,7 +450,7 @@ class Sequence:
     def prompt_token_ids(self) -> List[int]:
         # Select decoder or encoder input prompt token ids, as appropriate
         inputs = self.inputs
-        if is_valid_encoder_decoder_inputs(inputs):
+        if is_encoder_decoder_inputs(inputs):
             prompt_token_ids = inputs["encoder"].get("prompt_token_ids")
         else:
             prompt_token_ids = cast(Optional[List[int]],
@@ -462,7 +462,7 @@ class Sequence:
     def prompt_embeds(self) -> Optional[torch.Tensor]:
         # Select decoder or encoder input prompt embeds, as appropriate
         inputs = self.inputs
-        if is_valid_encoder_decoder_inputs(inputs):
+        if is_encoder_decoder_inputs(inputs):
             prompt_embeds = inputs["encoder"].get("prompt_embeds")
         else:
             prompt_embeds = cast(Optional[torch.Tensor],
@@ -473,7 +473,7 @@ class Sequence:
     @cached_property
     def multi_modal_data(self) -> "MultiModalDataDict":
         inputs = self.inputs
-        if is_valid_encoder_decoder_inputs(inputs):
+        if is_encoder_decoder_inputs(inputs):
             multi_modal_data = inputs["encoder"].get("multi_modal_data")
         else:
             multi_modal_data = cast(Optional["MultiModalDataDict"],

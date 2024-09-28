@@ -216,12 +216,11 @@ class EncoderDecoderInputs(TypedDict):
     decoder: Union[EmptyInputs, TokenInputs]
     """The inputs for the decoder portion."""
 
-    encoder_multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
-    """
-    Optional multi-modal data to pass to the encoder model,
-    if the model supports it.
-    """
 
+ProcessorInputs = Union[DecoderOnlyInputs, EncoderDecoderInputs]
+"""
+The inputs to :data:`vllm.inputs.InputProcessor`.
+"""
 
 _T1 = TypeVar("_T1", bound=SingletonPrompt, default=SingletonPrompt)
 _T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)
