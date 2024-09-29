@@ -346,12 +346,12 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
 
     // Thread 0 will load the last elements of the previous chunk, so we initialize those to 0.
     if (tidx == 0) {
-        input_t zeros[kNElts] = {0};
+        input_t initial_state[kNElts] = {0};
         if (has_initial_state) {
             #pragma unroll
-            for (int w = 0; w < kWidth - 1; ++w){ zeros[kNElts - 1 - (kWidth - 2) + w ] = conv_states[w]; }
+            for (int w = 0; w < kWidth - 1; ++w){ initial_state[kNElts - 1 - (kWidth - 2) + w ] = conv_states[w]; }
         }
-        smem_exchange[kNThreads - 1] = reinterpret_cast<vec_t *>(zeros)[0];
+        smem_exchange[kNThreads - 1] = reinterpret_cast<vec_t *>(initial_state)[0];
     }
 
     float weight_vals[kWidth];
