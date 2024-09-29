@@ -10,6 +10,12 @@ from vllm.sequence import IntermediateTensors
 
 
 def support_compile_llama_style(cls: type):
+    """
+    A decorator to add support for compiling the forward method of a class.
+    If a module's **forward signature** is compatible with llama, this 
+    decorator can be used to enable the compilation of the forward method.
+    """
+
     # take care of method resolution order
     # make sure super().__init__ is called on the base class
     #  other than TorchCompileWrapperWithCustomDispatcher
