@@ -39,17 +39,9 @@ def assert_enc_dec_mr_supported_scenario(
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_PP'])
 
-    if enc_dec_mr.model_config.is_multimodal_model:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_MM'])
-
     if enc_dec_mr.scheduler_config.num_lookahead_slots > 0:
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_SPEC_DEC'])
-
-    if not enc_dec_mr.model_config.enforce_eager:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CUDA_GRAPH'])
 
     if enc_dec_mr.prompt_adapter_config is not None:
         raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_ERR_STRS[
