@@ -19,7 +19,8 @@ def test_compile_correctness():
         llm = LLM(model="meta-llama/Meta-Llama-3-8B",
                   enforce_eager=True,
                   tensor_parallel_size=1,
-                  disable_custom_all_reduce=True)
+                  disable_custom_all_reduce=True,
+                  gpu_memory_utilization=0.3)
         outputs = llm.generate(prompts, sampling_params)
         all_outputs.append(outputs)
     reference_outputs = all_outputs[0]
