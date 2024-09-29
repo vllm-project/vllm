@@ -1,8 +1,12 @@
 from typing import List
 
+import pytest
+
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
+
+from ..utils import multi_gpu_test
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
@@ -53,19 +57,39 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
-def test_minicpmv_lora(minicpmv_lora_files):
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("fully_sharded", [True, False])
+def test_minicpmv_tp2(minicpmv_lora_files, fully_sharded):
     llm = vllm.LLM(
         MODEL_PATH,
-        max_num_seqs=2,
         enable_lora=True,
+        max_num_seqs=2,
         max_loras=4,
         max_lora_rank=64,
+        tensor_parallel_size=2,
         trust_remote_code=True,
+        fully_sharded_loras=fully_sharded,
     )
 
-    output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
+    output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
+
     for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output1[i])
-    output2 = do_sample(llm, minicpmv_lora_files, lora_id=2)
+        assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.parametrize("fully_sharded", [True, False])
+def test_minicpmv_tp4(minicpmv_lora_files, fully_sharded):
+    llm = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        max_num_seqs=2,
+        max_loras=4,
+        max_lora_rank=64,
+        tensor_parallel_size=4,
+        trust_remote_code=True,
+        fully_sharded_loras=fully_sharded,
+    )
+    output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output2[i])
+        assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
