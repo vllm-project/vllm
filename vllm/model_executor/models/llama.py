@@ -439,7 +439,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA,
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
-        self._use_torch_compile = envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE
+        self._use_torch_compile = envs.VLLM_TORCH_COMPILE_LEVEL > 0
         if self._use_torch_compile:
             TorchCompileWrapperWithCustomDispatcher.__init__(self)
 

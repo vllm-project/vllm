@@ -36,19 +36,11 @@ class TorchCompileWrapperWithCustomDispatcher:
             from vllm.plugins import get_torch_compile_backend
             backend = get_torch_compile_backend()
             if backend is None:
-                # otherwise, use the default backend,
-                # which compiles one general graph and
-                # several specialized graphs
-                from vllm.compilation.backends import vllm_backend
-                # in this case, users can only customize the inductor config
-                from vllm.plugins import get_inductor_additional_configs
-                additional_configs = get_inductor_additional_configs()
-
-                from functools import partial
-                backend = partial(
-                    vllm_backend,
-                    model=weakref.ref(self),
-                    additional_inductor_config=additional_configs)
+                from vllm.compilation.backends import get_default_backend
+                backend = get_default_backend(envs.VLLM_TORCH_COMPILE_LEVEL)
+                if not isinstance(backend, str):
+                    from functools import partial
+                    backend = partial(backend, model=weakref.ref(self))
 
             compiled_callable = torch.compile(
                 self.forward,

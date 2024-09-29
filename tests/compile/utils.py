@@ -70,8 +70,8 @@ if not is_hip() and is_quant_method_supported("awq"):
 
 def check_full_graph_support(model, model_kwargs, backend, tp_size=1):
     # make sure these models can be captured in full graph mode
-    if "VLLM_TEST_DYNAMO_GRAPH_CAPTURE" not in os.environ:
-        os.environ["VLLM_TEST_DYNAMO_GRAPH_CAPTURE"] = "1"
+    if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
+        os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "1"
         os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
 
     # Inductor doesn't support fp8/gptq_marlin_24 yet.

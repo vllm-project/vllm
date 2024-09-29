@@ -44,13 +44,13 @@ def get_torch_compile_backend() -> Optional[Union[Callable, str]]:
     return _torch_compile_backend
 
 
-_inductor_additional_configs: Optional[Dict] = None
+_inductor_additional_configs: Dict = {}
 
 
-def set_inductor_additional_configs(configs: Optional[Dict]):
+def set_inductor_additional_configs(configs: Dict):
     global _inductor_additional_configs
     _inductor_additional_configs = configs
 
 
-def get_inductor_additional_configs() -> Optional[Dict]:
+def get_inductor_additional_configs() -> Dict:
     return _inductor_additional_configs
