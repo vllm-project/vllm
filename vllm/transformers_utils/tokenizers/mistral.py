@@ -130,10 +130,6 @@ class MistralTokenizer:
     def vocab_size(self) -> int:
         return len(self._vocab)
 
-    @property
-    def vocab(self) -> Dict[str, int]:
-        return self._vocab
-
     def __len__(self) -> int:
         return self.vocab_size
 

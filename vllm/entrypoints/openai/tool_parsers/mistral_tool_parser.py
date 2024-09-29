@@ -45,7 +45,7 @@ class MistralToolParser(ToolParser):
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "[TOOL_CALLS]"
-        self.bot_token_id = self.model_tokenizer.vocab[self.bot_token]
+        self.bot_token_id = self.model_tokenizer.get_vocab()[self.bot_token]
         self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
 
     def extract_tool_calls(
