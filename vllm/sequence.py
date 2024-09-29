@@ -538,7 +538,7 @@ class Sequence:
 
         return self.data._cached_all_token_ids[-num_new_tokens:]
 
-    def hash_of_block(self, logical_idx: int, pre_block_hash: int) -> int:
+    def hash_of_block(self, logical_idx: int, pre_block_hash: Optional[int] = None) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
         # Compute the number of tokens in the sequence
         # The current hashing function is O(L).
