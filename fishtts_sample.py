@@ -1,9 +1,10 @@
+import argparse
 import asyncio
 import threading
 import time
 from typing import List
 
-import numpy
+import numpy as np
 import onnx
 from vllm import LLM, SamplingParams
 from tokenizers import Tokenizer
@@ -129,14 +130,10 @@ for text in texts:
     token_ids.append(7003)
     llm_inputs.append(token_ids)
 
-streaming=False
 chunk_size=20
 frame_shift=1200
 hidden_size = 1536
 speaker_embedding = torch.zeros((1, 192, 1), dtype=torch.float32).to('cuda')
-so = onnxruntime.SessionOptions()
-so.enable_profiling = True
-ort_session = onnxruntime.InferenceSession('/data/fishtts/genertor.onnx', providers=['CUDAExecutionProvider'], sess_options=so)
 sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], ignore_eos=True, max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
 prompts = [
     {"prompt_token_ids": llm_input} for llm_input in llm_inputs
@@ -178,11 +175,11 @@ def generate_chunk_audio(latent):
     return onnxruntime_outputs
 
 def save_audio(total_audio, path):
-    total_audio = numpy.concatenate(total_audio, axis=0)
+    total_audio = np.concatenate(total_audio, axis=0)
     sf.write(path, total_audio, 24000)
 
-if not streaming:
-    llm = LLM(model='/data/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True)
+def run():
+    llm = LLM(model='/data/fishtts', gpu_memory_utilization=0.7, dtype=torch.float32, skip_tokenizer_init=True)
     for i in range(len(prompts)):
         metrics = Metrics()
         metrics.time_start = time.perf_counter()
@@ -214,63 +211,112 @@ if not streaming:
         metrics.time_end = time.perf_counter()
         metrics.calc_non_streaming()
 
-
-else:
-    engine_args = AsyncEngineArgs(model='/data/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True)
-    model = AsyncLLMEngine.from_engine_args(engine_args)
-
-    def generate_audio_streaming(latent_queue, id, metrics: Metrics):
-        latent_buffer = []
-        audio_data_buffer = []
-        while True:
-            latent = latent_queue.get()
-            if latent is None:
-                break
-            latent_buffer.append(latent)
-            if len(latent_buffer) == chunk_size:
-                latent = torch.stack(latent_buffer, 0).unsqueeze(0).to('cuda')
-                onnxruntime_outputs = generate_chunk_audio(latent)
-                audio_data_buffer.append(onnxruntime_outputs)
-                latent_buffer = []
-
-                if metrics.time_first_byte == 0:
-                    metrics.time_first_byte = time.perf_counter()
-
-        if len(latent_buffer) > 0:
+async def generate_audio_streaming(latent_queue: asyncio.Queue, id, metrics: Metrics):
+    latent_buffer = []
+    audio_data_buffer = []
+    while True:
+        latent = await latent_queue.get()
+        if latent is None:
+            break
+        latent_buffer.append(latent)
+        if len(latent_buffer) == chunk_size:
             latent = torch.stack(latent_buffer, 0).unsqueeze(0).to('cuda')
-            onnxruntime_outputs = generate_chunk_audio(latent)
-            audio_data_buffer.append(onnxruntime_outputs)
-            
-        save_audio(audio_data_buffer, f'hh_{id}.wav')
-        print(f'save audio {id}')
+            audio_data_buffer.append(generate_chunk_audio(latent))
+            latent_buffer = []
+
+            if metrics.time_first_byte == 0:
+                metrics.time_first_byte = time.perf_counter()
+
+    if len(latent_buffer) > 0:
+        latent = torch.stack(latent_buffer, 0).unsqueeze(0).to('cuda')
+        audio_data_buffer.append(generate_chunk_audio(latent))
         
+    save_audio(audio_data_buffer, f'hh_{id}.wav')
+    print(f'save audio {id}')
+
+async def generate_token_streaming(engine: AsyncLLMEngine, prompt, id, latent_queue: asyncio.Queue, metrics: Metrics):
+    results_generator = engine.generate(prompt, sampling_params, request_id=id)
+    tokens = []
+    async for request_output in results_generator:
+        metrics.token_times.append(time.perf_counter())
+        token_ids = request_output.outputs[0].token_ids[-1]
+        latent = request_output.outputs[0].hidden_states[-1]
+        tokens.append(token_ids)
+        latent_queue.put_nowait(latent)
+
+    latent_queue.put_nowait(None)
+    print(f'{id}:  {len(tokens)}')
+
+async def get_request(
+    input_requests,
+    request_rate: float,
+):
+    requests = iter(input_requests)
+    for request in requests:
+        yield request
+
+        if request_rate == float("inf"):
+            # If the request rate is infinity, then we don't need to wait.
+            continue
+
+        # Sample the request interval from the exponential distribution.
+        interval = np.random.exponential(1.0 / request_rate)
+        # The next request will be sent after the interval.
+        await asyncio.sleep(interval)
+
+async def generate_streaming(engine, prompt, request_id) -> Metrics:
+    metrics = Metrics()
+    metrics.time_start = time.perf_counter()
     
-    async def generate_token_streaming(prompt, id, latent_queue, metrics: Metrics):
-        results_generator = model.generate(prompt, sampling_params, request_id=id)
-        tokens = []
-        async for request_output in results_generator:
-            metrics.token_times.append(time.perf_counter())
-            token_ids = request_output.outputs[0].token_ids[-1]
-            latent = request_output.outputs[0].hidden_states[-1]
-            tokens.append(token_ids)
-            latent_queue.put(latent)
+    latent_queue = asyncio.Queue()
+    vllm_task = asyncio.create_task(generate_token_streaming(engine, prompt, request_id, latent_queue, metrics))
+    generator_task = asyncio.create_task(generate_audio_streaming(latent_queue, request_id, metrics))
+    await vllm_task
+    await generator_task
+    metrics.time_end = time.perf_counter()
+    return metrics
 
-        latent_queue.put(None)
-        print(f'{id}:  {len(tokens)}')
-
-    async def generate(prompts):
+async def run_streaming(request_rate):
+    engine_args = AsyncEngineArgs(model='/data/fishtts', gpu_memory_utilization=0.7, dtype=torch.float32, skip_tokenizer_init=True)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    if request_rate < 0:
         for i in range(len(prompts)):
-            metrics = Metrics()
-            metrics.time_start = time.perf_counter()
-            
-            q = queue.Queue()
-            t = asyncio.create_task(generate_token_streaming(prompts[i], i, q, metrics))
-            g = threading.Thread(target=generate_audio_streaming, args=(q, i, metrics))
-            g.start()
-            await t
-            g.join()
-            metrics.time_end = time.perf_counter()
+            me = await generate_streaming(engine, prompts[i], i)
+            me.calc_streaming()
+    else:
+        tasks: List[asyncio.Task] = []
+        request_id = 0
+        me = await generate_streaming(engine, prompts[0], 0)
+        async for prompt in get_request(prompts, request_rate):
+            tasks.append(asyncio.create_task(generate_streaming(engine, prompt, request_id)))
+            request_id += 1
+        
+        metrics_list: List[Metrics] = await asyncio.gather(*tasks)
+        for metrics in metrics_list:
             metrics.calc_streaming()
 
-    asyncio.run(generate(prompts))
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--streaming", action="store_true")
+    parser.add_argument("--request-rate",
+                        type=float,
+                        default=-1,
+                        help="request rate per second")
+    parser.add_argument("--chunk-size",
+                        type=int,
+                        default=20,
+                        help="audio chunk size")
 
+    args = parser.parse_args()
+    
+    if args.chunk_size:
+        chunk_size = args.chunk_size
+    
+    ort_session = onnxruntime.InferenceSession('/data/fishtts/genertor.onnx', providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider'])
+    warmup_input = {k.name: to_numpy(v) for k, v in zip(ort_session.get_inputs(), (torch.zeros(1, chunk_size, hidden_size).to('cuda'), speaker_embedding))}
+    warmup_outputs = ort_session.run(None, warmup_input)
+
+    if not args.streaming:
+        run()
+    else:
+        asyncio.run(run_streaming(args.request_rate))
