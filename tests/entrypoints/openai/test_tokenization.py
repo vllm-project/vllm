@@ -113,30 +113,31 @@ async def test_tokenize_chat(client: openai.AsyncOpenAI, model_name: str,
                         "content": "Sure,"
                     })
 
-            prompt = tokenizer.apply_chat_template(
-                add_generation_prompt=add_generation,
-                continue_final_message=continue_final,
-                conversation=conversation,
-                tokenize=False)
-            tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
+                prompt = tokenizer.apply_chat_template(
+                    add_generation_prompt=add_generation,
+                    continue_final_message=continue_final,
+                    conversation=conversation,
+                    tokenize=False)
+                tokens = tokenizer.encode(prompt,
+                                          add_special_tokens=add_special)
 
-            response = requests.post(base_url + "/tokenize",
-                                     json={
-                                         "add_generation_prompt":
-                                         add_generation,
-                                         "continue_final_message":
-                                         continue_final,
-                                         "add_special_tokens": add_special,
-                                         "messages": conversation,
-                                         "model": model_name
-                                     })
-            response.raise_for_status()
+                response = requests.post(base_url + "/tokenize",
+                                         json={
+                                             "add_generation_prompt":
+                                             add_generation,
+                                             "continue_final_message":
+                                             continue_final,
+                                             "add_special_tokens": add_special,
+                                             "messages": conversation,
+                                             "model": model_name
+                                         })
+                response.raise_for_status()
 
-            assert response.json() == {
-                "tokens": tokens,
-                "count": len(tokens),
-                "max_model_len": 8192
-            }
+                assert response.json() == {
+                    "tokens": tokens,
+                    "count": len(tokens),
+                    "max_model_len": 8192
+                }
 
 
 @pytest.mark.asyncio
