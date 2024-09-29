@@ -75,8 +75,6 @@ class VideoPlugin(ImagePlugin):
                 raise
 
             return MultiModalInputs(batch_data)
-        else:
-            raise NotImplementedError("Multi batch is not supported yet")
 
         raise TypeError(f"Invalid video type: {type(data)}")
 
