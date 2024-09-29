@@ -54,11 +54,11 @@ struct SSMParamsBase {
     void *__restrict__ delta_ptr;
     void *__restrict__ delta_bias_ptr;
     void *__restrict__ out_ptr;
-    void *__restrict__ x_ptr;
+    void *__restrict__ ssm_states_ptr;
     void *__restrict__ z_ptr;
     void *__restrict__ out_z_ptr;
 
-    void *__restrict__ cu_seq_len_ptr;
+    void *__restrict__ seq_start_loc_ptr;
     void *__restrict__ cache_indices_ptr;
     void *__restrict__ has_initial_state_ptr;
 

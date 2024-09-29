@@ -105,10 +105,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     int seqlen = params.seqlen;
     int sequence_start_index = batch_id;
     if constexpr (kVarlen){
-        int *cu_seq_len = reinterpret_cast<int *>(params.cu_seq_len_ptr);
-        sequence_start_index = batch_id == 0 ? 0 : cu_seq_len[batch_id - 1];
-        const int sequence_end_index = cu_seq_len[batch_id];
-        seqlen = sequence_end_index - sequence_start_index;
+        int *seq_start_loc = reinterpret_cast<int *>(params.seq_start_loc_ptr);
+        sequence_start_index = seq_start_loc[batch_id];
+        seqlen = seq_start_loc[batch_id + 1] - sequence_start_index;
     }
     const bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
         : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
@@ -125,7 +124,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + sequence_start_index * params.B_batch_stride + group_id * params.B_group_stride;
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + sequence_start_index * params.C_batch_stride + group_id * params.C_group_stride;
-    input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + (cache_index * params.dim + dim_id * kNRows) * params.dstate;
+    input_t *ssm_states = reinterpret_cast<input_t *>(params.ssm_states_ptr) + (cache_index * params.dim + dim_id * kNRows) * params.dstate;
 
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
@@ -241,7 +240,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 }
                 // Initialize running total
 
-                scan_t running_prefix = chunk > 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.0, has_initial_state ? float(x[state_idx]): 0.0);
+                scan_t running_prefix = chunk > 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.0, has_initial_state ? float(ssm_states[state_idx]): 0.0);
 
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
@@ -252,7 +251,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 if (threadIdx.x == 0) {
                     smem_running_prefix[state_idx] = prefix_op.running_prefix;
                     if (chunk == n_chunks - 1) {
-                        x[state_idx] = input_t(prefix_op.running_prefix.y);
+                        ssm_states[state_idx] = input_t(prefix_op.running_prefix.y);
                     }
                 }
                 #pragma unroll
@@ -311,7 +310,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     constexpr bool kIsVariableC = true;
     constexpr bool kHasZ = true;
     BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-        BOOL_SWITCH(params.cu_seq_len_ptr != nullptr , kVarlen, [&] {
+        BOOL_SWITCH(params.seq_start_loc_ptr != nullptr , kVarlen, [&] {
             using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kVarlen, input_t, weight_t>;
             constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
             dim3 grid(params.batch, params.dim / kNRows);
@@ -400,14 +399,14 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const torch::Tensor out,
                         const torch::Tensor z,
                         const torch::Tensor out_z,
-                        void* D_ptr,
-                        void* delta_bias_ptr,
-                        void* x_ptr,
+                        const c10::optional<at::Tensor>& D,
+                        const c10::optional<at::Tensor>& delta_bias,
+                        const torch::Tensor ssm_states,
                         bool has_z, 
                         bool delta_softplus,
-                        void* cu_seq_len_ptr,
-                        void* cache_indices_ptr,
-                        void* has_initial_state_ptr,
+                        const c10::optional<at::Tensor>& seq_start_loc,
+                        const c10::optional<at::Tensor>& cache_indices,
+                        const c10::optional<at::Tensor>& has_initial_state,
                         bool varlen) {
 
     // Reset the parameters
@@ -432,15 +431,15 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.A_ptr = A.data_ptr();
     params.B_ptr = B.data_ptr();
     params.C_ptr = C.data_ptr();
-    params.D_ptr = D_ptr;
-    params.delta_bias_ptr = delta_bias_ptr;
+    params.D_ptr = D.has_value() ? D.value().data_ptr() : nullptr;
+    params.delta_bias_ptr = delta_bias.has_value() ? delta_bias.value().data_ptr() : nullptr;
     params.out_ptr = out.data_ptr();
-    params.x_ptr = x_ptr;
+    params.ssm_states_ptr = ssm_states.data_ptr();
     params.z_ptr = has_z ? z.data_ptr() : nullptr;
     params.out_z_ptr = has_z ? out_z.data_ptr() : nullptr;
-    params.cu_seq_len_ptr = cu_seq_len_ptr;
-    params.cache_indices_ptr = cache_indices_ptr;
-    params.has_initial_state_ptr = has_initial_state_ptr;
+    params.seq_start_loc_ptr = seq_start_loc.has_value() ? seq_start_loc.value().data_ptr() : nullptr;
+    params.cache_indices_ptr = cache_indices.has_value() ? cache_indices.value().data_ptr() : nullptr;
+    params.has_initial_state_ptr = has_initial_state.has_value() ? has_initial_state.value().data_ptr() : nullptr;
 
 
     // All stride are in elements, not bytes.
@@ -505,10 +504,10 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const c10::optional<torch::Tensor> &z_,
                   const c10::optional<torch::Tensor> &delta_bias_,
                   bool delta_softplus,
-                  const c10::optional<torch::Tensor> &cu_seq_len,
+                  const c10::optional<torch::Tensor> &seq_start_loc,
                   const c10::optional<torch::Tensor> &cache_indices,
                   const c10::optional<torch::Tensor> &has_initial_state,
-                  const c10::optional<torch::Tensor> &ssm_states) {
+                  const torch::Tensor &ssm_states) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -531,8 +530,8 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     TORCH_CHECK(delta.stride(-1) == 1 || delta.size(-1) == 1);
 
     const auto sizes = u.sizes();
-    const bool varlen = cu_seq_len.has_value();
-    const int batch_size = varlen ? cu_seq_len.value().sizes()[0] : sizes[0];
+    const bool varlen = seq_start_loc.has_value();
+    const int batch_size = varlen ? seq_start_loc.value().sizes()[0] - 1 : sizes[0];
     const int dim = varlen ? sizes[0] : sizes[1];
     const int seqlen = varlen ? sizes[1] : sizes[2];
     const int dstate = A.size(1);
@@ -589,11 +588,10 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     }
 
 
-    if (cu_seq_len.has_value()) {
-        auto cu_seq_len_ = cu_seq_len.value();
-        TORCH_CHECK(cu_seq_len_.scalar_type() == at::ScalarType::Int);
-        TORCH_CHECK(cu_seq_len_.is_cuda());
-        CHECK_SHAPE(cu_seq_len_, batch_size);
+    if (seq_start_loc.has_value()) {
+        auto seq_start_loc_ = seq_start_loc.value();
+        TORCH_CHECK(seq_start_loc_.scalar_type() == at::ScalarType::Int);
+        TORCH_CHECK(seq_start_loc_.is_cuda());
     }
 
 
@@ -625,42 +623,22 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     // at::Tensor out = torch::empty_like(u);
     // Right now u has BHL layout and delta has HBL layout, and we want out to have HBL layout
     at::Tensor out = delta;
-    TORCH_CHECK(ssm_states.has_value(), "ssm_states must be provided, shape required is B dim dstate");
-    auto _ssm_states = ssm_states.value();
-    TORCH_CHECK(_ssm_states.scalar_type() == input_type);
-    TORCH_CHECK(_ssm_states.is_cuda());
-    TORCH_CHECK(_ssm_states.stride(-1) == 1);
-    CHECK_SHAPE(_ssm_states, batch_size, dim, dstate);
-
-    if (cu_seq_len.has_value()) {
-        auto cu_seq_len_ = cu_seq_len.value();
-        TORCH_CHECK(cu_seq_len_.is_cuda());
-        TORCH_CHECK(cu_seq_len_.stride(-1) == 1);
-        CHECK_SHAPE(cu_seq_len_, batch_size);
-    }
-
-    if (cache_indices.has_value()) {
-        auto cache_indices_ = cache_indices.value();
-        TORCH_CHECK(cache_indices_.is_cuda());
-        CHECK_SHAPE(cache_indices_, batch_size);
-    }
-    if (has_initial_state.has_value()) {
-        auto has_initial_state_ = has_initial_state.value();
-        TORCH_CHECK(has_initial_state_.is_cuda());
-        CHECK_SHAPE(has_initial_state_, batch_size);
-    }
+    TORCH_CHECK(ssm_states.scalar_type() == input_type);
+    TORCH_CHECK(ssm_states.is_cuda());
+    TORCH_CHECK(ssm_states.stride(-1) == 1);
+    CHECK_SHAPE(ssm_states, batch_size, dim, dstate);
 
     SSMParamsBase params;
     set_ssm_params_fwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
                        u, delta, A, B, C, out, z, out_z,
-                       D_.has_value() ? D_.value().data_ptr() : nullptr,
-                       delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
-                       ssm_states.value().data_ptr(),
+                       D_,
+                       delta_bias_,
+                       ssm_states,
                        has_z,
                        delta_softplus,
-                       cu_seq_len.has_value() ? cu_seq_len.value().data_ptr(): nullptr,
-                       cache_indices.has_value() ? cache_indices.value().data_ptr(): nullptr,
-                       has_initial_state.has_value() ? has_initial_state.value().data_ptr(): nullptr,
+                       seq_start_loc,
+                       cache_indices,
+                       has_initial_state,
                        varlen
                        );
 
