@@ -703,11 +703,12 @@ class FlashAttentionImpl(AttentionImpl):
             "key/v_scale is not supported in FlashAttention.")
 
         if not torch.compiler.is_compiling():
+            old_context = get_forward_context()
             set_forward_context(attn_metadata)
         # if torch.compiler.is_compiling(), the metadata is set
         # in the context manager from the caller of the whole model.
 
-        return torch.ops.vllm.unified_flash_attention(
+        output = torch.ops.vllm.unified_flash_attention(
             query,
             key,
             value,
@@ -723,6 +724,11 @@ class FlashAttentionImpl(AttentionImpl):
             self.alibi_slopes,
             self.logits_soft_cap,
         )
+
+        if not torch.compiler.is_compiling():
+            set_forward_context(old_context)
+
+        return output
 
 
 @torch.library.custom_op("vllm::unified_flash_attention",
