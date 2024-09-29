@@ -464,6 +464,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA,
             if len(self.compiled_codes) < 1:
                 torch._dynamo.mark_dynamic(input_ids, 0)
                 torch._dynamo.mark_dynamic(positions, 0)
+                if intermediate_tensors is not None:
+                    for tensors in intermediate_tensors.tensors.values():
+                        torch._dynamo.mark_dynamic(tensors, 0)
                 return self.compiled_callable(input_ids, positions, kv_caches,
                                               attn_metadata,
                                               intermediate_tensors)
