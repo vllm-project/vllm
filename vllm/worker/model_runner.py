@@ -1007,8 +1007,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Used to cache python objects
         self.inter_data_cache: Dict[int, PyObjectCache] = {}
+
+        # Using the PythonizationCache in Pipeline-Parallel clobbers the
+        # SequenceGroupToSample object. In Pipeline-Parallel, we have
+        # more than 1 Scheduler, resulting in a potential back-to-back
+        # prepare_model_inputs() call. This clobbers the cached
+        # SequenceGroupToSample objects, as we reset the cache during
+        # every prepare_model_inputs() call.
         self.sampling_metadata_cache: SamplingMetadataCache = \
-            SamplingMetadataCache()
+              SamplingMetadataCache() \
+                if self.parallel_config.pipeline_parallel_size == 1 else None
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
