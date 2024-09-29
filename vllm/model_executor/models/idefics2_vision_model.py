@@ -65,12 +65,10 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.position_embedding = nn.Embedding(self.num_positions,
                                                self.embed_dim)
 
-    def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        patch_attention_mask: torch.BoolTensor,
-        tgt_sizes: Optional[torch.IntTensor] = None
-    ) -> torch.Tensor:
+    def forward(self,
+                pixel_values: torch.FloatTensor,
+                patch_attention_mask: torch.BoolTensor,
+                tgt_sizes: Optional[torch.IntTensor] = None) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
         patch_embeds = self.patch_embedding(pixel_values)
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
