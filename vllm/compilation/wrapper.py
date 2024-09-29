@@ -4,7 +4,7 @@ import weakref
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 
@@ -112,6 +112,10 @@ class TorchCompileWrapperWithCustomDispatcher:
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object
+
+    def set_sizes_to_specialize(self, sizes: List[Any]):
+        """Set the sizes to specialize for the compiled code."""
+        self.sizes_to_specialize = sizes
 
     def need_to_specialize(self, runtime_shapes: Tuple[int, ...]) -> bool:
         """Check if the current runtime shapes need to be specialized.
