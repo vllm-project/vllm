@@ -29,6 +29,7 @@ from transformers import LlamaConfig
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation import forward_context
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -459,8 +460,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA,
         if not self._use_torch_compile:
             return self.forward(input_ids, positions, kv_caches, attn_metadata,
                                 intermediate_tensors)
-        with attn_metadata.attention_backend.set_current_metadata(
-                attn_metadata):
+        with forward_context(attn_metadata):
             if len(self.compiled_codes) < 1:
                 torch._dynamo.mark_dynamic(input_ids, 0)
                 torch._dynamo.mark_dynamic(positions, 0)

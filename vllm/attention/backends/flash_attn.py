@@ -1,5 +1,4 @@
 """Attention layer with FlashAttention."""
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
@@ -14,6 +13,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
+from vllm.compilation import get_forward_context, set_forward_context
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -222,20 +222,6 @@ class FlashAttentionBackend(AttentionBackend):
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
-    @contextmanager
-    @staticmethod
-    def set_current_metadata(
-            metadata: "FlashAttentionMetadata"):  # type: ignore
-        global current_metadata
-        try:
-            current_metadata = metadata
-            yield
-        finally:
-            current_metadata = None
-
-
-current_metadata: Optional["FlashAttentionMetadata"] = None
-
 
 @dataclass
 class FlashAttentionMetadata(AttentionMetadata):
@@ -295,10 +281,6 @@ class FlashAttentionMetadata(AttentionMetadata):
 
     _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
-
-    @property
-    def attention_backend(self):
-        return FlashAttentionBackend
 
     @property
     def prefill_metadata(self) -> Optional["FlashAttentionMetadata"]:
@@ -721,8 +703,7 @@ class FlashAttentionImpl(AttentionImpl):
             "key/v_scale is not supported in FlashAttention.")
 
         if not torch.compiler.is_compiling():
-            global current_metadata
-            current_metadata = attn_metadata
+            set_forward_context(attn_metadata)
         # if torch.compiler.is_compiling(), the metadata is set
         # in the context manager from the caller of the whole model.
 
@@ -767,9 +748,10 @@ def unified_flash_attention(
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
 
-    global current_metadata
+    current_metadata = get_forward_context()
     assert current_metadata is not None
-    attn_metadata = current_metadata
+    assert isinstance(current_metadata, FlashAttentionMetadata)
+    attn_metadata: FlashAttentionMetadata = current_metadata
 
     if kv_cache.numel() > 0:
         key_cache = kv_cache[0]

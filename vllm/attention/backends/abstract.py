@@ -88,12 +88,6 @@ class AttentionBackend(ABC):
                      block_size: int, num_seqs: int, num_queries: int) -> None:
         raise NotImplementedError
 
-    @contextmanager
-    @staticmethod
-    def set_current_metadata(metadata: "AttentionMetadata"):
-        """Context manager to set the current metadata."""
-        raise NotImplementedError
-
 
 @dataclass
 class AttentionMetadata:
@@ -110,10 +104,6 @@ class AttentionMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
-
-    @property
-    def attention_backend(self):
-        return AttentionBackend
 
     @property
     @abstractmethod
