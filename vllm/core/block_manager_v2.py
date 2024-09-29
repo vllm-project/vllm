@@ -1,5 +1,4 @@
 """A block manager that manages token blocks."""
-from itertools import chain
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
@@ -470,12 +469,31 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             AllocStatus: The AllocStatus for swapping in/out the given 
                 sequence_group on to the 'device'.
         """
-        blocks = self._get_blocks_for_swap(seq_group, status)
-        num_blocks_touched = self.block_allocator.get_num_blocks_touched(
-            blocks, device, num_lookahead_slots)
+        # First determine the number of blocks that will be touched by this
+        # swap. Then verify if there are available blocks in the device
+        # to perform the swap.
+        num_blocks_touched = 0
+        blocks: List[Block] = []
+        for seq in seq_group.get_seqs(status=status):
+            block_table = self.block_tables[seq.seq_id]
+            if block_table.blocks is not None:
+                # Compute the number blocks to touch for the tokens to be
+                # appended. This does NOT include the full blocks that need
+                # to be touched for the swap.
+                num_blocks_touched += \
+                    block_table.get_num_blocks_touched_by_append_slots(
+                        block_table.get_unseen_token_ids(seq.get_token_ids()),
+                        num_lookahead_slots=num_lookahead_slots)
+                blocks.extend(block_table.blocks)
+        # Compute the number of full blocks to touch and add it to the
+        # existing count of blocks to touch.
+        num_blocks_touched += self.block_allocator.get_num_full_blocks_touched(
+            blocks, device=device)
+
         watermark_blocks = 0
         if device == Device.GPU:
             watermark_blocks = self.watermark_blocks
+
         if self.block_allocator.get_num_total_blocks(
                 device) < num_blocks_touched:
             return AllocStatus.NEVER
@@ -484,23 +502,3 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             return AllocStatus.OK
         else:
             return AllocStatus.LATER
-
-    def _get_blocks_for_swap(self, seq_group: SequenceGroup,
-                             status: SequenceStatus) -> List[Block]:
-        """Returns the list of blocks those are touched by the seq_group
-        
-        Args:
-            sequence_group (SequenceGroup): The sequence group to swap in.
-            status (SequenceStatus): The status of sequence which is needed
-                for action. RUNNING for swap out and SWAPPED for swap in
-        
-        Returns:
-            The list of blocks those are touched by the seq_group.
-        """
-        blocks: Dict[int, List[Block]] = {}
-        for seq in seq_group.get_seqs(status=status):
-            block_table = self.block_tables[seq.seq_id]
-            if block_table.blocks is not None:
-                blocks[seq.seq_id] = block_table.blocks
-        combined_blocks = list(chain(*blocks.values()))
-        return combined_blocks
