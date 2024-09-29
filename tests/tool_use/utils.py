@@ -95,6 +95,14 @@ CONFIGS: Dict[str, ServerConfig] = {
             "--tool-call-parser", "granite-20b-fc", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_granite_20b_fc.jinja")
         ],
+    },
+    "granite8b": {
+        "model":
+        "ibm-granite/granite-8b-instruct",
+        "arguments": [
+            "--tool-call-parser", "granite", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
+        ],
     }
 }
 
