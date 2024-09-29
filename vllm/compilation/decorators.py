@@ -10,7 +10,10 @@ from vllm.sequence import IntermediateTensors
 
 
 def support_compile_llama_style(cls: type):
-    cls.__bases__ = (TorchCompileWrapperWithCustomDispatcher, ) + cls.__bases__
+    # take care of method resolution order
+    # make sure super().__init__ is called on the base class
+    #  other than TorchCompileWrapperWithCustomDispatcher
+    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
     old_init = cls.__init__
 
