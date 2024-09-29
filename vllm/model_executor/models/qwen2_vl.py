@@ -23,8 +23,8 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import lru_cache, partial
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple, Type,
-                    TypedDict, Union, Callable, Any)
+from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
+                    Tuple, Type, TypedDict, Union)
 
 import torch
 import torch.nn as nn
