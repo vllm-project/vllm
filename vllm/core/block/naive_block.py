@@ -4,7 +4,6 @@ from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
-from vllm.utils import cdiv
 
 Refcount = int
 
@@ -282,40 +281,26 @@ class NaiveBlockAllocator(BlockAllocator):
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         raise NotImplementedError("There is no promotion for naive blocks")
 
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               num_lookahead_slots: int = 0) -> int:
-        """Determine the number of blocks that will be touched by
-        swapping in/out the given blocks from certain sequence
-        group with the provided num_lookahead_slots.
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
+        """Returns the number of full blocks that will be touched by
+        swapping in/out.
 
         Args:
-            blocks (List[Block]): The potential blocks to swap.
-            num_lookahead_slots (int): number of lookahead slots (0 for swap 
-                out).
-        
+            blocks: List of blocks to be swapped.
         Returns:
-            int: the number of blocks that will be touched by
-                swapping in/out the given blocks and num_lookahead_slots.
+            int: the number of full blocks that will be touched by
+                swapping in/out the given blocks. Non full blocks are ignored
+                when deciding the number of blocks to touch.
         """
         # NOTE: for naive block, we use set to eliminate common blocks among
         # seqs, also we compare the empty slots in the mutable blocks with
         # lookahead slots to get the number of unique new block that are
         # needed.
         old_block_set = set()
-        new_block_count = 0
-        # TODO(cade): make sure the logic is correct and clean it up.
         for block in blocks:
-            if not block.is_full and num_lookahead_slots != 0:
-                new_block_count += 1
-                if num_lookahead_slots > block.num_empty_slots:
-                    new_block_count += cdiv(
-                        num_lookahead_slots - block.num_empty_slots,
-                        self._block_size)
-            else:
-                old_block_set.add(block.block_id)
-        num_touched_blocks = new_block_count + len(old_block_set)
-        return num_touched_blocks
+            if block.is_full:
+                old_block_set.add(block)
+        return len(old_block_set)
 
     def swap_out(self, blocks: List[Block]) -> None:
         for block in blocks:
