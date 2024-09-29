@@ -2,7 +2,7 @@ import importlib
 import importlib.util
 import os
 from collections import abc
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type, Union
+from typing import Callable, Dict, List, Optional, Sequence, Type, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
@@ -71,6 +71,7 @@ class ToolParser:
             "AbstractToolParser.extract_tool_calls_streaming has not been "
             "implemented!")
 
+
 class ToolParserManager:
     tool_parsers: Dict[str, Type] = {}
 
@@ -121,7 +122,8 @@ class ToolParserManager:
             raise TypeError(f'force must be a boolean, but got {type(force)}')
 
         # raise the error ahead of time
-        if not (name is None or isinstance(name, str) or is_list_of(name, str)):
+        if not (name is None or isinstance(name, str)
+                or is_list_of(name, str)):
             raise TypeError(
                 'name must be None, an instance of str, or a sequence of str, '
                 f'but got {type(name)}')
