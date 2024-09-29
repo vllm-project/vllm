@@ -112,6 +112,10 @@ class AttentionMetadata:
     slot_mapping: torch.Tensor
 
     @property
+    def attention_backend(self):
+        return AttentionBackend
+
+    @property
     @abstractmethod
     def prefill_metadata(self) -> Optional["AttentionMetadata"]:
         """Return the attention metadata that's required to run prefill

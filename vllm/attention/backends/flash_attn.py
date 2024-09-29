@@ -297,6 +297,10 @@ class FlashAttentionMetadata(AttentionMetadata):
     _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
 
     @property
+    def attention_backend(self):
+        return FlashAttentionBackend
+
+    @property
     def prefill_metadata(self) -> Optional["FlashAttentionMetadata"]:
         if self.num_prefills == 0:
             return None
