@@ -1091,6 +1091,13 @@ def cuda_device_count_stateless() -> int:
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
+def cuda_is_initialized() -> bool:
+    """Check if CUDA is initialized."""
+    if not torch.cuda._is_compiled():
+        return False
+    return torch.cuda.is_initialized()
+
+
 def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     """Make an instance method that weakly references
     its associated instance and no-ops once that
