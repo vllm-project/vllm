@@ -16,15 +16,6 @@ try:
 except Exception:
     pass
 
-is_xpu = False
-try:
-    # installed IPEX if the machine has XPUs.
-    import intel_extension_for_pytorch  # noqa: F401
-    import oneccl_bindings_for_pytorch  # noqa: F401
-    is_xpu = True
-except Exception:
-    pass
-
 is_cuda = False
 
 try:
@@ -54,6 +45,9 @@ except Exception:
 is_xpu = False
 
 try:
+    # installed IPEX if the machine has XPUs.
+    import intel_extension_for_pytorch  # noqa: F401
+    import oneccl_bindings_for_pytorch  # noqa: F401
     import torch
     if hasattr(torch, 'xpu') and torch.xpu.is_available():
         is_xpu = True
@@ -86,9 +80,6 @@ if is_tpu:
     # so we need to check tpu first
     from .tpu import TpuPlatform
     current_platform = TpuPlatform()
-if is_xpu:
-    from .xpu import XpuPlatform
-    current_platform = XpuPlatform()
 elif is_cuda:
     from .cuda import CudaPlatform
     current_platform = CudaPlatform()
