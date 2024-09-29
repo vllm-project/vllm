@@ -33,9 +33,7 @@ class MistralToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
-        if isinstance(self.model_tokenizer, MistralTokenizer):
-            self.model_tokenizer = self.model_tokenizer.tokenizer
-        else:
+        if not isinstance(self.model_tokenizer, MistralTokenizer):
             logger.info("Non-Mistral tokenizer detected when using a Mistral "
                         "model...")
 

@@ -79,7 +79,8 @@ CONFIGS: Dict[str, ServerConfig] = {
         "arguments": [
             "--tool-call-parser", "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
-            "--ignore-patterns=\"consolidated.safetensors\""
+            "--ignore-patterns=\"consolidated.safetensors\"",
+            "--tokenizer-mode", "mistral"
         ],
     },
     "internlm": {
