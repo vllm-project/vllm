@@ -869,7 +869,28 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         return "resampler" in name
 
 
-class MiniCPMV2_6(MiniCPMVBaseModel):
+class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(
         self,
