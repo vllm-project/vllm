@@ -84,7 +84,7 @@ class Qwen2VLImagePixelInputs(TypedDict):
     """
 
     image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)
+    """Shape: `(num_images, 3)`
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
