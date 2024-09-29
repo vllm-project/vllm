@@ -788,7 +788,7 @@ def unified_flash_attention(
 
     if prefill_meta := attn_metadata.prefill_metadata:
         # Prompt run.
-        if (kv_cache.numel() or prefill_meta.block_tables is None
+        if (kv_cache.numel() == 0 or prefill_meta.block_tables is None
                 or prefill_meta.block_tables.numel() == 0):
             # normal attention
             # When block_tables are not filled, it means q and k are the
