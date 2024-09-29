@@ -55,8 +55,6 @@ class LlavaOnevisionVideoPixelInputs(TypedDict):
     Note that `num_videos` may be different for each batch, and 'num_frames'
     may be different for each video, in which case the data is passed as a
     list instead of a batched tensor.
-
-    Note that it only supports single batch.
     """
 
 
