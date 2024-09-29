@@ -443,7 +443,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # prefix tokens)
         new_block = self.gpu_allocator.allocate(block_hash, num_hashed_tokens)
 
-        # If the block has is None, then the block is not full.
+        # If the block_hash is None, then the block is not full.
         # If the block is not full, then we expect it to have a refcount of 1.
         if block_hash is None:
             assert new_block.ref_count == 1
