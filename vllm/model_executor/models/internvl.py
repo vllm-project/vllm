@@ -175,13 +175,15 @@ def get_internvl_num_patches(image_size: int, patch_size: int,
         (downsample_ratio**2))
 
 
-def get_max_internvl_image_tokens(ctx: InputContext):
+def get_max_internvl_image_tokens(ctx: InputContext,
+                                  *,
+                                  max_dynamic_patch: Optional[int] = None):
     hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
 
     use_thumbnail = hf_config.use_thumbnail
-    max_dynamic_patch = hf_config.max_dynamic_patch
-    if use_thumbnail:
+    max_dynamic_patch = max_dynamic_patch or hf_config.max_dynamic_patch
+    if use_thumbnail and max_dynamic_patch > 1:
         max_dynamic_patch += 1
     downsample_ratio = hf_config.downsample_ratio
 
@@ -192,7 +194,10 @@ def get_max_internvl_image_tokens(ctx: InputContext):
     return num_patches * max_dynamic_patch
 
 
-def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_internvl(ctx: InputContext,
+                                 llm_inputs: LLMInputs,
+                                 *,
+                                 max_dynamic_patch: Optional[int] = None):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -209,7 +214,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
 
     image_data = multi_modal_data["image"]
     min_num = hf_config.min_dynamic_patch
-    max_num = hf_config.max_dynamic_patch
+    max_num = max_dynamic_patch or hf_config.max_dynamic_patch
     use_thumbnail = hf_config.use_thumbnail
     if isinstance(image_data, Image.Image):
         width, height = image_data.size
@@ -253,12 +258,15 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
                      multi_modal_data=multi_modal_data)
 
 
-def input_mapper_for_internvl(ctx: InputContext, data: object):
+def input_mapper_for_internvl(ctx: InputContext,
+                              data: object,
+                              *,
+                              max_dynamic_patch: Optional[int] = None):
     hf_config = ctx.get_hf_config()
 
     use_thumbnail = hf_config.use_thumbnail
     min_num = hf_config.min_dynamic_patch
-    max_num = hf_config.max_dynamic_patch
+    max_num = max_dynamic_patch or hf_config.max_dynamic_patch
     image_size = hf_config.vision_config.image_size
 
     if isinstance(data, Image.Image):
@@ -292,8 +300,11 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
     })
 
 
-def dummy_data_for_internvl(ctx: InputContext, seq_len: int,
-                            mm_counts: Mapping[str, int]):
+def dummy_data_for_internvl(ctx: InputContext,
+                            seq_len: int,
+                            mm_counts: Mapping[str, int],
+                            *,
+                            max_dynamic_patch: Optional[int] = None):
     num_images = mm_counts["image"]
 
     image_feature_size = get_max_internvl_image_tokens(ctx)
@@ -315,7 +326,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int,
 
     image_size = vision_config.image_size
     min_num = hf_config.min_dynamic_patch
-    max_num = hf_config.max_dynamic_patch
+    max_num = max_dynamic_patch or hf_config.max_dynamic_patch
     max_image_width = max_num * image_size
     max_image_height = min_num * image_size
 
@@ -470,7 +481,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         self,
         image_input: InternVLImageInputs,
     ) -> torch.Tensor:
-
+        print(image_input["data"].shape)
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
