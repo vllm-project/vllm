@@ -746,7 +746,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             return self.cpu_allocator.get_prefix_cache_hit_rate()
         raise ValueError(f"Invalid device: {device}")
 
-    def _get_pre_block_hash(self, seq: Sequence) -> int:
+    def _get_pre_block_hash(self, seq: Sequence) -> Optional[int]:
         if seq.n_blocks > 1:
             block_table = self.block_tables[seq.seq_id]
             return block_table[seq.n_blocks - 2].block_hash

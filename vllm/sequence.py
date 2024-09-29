@@ -283,7 +283,7 @@ class SequenceData(msgspec.Struct,
 
     def get_range_token_ids(
             self, start_pos: int, end_pos: int
-    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
+    ) -> Tuple[Optional[Tuple[int, ...]], Optional[Tuple[int, ...]]]:
         """Get range tokens, and make the return value hashable"""
         num_tokens = end_pos - start_pos
         prompt_length = self.get_prompt_len()
