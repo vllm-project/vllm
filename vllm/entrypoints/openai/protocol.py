@@ -440,6 +440,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         " of the specified `tools`")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get("add_generation_prompt"):
+            raise ValueError(
+                "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+            )
+        return data
+
 
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -873,6 +882,15 @@ class TokenizeChatRequest(OpenAIBaseModel):
     add_generation_prompt: bool = Field(default=True)
     continue_final_message: bool = Field(default=False)
     add_special_tokens: bool = Field(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get("add_generation_prompt"):
+            raise ValueError(
+                "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+            )
+        return data
 
 
 TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
