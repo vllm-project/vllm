@@ -114,7 +114,7 @@ If you need to touch the C++ or CUDA code, you need to build vLLM from source:
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
-    $ pip install -e .  # This may take 5-10 minutes.
+    $ pip install -e .  # This can take a long time
 
 .. note::
 
