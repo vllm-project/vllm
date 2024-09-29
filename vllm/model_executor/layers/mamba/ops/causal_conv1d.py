@@ -12,59 +12,44 @@ def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-    seq_idx: Optional[torch.Tensor] = None,
-    initial_states: Optional[torch.Tensor] = None,
-    return_final_states: bool = False,
-    final_states_out=None,
-    activation: str = "silu",
+    query_start_loc: Optional[torch.Tensor] = None,
+    cache_indices: Optional[torch.Tensor] = None,
+    has_initial_state: Optional[torch.Tensor] = None,
+    conv_states: Optional[torch.Tensor] = None,
+    activation: Optional[str] = "silu",
 ):
     """
-    x: (batch, dim, seqlen)
+    x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
+        sequences are concatenated from left to right for varlen
     weight: (dim, width)
     bias: (dim,)
-    seq_idx: (batch, seqlen)
-    initial_states: (batch, dim, width - 1)
-    final_states_out: (batch, dim, width - 1), to be written to
+    query_start_loc: (batch + 1) int32
+        The cumulative sequence lengths of the sequences in
+        the batch, used to index into sequence. prepended by 0.
+        for example: query_start_loc = torch.Tensor([0,10,16,17]), 
+        x.shape=(dim,17)
+    cache_indices: (batch)  int32
+        indicates the corresponding state index, 
+        like so: conv_state = conv_states[cache_indices[batch_id]]
+    has_initial_state: (batch) bool
+        indicates whether should the kernel take the current state as initial 
+        state for the calculations
+    conv_states: (...,dim,width - 1) itype
+        updated inplace if provided
     activation: either None or "silu" or "swish"
 
     out: (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    if x.stride(2) != 1 and x.stride(1) != 1:
+    if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
-    if seq_idx is not None:
-        assert (initial_states is
-                None), "initial_states must be None if seq_idx is not None"
-        assert (not return_final_states
-                ), "If seq_idx is not None, we don't return final_states_out"
-    seq_idx = seq_idx.contiguous() if seq_idx is not None else None
-    if initial_states is not None and (initial_states.stride(2) != 1
-                                       and initial_states.stride(1) != 1):
-        initial_states = initial_states.contiguous()
-    if return_final_states:
-        assert (
-            x.stride(1) == 1
-        ), "Only channel-last layout support returning final_states_out"
-        if final_states_out is not None:
-            assert (final_states_out.stride(2) == 1
-                    or final_states_out.stride(1) == 1)
-        else:
-            batch, dim, seqlen = x.shape
-            width = weight.shape[1]
-            final_states_out = torch.empty(batch,
-                                           width - 1,
-                                           dim,
-                                           device=x.device,
-                                           dtype=x.dtype).transpose(1, 2)
-    else:
-        final_states_out = None
 
-    out = ops.causal_conv1d_fwd(x, weight, bias, seq_idx, initial_states,
-                                final_states_out, activation
+    out = ops.causal_conv1d_fwd(x, weight, bias, conv_states, query_start_loc,
+                                cache_indices, has_initial_state, activation
                                 in ["silu", "swish"])
-    return (out, None) if not return_final_states else (out, final_states_out)
+    return out
 
 
 def causal_conv1d_update(x: torch.Tensor,
@@ -72,21 +57,33 @@ def causal_conv1d_update(x: torch.Tensor,
                          weight: torch.Tensor,
                          bias: Optional[torch.Tensor] = None,
                          activation: Optional[str] = None,
+                         cache_seqlens: Optional[torch.Tensor] = None,
                          conv_state_indices: Optional[torch.Tensor] = None):
     """
-    x: (batch, dim)
-    conv_state: (batch, dim, width)
+    x: (batch, dim) or (batch, dim, seqlen)
+    conv_state: (batch, dim, state_len), where state_len >= width - 1
     weight: (dim, width)
     bias: (dim,)
+    cache_seqlens: (batch,), dtype int32.
+        If not None, the conv_state is treated as a circular buffer.
+        The conv_state will be updated by copying x to the conv_state 
+        starting at the index
+        @cache_seqlens % state_len.
     conv_state_indices: (batch,), dtype int32
         If not None, the conv_state is a larger tensor along the batch dim, 
         and we are selecting the batch coords specified by conv_state_indices.
         Useful for a continuous batching scenario.
 
-    out: (batch, dim)
+    out: (batch, dim) or (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    activation_bool = activation in ["silu", "swish"]
-    return ops.causal_conv1d_update(x, conv_state, weight, bias,
-                                    activation_bool, conv_state_indices)
+    activation_val = activation in ["silu", "swish"]
+    unsqueeze = x.dim() == 2
+    if unsqueeze:
+        x = x.unsqueeze(-1)
+    out = ops.causal_conv1d_update(x, conv_state, weight, bias, activation_val,
+                                   cache_seqlens, conv_state_indices)
+    if unsqueeze:
+        out = out.squeeze(-1)
+    return out

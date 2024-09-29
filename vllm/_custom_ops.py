@@ -440,9 +440,10 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     @torch.library.register_fake("_C::causal_conv1d_fwd")
     def causal_conv1d_fwd_fake(x: torch.Tensor, weight: torch.Tensor,
                                bias_: Optional[torch.Tensor],
-                               seq_idx_: Optional[torch.Tensor],
-                               initial_states_: Optional[torch.Tensor],
-                               final_states_out_: Optional[torch.Tensor],
+                               conv_states: Optional[torch.Tensor],
+                               cu_seq_len: Optional[torch.Tensor],
+                               cache_indices: Optional[torch.Tensor],
+                               has_initial_state: Optional[torch.Tensor],
                                silu_activation: bool) -> torch.Tensor:
         return torch.empty_like(x)
 
@@ -450,22 +451,22 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     def causal_conv1d_update_fake(
             x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
             bias_: Optional[torch.Tensor], silu_activation: bool,
+            cache_seqlens: Optional[torch.Tensor],
             conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
         return torch.empty_like(x)
 
     @torch.library.register_fake("_C::selective_scan_fwd")
-    def selective_scan_fwd_fake(
-            u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
-            B: torch.Tensor, C: torch.Tensor, D_: Optional[torch.Tensor],
-            z_: Optional[torch.Tensor], delta_bias_: Optional[torch.Tensor],
-            delta_softplus: bool, index_: Optional[torch.Tensor],
-            x: Optional[torch.Tensor]) -> List[torch.Tensor]:
-        a = torch.empty_like(u)
-        if z_ is not None:
-            c = torch.empty_like(z_)
-            return [a, c]
-        else:
-            return [a]
+    def selective_scan_fwd_fake(u: torch.Tensor, delta: torch.Tensor,
+                                A: torch.Tensor, B: torch.Tensor,
+                                C: torch.Tensor, D_: Optional[torch.Tensor],
+                                z_: Optional[torch.Tensor],
+                                delta_bias_: Optional[torch.Tensor],
+                                delta_softplus: bool,
+                                cu_seq_len: Optional[torch.Tensor],
+                                cache_indices: Optional[torch.Tensor],
+                                has_initial_state: Optional[torch.Tensor],
+                                ssm_states: Optional[torch.Tensor]) -> None:
+        return None
 
 
 # cutlass
@@ -761,37 +762,37 @@ def ggml_mul_mat_a8(
 # mamba
 def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       bias_: Optional[torch.Tensor],
-                      seq_idx_: Optional[torch.Tensor],
-                      initial_states_: Optional[torch.Tensor],
-                      final_states_out_: Optional[torch.Tensor],
+                      conv_states: Optional[torch.Tensor],
+                      query_start_loc: Optional[torch.Tensor],
+                      cache_indices: Optional[torch.Tensor],
+                      has_initial_state: Optional[torch.Tensor],
                       silu_activation: bool) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
-                                          initial_states_, final_states_out_,
-                                          silu_activation)
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
+                                          query_start_loc, cache_indices,
+                                          has_initial_state, silu_activation)
 
 
 def causal_conv1d_update(
-    x: torch.Tensor,
-    conv_state: torch.Tensor,
-    weight: torch.Tensor,
-    bias_: Optional[torch.Tensor],
-    silu_activation: bool,
-    conv_state_indices: Optional[torch.Tensor],
-) -> torch.Tensor:
+        x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
+        bias_: Optional[torch.Tensor], silu_activation: bool,
+        cache_seqlens: Optional[torch.Tensor],
+        conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                             silu_activation,
+                                             silu_activation, cache_seqlens,
                                              conv_state_indices)
 
 
-def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
-                       B: torch.Tensor, C: torch.Tensor,
-                       D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
-                       delta_bias_: Optional[torch.Tensor],
-                       delta_softplus: bool, index_: Optional[torch.Tensor],
-                       x: Optional[torch.Tensor]) -> List[torch.Tensor]:
-    return torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_,
-                                           delta_bias_, delta_softplus, index_,
-                                           x)
+def selective_scan_fwd(
+        u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor, B: torch.Tensor,
+        C: torch.Tensor, D_: Optional[torch.Tensor],
+        z_: Optional[torch.Tensor], delta_bias_: Optional[torch.Tensor],
+        delta_softplus: bool, query_start_loc: Optional[torch.Tensor],
+        cache_indices: Optional[torch.Tensor],
+        has_initial_state: Optional[torch.Tensor], ssm_states: torch.Tensor):
+    torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_, delta_bias_,
+                                    delta_softplus, query_start_loc,
+                                    cache_indices, has_initial_state,
+                                    ssm_states)
 
 
 # moe

@@ -1,6 +1,8 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/selective_state_update.py
 
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
@@ -317,20 +319,50 @@ def selective_state_update(state,
     return out
 
 
-def selective_scan_fn(u,
-                      delta,
-                      A,
-                      B,
-                      C,
-                      D=None,
-                      z=None,
-                      delta_bias=None,
-                      delta_softplus=False,
-                      return_last_state=False,
-                      position_indices=None,
-                      prev_state=None):
-    """if return_last_state is True, returns (out, last_state)
-    last_state has shape (batch, dim, dstate). 
+def selective_scan_fn(
+        u,
+        ssm_states,
+        delta,
+        A,
+        B,
+        C,
+        D=None,
+        z=None,
+        delta_bias=None,
+        delta_softplus=False,
+        query_start_loc=None,
+        cache_indices=None,
+        has_initial_state=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    u: (dim, total_length) for varlen or (batch, dim, seqlen) 
+    delta: (dim, total_length) for varlen or (batch, dim, seqlen)
+    A: (dim, dstate) 
+    B: (ngroups, dstate, total_length) for varlen or 
+                                        (batch,ngroups,dstate,seqlen)
+    C: (ngroups, dstate, total_length) for varlen or 
+                                        (batch,ngroups,dstate,seqlen)
+    D: (dim,) 
+    z: (dim, total_length) for varlen or (batch, dim, seqlen) 
+    dt_bias: (dim,) or (dim)
+    query_start_loc: (batch + 1) int32
+        The cumulative sequence lengths of the sequences in
+        the batch, used to index into sequence. prepended with 0.
+        for example: query_start_loc = torch.Tensor([0,10,16,17]), 
+        x.shape=(dim,17)
+    cache_indices: (batch) int32
+        A tensor with each cell is a correspondent 
+        input and output ssm_state index
+    has_initial_state: (batch) bool
+        A tensor populated with ones and zeros, 
+        indicate if the ssm_state at the corresponding index should be 
+        used as initial state. Not providing argument assumes 
+        there's no initial state
+
+    returns
+        output: (dim, total_length) for varlen or (batch, dim, seqlen) 
+                supports inplace replacement
+        last_state has shape (batch, dim, dstate). 
+                supports inplace replacement if ssm_state was provided
     """
     if u.stride(-1) != 1:
         u = u.contiguous()
@@ -344,28 +376,20 @@ def selective_scan_fn(u,
         C = C.contiguous()
     if z is not None and z.stride(-1) != 1:
         z = z.contiguous()
-    if B.dim() == 3:
+    if B.dim() == 3 and query_start_loc is None:
         B = B.unsqueeze(1)
-    if C.dim() == 3:
+    if B.dim() == 2 and query_start_loc is not None:
+        B = B.unsqueeze(0)
+    if C.dim() == 3 and query_start_loc is None:
         C = C.unsqueeze(1)
-    n_chunks = int((u.shape[-1] + 2048 - 1) / 2048)
-    x = torch.zeros((
-        u.shape[0],
-        u.shape[1],
-        n_chunks,
-        int(A.shape[1] * 2),
-    ),
-                    device=u.device,
-                    dtype=torch.float32,
-                    requires_grad=False)
-    x[:, :, 0, 0::2] = 1
-    if prev_state is not None:
-        x[:, :, 0, 1::2].copy_(prev_state)
-    out, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias,
-                                        delta_softplus, position_indices, x)
-    last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
+    if C.dim() == 2 and query_start_loc is not None:
+        C = C.unsqueeze(0)
+
+    ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
+                           query_start_loc, cache_indices, has_initial_state,
+                           ssm_states)
+
     if z is None:
-        return out if not return_last_state else (out, last_state)
+        return delta  # output written inplace to delta
     else:
-        out_z = rest[0]
-        return out_z if not return_last_state else (out_z, last_state)
+        return z  # output written inplace to z
