@@ -426,7 +426,6 @@ class ModelConfig:
         architectures = getattr(self.hf_config, "architectures", [])
         if len(architectures) == 0:
             raise ValueError("No architectures found in the model config.")
-
         if not all(arch in _PP_SUPPORTED_MODELS
                    for arch in architectures) and pipeline_parallel_size > 1:
             raise NotImplementedError(
