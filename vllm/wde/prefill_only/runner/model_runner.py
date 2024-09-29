@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import CudaMemoryProfiler, is_pin_memory_available
+from vllm.utils import DeviceMemoryProfiler, is_pin_memory_available
 from vllm.wde.core.config import DeviceConfig, LoadConfig, ModelConfig
 from vllm.wde.core.layers.attention import AttentionBackend
 from vllm.wde.prefill_only.config import PrefillOnlySchedulerConfig
@@ -37,7 +37,7 @@ class ModelRunner:
                                                  initialize_model)
 
         logger.info("Starting to load model %s...", self.model_config.model)
-        with CudaMemoryProfiler() as m:
+        with DeviceMemoryProfiler() as m:
             loader = get_model_loader(self.load_config)
             self.model = initialize_model(model_config=self.model_config,
                                           load_config=self.load_config,
