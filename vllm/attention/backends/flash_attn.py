@@ -1,4 +1,5 @@
 """Attention layer with FlashAttention."""
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
@@ -220,6 +221,20 @@ class FlashAttentionBackend(AttentionBackend):
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
+
+    @contextmanager
+    @staticmethod
+    def set_current_metadata(
+            metadata: "FlashAttentionMetadata"):  # type: ignore
+        global current_metadata
+        try:
+            current_metadata = metadata
+            yield
+        finally:
+            current_metadata = None
+
+
+current_metadata: Optional["FlashAttentionMetadata"] = None
 
 
 @dataclass

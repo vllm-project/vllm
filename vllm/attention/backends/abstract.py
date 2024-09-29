@@ -88,6 +88,12 @@ class AttentionBackend(ABC):
                      block_size: int, num_seqs: int, num_queries: int) -> None:
         raise NotImplementedError
 
+    @contextmanager
+    @staticmethod
+    def set_current_metadata(metadata: "AttentionMetadata"):
+        """Context manager to set the current metadata."""
+        raise NotImplementedError
+
 
 @dataclass
 class AttentionMetadata:
