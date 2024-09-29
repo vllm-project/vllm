@@ -1,7 +1,15 @@
 import operator
+from typing import Callable, Dict, Optional, Tuple
+from weakref import ReferenceType
 
 import torch
 import torch.fx as fx
+
+from vllm.logger import init_logger
+
+from .wrapper import TorchCompileWrapperWithCustomDispatcher
+
+logger = init_logger(__name__)
 
 
 def fix_functionalization(graph: fx.Graph):
@@ -148,9 +156,85 @@ def fix_functionalization(graph: fx.Graph):
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
 
-def vllm_backend(graph, example_inputs):
+def wrap_inductor(graph, example_inputs, additional_inductor_config):
     from torch._inductor import config
     current_config = config.shallow_copy_dict()
     from torch._inductor.compile_fx import compile_fx
+
     current_config['post_grad_custom_post_pass'] = fix_functionalization
+    if additional_inductor_config is not None:
+        current_config.update(additional_inductor_config)
     return compile_fx(graph, example_inputs, config_patches=current_config)
+
+
+def vllm_backend(
+        graph,
+        example_inputs,
+        model_ref: Optional[
+            ReferenceType[TorchCompileWrapperWithCustomDispatcher]] = None,
+        additional_inductor_config: Optional[Dict] = None) -> Callable:
+
+    # flags for all the seen shapes, whether we need to specialize
+    runtime_shapes_to_compile_flags: Dict[Tuple[int, ...], bool] = {}
+
+    # if we need to specialize, the compiled graph for that shape
+    runtime_shapes_to_compiled_graph: Dict[Tuple[int, ...], Callable] = {}
+
+    # this is the first compilation, we will compile a graph with
+    # dynamic shape, as the caller will mark first dimension as dynamic
+    logger.info("Compiling a graph for general shapes")
+    graph_for_symbolic_shape = wrap_inductor(graph, example_inputs,
+                                             additional_inductor_config)
+
+    first_run = True
+
+    # this is the function we return to Dynamo to run finally
+    def compiled_graph_wrapper(*args):
+
+        # Dynamo calling convention: the first integer arguments are the
+        # runtime shapes of the dynamic dimensions
+        runtime_shapes = []
+        for x in args:
+            if isinstance(x, int):
+                runtime_shapes.append(x)
+            else:
+                # important to break and exit early
+                # the list of args can be very long
+                break
+
+        nonlocal first_run
+        nonlocal runtime_shapes_to_compile_flags
+        nonlocal runtime_shapes_to_compiled_graph
+
+        if first_run:
+            # the first compilation is for profiling, we directly run it
+            first_run = False
+            return graph_for_symbolic_shape(*args)
+
+        if model_ref is None:
+            # no information about the model, we cannot specialize
+            return graph_for_symbolic_shape(*args)
+
+        model: TorchCompileWrapperWithCustomDispatcher = model_ref()
+        assert model is not None, "model is garbage collected"
+
+        if runtime_shapes not in runtime_shapes_to_compile_flags:
+            # we haven't seen this shape before
+            # query the model if we need to specialize for this shape
+            runtime_shapes_to_compile_flags[
+                runtime_shapes] = model.need_to_specialize(runtime_shapes)
+
+        if not runtime_shapes_to_compile_flags[runtime_shapes]:
+            # we don't need to specialize for this shape
+            return graph_for_symbolic_shape(*args)
+
+        if runtime_shapes not in runtime_shapes_to_compiled_graph:
+            # we need to specialize for this shape, and we haven't compiled
+            # compile the graph for this shape
+            logger.info("Compiling a graph for shapes %s", runtime_shapes)
+            runtime_shapes_to_compiled_graph[runtime_shapes] = wrap_inductor(
+                graph, args, additional_inductor_config)
+
+        return runtime_shapes_to_compiled_graph[runtime_shapes](*args)
+
+    return compiled_graph_wrapper

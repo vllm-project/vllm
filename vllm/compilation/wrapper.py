@@ -1,9 +1,10 @@
 import os
 import sys
+import weakref
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
-from typing import Callable, List
+from typing import Callable, List, Optional, Tuple
 
 import torch
 
@@ -23,7 +24,37 @@ class TorchCompileWrapperWithCustomDispatcher:
         `torch.compile` over the forward method.
     """
 
-    def __init__(self, compiled_callable: Callable):
+    def __init__(self, compiled_callable: Optional[Callable] = None):
+
+        if compiled_callable is None:
+            # default compilation settings
+            # compiling the forward method
+
+            # choose the compile backend
+
+            # if the user has set the backend, use it
+            from vllm.plugins import get_torch_compile_backend
+            backend = get_torch_compile_backend()
+            if backend is None:
+                # otherwise, use the default backend,
+                # which compiles one general graph and
+                # several specialized graphs
+                from vllm.compilation.backends import vllm_backend
+                # in this case, users can only customize the inductor config
+                from vllm.plugins import get_inductor_additional_configs
+                additional_configs = get_inductor_additional_configs()
+
+                from functools import partial
+                backend = partial(
+                    vllm_backend,
+                    model=weakref.ref(self),
+                    additional_inductor_config=additional_configs)
+
+            compiled_callable = torch.compile(
+                self.forward,
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=backend)
+
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
         self.compiled_codes: List[CodeType] = []
@@ -34,6 +65,8 @@ class TorchCompileWrapperWithCustomDispatcher:
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
             envs.VLLM_DYNAMO_USE_CUSTOM_DISPATCHER
+
+        self.sizes_to_specialize = []
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
@@ -79,3 +112,13 @@ class TorchCompileWrapperWithCustomDispatcher:
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object
+
+    def need_to_specialize(self, runtime_shapes: Tuple[int, ...]) -> bool:
+        """Check if the current runtime shapes need to be specialized.
+        If not, we can use the graph for general shapes.
+        If yes, we will compile the graph for the current shapes.
+        The argument `runtime_shapes` is a tuple of integers, representing
+        the runtime shapes of the dimensions marked as dynamic during graph
+        capture.
+        """
+        return False
