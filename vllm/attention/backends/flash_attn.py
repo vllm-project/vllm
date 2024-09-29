@@ -13,7 +13,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.compilation import get_forward_context, set_forward_context
+from vllm.compilation import get_forward_context
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -702,12 +702,6 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
-        if not torch.compiler.is_compiling():
-            old_context = get_forward_context()
-            set_forward_context(attn_metadata)
-        # if torch.compiler.is_compiling(), the metadata is set
-        # in the context manager from the caller of the whole model.
-
         output = torch.ops.vllm.unified_flash_attention(
             query,
             key,
@@ -724,9 +718,6 @@ class FlashAttentionImpl(AttentionImpl):
             self.alibi_slopes,
             self.logits_soft_cap,
         )
-
-        if not torch.compiler.is_compiling():
-            set_forward_context(old_context)
 
         return output
 
