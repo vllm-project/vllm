@@ -165,7 +165,7 @@ class JambaMambaMixer(nn.Module):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
-                cu_seq_len=attn_metadata.query_start_loc[1:])
+                cu_seq_len=attn_metadata.seq_start_loc)
         else:
             hidden_states = causal_conv1d_update(
                 hidden_states.transpose(0, 1),
@@ -208,7 +208,7 @@ class JambaMambaMixer(nn.Module):
                 delta_softplus=True,
                 ssm_states=ssm_state,
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
-                cu_seq_len=attn_metadata.query_start_loc[1:])
+                cu_seq_len=attn_metadata.seq_start_loc)
         else:
             scan_outputs = selective_state_update(
                 ssm_state,
