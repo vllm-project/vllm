@@ -163,7 +163,7 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
 
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
-    if 'post_grad_custom_post_pass' in current_config:
+    if current_config['post_grad_custom_post_pass'] is not None:
         logger.warning(
             "post_grad_custom_post_pass is already set in the config. "
             "Overwriting it with the fix_functionalization")
@@ -205,6 +205,8 @@ def vllm_backend(
                 # important to break and exit early
                 # the list of args can be very long
                 break
+
+        runtime_shapes = tuple(runtime_shapes)
 
         nonlocal first_run
         nonlocal runtime_shapes_to_compile_flags
