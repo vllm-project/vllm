@@ -501,6 +501,7 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> List[RequestOutput]:
         """
@@ -528,6 +529,9 @@ class LLM:
               If not provided, the model's default chat template will be used.
             add_generation_prompt: If True, adds a generation template
                 to each message.
+            continue_final_message: If True, continues the final message in
+                the conversation instead of starting a new one. Cannot be `True`
+                if `add_generation_prompt` is also `True`.
 
         Returns:
             A list of ``RequestOutput`` objects containing the generated
@@ -567,6 +571,7 @@ class LLM:
                     conversation=conversation,
                     chat_template=chat_template,
                     add_generation_prompt=add_generation_prompt,
+                    continue_final_message=continue_final_message,
                     tools=tools,
                 )
 
