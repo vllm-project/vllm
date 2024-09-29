@@ -12,7 +12,7 @@ def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-    seq_start_loc: Optional[torch.Tensor] = None,
+    query_start_loc: Optional[torch.Tensor] = None,
     cache_indices: Optional[torch.Tensor] = None,
     has_initial_state: Optional[torch.Tensor] = None,
     conv_states: Optional[torch.Tensor] = None,
@@ -23,10 +23,10 @@ def causal_conv1d_fn(
         sequences are concatenated from left to right for varlen
     weight: (dim, width)
     bias: (dim,)
-    seq_start_loc: (batch + 1) int32
+    query_start_loc: (batch + 1) int32
         The cumulative sequence lengths of the sequences in
-        the batch, used to index into sequence. 
-        for example: seq_start_loc = torch.Tensor([0,10,16,17]), 
+        the batch, used to index into sequence. prepended by 0.
+        for example: query_start_loc = torch.Tensor([0,10,16,17]), 
         x.shape=(dim,17)
     cache_indices: (batch)  int32
         indicates the corresponding state index, 
@@ -46,7 +46,7 @@ def causal_conv1d_fn(
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    out = ops.causal_conv1d_fwd(x, weight, bias, conv_states, seq_start_loc,
+    out = ops.causal_conv1d_fwd(x, weight, bias, conv_states, query_start_loc,
                                 cache_indices, has_initial_state, activation
                                 in ["silu", "swish"])
     return out

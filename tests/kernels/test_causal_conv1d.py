@@ -365,7 +365,8 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
     assert all(s > 0 for s in seqlens[-1])
 
     cumsum = torch.cumsum(torch.tensor(seqlens[0]), dim=0).to(torch.int32)
-    cumsum = torch.concat([torch.tensor([0],dtype=torch.int32), cumsum], dim=0)
+    cumsum = torch.concat([torch.tensor([0], dtype=torch.int32), cumsum],
+                          dim=0)
     x = torch.randn(batch, 4096 + dim + 64, seqlen, device=device,
                     dtype=itype)[:, 4096:4096 + dim, :]
     weight = torch.randn(dim, width, device=device, dtype=itype)

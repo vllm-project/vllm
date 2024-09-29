@@ -319,33 +319,35 @@ def selective_state_update(state,
     return out
 
 
-def selective_scan_fn(u,
-                      ssm_states,
-                      delta,
-                      A,
-                      B,
-                      C,
-                      D=None,
-                      z=None,
-                      delta_bias=None,
-                      delta_softplus=False,
-                      seq_start_loc=None,
-                      cache_indices=None,
-                      has_initial_state=None
-                      ) -> Tuple[torch.Tensor, torch.Tensor]:
+def selective_scan_fn(
+        u,
+        ssm_states,
+        delta,
+        A,
+        B,
+        C,
+        D=None,
+        z=None,
+        delta_bias=None,
+        delta_softplus=False,
+        query_start_loc=None,
+        cache_indices=None,
+        has_initial_state=None) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
     delta: (dim, total_length) for varlen or (batch, dim, seqlen)
     A: (dim, dstate) 
-    B: (ngroups, dstate, total_length) for varlen or (batch,ngroups,dstate,seqlen)
-    C: (ngroups, dstate, total_length) for varlen or (batch,ngroups,dstate,seqlen)
+    B: (ngroups, dstate, total_length) for varlen or 
+                                        (batch,ngroups,dstate,seqlen)
+    C: (ngroups, dstate, total_length) for varlen or 
+                                        (batch,ngroups,dstate,seqlen)
     D: (dim,) 
     z: (dim, total_length) for varlen or (batch, dim, seqlen) 
     dt_bias: (dim,) or (dim)
-    seq_start_loc: (batch + 1) int32
+    query_start_loc: (batch + 1) int32
         The cumulative sequence lengths of the sequences in
-        the batch, used to index into sequence. 
-        for example: seq_start_loc = torch.Tensor([0,10,16,17]), 
+        the batch, used to index into sequence. prepended with 0.
+        for example: query_start_loc = torch.Tensor([0,10,16,17]), 
         x.shape=(dim,17)
     cache_indices: (batch) int32
         A tensor with each cell is a correspondent 
@@ -374,17 +376,17 @@ def selective_scan_fn(u,
         C = C.contiguous()
     if z is not None and z.stride(-1) != 1:
         z = z.contiguous()
-    if B.dim() == 3 and seq_start_loc is None:
+    if B.dim() == 3 and query_start_loc is None:
         B = B.unsqueeze(1)
-    if B.dim() == 2 and seq_start_loc is not None:
+    if B.dim() == 2 and query_start_loc is not None:
         B = B.unsqueeze(0)
-    if C.dim() == 3 and seq_start_loc is None:
+    if C.dim() == 3 and query_start_loc is None:
         C = C.unsqueeze(1)
-    if C.dim() == 2 and seq_start_loc is not None:
+    if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
-                           seq_start_loc, cache_indices, has_initial_state,
+                           query_start_loc, cache_indices, has_initial_state,
                            ssm_states)
 
     if z is None:

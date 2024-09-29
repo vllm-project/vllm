@@ -55,7 +55,7 @@ void set_conv_params_fwd(ConvParamsBase &params,
                          const at::Tensor out,
                          const c10::optional<at::Tensor>& bias,
                          bool silu_activation,
-                         const c10::optional<at::Tensor>& seq_start_loc = std::nullopt,
+                         const c10::optional<at::Tensor>& query_start_loc = std::nullopt,
                          const c10::optional<at::Tensor>& cache_indices = std::nullopt,
                          const c10::optional<at::Tensor>& has_initial_state = std::nullopt) {
 
@@ -75,10 +75,10 @@ void set_conv_params_fwd(ConvParamsBase &params,
     params.bias_ptr = bias.has_value() ? bias.value().data_ptr() : nullptr;
     params.out_ptr = out.data_ptr();
     // All stride are in elements, not bytes.
-    params.seq_start_loc_ptr = seq_start_loc.has_value() ? seq_start_loc.value().data_ptr() : nullptr;
+    params.query_start_loc_ptr = query_start_loc.has_value() ? query_start_loc.value().data_ptr() : nullptr;
     params.cache_indices_ptr = cache_indices.has_value() ? cache_indices.value().data_ptr() : nullptr;
     params.has_initial_state_ptr = has_initial_state.has_value() ? has_initial_state.value().data_ptr() : nullptr;
-    const bool varlen = params.seq_start_loc_ptr != nullptr;
+    const bool varlen = params.query_start_loc_ptr != nullptr;
     params.x_batch_stride = x.stride(varlen ? 1 : 0);
     params.x_c_stride = x.stride(varlen ? 0 : 1);
     params.x_l_stride = x.stride(varlen ? 1 : -1);
@@ -94,7 +94,7 @@ at::Tensor
 causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                   const c10::optional<at::Tensor> &bias_,
                   const c10::optional<at::Tensor> &conv_states,
-                  const c10::optional<at::Tensor> &seq_start_loc,
+                  const c10::optional<at::Tensor> &query_start_loc,
                   const c10::optional<at::Tensor> &cache_indices,
                   const c10::optional<at::Tensor> &has_initial_state,
                   bool silu_activation) {
@@ -106,9 +106,9 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     TORCH_CHECK(x.is_cuda());
     TORCH_CHECK(weight.is_cuda());
     
-    const bool varlen = seq_start_loc.has_value() ? true : false;
+    const bool varlen = query_start_loc.has_value() ? true : false;
     const auto sizes = x.sizes();
-    const int batch_size = varlen ? seq_start_loc.value().sizes()[0] - 1 : sizes[0];
+    const int batch_size = varlen ? query_start_loc.value().sizes()[0] - 1 : sizes[0];
     const int dim = varlen ? sizes[0] : sizes[1];
     const int seqlen = varlen ? sizes[1] : sizes[2];
     const int width = weight.size(-1);
@@ -139,10 +139,10 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     }
 
 
-    if (seq_start_loc.has_value()) {
-        auto seq_start_loc_ = seq_start_loc.value();
-        TORCH_CHECK(seq_start_loc_.scalar_type() == at::ScalarType::Int);
-        TORCH_CHECK(seq_start_loc_.is_cuda());
+    if (query_start_loc.has_value()) {
+        auto query_start_loc_ = query_start_loc.value();
+        TORCH_CHECK(query_start_loc_.scalar_type() == at::ScalarType::Int);
+        TORCH_CHECK(query_start_loc_.is_cuda());
     }
 
 
@@ -159,7 +159,7 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
                         bias_,
                         silu_activation, 
-                        seq_start_loc,
+                        query_start_loc,
                         cache_indices,
                         has_initial_state
                         );
@@ -319,13 +319,13 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
     auto& smem_store_vec = reinterpret_cast<typename Ktraits::BlockStoreVecT::TempStorage&>(smem_);
     vec_t *smem_exchange = reinterpret_cast<vec_t *>(smem_ + Ktraits::kSmemIOSize);
 
-    const bool kVarlen = params.seq_start_loc_ptr != nullptr;
+    const bool kVarlen = params.query_start_loc_ptr != nullptr;
     const int tidx = threadIdx.x;
     const int batch_id = blockIdx.x;
     const int channel_id = blockIdx.y;
-    const int *seq_start_loc = kVarlen ? reinterpret_cast<int *>(params.seq_start_loc_ptr) : nullptr;
-    const int sequence_start_index = kVarlen ? seq_start_loc[batch_id] : batch_id;
-    const int seqlen = kVarlen ? seq_start_loc[batch_id + 1] - sequence_start_index : params.seqlen;
+    const int *query_start_loc = kVarlen ? reinterpret_cast<int *>(params.query_start_loc_ptr) : nullptr;
+    const int sequence_start_index = kVarlen ? query_start_loc[batch_id] : batch_id;
+    const int seqlen = kVarlen ? query_start_loc[batch_id + 1] - sequence_start_index : params.seqlen;
 
     input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + sequence_start_index * params.x_batch_stride
         + channel_id * params.x_c_stride;
@@ -453,7 +453,7 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
 void causal_conv1d_fwd_launch(ConvParamsBase &params, cudaStream_t stream) {
     static constexpr int kNElts = sizeof(input_t) == 4 ? 4 : 8;
-    const bool kVarlen = params.seq_start_loc_ptr != nullptr;
+    const bool kVarlen = params.query_start_loc_ptr != nullptr;
     BOOL_SWITCH(params.seqlen % kNElts == 0 && !kVarlen, kIsVecLoad, [&] {
         using Ktraits = Causal_conv1d_fwd_kernel_traits<kNThreads, kWidth, kIsVecLoad, input_t, weight_t>;
         constexpr int kSmemSize = Ktraits::kSmemSize;

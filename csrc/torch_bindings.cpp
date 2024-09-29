@@ -275,7 +275,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! A, Tensor! B, Tensor! C,"
       "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
       "bool delta_softplus,"
-      "Tensor? seq_start_loc,"
+      "Tensor? query_start_loc,"
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
       "Tensor! ssm_states) -> ()");
@@ -295,7 +295,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
       "Tensor? bias_,"
       "Tensor!? conv_states,"
-      "Tensor? seq_start_loc,"
+      "Tensor? query_start_loc,"
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
       "bool silu_activation) -> Tensor");

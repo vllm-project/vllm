@@ -433,10 +433,8 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
     assert all(s > 0 for s in seqlens[-1])
 
     cumsum = torch.cumsum(torch.tensor(seqlens[0]), dim=0).to(torch.int32)
-    cumsum = torch.concat(
-        [torch.tensor([0],dtype=torch.int32), cumsum],
-        dim=0
-    ).cuda()
+    cumsum = torch.concat([torch.tensor([0], dtype=torch.int32), cumsum],
+                          dim=0).cuda()
 
     dim = 4
     dstate = 8
@@ -480,7 +478,7 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
                                       device=u.device)
     out = selective_scan_fn(u, prev_state, delta, A, B, C, D, z, delta_bias,
                             delta_softplus, cumsum, cache_indices,
-                            has_initial_state )
+                            has_initial_state)
     outs_ref = []
     splits = [
         torch.split(var, seqlens[0], dim=-1)

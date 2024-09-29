@@ -58,7 +58,7 @@ struct SSMParamsBase {
     void *__restrict__ z_ptr;
     void *__restrict__ out_z_ptr;
 
-    void *__restrict__ seq_start_loc_ptr;
+    void *__restrict__ query_start_loc_ptr;
     void *__restrict__ cache_indices_ptr;
     void *__restrict__ has_initial_state_ptr;
 

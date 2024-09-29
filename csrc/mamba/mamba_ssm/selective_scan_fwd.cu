@@ -105,9 +105,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     int seqlen = params.seqlen;
     int sequence_start_index = batch_id;
     if constexpr (kVarlen){
-        int *seq_start_loc = reinterpret_cast<int *>(params.seq_start_loc_ptr);
-        sequence_start_index = seq_start_loc[batch_id];
-        seqlen = seq_start_loc[batch_id + 1] - sequence_start_index;
+        int *query_start_loc = reinterpret_cast<int *>(params.query_start_loc_ptr);
+        sequence_start_index = query_start_loc[batch_id];
+        seqlen = query_start_loc[batch_id + 1] - sequence_start_index;
     }
     const bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
         : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
@@ -310,7 +310,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     constexpr bool kIsVariableC = true;
     constexpr bool kHasZ = true;
     BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-        BOOL_SWITCH(params.seq_start_loc_ptr != nullptr , kVarlen, [&] {
+        BOOL_SWITCH(params.query_start_loc_ptr != nullptr , kVarlen, [&] {
             using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kVarlen, input_t, weight_t>;
             constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
             dim3 grid(params.batch, params.dim / kNRows);
@@ -404,7 +404,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const torch::Tensor ssm_states,
                         bool has_z, 
                         bool delta_softplus,
-                        const c10::optional<at::Tensor>& seq_start_loc,
+                        const c10::optional<at::Tensor>& query_start_loc,
                         const c10::optional<at::Tensor>& cache_indices,
                         const c10::optional<at::Tensor>& has_initial_state,
                         bool varlen) {
@@ -437,7 +437,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.ssm_states_ptr = ssm_states.data_ptr();
     params.z_ptr = has_z ? z.data_ptr() : nullptr;
     params.out_z_ptr = has_z ? out_z.data_ptr() : nullptr;
-    params.seq_start_loc_ptr = seq_start_loc.has_value() ? seq_start_loc.value().data_ptr() : nullptr;
+    params.query_start_loc_ptr = query_start_loc.has_value() ? query_start_loc.value().data_ptr() : nullptr;
     params.cache_indices_ptr = cache_indices.has_value() ? cache_indices.value().data_ptr() : nullptr;
     params.has_initial_state_ptr = has_initial_state.has_value() ? has_initial_state.value().data_ptr() : nullptr;
 
@@ -504,7 +504,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const c10::optional<torch::Tensor> &z_,
                   const c10::optional<torch::Tensor> &delta_bias_,
                   bool delta_softplus,
-                  const c10::optional<torch::Tensor> &seq_start_loc,
+                  const c10::optional<torch::Tensor> &query_start_loc,
                   const c10::optional<torch::Tensor> &cache_indices,
                   const c10::optional<torch::Tensor> &has_initial_state,
                   const torch::Tensor &ssm_states) {
@@ -530,8 +530,8 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     TORCH_CHECK(delta.stride(-1) == 1 || delta.size(-1) == 1);
 
     const auto sizes = u.sizes();
-    const bool varlen = seq_start_loc.has_value();
-    const int batch_size = varlen ? seq_start_loc.value().sizes()[0] - 1 : sizes[0];
+    const bool varlen = query_start_loc.has_value();
+    const int batch_size = varlen ? query_start_loc.value().sizes()[0] - 1 : sizes[0];
     const int dim = varlen ? sizes[0] : sizes[1];
     const int seqlen = varlen ? sizes[1] : sizes[2];
     const int dstate = A.size(1);
@@ -588,10 +588,10 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     }
 
 
-    if (seq_start_loc.has_value()) {
-        auto seq_start_loc_ = seq_start_loc.value();
-        TORCH_CHECK(seq_start_loc_.scalar_type() == at::ScalarType::Int);
-        TORCH_CHECK(seq_start_loc_.is_cuda());
+    if (query_start_loc.has_value()) {
+        auto query_start_loc_ = query_start_loc.value();
+        TORCH_CHECK(query_start_loc_.scalar_type() == at::ScalarType::Int);
+        TORCH_CHECK(query_start_loc_.is_cuda());
     }
 
 
@@ -636,7 +636,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        ssm_states,
                        has_z,
                        delta_softplus,
-                       seq_start_loc,
+                       query_start_loc,
                        cache_indices,
                        has_initial_state,
                        varlen

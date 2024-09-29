@@ -36,7 +36,7 @@ struct ConvParamsBase {
     void *__restrict__ out_ptr;
 
     void *__restrict__ conv_state_ptr;
-    void *__restrict__ seq_start_loc_ptr;
+    void *__restrict__ query_start_loc_ptr;
     void *__restrict__ has_initial_state_ptr;
     void *__restrict__ cache_indices_ptr;
     int32_t *__restrict__ cache_seqlens;
