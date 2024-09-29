@@ -766,12 +766,12 @@ def _expand_pad_tokens(inputs: list, token_id: int, make_batched_fn: Callable,
         inputs (list): The multi-modal inputs (e.g., images or videos).
         token_id (int): The token ID used to represent the multi-modal input.
         make_batched_fn (Callable): A function to batch the inputs.
-        data_type_key (str): The type of the multi-modal input ("image" or "video").
+        data_type_key (str): The type of the multi-modal input.
         image_processor (Any): The image processor used to process the inputs.
         prompt_token_ids (List[int]): The list of token IDs in the prompt.
 
     Returns:
-        List[int]: The list of token IDs with expanded pad tokens for the multi-modal inputs.
+        List[int]: The list of token IDs for the multi-modal inputs.
     """
     indices = [
         idx for idx, token in enumerate(prompt_token_ids) if token == token_id
