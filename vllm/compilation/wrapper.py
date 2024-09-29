@@ -36,8 +36,8 @@ class TorchCompileWrapperWithCustomDispatcher:
             from vllm.plugins import get_torch_compile_backend
             backend = get_torch_compile_backend()
             if backend is None:
-                from vllm.compilation.backends import get_default_backend
-                backend = get_default_backend(envs.VLLM_TORCH_COMPILE_LEVEL)
+                from vllm.compilation.backends import select_default_backend
+                backend = select_default_backend(envs.VLLM_TORCH_COMPILE_LEVEL)
                 if not isinstance(backend, str):
                     from functools import partial
                     backend = partial(backend, model=weakref.ref(self))
