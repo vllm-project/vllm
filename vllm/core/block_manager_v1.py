@@ -330,8 +330,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Set the reference counts of the token blocks.
                 block.ref_count = ref_count
             elif not is_encoder_decoder and self.enable_caching:
+                pre_block_hash = block_table[logical_idx - 1].block_hash if logical_idx > 0 else None
                 block = self.gpu_allocator.allocate(
-                    seq.hash_of_block(logical_idx),
+                    seq.hash_of_block(logical_idx, pre_block_hash),
                     seq.num_hashed_tokens_of_block(logical_idx))
             else:
                 block = self.gpu_allocator.allocate()
@@ -393,7 +394,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         # Compute a new hash for the block so that it can be shared by other
         # Sequences
-        new_hash = seq.hash_of_block(seq.n_blocks - 1)
+        pre_block_hash = self._get_pre_block_hash(seq)
+        new_hash = seq.hash_of_block(seq.n_blocks - 1, pre_block_hash)
 
         # if new_hash is already in the cached table, then free last_block
         # and return the cached version
@@ -435,7 +437,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_hash: Optional[int] = None
         n_blocks = seq.n_blocks
         if (self._is_last_block_full(seq)):
-            block_hash = seq.hash_of_block(n_blocks - 1)
+            pre_block_hash = self._get_pre_block_hash(seq)
+            block_hash = seq.hash_of_block(n_blocks - 1, pre_block_hash)
         num_hashed_tokens = seq.num_hashed_tokens_of_block(n_blocks - 1)
 
         # num_hashed_tokens is used to compute future hashes
@@ -741,3 +744,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if device == Device.CPU:
             return self.cpu_allocator.get_prefix_cache_hit_rate()
         raise ValueError(f"Invalid device: {device}")
+
+    def _get_pre_block_hash(self, seq: Sequence) -> int:
+        if seq.n_blocks > 1:
+            block_table = self.block_tables[seq.seq_id]
+            return block_table[seq.n_blocks - 2].block_hash
+        else:
+            return None

@@ -281,16 +281,21 @@ class SequenceData(msgspec.Struct,
     def get_token_ids(self) -> List[int]:
         return self._cached_all_token_ids
 
-    def get_prefix_token_ids(
-            self, num_tokens: int
+    def get_range_token_ids(
+            self, start_pos: int, end_pos: int
     ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
-        """Get prefix tokens, and make the return value hashable"""
+        """Get range tokens, and make the return value hashable"""
+        num_tokens = end_pos - start_pos
         prompt_length = self.get_prompt_len()
-        if num_tokens > prompt_length:
-            return (self._prompt_token_ids_tuple,
-                    tuple(self._output_token_ids[:num_tokens - prompt_length]))
+        if start_pos < prompt_length:
+            if end_pos <= prompt_length:
+                return (self._prompt_token_ids_tuple[start_pos: end_pos], None)
+            else:
+                return (self._prompt_token_ids_tuple,
+                        tuple(self._output_token_ids[:num_tokens - prompt_length]))
         else:
-            return (self._prompt_token_ids_tuple[:num_tokens], None)
+            return (None,
+                    tuple(self._output_token_ids[start_pos - prompt_length : end_pos - prompt_length]))
 
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
@@ -530,15 +535,14 @@ class Sequence:
 
         return self.data._cached_all_token_ids[-num_new_tokens:]
 
-    def hash_of_block(self, logical_idx: int) -> int:
+    def hash_of_block(self, logical_idx: int, pre_block_hash: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
-
         # Compute the number of tokens in the sequence
-        # TODO: The current hashing function is O(L^2). We should optimize
-        # this in the future.
-        num_tokens = self.num_hashed_tokens_of_block(logical_idx)
-        hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
-        return hash((hashed_tokens, self.lora_int_id))
+        # The current hashing function is O(L).
+        end_pos = self.num_hashed_tokens_of_block(logical_idx)
+        start_pos = end_pos - self.block_size
+        hashed_tokens = self.data.get_range_token_ids(start_pos, end_pos)
+        return hash((pre_block_hash, hashed_tokens, self.lora_int_id))
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
