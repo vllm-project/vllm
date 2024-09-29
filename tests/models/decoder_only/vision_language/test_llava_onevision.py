@@ -11,6 +11,7 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import (VIDEO_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _VideoAssets)
+from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
 # Video test
@@ -164,9 +165,7 @@ def run_video_test(
         )
 
 
-@pytest.mark.skip(
-    reason=
-    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -210,9 +209,7 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
     )
 
 
-@pytest.mark.skip(
-    reason=
-    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
@@ -306,9 +303,7 @@ def run_image_test(
         )
 
 
-@pytest.mark.skip(
-    reason=
-    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])

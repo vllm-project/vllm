@@ -9,6 +9,7 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
+from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
 _LIMIT_IMAGE_PER_PROMPT = 1
@@ -227,29 +228,26 @@ def _run_test(
         )
 
 
-SIZES = [
-    # Text only
-    [],
-    # Single-size
-    [(512, 512)],
-    # Single-size, batched
-    [(512, 512), (512, 512), (512, 512)],
-    # Multi-size, batched
-    [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
-     (1024, 1024), (512, 1536), (512, 2028)],
-    # Multi-size, batched, including text only
-    [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
-     (1024, 1024), (512, 1536), (512, 2028), None],
-    # mllama has 8 possible aspect ratios, carefully set the sizes
-    # to cover all of them
-]
-
-
-@pytest.mark.skip(
-    reason=
-    "Model is too big, test passed on L40 locally but will OOM on CI machine.")
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("sizes", SIZES)
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        # Text only
+        [],
+        # Single-size
+        [(512, 512)],
+        # Single-size, batched
+        [(512, 512), (512, 512), (512, 512)],
+        # Multi-size, batched
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
+         (1024, 1024), (512, 1536), (512, 2028)],
+        # Multi-size, batched, including text only
+        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
+         (1024, 1024), (512, 1536), (512, 2028), None],
+        # mllama has 8 possible aspect ratios, carefully set the sizes
+        # to cover all of them
+    ])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
