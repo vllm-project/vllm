@@ -130,7 +130,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         torch.xpu.synchronize()
-        used_memory = torch.xpu.memory_allocated()
+        used_memory = torch.xpu.memory.memory_reserved()
         total_gpu_memory = torch.xpu.get_device_properties(
             self.local_rank).total_memory
         free_gpu_memory = total_gpu_memory - used_memory
@@ -203,4 +203,4 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         if parallel_config.pipeline_parallel_size > 1:
             # torch-ccl xpu need a collective API warm up
             # before calling send/recv API
-            get_pp_group().all_reduce(torch.zeros(1).xpu())
+            get_pp_group().all_gather(torch.zeros(1).xpu())

@@ -49,18 +49,16 @@ class IpexAttnBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        from vllm._ipex_ops import ipex_ops as ops
-        ops.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        torch.xpu.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        from vllm._ipex_ops import ipex_ops as ops
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        ops.copy_blocks(key_caches, value_caches, src_to_dists)
+        torch.xpu.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 @dataclass
@@ -100,6 +98,38 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
             return None
 
         return self
+
+
+from torch.nn.functional import scaled_dot_product_attention
+
+def _make_attention_mask(
+    att_bias: List[torch.Tensor],
+    seq_lens: List[int],
+    prompt_token_num: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    assert att_bias[0].dim() == 3
+    assert len(att_bias) == len(seq_lens)
+    head_size, _, _ = att_bias[0].size()
+    mask = torch.empty(head_size,
+                       prompt_token_num,
+                       prompt_token_num,
+                       dtype=dtype)
+    mask.fill_(-torch.inf)
+    start = 0
+    for prompt_len, sub_mask in zip(seq_lens, att_bias):
+        end = start + prompt_len
+        mask[:, start:end, start:end] = sub_mask
+        start += prompt_len
+    return mask
+
+
+def use_sdp_causal(head_dim, query_states):
+    return (
+        head_dim in [-1, 64, 80, 96, 128]           # for now
+        and query_states.device.type == "xpu"       # GPU
+        and query_states.dtype in [torch.float, torch.half]     # fp32/fp16
+    )
 
 
 class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
@@ -152,7 +182,16 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = 1
+        # x = 1
+        # num_blocks = kv_cache.shape[1]
+
+        # key_cache = kv_cache[0]
+        # key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+        #                            -1, x)
+        # value_cache = kv_cache[1]
+        # value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        # return key_cache, value_cache
+        x = 16 // kv_cache.element_size()
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]
@@ -228,28 +267,61 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                             attn_metadata.seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        att_masks = _make_sliding_window_bias(
-                            attn_metadata.seq_lens, None, dtype=query.dtype)
+                        att_masks = [None] * len(attn_metadata.seq_lens)
                     attn_metadata.attn_bias = att_masks
 
+                # output = torch.empty(
+                #     (num_tokens, self.num_heads, self.head_size),
+                #     dtype=query.dtype,
+                #     device=query.device)
+                # ipex_ops.varlen_attention(query,
+                #                           key,
+                #                           value,
+                #                           output,
+                #                           attn_metadata.seqlen_q,
+                #                           attn_metadata.seqlen_q,
+                #                           attn_metadata.max_seqlen,
+                #                           attn_metadata.max_seqlen,
+                #                           pdropout=0.0,
+                #                           softmax_scale=self.scale,
+                #                           zero_tensors=False,
+                #                           is_causal=True,
+                #                           return_softmax=False,
+                #                           gen_=None)
+
                 output = torch.empty(
-                    (num_tokens, self.num_heads, self.head_size),
-                    dtype=query.dtype,
-                    device=query.device)
-                ipex_ops.varlen_attention(query,
-                                          key,
-                                          value,
-                                          output,
-                                          attn_metadata.seqlen_q,
-                                          attn_metadata.seqlen_q,
-                                          attn_metadata.max_seqlen,
-                                          attn_metadata.max_seqlen,
-                                          pdropout=0.0,
-                                          softmax_scale=self.scale,
-                                          zero_tensors=False,
-                                          is_causal=True,
-                                          return_softmax=False,
-                                          gen_=None)
+                            (num_tokens, self.num_heads, self.head_size),
+                            dtype=query.dtype, device=query.device)
+                query = query.movedim(0, query.dim() - 2)
+                key = key.movedim(0, key.dim() - 2)
+                value = value.movedim(0, value.dim() - 2)
+
+                start = 0
+                for seq_len, mask in zip(attn_metadata.seq_lens,
+                                        attn_metadata.attn_bias):
+                    end = start + seq_len
+                    if use_sdp_causal(self.head_size, query):
+                        import xe_addons
+                        if mask is not None:
+                            mask = mask.unsqueeze(0)
+                        sub_out = xe_addons.sdp_causal(
+                            query[None, :, start:end, :].contiguous(),
+                            key[None, :, start:end, :].contiguous(),
+                            value[None, :, start:end, :].contiguous(),
+                            mask).squeeze(0).movedim(
+                                query.dim() - 2, 0)
+                    else:
+                        sub_out = torch.nn.functional.scaled_dot_product_attention(
+                            query[None, :, start:end, :],
+                            key[None, :, start:end, :],
+                            value[None, :, start:end, :],
+                            attn_mask=mask,
+                            dropout_p=0.0,
+                            is_causal=not self.need_mask,
+                            scale=self.scale).squeeze(0).movedim(
+                                query.dim() - 2, 0)
+                    output[start:end, :, :] = sub_out
+                    start = end
             else:
                 # prefix-enabled attention
                 raise RuntimeError(

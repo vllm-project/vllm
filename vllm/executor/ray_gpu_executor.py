@@ -312,6 +312,114 @@ class RayGPUExecutor(DistributedGPUExecutor):
             else:
                 self.non_driver_workers.append(worker)
 
+    def _get_env_vars_to_be_updated(self):
+        # Get the set of GPU IDs used on each node.
+        worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
+                                                    use_dummy_driver=True)
+
+        node_workers = defaultdict(list)
+        node_gpus = defaultdict(list)
+
+        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+            node_workers[node_id].append(i)
+            # `gpu_ids` can be a list of strings or integers.
+            # convert them to integers for consistency.
+            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # string sorting is not sufficient.
+            # see https://github.com/vllm-project/vllm/issues/5590
+            gpu_ids = [int(x) for x in gpu_ids]
+            node_gpus[node_id].extend(gpu_ids)
+        for node_id, gpu_ids in node_gpus.items():
+            node_gpus[node_id] = sorted(gpu_ids)
+
+        # Set environment variables for the driver and workers.
+        all_args_to_update_env_vars = self._get_env_vars_to_be_updated()
+
+        self._run_workers("update_environment_variables",
+                          all_args=all_args_to_update_env_vars)
+
+        if len(node_gpus) == 1:
+            # in single node case, we don't need to get the IP address.
+            # the loopback address is sufficient
+            # NOTE: a node may have several IP addresses, one for each
+            # network interface. `get_ip()` might return any of them,
+            # while they might not work for communication inside the node
+            # if the network setup is complicated. Using the loopback address
+            # solves this issue, as it always works for communication inside
+            # the node.
+            driver_ip = "127.0.0.1"
+        distributed_init_method = get_distributed_init_method(
+            driver_ip, get_open_port())
+
+        error_on_invalid_device_count_status()
+
+        # Initialize the actual workers inside worker wrapper.
+        init_worker_all_kwargs = [
+            self._get_worker_kwargs(
+                local_rank=node_workers[node_id].index(rank),
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+            ) for rank, (node_id,
+                         _) in zip(worker_ranks, worker_node_and_gpu_ids)
+        ]
+        self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
+
+        self._run_workers("init_device")
+        self._run_workers("load_model",
+                          max_concurrent_workers=self.parallel_config.
+                          max_parallel_loading_workers)
+
+        # This is the list of workers that are rank 0 of each TP group EXCEPT
+        # global rank 0. These are the workers that will broadcast to the
+        # rest of the workers.
+        self.tp_driver_workers: List[RayWorkerWrapper] = []
+        # This is the list of workers that are not drivers and not the first
+        # worker in a TP group. These are the workers that will be
+        # broadcasted to.
+        self.non_driver_workers: List[RayWorkerWrapper] = []
+
+        # Enforce rank order for correct rank to return final output.
+        for rank, worker in sorted(zip(worker_ranks[1:], self.workers)):
+            # We need to skip the driver worker, which we
+            # do by skipping worker_ranks[0] which is always 0.
+            if rank % self.parallel_config.tensor_parallel_size == 0:
+                self.tp_driver_workers.append(worker)
+            else:
+                self.non_driver_workers.append(worker)
+
+    def _get_env_vars_to_be_updated(self):
+        # Get the set of GPU IDs used on each node.
+        worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
+                                                    use_dummy_driver=True)
+
+        node_workers = defaultdict(list)
+        node_gpus = defaultdict(list)
+
+        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+            node_workers[node_id].append(i)
+            # `gpu_ids` can be a list of strings or integers.
+            # convert them to integers for consistency.
+            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # string sorting is not sufficient.
+            # see https://github.com/vllm-project/vllm/issues/5590
+            gpu_ids = [int(x) for x in gpu_ids]
+            node_gpus[node_id].extend(gpu_ids)
+        for node_id, gpu_ids in node_gpus.items():
+            node_gpus[node_id] = sorted(gpu_ids)
+
+        VLLM_INSTANCE_ID = get_vllm_instance_id()
+
+        # Set environment variables for the driver and workers.
+        all_args_to_update_environment_variables = [({
+            "CUDA_VISIBLE_DEVICES":
+            ",".join(map(str, node_gpus[node_id])),
+            "VLLM_INSTANCE_ID":
+            VLLM_INSTANCE_ID,
+            "VLLM_TRACE_FUNCTION":
+            str(envs.VLLM_TRACE_FUNCTION),
+        }, ) for (node_id, _) in worker_node_and_gpu_ids]
+        return all_args_to_update_environment_variables
+
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
     ) -> Optional[List[SamplerOutput]]:

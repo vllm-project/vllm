@@ -51,6 +51,7 @@ class PagedAttention:
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # kv_cache in the shape of [2, num_blocks, block_size x num_kv_heads x head_dim]
         x = 16 // kv_cache.element_size()
         num_blocks = kv_cache.shape[1]
 

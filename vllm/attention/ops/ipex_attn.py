@@ -4,6 +4,7 @@ import intel_extension_for_pytorch.llm.modules as ipex_modules
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._ipex_ops import ipex_ops
 
 
 class PagedAttention:
@@ -110,7 +111,7 @@ class PagedAttention:
         src_to_dst: Dict[int, int],
         *args,
     ) -> None:
-        raise NotImplementedError
+        ipex_ops.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
@@ -120,4 +121,4 @@ class PagedAttention:
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        ops.copy_blocks(key_caches, value_caches, src_to_dists)
+        ipex_ops.copy_blocks(key_caches, value_caches, src_to_dists)

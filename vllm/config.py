@@ -372,12 +372,12 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        if device_config.device_type not in ("cuda", "tpu"):
-            logger.warning(
-                "Async output processing is only supported for CUDA or TPU. "
-                "Disabling it for other platforms.")
-            self.use_async_output_proc = False
-            return
+        # if device_config.device_type not in ("cuda", "tpu"):
+        #     logger.warning(
+        #         "Async output processing is only supported for CUDA or TPU. "
+        #         "Disabling it for other platforms.")
+        #     self.use_async_output_proc = False
+        #     return
 
         if envs.VLLM_USE_RAY_SPMD_WORKER:
             logger.warning(
@@ -864,7 +864,7 @@ class ParallelConfig:
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
 
-        if current_platform.is_tpu() and self.world_size > 1:
+        if (current_platform.is_tpu() or current_platform.is_xpu()) and self.world_size > 1:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
             if self.distributed_executor_backend != "ray":

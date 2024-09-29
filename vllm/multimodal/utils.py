@@ -59,9 +59,13 @@ async def async_fetch_image(image_url: str,
     By default, the image is converted into RGB format.
     """
     if image_url.startswith('http'):
-        image_raw = await global_http_connection.async_get_bytes(
-            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
-        image = _load_image_from_bytes(image_raw)
+        try:
+            import requests
+            image = Image.open(requests.get(image_url, stream=True).raw)
+        except:
+            image_raw = await global_http_connection.async_get_bytes(
+                image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+            image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
         image = _load_image_from_data_url(image_url)

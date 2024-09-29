@@ -310,7 +310,7 @@ function (define_gpu_extension_target GPU_MOD_NAME)
     GPU
     "WITH_SOABI"
     "DESTINATION;LANGUAGE;USE_SABI"
-    "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
+    "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES;LINK_FLAGS")
 
   # Add hipify preprocessing step when building with HIP/ROCm.
   if (GPU_LANGUAGE STREQUAL "HIP")
@@ -351,6 +351,11 @@ function (define_gpu_extension_target GPU_MOD_NAME)
     ${GPU_INCLUDE_DIRECTORIES})
 
   target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
+
+  if (GPU_LANGUAGE STREQUAL "SYCL")
+    target_compile_options(${GPU_MOD_NAME} PRIVATE ${GPU_COMPILE_FLAGS})
+    target_link_options(${GPU_MOD_NAME} PRIVATE ${GPU_LINK_FLAGS})
+  endif()   
 
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.

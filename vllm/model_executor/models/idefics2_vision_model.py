@@ -23,7 +23,7 @@ import torch
 from torch import nn
 from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2Config, Idefics2VisionConfig)
-from xformers import ops as xops
+#from xformers import ops as xops
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -102,6 +102,16 @@ class Idefics2VisionEmbeddings(nn.Module):
         return embeddings
 
 
+def attention_softmax(attn_weights: torch.Tensor, training: bool):
+    if attn_weights.is_contiguous() and attn_weights.device.type == "xpu" and not training:
+        import xe_addons
+        xe_addons.attn_softmax_inplaced(attn_weights)
+    else:
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1,
+                                                   dtype=torch.float32).to(attn_weights.dtype)
+    return attn_weights
+
+
 class Idefics2VisionAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -155,15 +165,26 @@ class Idefics2VisionAttention(nn.Module):
         value_states = value_states.view(batch_size, q_len,
                                          self.num_heads_per_partition,
                                          self.head_dim)
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(
+            2, 3)) * self.scale
+
+        attn_weights = attention_softmax(attn_weights, self.training)
+        attn_weights = nn.functional.dropout(attn_weights,
+                                             p=self.dropout,
+                                             training=self.training)
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
         # see: https://facebookresearch.github.io/xformers/components/ops.html
-        out = xops.memory_efficient_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            p=self.dropout,
-            scale=self.scale,
-        )
-        out = out.view(batch_size, q_len, -1)
+        # out = xops.memory_efficient_attention_forward(
+        #     query_states,
+        #     key_states,
+        #     value_states,
+        #     p=self.dropout,
+        #     scale=self.scale,
+        # )
+        out = attn_output.view(batch_size, q_len, -1)
         attn_output, _ = self.out_proj(out)
         return attn_output
 

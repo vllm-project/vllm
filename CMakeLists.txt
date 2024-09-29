@@ -86,20 +86,20 @@ find_package(Torch REQUIRED)
 #
 message(STATUS "Enabling core extension.")
 
-# Define _core_C extension
-#  built for (almost) every target platform, (excludes TPU and Neuron)
+# # Define _core_C extension
+# #  built for (almost) every target platform, (excludes TPU and Neuron)
 
-set(VLLM_EXT_SRC
-  "csrc/core/torch_bindings.cpp")
+# set(VLLM_EXT_SRC
+#   "csrc/core/torch_bindings.cpp")
 
-define_gpu_extension_target(
-  _core_C
-  DESTINATION vllm
-  LANGUAGE CXX
-  SOURCES ${VLLM_EXT_SRC}
-  COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
-  USE_SABI 3
-  WITH_SOABI)
+# define_gpu_extension_target(
+#   _core_C
+#   DESTINATION vllm
+#   LANGUAGE CXX
+#   SOURCES ${VLLM_EXT_SRC}
+#   COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+#   USE_SABI 3
+#   WITH_SOABI)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -108,6 +108,10 @@ if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    elseif(VLLM_TARGET_DEVICE STREQUAL "xpu")
+        message(STATUS "Building XPU")
+        set(VLLM_GPU_LANG "SYCL")
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/xpu_extension.cmake)
     else()
         return()
     endif()
@@ -201,11 +205,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         GIT_TAG v3.5.1
         GIT_PROGRESS TRUE
-
-        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
-        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
-        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
   )
   FetchContent_MakeAvailable(cutlass)
 
@@ -239,7 +238,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           COMPILE_FLAGS
           "-gencode arch=compute_90a,code=sm_90a")
   endif()
-
 
   #
   # Machete kernels
@@ -299,12 +297,6 @@ define_gpu_extension_target(
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
-
-# If CUTLASS is compiled on NVCC >= 12.5, it by default uses 
-# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the 
-# driver API. This causes problems when linking with earlier versions of CUDA.
-# Setting this variable sidesteps the issue by calling the driver directly.
-target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
 #
 # _moe_C extension
