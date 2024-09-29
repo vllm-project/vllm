@@ -4,7 +4,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata
-from vllm.compilation import forward_context
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.sequence import IntermediateTensors
 
@@ -49,21 +48,18 @@ def support_compile_llama_style(cls: type):
         if not self._use_torch_compile:
             return self.forward(input_ids, positions, kv_caches, attn_metadata,
                                 intermediate_tensors)
-        with forward_context(attn_metadata):
-            if len(self.compiled_codes) < 1:
-                torch._dynamo.mark_dynamic(input_ids, 0)
-                torch._dynamo.mark_dynamic(positions, 0)
-                if intermediate_tensors is not None:
-                    for tensors in intermediate_tensors.tensors.values():
-                        torch._dynamo.mark_dynamic(tensors, 0)
-                return self.compiled_callable(input_ids, positions, kv_caches,
-                                              attn_metadata,
-                                              intermediate_tensors)
-            with self.dispatch_to_code(0):
-                model_output = self.forward(input_ids, positions, kv_caches,
-                                            attn_metadata,
-                                            intermediate_tensors)
-            return model_output
+        if len(self.compiled_codes) < 1:
+            torch._dynamo.mark_dynamic(input_ids, 0)
+            torch._dynamo.mark_dynamic(positions, 0)
+            if intermediate_tensors is not None:
+                for tensors in intermediate_tensors.tensors.values():
+                    torch._dynamo.mark_dynamic(tensors, 0)
+            return self.compiled_callable(input_ids, positions, kv_caches,
+                                          attn_metadata, intermediate_tensors)
+        with self.dispatch_to_code(0):
+            model_output = self.forward(input_ids, positions, kv_caches,
+                                        attn_metadata, intermediate_tensors)
+        return model_output
 
     cls.__call__ = __call__
     return cls
