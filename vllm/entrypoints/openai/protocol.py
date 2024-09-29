@@ -443,10 +443,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
-        if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
-                "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
-            )
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
         return data
 
 
@@ -886,10 +886,10 @@ class TokenizeChatRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
-        if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
-                "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
-            )
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
         return data
 
 
