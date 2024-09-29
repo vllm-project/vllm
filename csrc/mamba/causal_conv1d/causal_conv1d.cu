@@ -410,7 +410,11 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         }
         out += kChunkSize;
     }
-
+    // Final state is stored in the smem_exchange last token slot,
+    // in case seqlen < kWidth, we would need to take the final state from the 
+    // initial state which is stored in conv_states
+    // in case seqlen > kWidth, we would need to load the last kWidth - 1 data
+    // and load it into conv_state accordingly
     int last_thread =  ((seqlen - (kWidth - 1)) - (n_chunks - 1) * kChunkSize) / kNElts;
     if (conv_states != nullptr && tidx == last_thread) { 
         input_t x_vals_load[kNElts * 2] = {0};
