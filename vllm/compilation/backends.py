@@ -190,23 +190,17 @@ def vllm_backend(
     graph_for_symbolic_shape = wrap_inductor(graph, example_inputs,
                                              additional_inductor_config)
 
+    sym_shape_indices = [
+        i for i, x in enumerate(example_inputs) if isinstance(x, torch.SymInt)
+    ]
+
     first_run = True
 
     # this is the function we return to Dynamo to run finally
     def compiled_graph_wrapper(*args):
 
-        # Dynamo calling convention: the first integer arguments are the
-        # runtime shapes of the dynamic dimensions
-        runtime_shapes = []
-        for x in args:
-            if isinstance(x, int):
-                runtime_shapes.append(x)
-            else:
-                # important to break and exit early
-                # the list of args can be very long
-                break
-
-        runtime_shapes = tuple(runtime_shapes)
+        runtime_shapes: Tuple[int,
+                              ...] = tuple(args[i] for i in sym_shape_indices)
 
         nonlocal first_run
         nonlocal runtime_shapes_to_compile_flags
