@@ -181,8 +181,9 @@ def get_max_internvl_image_tokens(ctx: InputContext,
     hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
 
+    if max_dynamic_patch is None:
+        max_dynamic_patch = hf_config.max_dynamic_patch
     use_thumbnail = hf_config.use_thumbnail
-    max_dynamic_patch = max_dynamic_patch or hf_config.max_dynamic_patch
     if use_thumbnail and max_dynamic_patch > 1:
         max_dynamic_patch += 1
     downsample_ratio = hf_config.downsample_ratio
