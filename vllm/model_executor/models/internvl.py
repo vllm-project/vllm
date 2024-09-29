@@ -481,7 +481,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         self,
         image_input: InternVLImageInputs,
     ) -> torch.Tensor:
-        print(image_input["data"].shape)
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
