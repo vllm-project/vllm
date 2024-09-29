@@ -40,7 +40,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                 backend = select_default_backend(envs.VLLM_TORCH_COMPILE_LEVEL)
                 if not isinstance(backend, str):
                     from functools import partial
-                    backend = partial(backend, model=weakref.ref(self))
+                    backend = partial(backend, model_ref=weakref.ref(self))
 
             compiled_callable = torch.compile(
                 self.forward,
