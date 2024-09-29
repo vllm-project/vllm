@@ -253,6 +253,8 @@ class ModelConfig:
 
     def _verify_embedding_mode(self) -> None:
         architectures = getattr(self.hf_config, "architectures", [])
+        if len(architectures) == 0:
+            raise ValueError("No architectures found in the model config.")
         self.embedding_mode = any(
             ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
@@ -422,6 +424,9 @@ class ModelConfig:
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         architectures = getattr(self.hf_config, "architectures", [])
+        if len(architectures) == 0:
+            raise ValueError("No architectures found in the model config.")
+
         if not all(arch in _PP_SUPPORTED_MODELS
                    for arch in architectures) and pipeline_parallel_size > 1:
             raise NotImplementedError(
