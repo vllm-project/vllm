@@ -190,6 +190,9 @@ def vllm_backend(
     graph_for_symbolic_shape = wrap_inductor(graph, example_inputs,
                                              additional_inductor_config)
 
+    # TODO: Dynamo does not pass all dynamic shapes.
+    # Need to investigate why. It works now because all the dynamic
+    # shapes have the same value, and either of them can be used.
     sym_shape_indices = [
         i for i, x in enumerate(example_inputs) if isinstance(x, torch.SymInt)
     ]
