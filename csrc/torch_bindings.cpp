@@ -273,26 +273,31 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"
       "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor? z_, Tensor? delta_bias_,"
+      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
       "bool delta_softplus,"
-      "Tensor? index_, Tensor!? x) -> Tensor[]");
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "Tensor! ssm_states) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
   ops.def(
       "causal_conv1d_update(Tensor! x,"
       "Tensor! conv_state,"
       "Tensor! weight,"
-      "Tensor? bias,"
+      "Tensor? bias_,"
       "bool silu_activation,"
+      "Tensor? cache_seqlens_,"
       "Tensor? conv_state_indices) -> Tensor");
   ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
 
   ops.def(
       "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
       "Tensor? bias_,"
-      "Tensor? seq_idx_,"
-      "Tensor? initial_states_,"
-      "Tensor!? final_states_out_,"
+      "Tensor!? conv_states,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
       "bool silu_activation) -> Tensor");
   ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 #endif

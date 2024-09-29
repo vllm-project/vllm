@@ -54,10 +54,14 @@ struct SSMParamsBase {
     void *__restrict__ delta_ptr;
     void *__restrict__ delta_bias_ptr;
     void *__restrict__ out_ptr;
-    void *__restrict__ x_ptr;
+    void *__restrict__ ssm_states_ptr;
     void *__restrict__ z_ptr;
     void *__restrict__ out_z_ptr;
-    void *__restrict__ index_ptr;
+
+    void *__restrict__ query_start_loc_ptr;
+    void *__restrict__ cache_indices_ptr;
+    void *__restrict__ has_initial_state_ptr;
+
 };
 
 
@@ -201,7 +205,7 @@ inline __device__ void load_input(typename Ktraits::input_t *u,
                                   typename Ktraits::input_t (&u_vals)[Ktraits::kNItems],
                                   typename Ktraits::BlockLoadT::TempStorage &smem_load,
                                   int seqlen) {
-    if constexpr (Ktraits::kIsEvenLen) {
+    if constexpr (Ktraits::kIsEvenLen && !Ktraits::kVarlen) {
         auto& smem_load_vec = reinterpret_cast<typename Ktraits::BlockLoadVecT::TempStorage&>(smem_load);
         using vec_t = typename Ktraits::vec_t;
         typename Ktraits::BlockLoadVecT(smem_load_vec).Load(
@@ -217,21 +221,6 @@ inline __device__ void load_input(typename Ktraits::input_t *u,
     }
 }
 
-template<typename Ktraits>
-inline __device__ void load_index(int *u,
-                                  int (&u_vals)[Ktraits::kNItems],
-                                  typename Ktraits::BlockLoadIndexT::TempStorage &smem_load_index,
-                                  int seqlen) {
-    if constexpr (Ktraits::kIsEvenLen) {
-        auto& smem_load_index_vec = reinterpret_cast<typename Ktraits::BlockLoadIndexVecT::TempStorage&>(smem_load_index);
-        Ktraits::BlockLoadIndexVecT(smem_load_index_vec).Load(
-            reinterpret_cast<uint4*>(u),
-            reinterpret_cast<uint4(&)[Ktraits::kNLoadsIndex]>(u_vals)
-       );
-    } else {
-        Ktraits::BlockLoadIndexT(smem_load_index).Load(u, u_vals, seqlen, 0);
-    }
-}
 
 template<typename Ktraits>
 inline __device__ void load_weight(typename Ktraits::input_t *Bvar,
@@ -240,7 +229,7 @@ inline __device__ void load_weight(typename Ktraits::input_t *Bvar,
                                    int seqlen) {
     constexpr int kNItems = Ktraits::kNItems;
     typename Ktraits::input_t B_vals_load[kNItems];
-    if constexpr (Ktraits::kIsEvenLen) {
+    if constexpr (Ktraits::kIsEvenLen && !Ktraits::kVarlen) {
         auto& smem_load_weight_vec = reinterpret_cast<typename Ktraits::BlockLoadWeightVecT::TempStorage&>(smem_load_weight);
         using vec_t = typename Ktraits::vec_t;
         typename Ktraits::BlockLoadWeightVecT(smem_load_weight_vec).Load(
@@ -263,7 +252,7 @@ inline __device__ void store_output(typename Ktraits::input_t *out,
     typename Ktraits::input_t write_vals[Ktraits::kNItems];
     #pragma unroll
     for (int i = 0; i < Ktraits::kNItems; ++i) { write_vals[i] = out_vals[i]; }
-    if constexpr (Ktraits::kIsEvenLen) {
+    if constexpr (Ktraits::kIsEvenLen && !Ktraits::kVarlen) {
         auto& smem_store_vec = reinterpret_cast<typename Ktraits::BlockStoreVecT::TempStorage&>(smem_store);
         using vec_t = typename Ktraits::vec_t;
         typename Ktraits::BlockStoreVecT(smem_store_vec).Store(
