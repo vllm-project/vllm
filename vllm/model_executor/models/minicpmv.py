@@ -916,14 +916,14 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def init_vision_module(self) -> nn.Module:
         # A custom version of SiglipVisionTransformer, won't work with TP
-        from vllm.model_executor.models.na_vit import SiglipVisionTransformer
+        # from vllm.model_executor.models.na_vit import SiglipVisionTransformer
 
         if self.config._attn_implementation == "flash_attention_2":
             self.config.vision_config._attn_implementation = "flash_attention_2"
         else:
             # not support sdpa
             self.config.vision_config._attn_implementation = "eager"
-        model = SiglipVisionTransformer(self.config.vision_config)
+        model = Idefics2VisionTransformer(self.config.vision_config)
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
@@ -981,12 +981,12 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values.type(dtype),
             patch_attention_mask=patch_attn_mask,
             tgt_sizes=tgt_sizes,
-        ).last_hidden_state
+        )#.last_hidden_state
 
         return self.resampler(vision_embedding, tgt_sizes)
 
     def is_default_weight_loading(self, name: str) -> bool:
-        return "resampler" in name or "vpm" in name
+        return "resampler" in name #or "vpm" in name
 
 
 _SUPPORT_VERSION = {
