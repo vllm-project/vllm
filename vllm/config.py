@@ -1021,6 +1021,7 @@ class SchedulerConfig:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         #self.use_v2_block_manager = use_v2_block_manager
+
         self.use_v2_block_manager = True
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
