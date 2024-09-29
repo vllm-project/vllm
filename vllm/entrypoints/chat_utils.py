@@ -542,6 +542,14 @@ def apply_mistral_chat_template(
     if chat_template is not None:
         logger.warning(
             "'chat_template' cannot be overridden for mistral tokenizer.")
+    if "add_generation_prompt" in kwargs:
+        logger.warning(
+            "'add_generation_prompt' is not supported for mistral tokenizer, "
+            "so it will be ignored.")
+    if "continue_final_message" in kwargs:
+        logger.warning(
+            "'continue_final_message' is not supported for mistral tokenizer, "
+            "so it will be ignored.")
 
     return tokenizer.apply_chat_template(
         messages=messages,

@@ -211,6 +211,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
     )
+    continue_final_message: bool = Field(
+        default=False,
+        description=
+        ("If this is set, the chat will be formatted so that the final "
+         "message in the chat is open-ended, without any EOS tokens. The "
+         "model will continue this message rather than starting a new one. "
+         "This allows you to \"prefill\" part of the model's response for it. "
+         "Cannot be used at the same time as `add_generation_prompt`."),
+    )
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -429,6 +438,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     raise ValueError(
                         "The tool specified in `tool_choice` does not match any"
                         " of the specified `tools`")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
         return data
 
 
@@ -862,7 +880,17 @@ class TokenizeChatRequest(OpenAIBaseModel):
     messages: List[ChatCompletionMessageParam]
 
     add_generation_prompt: bool = Field(default=True)
+    continue_final_message: bool = Field(default=False)
     add_special_tokens: bool = Field(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
 
 
 TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
