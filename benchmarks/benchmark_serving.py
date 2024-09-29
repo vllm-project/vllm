@@ -511,7 +511,8 @@ def main(args: argparse.Namespace):
     np.random.seed(args.seed)
 
     backend = args.backend
-    model_id = args.model
+    # model_id = args.model
+    model_id = args.model.split('/')[-1]
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
 
     if args.base_url is not None:

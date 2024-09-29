@@ -772,6 +772,9 @@ void paged_attention_xpu_v1_impl_launcher(
 
 #define CALL_KERNEL_LAUNCHER_BLOCK_SIZE(T)                        \
   switch (block_size) {                                           \
+    case 8:                                                      \
+      CALL_KERNEL_LAUNCHER(T, 8);                                \
+      break;                                                      \
     case 16:                                                      \
       CALL_KERNEL_LAUNCHER(T, 16);                                \
       break;                                                      \

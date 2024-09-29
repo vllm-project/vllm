@@ -366,12 +366,12 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        if device_config.device_type not in ("cuda", "tpu"):
-            logger.warning(
-                "Async output processing is only supported for CUDA or TPU. "
-                "Disabling it for other platforms.")
-            self.use_async_output_proc = False
-            return
+        # if device_config.device_type not in ("cuda", "tpu"):
+        #     logger.warning(
+        #         "Async output processing is only supported for CUDA or TPU. "
+        #         "Disabling it for other platforms.")
+        #     self.use_async_output_proc = False
+        #     return
 
         if envs.VLLM_USE_RAY_SPMD_WORKER:
             logger.warning(
@@ -379,13 +379,13 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        if self.enforce_eager:
-            logger.warning(
-                "To see benefits of async output processing, enable CUDA "
-                "graph. Since, enforce-eager is enabled, async output "
-                "processor cannot be used")
-            self.use_async_output_proc = not self.enforce_eager
-            return
+        # if self.enforce_eager:
+        #     logger.warning(
+        #         "To see benefits of async output processing, enable CUDA "
+        #         "graph. Since, enforce-eager is enabled, async output "
+        #         "processor cannot be used")
+        #     self.use_async_output_proc = not self.enforce_eager
+        #     return
 
         # Async postprocessor is not necessary with embedding mode
         # since there is no token generation
