@@ -69,7 +69,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def process_outputs(self,
                         sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput],
-                        is_async: bool = False) -> Optional[int]:
+                        is_async: bool = False) -> None:
         """Append new tokens in the outputs to sequences in the sequence group.
 
         This only supports sequence groups of size 1. It supports greater than
@@ -84,10 +84,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             tokens from the previous step. If this is true, then
             no tokens need to be appended since it is already done
             externally (before the next schedule() call)
-            
-        Returns:
-            The number of tokens appended to the sequence. This is optional
-            because only speculative decode uses this return value.
         """
         # Sequences can be in RUNNING or FINISHED_ABORTED state
         # once scheduled, as a sequence is moved to FINSIHED_ABORTED
@@ -168,6 +164,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                     output_token_ids = output_token_ids[:i + 1]
                     break
 
+        is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
         for output_token_id, output_logprob in zip(output_token_ids,
@@ -177,8 +174,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 logprobs=output_logprob,
             )
 
+            if is_prefill_sampled_token:
+                is_prefill_sampled_token = False
+            else:
+                # Update num_computed_tokens iff the sampled token is not from
+                # a prefill step.
+                seq.data.update_num_computed_tokens(1)
+
             self._process_decode_and_stop(seq, sampling_params)
 
             if seq.is_finished():
                 break
-        return len(output_token_ids)
