@@ -161,9 +161,13 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
     current_config = config.shallow_copy_dict()
     from torch._inductor.compile_fx import compile_fx
 
-    current_config['post_grad_custom_post_pass'] = fix_functionalization
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
+    if 'post_grad_custom_post_pass' in current_config:
+        logger.warning(
+            "post_grad_custom_post_pass is already set in the config. "
+            "Overwriting it with the fix_functionalization")
+    current_config['post_grad_custom_post_pass'] = fix_functionalization
     return compile_fx(graph, example_inputs, config_patches=current_config)
 
 
