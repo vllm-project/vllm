@@ -320,6 +320,7 @@ def selective_state_update(state,
 
 
 def selective_scan_fn(u,
+                      ssm_states,
                       delta,
                       A,
                       B,
@@ -328,25 +329,24 @@ def selective_scan_fn(u,
                       z=None,
                       delta_bias=None,
                       delta_softplus=False,
-                      cu_seq_len=None,
+                      seq_start_loc=None,
                       cache_indices=None,
-                      has_initial_state=None,
-                      ssm_states=None) -> Tuple[torch.Tensor, torch.Tensor]:
+                      has_initial_state=None
+                      ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    u: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
-    delta: (dim, cu_seq_len) for varlen or (batch, dim, seqlen)
+    u: (dim, total_length) for varlen or (batch, dim, seqlen) 
+    delta: (dim, total_length) for varlen or (batch, dim, seqlen)
     A: (dim, dstate) 
-    B: (ngroups, dstate, cu_seq_len) for varlen or (batch,ngroups,dstate,seqlen)
-    C: (ngroups, dstate, cu_seq_len) for varlen or (batch,ngroups,dstate,seqlen)
+    B: (ngroups, dstate, total_length) for varlen or (batch,ngroups,dstate,seqlen)
+    C: (ngroups, dstate, total_length) for varlen or (batch,ngroups,dstate,seqlen)
     D: (dim,) 
-    z: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
+    z: (dim, total_length) for varlen or (batch, dim, seqlen) 
     dt_bias: (dim,) or (dim)
-    cu_seq_len: (batch) int32
-        Cumulative tokens along the last dimension, 
-        sequence lengths are passed through cu_seq_len therefore are required 
-        for variable lengths kernel activation.
-        for example: cu_seq_len = torch.Tensor([10,15,16]) 
-        then u.shape = (dim,16)
+    seq_start_loc: (batch + 1) int32
+        The cumulative sequence lengths of the sequences in
+        the batch, used to index into sequence. 
+        for example: seq_start_loc = torch.Tensor([0,10,16,17]), 
+        x.shape=(dim,17)
     cache_indices: (batch) int32
         A tensor with each cell is a correspondent 
         input and output ssm_state index
@@ -357,7 +357,7 @@ def selective_scan_fn(u,
         there's no initial state
 
     returns
-        output: (dim, cu_seq_len) for varlen or (batch, dim, seqlen) 
+        output: (dim, total_length) for varlen or (batch, dim, seqlen) 
                 supports inplace replacement
         last_state has shape (batch, dim, dstate). 
                 supports inplace replacement if ssm_state was provided
@@ -374,17 +374,17 @@ def selective_scan_fn(u,
         C = C.contiguous()
     if z is not None and z.stride(-1) != 1:
         z = z.contiguous()
-    if B.dim() == 3 and cu_seq_len is None:
+    if B.dim() == 3 and seq_start_loc is None:
         B = B.unsqueeze(1)
-    if B.dim() == 2 and cu_seq_len is not None:
+    if B.dim() == 2 and seq_start_loc is not None:
         B = B.unsqueeze(0)
-    if C.dim() == 3 and cu_seq_len is None:
+    if C.dim() == 3 and seq_start_loc is None:
         C = C.unsqueeze(1)
-    if C.dim() == 2 and cu_seq_len is not None:
+    if C.dim() == 2 and seq_start_loc is not None:
         C = C.unsqueeze(0)
 
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
-                           cu_seq_len, cache_indices, has_initial_state,
+                           seq_start_loc, cache_indices, has_initial_state,
                            ssm_states)
 
     if z is None:

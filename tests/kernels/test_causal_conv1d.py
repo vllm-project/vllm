@@ -365,6 +365,7 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
     assert all(s > 0 for s in seqlens[-1])
 
     cumsum = torch.cumsum(torch.tensor(seqlens[0]), dim=0).to(torch.int32)
+    cumsum = torch.concat([torch.tensor([0],dtype=torch.int32), cumsum], dim=0)
     x = torch.randn(batch, 4096 + dim + 64, seqlen, device=device,
                     dtype=itype)[:, 4096:4096 + dim, :]
     weight = torch.randn(dim, width, device=device, dtype=itype)
@@ -380,10 +381,10 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
                                dtype=x.dtype)
     final_states_ref = final_states.clone()
     has_initial_states = torch.randint(0,
-                                       2, (cumsum.shape[0], ),
+                                       2, (cumsum.shape[0] - 1, ),
                                        dtype=torch.bool,
                                        device=x.device)
-    cache_indices = torch.randperm(cumsum.shape[0],
+    cache_indices = torch.randperm(cumsum.shape[0] - 1,
                                    dtype=torch.int32,
                                    device=x.device)
     out = causal_conv1d_fn(x.squeeze(0), weight, bias, cumsum.cuda(),

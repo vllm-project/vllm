@@ -298,6 +298,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
             _z = z[..., chunk_start:chunk_end]
         out = selective_scan_fn(
             u[..., chunk_start:chunk_end],
+            state,
             delta[..., chunk_start:chunk_end],
             A,
             _B,
@@ -306,7 +307,6 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
             z=_z,
             delta_bias=delta_bias,
             delta_softplus=delta_softplus,
-            ssm_states=state,
             has_initial_state=torch.ones(batch_size,
                                          device=u.device,
                                          dtype=torch.bool) if c > 0 else None)
@@ -431,8 +431,12 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
                  torch.tensor([seqlen - 1])])).tolist())
     assert sum(seqlens[-1]) == seqlen
     assert all(s > 0 for s in seqlens[-1])
-    cumsum = torch.cumsum(torch.tensor(seqlens[0]),
-                          dim=0).to(torch.int32).cuda()
+
+    cumsum = torch.cumsum(torch.tensor(seqlens[0]), dim=0).to(torch.int32)
+    cumsum = torch.concat(
+        [torch.tensor([0],dtype=torch.int32), cumsum],
+        dim=0
+    ).cuda()
 
     dim = 4
     dstate = 8
@@ -460,23 +464,23 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups,
     delta_ref = delta.clone()
     out = None
     out_ref = None
-    prev_state_shape = (cumsum.shape[0], u.shape[0], int(A.shape[1]))
+    prev_state_shape = (cumsum.shape[0] - 1, u.shape[0], int(A.shape[1]))
     prev_state = torch.randn(prev_state_shape,
                              device=u.device,
                              dtype=itype,
                              requires_grad=False)
     prev_state_ref = prev_state.clone()
-    cache_indices = torch.randperm(cumsum.shape[0],
+    cache_indices = torch.randperm(cumsum.shape[0] - 1,
                                    dtype=torch.int32,
                                    device=u.device)
 
     has_initial_state = torch.randint(0,
-                                      2, (cumsum.shape[0], ),
+                                      2, (cumsum.shape[0] - 1, ),
                                       dtype=torch.bool,
                                       device=u.device)
-    out = selective_scan_fn(u, delta, A, B, C, D, z, delta_bias,
+    out = selective_scan_fn(u, prev_state, delta, A, B, C, D, z, delta_bias,
                             delta_softplus, cumsum, cache_indices,
-                            has_initial_state, prev_state)
+                            has_initial_state )
     outs_ref = []
     splits = [
         torch.split(var, seqlens[0], dim=-1)

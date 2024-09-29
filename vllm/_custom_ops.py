@@ -763,12 +763,12 @@ def ggml_mul_mat_a8(
 def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       bias_: Optional[torch.Tensor],
                       conv_states: Optional[torch.Tensor],
-                      cu_seq_len: Optional[torch.Tensor],
+                      seq_start_loc: Optional[torch.Tensor],
                       cache_indices: Optional[torch.Tensor],
                       has_initial_state: Optional[torch.Tensor],
                       silu_activation: bool) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
-                                          cu_seq_len, cache_indices,
+                                          seq_start_loc, cache_indices,
                                           has_initial_state, silu_activation)
 
 
@@ -787,12 +787,12 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
                        D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
                        delta_bias_: Optional[torch.Tensor],
                        delta_softplus: bool,
-                       cu_seq_len: Optional[torch.Tensor],
+                       seq_start_loc: Optional[torch.Tensor],
                        cache_indices: Optional[torch.Tensor],
                        has_initial_state: Optional[torch.Tensor],
-                       ssm_states: Optional[torch.Tensor]):
+                       ssm_states: torch.Tensor):
     torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_, delta_bias_,
-                                    delta_softplus, cu_seq_len, cache_indices,
+                                    delta_softplus, seq_start_loc, cache_indices,
                                     has_initial_state, ssm_states)
 
 
