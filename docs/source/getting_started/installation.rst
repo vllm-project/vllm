@@ -12,8 +12,8 @@ Requirements
 * Python: 3.8 -- 3.12
 * GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
-Install with pip
-----------------
+Install released versions
+--------------------------
 
 You can install vLLM using pip:
 
@@ -46,22 +46,34 @@ You can install vLLM using pip:
 
     Therefore, it is recommended to install vLLM with a **fresh new** conda environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See below for instructions.
 
-.. note::
+Install the latest code
+----------------------------
 
-    vLLM also publishes wheels for Linux running on x86 platform with cuda 12 for every commit since v0.5.3. You can download and install them with the following command:
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on x86 platform with cuda 12 for every commit since v0.5.3. You can download and install the latest one with the following command:
 
-    .. code-block:: console
+.. code-block:: console
 
-        $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-        $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+    $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 
-    You can also just download the latest wheel by running:
+If you want to access the wheels for previous commits, you can specify the commit hash in the URL:
 
-    .. code-block:: console
+.. code-block:: console
 
-        $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+    $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
+    $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 
-    Note that the wheels are built with Python 3.8 abi (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about abi), so they are compatible with Python 3.8 and later. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual version of wheels is contained in the wheel metadata.
+Note that the wheels are built with Python 3.8 abi (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about abi), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata.
+
+Another way to access the latest code is to use the docker images:
+
+.. code-block:: console
+
+    $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
+    $ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${VLLM_COMMIT}
+
+These docker images are used for CI and testing only, and they are not intended for production use. They will be expired after several days.
+
+Latest code can contain bugs and may not be stable. Please use it with caution.
 
 Build from source (without compilation)
 ---------------------------------------
@@ -102,7 +114,7 @@ If you need to touch the C++ or CUDA code, you need to build vLLM from source:
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
-    $ pip install -e .  # This may take 5-10 minutes.
+    $ pip install -e .  # This can take a long time
 
 .. note::
 
