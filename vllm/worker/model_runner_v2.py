@@ -97,6 +97,9 @@ class GPUModelRunner:
             if req_index is not None:
                 removed_req_indices.append(req_index)
 
+        # Condense the batched states.
+        self.batched_states.condense(removed_req_indices)
+
         # Update the states of the running requests.
         num_prev_blocks: Dict[str, int] = {}
         new_block_ids: Dict[str, List[int]] = {}
@@ -155,19 +158,9 @@ class GPUModelRunner:
             req_ids_to_add.append(req_id)
 
         # Add the new or resumed requests to the batched states.
-        # The smaller empty indices are filled first.
-        removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
-            if removed_req_indices:
-                # TODO(woosuk): Consider LoRA.
-                req_index = removed_req_indices.pop()
-            else:
-                req_index = self.batched_states.num_reqs
-            self.batched_states.add_request(req_state, req_index)
-
-        # Condense the batched states.
-        self.batched_states.condense(removed_req_indices)
+            self.batched_states.add_request(req_state)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
 
@@ -292,8 +285,15 @@ class BatchedRequestStates:
         self.num_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
 
-    def add_request(self, request: "RequestState", req_index: int) -> None:
+    def add_request(
+        self,
+        request: "RequestState",
+        req_index: Optional[int] = None,
+    ) -> None:
+        if req_index is None:
+            req_index = self.num_reqs
         assert req_index < self.max_num_reqs
+
         self.req_ids[req_index] = request.req_id
         self.num_reqs += 1
 
@@ -308,6 +308,7 @@ class BatchedRequestStates:
         elif sampling_params.sampling_type == SamplingType.RANDOM:
             self.random_reqs.add(req_index)
         elif sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+            # TODO
             assert False
 
         self.top_p_cpu[req_index] = sampling_params.top_p
@@ -344,14 +345,26 @@ class BatchedRequestStates:
 
     def condense(self, empty_req_indices: List[int]) -> None:
         # TODO(woosuk): Consider LoRA.
+        if not empty_req_indices:
+            # The batched states are already condensed.
+            return
+        if self.num_reqs == 0:
+            # The batched states are empty.
+            return
+
+        empty_req_indices = sorted(empty_req_indices, reverse=True)
+        last_req_index = self.num_reqs + len(empty_req_indices) - 1
         while empty_req_indices:
-            empty_index = empty_req_indices.pop()
-            last_req_index = self.num_reqs + len(empty_req_indices) - 1
-            if empty_index == last_req_index:
-                assert len(empty_req_indices) == 0
+            # Find the largest non-empty index.
+            while last_req_index in empty_req_indices:
+                last_req_index -= 1
+
+            # Find the smallest empty index.
+            empty_index = empty_req_indices.pop() 
+            if empty_index >= last_req_index:
                 break
 
-            # Swap the last request with the empty slot.
+            # Swap the states.
             self.req_ids[empty_index] = self.req_ids[last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
