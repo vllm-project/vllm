@@ -1,15 +1,14 @@
 import importlib
 import importlib.util
 import os
-from collections import abc
 from typing import Callable, Dict, List, Optional, Sequence, Type, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation)
 from vllm.logger import init_logger
-from vllm.utils import is_list_of
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import is_list_of
 
 logger = init_logger(__name__)
 
