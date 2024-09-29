@@ -725,7 +725,8 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
 
-@torch.library.custom_op("vllm::unified_flash_attention", mutates_args=[])
+@torch.library.custom_op("vllm::unified_flash_attention",
+                         mutates_args=["kv_cache"])
 def unified_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
