@@ -8,7 +8,6 @@ from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
-from vllm.utils import cdiv
 
 PrefixHash = int
 
@@ -576,37 +575,27 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             if ids
         ])
 
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               num_lookahead_slots: int = 0) -> int:
-        """Determine the number of blocks that will be touched by
-        swapping in/out the given blocks from certain sequence
-        group with the provided num_lookahead_slots.
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
+        """Returns the number of full blocks that will be touched by
+        swapping in/out.
 
         Args:
-            blocks (List[Block]): The potential blocks to swap.
-            num_lookahead_slots (int): number of lookahead slots (0 for 
-                swap out).
-        
+            blocks: List of blocks to be swapped.
         Returns:
-            int: the number of blocks that will be touched by
-                swapping in/out the given blocks and num_lookahead_slots.
+            int: the number of full blocks that will be touched by
+                swapping in/out the given blocks. Non full blocks are ignored
+                when deciding the number of blocks to touch.
         """
-        num_touched_blocks = 0
+        num_touched_blocks: int = 0
         for block in blocks:
-            if not block.is_full:
+            # If the block has a match in the cache and the cached
+            # block is not referenced, then we still count it as a
+            # touched block
+            if block.is_full and (not self.is_block_cached(block) or \
+                (block.content_hash is not None and \
+                self._cached_blocks[block.content_hash] in \
+                        self.evictor)):
                 num_touched_blocks += 1
-                if num_lookahead_slots > block.num_empty_slots:
-                    num_touched_blocks += cdiv(
-                        num_lookahead_slots - block.num_empty_slots,
-                        self._block_size)
-            else:
-                # If the block has a match in the cache and the cached block
-                # is not referenced, then we still count it as a touched block
-                if not self.is_block_cached(block) or \
-                    (block.content_hash is not None and \
-                     self._cached_blocks[block.content_hash] in self.evictor):
-                    num_touched_blocks += 1
         return num_touched_blocks
 
     def swap_out(self, blocks: List[Block]) -> None:
