@@ -119,6 +119,9 @@ STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
+GB_bytes = 1_000_000_000
+"""The number of bytes in one gigabyte (GB)."""
+
 GiB_bytes = 1 << 30
 """The number of bytes in one gibibyte (GiB)."""
 

@@ -7,6 +7,7 @@ import torch
 
 from vllm.utils import is_cpu
 
+from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
 MODELS = [
@@ -69,20 +70,10 @@ def test_phimoe_routing_function():
         assert torch.equal(topk_ids, ground_truth[test_id]["topk_ids"])
 
 
-def get_gpu_memory():
-    try:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        gpu_memory = props.total_memory / (1024**3)
-        return gpu_memory
-    except Exception:
-        return 0
-
-
 @pytest.mark.skipif(condition=is_cpu(),
                     reason="This test takes a lot time to run on CPU, "
                     "and vllm CI's disk space is not enough for this model.")
-@pytest.mark.skipif(condition=get_gpu_memory() < 100,
-                    reason="Skip this test if GPU memory is insufficient.")
+@large_gpu_test(min_gb=80)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])

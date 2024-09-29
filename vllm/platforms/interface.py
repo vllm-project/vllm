@@ -85,6 +85,12 @@ class Platform:
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
+        """Get the name of a device."""
+        raise NotImplementedError
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        """Get the total memory of a device in bytes."""
         raise NotImplementedError
 
     @classmethod
