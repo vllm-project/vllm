@@ -7,6 +7,8 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.utils import is_hip
 
+from .interfaces import supports_multimodal
+
 logger = init_logger(__name__)
 
 _GENERATION_MODELS = {
@@ -199,15 +201,11 @@ class ModelRegistry:
                 "overwritten by the new model class %s.", model_arch,
                 model_cls.__name__)
 
-        # Avoid circular import
-        from vllm.model_executor.models.interfaces import supports_multimodal
         if supports_multimodal(model_cls):
             # NOTE: This map is needed to store the information if the OOT model
             # is a multimodal model.
-            global _OOT_MULTIMODAL_MODELS
             _OOT_MULTIMODAL_MODELS[model_arch] = model_cls
 
-        global _OOT_MODELS
         _OOT_MODELS[model_arch] = model_cls
 
     @staticmethod
@@ -216,11 +214,9 @@ class ModelRegistry:
 
     @staticmethod
     def is_multimodal_model(model_arch: str) -> bool:
-
         # TODO: find a way to avoid initializing CUDA prematurely to
         # use `supports_multimodal` to determine if a model is multimodal
         # model_cls = ModelRegistry._try_load_model_cls(model_arch)
-        # from vllm.model_executor.models.interfaces import supports_multimodal
         return (model_arch in _MULTIMODAL_MODELS
                 or model_arch in _OOT_MULTIMODAL_MODELS)
 

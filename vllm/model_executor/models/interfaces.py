@@ -1,10 +1,12 @@
-from typing import (ClassVar, Dict, List, Literal, Optional, Protocol, Type,
-                    Union, overload, runtime_checkable)
+from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
+                    Protocol, Type, Union, overload, runtime_checkable)
 
 from typing_extensions import TypeIs
 
-from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
 
 logger = init_logger(__name__)
 
@@ -22,7 +24,7 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def __init__(self, *, multimodal_config: MultiModalConfig) -> None:
+    def __init__(self, *, multimodal_config: "MultiModalConfig") -> None:
         ...
 
 
@@ -32,7 +34,7 @@ class SupportsMultiModal(Protocol):
 class _SupportsMultiModalType(Protocol):
     supports_multimodal: Literal[True]
 
-    def __call__(self, *, multimodal_config: MultiModalConfig) -> None:
+    def __call__(self, *, multimodal_config: "MultiModalConfig") -> None:
         ...
 
 
@@ -75,7 +77,7 @@ class SupportsLoRA(Protocol):
     embedding_padding_modules: ClassVar[List[str]]
 
     # lora_config is None when LoRA is not enabled
-    def __init__(self, *, lora_config: Optional[LoRAConfig] = None) -> None:
+    def __init__(self, *, lora_config: Optional["LoRAConfig"] = None) -> None:
         ...
 
 
@@ -90,7 +92,7 @@ class _SupportsLoRAType(Protocol):
     embedding_modules: Dict[str, str]
     embedding_padding_modules: List[str]
 
-    def __call__(self, *, lora_config: Optional[LoRAConfig] = None) -> None:
+    def __call__(self, *, lora_config: Optional["LoRAConfig"] = None) -> None:
         ...
 
 
@@ -158,7 +160,7 @@ class HasInnerState(Protocol):
 
     def __init__(self,
                  *,
-                 scheduler_config: Optional[SchedulerConfig] = None) -> None:
+                 scheduler_config: Optional["SchedulerConfig"] = None) -> None:
         ...
 
 
@@ -168,7 +170,7 @@ class _HasInnerStateType(Protocol):
 
     def __init__(self,
                  *,
-                 scheduler_config: Optional[SchedulerConfig] = None) -> None:
+                 scheduler_config: Optional["SchedulerConfig"] = None) -> None:
         ...
 
 
