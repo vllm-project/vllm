@@ -21,6 +21,7 @@ def single_marlin_moe(
     renormalize: bool,
     override_config: Optional[Dict[str, Any]] = None,
     num_bits: int = 8,
+    is_k_full: bool = True,
 ) -> torch.Tensor:
     """
     This function computes the multiplication of hidden_states with expert
@@ -86,7 +87,7 @@ def single_marlin_moe(
 
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        g_idx, perm, workspace, scalar_type, M, N, K, True, E, topk,
+        g_idx, perm, workspace, scalar_type, M, N, K, is_k_full, E, topk,
         block_size_m, True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
@@ -107,6 +108,7 @@ def fused_marlin_moe(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     num_bits: int = 8,
+    is_k_full: bool = True,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -199,7 +201,7 @@ def fused_marlin_moe(
         M,
         2 * N,
         K,
-        True,
+        is_k_full,
         E,
         topk,
         block_size_m,
@@ -223,7 +225,7 @@ def fused_marlin_moe(
         M,
         K,
         N,
-        True,
+        is_k_full,
         E,
         topk,
         block_size_m,
