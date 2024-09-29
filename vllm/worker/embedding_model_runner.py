@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
+from vllm.compilation import forward_context
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -119,7 +120,8 @@ class EmbeddingModelRunner(
                                          device=self.device),
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        with forward_context(model_input.attn_metadata):
+            hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.
         if not self.is_driver_worker:
