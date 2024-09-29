@@ -330,7 +330,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Set the reference counts of the token blocks.
                 block.ref_count = ref_count
             elif not is_encoder_decoder and self.enable_caching:
-                pre_block_hash = block_table[logical_idx - 1].block_hash if logical_idx > 0 else None
+                pre_block_hash = block_table[logical_idx - 1].block_hash \
+                    if logical_idx > 0 else None
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx, pre_block_hash),
                     seq.num_hashed_tokens_of_block(logical_idx))
