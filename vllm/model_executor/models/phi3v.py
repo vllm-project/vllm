@@ -439,7 +439,7 @@ def input_processor_for_phi3v(ctx: InputContext,
     elif isinstance(image_data, torch.Tensor):
         num_images, image_feature_size, hidden_size = image_data.shape
     elif is_list_of(image_data, torch.Tensor):
-        image_feature_size = [item.shape[1] for item in image_data]
+        image_feature_size = [item.shape[0] for item in image_data]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -577,9 +577,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
         image_sizes = kwargs.pop("image_sizes", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
-            return None
-
         if pixel_values is None and image_embeds is None:
             return None
 
@@ -616,7 +613,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
 
         if image_input["type"] == "image_embeds":
-            return image_input["data"]
+            return list(torch.unbind(image_input["data"], dim=0))
 
         assert self.vision_embed_tokens is not None
         image_embeds = self.vision_embed_tokens(image_input["data"],
