@@ -832,6 +832,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # vLLM uses cuda graph only for decoding requests.
             batch_size += cuda_graph_pad_size
 
+        print (f"cuda_graph_pad_size -- {cuda_graph_pad_size}")
+
         # Tokens and positions.
         if cuda_graph_pad_size:
             input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
@@ -858,10 +860,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
 
         # Attention metadata.
-        is_mscp: bool = self.scheduler_config.is_multi_step and \
-                        self.scheduler_config.chunked_prefill_enabled
-        use_graph_block_tables = cuda_graph_pad_size != -1 or \
-            (is_mscp and len(seq_lens) in _BATCH_SIZES_TO_CAPTURE)
+        #is_mscp: bool = self.scheduler_config.is_multi_step and \
+        #                self.scheduler_config.chunked_prefill_enabled
+        #use_graph_block_tables = cuda_graph_pad_size != -1 or \
+        #    (is_mscp and len(seq_lens) in _BATCH_SIZES_TO_CAPTURE)
+        use_graph_block_tables = cuda_graph_pad_size != -1
         attn_metadata = self.attn_metadata_builder.build(
             seq_lens,
             query_lens,
@@ -1570,7 +1573,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    virtual_engine=virtual_engine)
 
     @torch.inference_mode()
-    @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
+    #@dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
     def execute_model(
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
@@ -1604,11 +1607,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
         if prefill_meta is None and decode_meta.use_cuda_graph:
+            print ("Running cuda-graphs ...")
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
         else:
+            if decode_meta is not None:
+                print (f"Running eager because use_cuda_graph {decode_meta.use_cuda_graph} | prefill is not None {prefill_meta is not None} ...")
+            else:
+                print (f"Running eager because decode meta is None | prefill is not None {prefill_meta is not None} ...")
             model_executable = self.model
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}

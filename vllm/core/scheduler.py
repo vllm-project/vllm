@@ -1356,6 +1356,16 @@ class Scheduler:
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
 
+        num_prompts = len([None for x in seq_group_metadata_list if x.is_prompt])
+        num_decodes = len(seq_group_metadata_list) - num_prompts
+        num_prompt_tokens = sum([x.token_chunk_size if x.is_prompt else 0 for x in seq_group_metadata_list])
+        num_decode_tokens = sum([x.token_chunk_size if not x.is_prompt else 0 for x in seq_group_metadata_list]) 
+        print ("Scheduler :\n")
+        print (f"    # prompts {num_prompts}")
+        print (f"    # decodes {num_decodes}")
+        print (f"    # prompt tokens {num_prompt_tokens}")
+        print (f"    # decode tokens {num_decode_tokens}")
+
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,
                 allow_async_output_proc)
