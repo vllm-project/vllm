@@ -397,6 +397,7 @@ class LLM:
         beam_width: int,
         max_tokens: int,
         ignore_eos: bool = False,
+        temperature: float = 0.0,
     ) -> List[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -406,6 +407,7 @@ class LLM:
                 of token IDs.
             beam_width: The number of beams to keep at each step.
             max_tokens: The max number of tokens to generate for each prompt.
+            temperature: The temperature to use for generation.
         
         TODO: how does beam search work together with length penalty, frequency
         penalty, and stopping criteria, etc.?
@@ -417,7 +419,7 @@ class LLM:
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,
-                                            temperature=0.0)
+                                            temperature=temperature)
         instances: List[BeamSearchInstance] = []
 
         for prompt in prompts:
@@ -500,6 +502,7 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> List[RequestOutput]:
         """
@@ -527,6 +530,9 @@ class LLM:
               If not provided, the model's default chat template will be used.
             add_generation_prompt: If True, adds a generation template
                 to each message.
+            continue_final_message: If True, continues the final message in
+                the conversation instead of starting a new one. Cannot be `True`
+                if `add_generation_prompt` is also `True`.
 
         Returns:
             A list of ``RequestOutput`` objects containing the generated
@@ -558,6 +564,7 @@ class LLM:
                     messages=msgs,
                     chat_template=chat_template,
                     add_generation_prompt=add_generation_prompt,
+                    continue_final_message=continue_final_message,
                     tools=tools,
                 )
             else:
@@ -566,6 +573,7 @@ class LLM:
                     conversation=conversation,
                     chat_template=chat_template,
                     add_generation_prompt=add_generation_prompt,
+                    continue_final_message=continue_final_message,
                     tools=tools,
                 )
 

@@ -59,6 +59,13 @@ def get_physical_device_name(device_id: int = 0) -> str:
     return pynvml.nvmlDeviceGetName(handle)
 
 
+@lru_cache(maxsize=8)
+@with_nvml_context
+def get_physical_device_total_memory(device_id: int = 0) -> int:
+    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+    return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+
+
 @with_nvml_context
 def warn_if_different_devices():
     device_ids: int = pynvml.nvmlDeviceGetCount()
@@ -106,6 +113,11 @@ class CudaPlatform(Platform):
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         return get_physical_device_name(physical_device_id)
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        return get_physical_device_total_memory(physical_device_id)
 
     @classmethod
     @with_nvml_context
