@@ -860,17 +860,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
 
         # Attention metadata.
-        #is_mscp: bool = self.scheduler_config.is_multi_step and \
-        #                self.scheduler_config.chunked_prefill_enabled
-        #use_graph_block_tables = cuda_graph_pad_size != -1 or \
-        #    (is_mscp and len(seq_lens) in _BATCH_SIZES_TO_CAPTURE)
-        use_graph_block_tables = cuda_graph_pad_size != -1
         attn_metadata = self.attn_metadata_builder.build(
             seq_lens,
             query_lens,
             cuda_graph_pad_size,
-            batch_size,
-            use_graph_block_tables=use_graph_block_tables)
+            batch_size)
 
         # LoRA data.
         lora_requests = set()

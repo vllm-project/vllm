@@ -518,8 +518,7 @@ class FlashAttentionMetadataBuilder(
             device=self.runner.device, non_blocking=True)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int,
-              use_graph_block_tables: bool):
+              cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
 
         Args:
@@ -551,22 +550,15 @@ class FlashAttentionMetadataBuilder(
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
-            assert use_graph_block_tables, \
-                ("Must use graph block tables from the runner when using "
-                 "the captured graph")
             block_tables = self._use_graph_block_tables(
                 num_seqs, self.block_tables)
         else:
-            if use_graph_block_tables:
-                block_tables = self._use_graph_block_tables(
-                    num_seqs, self.block_tables)
-            else:
-                block_tables = make_tensor_with_pad(
-                    self.block_tables,
-                    pad=0,
-                    dtype=torch.int,
-                    device=device,
-                )
+            block_tables = make_tensor_with_pad(
+                self.block_tables,
+                pad=0,
+                dtype=torch.int,
+                device=device,
+            )
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         assert device is not None
