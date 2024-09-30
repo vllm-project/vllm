@@ -1205,7 +1205,12 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        args = [args[0]] + args[1:index] + config_args + args[index + 2:]
+        
+        # Note if served-model-name is specified at the end of yaml file,
+        # the positional argument model_tag will not be parsed normally,
+        # you would see error like the following
+        # vllm serve: error: the following arguments are required: model_tag
+        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
         return args
 
