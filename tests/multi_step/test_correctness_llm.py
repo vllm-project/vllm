@@ -197,6 +197,7 @@ def test_multi_step_llm_w_prompt_logprobs(
         name_1="vllm",
     )
 
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("tp_size", [1])
@@ -264,9 +265,9 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
         outputs_baseline = (vllm_model.generate_greedy(prompts, max_tokens)
-                        if num_logprobs is None else
-                        vllm_model.generate_greedy_logprobs(
-                            prompts, max_tokens, num_logprobs))
+                            if num_logprobs is None else
+                            vllm_model.generate_greedy_logprobs(
+                                prompts, max_tokens, num_logprobs))
 
     with vllm_runner(
             model,
@@ -280,9 +281,9 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
         outputs_w_features = (vllm_model.generate_greedy(prompts, max_tokens)
-                        if num_logprobs is None else
-                        vllm_model.generate_greedy_logprobs(
-                            prompts, max_tokens, num_logprobs))
+                              if num_logprobs is None else
+                              vllm_model.generate_greedy_logprobs(
+                                  prompts, max_tokens, num_logprobs))
 
     if num_logprobs is None:
         check_outputs_equal(
@@ -319,6 +320,7 @@ DEFAULT_SERVER_ARGS: List[str] = [
     "--swap-space",
     "16",
 ]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize(("tp_size, pp_size"), [
