@@ -512,7 +512,6 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
-        "video": ["opencv-python"],  # Required for video processing
         "audio": ["librosa", "soundfile"]  # Required for audio processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
