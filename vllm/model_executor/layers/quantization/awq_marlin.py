@@ -293,7 +293,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             "is_transposed":
             True,
             "quant_method":
-            FusedMoeWeightScaleSupported.GROUP,
+            FusedMoeWeightScaleSupported.GROUP.value,
         })
 
         w13_qweight = Parameter(torch.empty(num_experts,
