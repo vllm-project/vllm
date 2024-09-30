@@ -354,12 +354,15 @@ def get_path(*filepath) -> str:
 
 
 def get_vllm_version() -> str:
-    version = get_version()
+    version = get_version(
+        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+    )
+
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
-            version += "+empty"
+            version += f"{sep}empty"
     elif _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
@@ -412,6 +415,8 @@ def get_requirements() -> List[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
+            elif line.startswith("--"):
+                continue
             else:
                 resolved_requirements.append(line)
         return resolved_requirements
