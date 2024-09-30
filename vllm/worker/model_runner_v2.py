@@ -100,7 +100,8 @@ class GPUModelRunner:
         # Condense the batched states.
         # We condense the states before adding new/resumed requests
         # because the attention backend may require it.
-        self.batched_states.condense(removed_req_indices)
+        if removed_req_indices:
+            self.batched_states.condense(removed_req_indices)
 
         # Update the states of the running requests.
         num_prev_blocks: Dict[str, int] = {}
@@ -356,9 +357,6 @@ class BatchedRequestStates:
 
     def condense(self, empty_req_indices: List[int]) -> None:
         # TODO(woosuk): Consider LoRA.
-        if not empty_req_indices:
-            # The batched states are already condensed.
-            return
         if self.num_reqs == 0:
             # The batched states are empty.
             return
