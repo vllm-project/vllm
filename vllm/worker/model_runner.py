@@ -745,11 +745,16 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                              max_encoder_seq_len: int = 0) -> int:
         is_mscp: bool = self.runner.scheduler_config.is_multi_step and \
                     self.runner.scheduler_config.chunked_prefill_enabled
-        # In multi-step chunked-prefill, starting from the second step
-        # all the sequences are guaranteed to be decodes. So, we may
-        # run the first-step in eager mode and the rest of the steps
-        # in graph mode.
-        batch_size = batch_size if not is_mscp else num_seqs
+        # The input batch_size is the number of input-tokens that includes
+        # both the prefill and decode tokens. Generally, when the batch has
+        # prefills, we don't use CUDA graphs. i.e. _use_captured_graph() will
+        # be False.
+        # However, In the multi-step + chunked-prefill case, only the first
+        # step has Prefills (if any). The rest of the steps are guaranteed to
+        # be all decodes. In this case, we set up the padding as if all the
+        # sequences are decodes so we may run all steps expect the first step
+        # in CUDA graph mode.
+        batch_size = num_seqs if is_mscp else batch_size
         decode_only = self.decode_only or is_mscp
         if not self._use_captured_graph(batch_size, decode_only,
                                         max_decode_seq_len,
