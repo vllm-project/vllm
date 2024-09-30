@@ -4,7 +4,6 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.plugins import set_torch_compile_backend
 from vllm.utils import is_hip
 
 TEST_MODELS_SMOKE = [
@@ -68,19 +67,19 @@ if not is_hip() and is_quant_method_supported("awq"):
     }))
 
 
-def check_full_graph_support(model, model_kwargs, backend, tp_size=1):
+def check_full_graph_support(model,
+                             model_kwargs,
+                             optimization_level,
+                             tp_size=1):
     # make sure these models can be captured in full graph mode
-    if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
-        os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "1"
-        os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
+    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(optimization_level)
+    os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
 
     # Inductor doesn't support fp8/gptq_marlin_24 yet.
     quantization = model_kwargs.get("quantization")
     if (quantization == "fp8" or quantization == "gptq_marlin"
-            or quantization == "gptq_marlin_24") and backend != "eager":
+            or quantization == "gptq_marlin_24") and optimization_level > 1:
         return
-
-    set_torch_compile_backend(backend)
 
     prompts = [
         "Hello, my name is",
