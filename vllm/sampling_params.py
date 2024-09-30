@@ -528,4 +528,5 @@ class SamplingParams(
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens})")
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}), "
+            f"guided_decoding={self.guided_decoding}")

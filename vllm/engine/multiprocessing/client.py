@@ -16,6 +16,8 @@ from vllm.config import DecodingConfig, EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
+from vllm.engine.async_llm_engine import (
+    build_guided_decoding_logits_processor_async)
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
@@ -28,8 +30,6 @@ from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -517,10 +517,14 @@ class MQLLMEngineClient:
         # Constructing guided decoding logits processors is expensive, so we do
         # it here to avoid contending with cpu resources and the GIL on the
         # backend process.
-        if isinstance(params, SamplingParams):
+        if isinstance(params, SamplingParams) and \
+            params.guided_decoding is not None:
             params = await \
-                self._build_guided_decoding_logits_processor_async(
-                    params, lora_request)
+                build_guided_decoding_logits_processor_async(
+                    sampling_params=params,
+                    tokenizer=await self.get_tokenizer(lora_request),
+                    default_guided_backend=self.decoding_config.guided_decoding_backend
+                )
 
         # 1) Create output queue for this requests.
         queue: asyncio.Queue[Union[RequestOutput,
@@ -572,36 +576,6 @@ class MQLLMEngineClient:
                     await self.abort(request_id)
         finally:
             self.output_queues.pop(request_id)
-
-    async def _build_guided_decoding_logits_processor_async(
-            self, sampling_params: SamplingParams,
-            lora_request: Optional[LoRARequest]) -> SamplingParams:
-        """Constructs a logits processor based on any provided guided
-        decoding parameters. Updates logits_processors, deletes the guided
-        decoding params, and returns the modified sampling params"""
-        if (guided_decoding := sampling_params.guided_decoding) is None:
-            return sampling_params
-
-        logger.debug(
-            "Building guided decoding logits processor in "
-            "AsyncEngineRPCClient. Params: %s", guided_decoding)
-
-        tokenizer = await self.get_tokenizer(lora_request=lora_request)
-        guided_decoding.backend = guided_decoding.backend or \
-            self.decoding_config.guided_decoding_backend
-
-        processor = await get_guided_decoding_logits_processor(
-            guided_params=guided_decoding, tokenizer=tokenizer)
-
-        if processor:
-            if sampling_params.logits_processors is None:
-                sampling_params.logits_processors = []
-            sampling_params.logits_processors.append(processor)
-
-        # Unset guided decoding params after constructing the lp from them
-        sampling_params.guided_decoding = None
-
-        return sampling_params
 
     async def start_profile(self) -> None:
         """Start profiling the engine"""
