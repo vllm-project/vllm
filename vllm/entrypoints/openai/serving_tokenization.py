@@ -87,6 +87,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     messages=request.messages,
                     chat_template=self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                 )
             else:
                 prompt = apply_hf_chat_template(
@@ -94,6 +95,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     conversation=conversation,
                     chat_template=self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                 )
         else:
             prompt = request.prompt
