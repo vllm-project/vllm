@@ -6,7 +6,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union
+from typing import Set, Type, Union, overload
 
 import torch
 from typing_extensions import TypeVar
@@ -29,7 +29,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
-                         InputRegistry, LLMInputs, PromptInputs)
+                         InputRegistry, LLMInputs, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -51,7 +51,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device, weak_bind
+from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -699,16 +699,51 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
+    @overload  # DEPRECATED
     def add_request(
         self,
         request_id: str,
-        inputs: PromptInputs,
+        *,
+        inputs: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+    ) -> None:
+        ...
+
+    @overload
+    def add_request(
+        self,
+        request_id: str,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> None:
+        ...
+
+    @deprecate_kwargs(
+        "inputs",
+        additional_message="Please use the 'prompt' parameter instead.",
+    )
+    def add_request(
+            self,
+            request_id: str,
+            prompt: Optional[PromptType] = None,
+            params: Optional[Union[SamplingParams, PoolingParams]] = None,
+            arrival_time: Optional[float] = None,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            priority: int = 0,
+            *,
+            inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -718,8 +753,7 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            inputs: The inputs to the LLM. See
-                :class:`~vllm.inputs.PromptInputs`
+            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
                 for more details about the format of each input.
             params: Parameters for sampling or pooling.
                 :class:`~vllm.SamplingParams` for text generation.
@@ -754,11 +788,15 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+        if inputs is not None:
+            prompt = inputs
+        assert prompt is not None and params is not None
+
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
-        if priority > 0 and not self.scheduler_config.policy == "priority":
+        if priority != 0 and not self.scheduler_config.policy == "priority":
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
 
@@ -766,7 +804,7 @@ class LLMEngine:
             arrival_time = time.time()
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
-            inputs,
+            prompt,
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
@@ -936,6 +974,11 @@ class LLMEngine:
                 seq_group_meta: SequenceGroupMetadata, num_outputs: int,
                 is_first_step_output: Optional[bool]) -> None:
             """
+            When multi-step and chunked-prefill are enabled together, the
+            prefill sequence scheduled for multi-step execution turn into
+            decodes in the first step itself. This function accounts
+            for that conversion.
+
             seq_group: SequenceGroup - A prefill seq_group
             seq_group_meta: SequenceGroupMetadata - Metadata of the given
               prefill seq_group
@@ -949,11 +992,6 @@ class LLMEngine:
                 must be None, as num_outputs > 1 indicates that outputs from
                 all the steps in multi-step are submitted in a single burst.
                 When multi-step is disabled, this value is always True.
-
-            When multi-step and chunked-prefill are enabled together, the
-            prefill sequence scheduled for multi-step execution turn into
-            decodes in the first step itself. This function accounts
-            for that conversion.
             """
 
             assert seq_group_meta.is_prompt
