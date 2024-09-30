@@ -39,6 +39,7 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.utils import is_list_of
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
@@ -118,14 +119,15 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
     if not isinstance(data, list):
         data = [data]
 
+    # If the audio inputs are embeddings, no need for preprocessing
+    if is_list_of(data, torch.Tensor, check="all"):
+        return MultiModalInputs({"audio_embeds": data})
+
     audio_features = []
-    audio_embeds = []
-    is_audio_embeds = False
     for audio_input in data:
         if not isinstance(audio_input, tuple):
-            is_audio_embeds = True
-            audio_embeds.append(audio_input)
-            continue
+            raise NotImplementedError(
+                f"Unsupported data type: {type(audio_input)}")
 
         (audio, sr) = cast(Tuple[np.ndarray, Union[float, int]], audio_input)
         feature_extractor = whisper_feature_extractor(ctx)
@@ -153,8 +155,7 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         # Remove the batch dimension because we're wrapping it in a list.
         audio_features.append(single_audio_features.squeeze(0))
 
-    return (MultiModalInputs({"audio_embeds": audio_embeds}) if is_audio_embeds
-            else MultiModalInputs({"audio_features": audio_features}))
+    return MultiModalInputs({"audio_features": audio_features})
 
 
 def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
