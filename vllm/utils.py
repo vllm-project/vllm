@@ -1205,7 +1205,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        
+
         # Note if served-model-name is specified at the end of yaml file,
         # the positional argument model_tag will not be parsed normally,
         # you would see error like the following
