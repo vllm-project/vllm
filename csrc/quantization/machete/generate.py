@@ -457,7 +457,10 @@ def generate():
             )),
     ]
 
-    schedules = list(set([x[1] for x in default_heuristic]))
+    schedules = []
+    for constraints, schedule_config in default_heuristic:
+        if schedule_config not in schedules:
+            schedules.append(schedule_config)
 
     impl_configs = []
 
