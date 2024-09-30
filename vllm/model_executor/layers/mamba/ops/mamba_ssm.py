@@ -332,7 +332,7 @@ def selective_scan_fn(
         delta_softplus=False,
         query_start_loc=None,
         cache_indices=None,
-        has_initial_state=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        has_initial_state=None) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
     delta: (dim, total_length) for varlen or (batch, dim, seqlen)
