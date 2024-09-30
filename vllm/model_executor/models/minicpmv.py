@@ -31,14 +31,13 @@ import torch
 import torch.types
 from PIL import Image
 from torch import nn
-from torch.nn.init import trunc_normal_
 from transformers import PretrainedConfig
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.resampler import BaseResampler
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (Resampler2,
@@ -104,58 +103,6 @@ class MiniCPMVImagePixelInputs(TypedDict):
 
 
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
-
-
-class BaseResampler(nn.Module):
-    """
-    A 2D perceiver-resampler network with one cross attention layers by
-        (grid_size**2) learnable queries and 2d sincos pos_emb
-    Outputs:
-        A tensor with the shape of (grid_size**2, embed_dim)
-    """
-
-    def __init__(
-        self,
-        num_queries: int,
-        embed_dim: int,
-        num_heads: int,
-        kv_dim: Optional[int] = None,
-        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-    ) -> None:
-        super().__init__()
-
-        self.num_queries = num_queries
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-
-        self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
-        trunc_normal_(self.query, std=0.02)
-        if kv_dim is not None and kv_dim != embed_dim:
-            self.kv_proj = ReplicatedLinear(kv_dim, embed_dim, bias=False)
-        else:
-            # Maintain the same return value with ReplicatedLinear.forward
-            self.kv_proj = lambda *args, **kwargs: (
-                nn.Identity()(*args, **kwargs),
-                None,
-            )
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads)
-        self.ln_q = norm_layer(embed_dim)
-        self.ln_kv = norm_layer(embed_dim)
-        self.ln_post = norm_layer(embed_dim)
-        self.proj = nn.Parameter(
-            (embed_dim**-0.5) * torch.randn(embed_dim, embed_dim))
-
-    def _init_weights(self, m: nn.Module) -> None:
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=0.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    def _repeat(self, query, N: int):
-        return query.unsqueeze(1).repeat(1, N, 1)
 
 
 class Resampler2_5(BaseResampler):
