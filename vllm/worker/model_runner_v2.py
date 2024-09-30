@@ -98,6 +98,8 @@ class GPUModelRunner:
                 removed_req_indices.append(req_index)
 
         # Condense the batched states.
+        # We condense the states before adding new/resumed requests
+        # because the attention backend may require it.
         self.batched_states.condense(removed_req_indices)
 
         # Update the states of the running requests.
@@ -163,7 +165,6 @@ class GPUModelRunner:
             self.batched_states.add_request(req_state)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
-
         pass
 
     @torch.inference_mode()
@@ -342,6 +343,16 @@ class BatchedRequestStates:
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
         return req_index
+
+    def clear(self) -> None:
+        self.num_reqs = 0
+        self.greedy_reqs.clear()
+        self.random_reqs.clear()
+        self.top_p_reqs.clear()
+        self.top_k_reqs.clear()
+        self.generators.clear()
+        self.num_logprobs.clear()
+        self.prompt_logprob_reqs.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
         # TODO(woosuk): Consider LoRA.
