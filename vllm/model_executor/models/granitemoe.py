@@ -382,10 +382,11 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA):
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+                       sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
-        logits = logits / self.config.logits_scaling
+        if logits is not None:
+            logits /= self.config.logits_scaling
         return logits
 
     def make_empty_intermediate_tensors(
