@@ -356,10 +356,6 @@ class CommonAttentionState(AttentionState):
             input_buffers,
             attn_metadata,
             is_encoder_decoder_model: bool = False) -> None:
-        print (f'prepare_graph_input_buffers : '
-               f'input buffer seq-lens {input_buffers["seq_lens_tensor"].shape} vs actual {attn_metadata.decode_metadata.seq_lens_tensor.shape}'
-               f'input buffer block-tables {input_buffers["block_tables"].shape} vs actual {attn_metadata.decode_metadata.block_tables.shape}'
-               )
         input_buffers["seq_lens_tensor"].copy_(
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"].copy_(
