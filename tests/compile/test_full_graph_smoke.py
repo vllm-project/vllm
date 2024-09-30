@@ -1,16 +1,22 @@
+from typing import Dict, List, Optional
+
 import pytest
 
-from ..utils import fork_new_process_for_each_test
-from .utils import TEST_MODELS_SMOKE, check_full_graph_support
+from ..utils import compare_all_settings
+from .utils import TEST_MODELS_SMOKE
 
 
 @pytest.mark.parametrize("model_info", TEST_MODELS_SMOKE)
-@pytest.mark.parametrize("optimization_level", [1, 2])
-@fork_new_process_for_each_test
-def test_full_graph(model_info, optimization_level):
+def test_compile_correctness(model_info):
     model = model_info[0]
-    model_kwargs = model_info[1]
-    check_full_graph_support(model,
-                             model_kwargs,
-                             optimization_level,
-                             tp_size=1)
+    model_args = model_info[1]
+    all_args = [
+        ["--enforce-eager"] + model_args,
+        ["--enforce-eager"] + model_args,
+        ["--enforce-eager"] + model_args,
+    ]
+    all_envs: List[Optional[Dict[str, str]]] = [{
+        "VLLM_TORCH_COMPILE_LEVEL":
+        str(i)
+    } for i in range(3)]
+    compare_all_settings(model, all_args, all_envs)

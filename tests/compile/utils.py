@@ -7,10 +7,9 @@ from vllm import LLM, SamplingParams
 from vllm.utils import is_hip
 
 TEST_MODELS_SMOKE = [
-    ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples", {
-        "quantization": "compressed-tensors"
-    }),
-    ("meta-llama/Meta-Llama-3-8B", {}),
+    ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples",
+     ["--quantization", "compressed-tensors"]),
+    ("meta-llama/Meta-Llama-3-8B", []),
 ]
 
 TEST_MODELS = [
