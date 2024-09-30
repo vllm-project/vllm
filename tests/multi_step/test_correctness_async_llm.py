@@ -231,14 +231,14 @@ import sys
 
 
 def test_multi_step_chunked_prefix():
-    # sys.argv = [
-    #     'vllm', 'serve', 'JackFram/llama-160m', '--num-scheduler-steps', '8',
-    #     '--enable-prefix-caching', '--enable-chunked-prefill'
-    # ]
-
     sys.argv = [
         'vllm', 'serve', 'JackFram/llama-160m', '--num-scheduler-steps', '8',
-        '--enable-chunked-prefill'
+        '--enable-prefix-caching', '--enable-chunked-prefill'
     ]
+
+    # sys.argv = [
+    #     'vllm', 'serve', 'JackFram/llama-160m', '--num-scheduler-steps', '8',
+    #     '--enable-chunked-prefill'
+    # ]
 
     main()

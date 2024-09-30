@@ -1608,21 +1608,35 @@ class Scheduler:
         if enable_chunking and len(seqs) == 1:
             remaining_token_budget = budget.remaining_token_budget()
             if self.cache_config.enable_prefix_caching:
-                # When prefix caching is enabled, we always allocate
-                # the number of new tokens that is dividable by the block size
-                # to avoid partial block matching.
-                block_size = self.cache_config.block_size
-                remainder = budget.token_budget % block_size
-                if remainder != 0:
-                    raise ValueError("When enabling chunked prefill and "
-                                     "prefix caching, max_num_batched_tokens "
-                                     "(chunk size) must be dividable by "
-                                     "block size, but got chunk_size "
-                                     f"({budget.token_budget}) % block_size "
-                                     f"({block_size}) = {remainder}")
-                if remaining_token_budget < num_new_tokens:
-                    num_new_tokens = (remaining_token_budget //
-                                      block_size) * block_size
+                if self.scheduler_config.is_multi_step:
+                    # The current multi-step + chunked prefill capability does
+                    # not actually support chunking prompts.
+                    if num_new_tokens > self._get_prompt_limit(seq_group):
+                        # If the seq_group is in prompt-stage, pass the
+                        # num_new_tokens as-is so the caller can ignore
+                        # the sequence.
+                        pass
+                    else:
+                        num_new_tokens = 0 \
+                            if num_new_tokens > remaining_token_budget \
+                            else num_new_tokens
+                else:
+                    # When prefix caching is enabled, we always allocate
+                    # the number of new tokens that is dividable by the block
+                    # size to avoid partial block matching.
+                    block_size = self.cache_config.block_size
+                    remainder = budget.token_budget % block_size
+                    if remainder != 0:
+                        raise ValueError(
+                            "When enabling chunked prefill and "
+                            "prefix caching, max_num_batched_tokens "
+                            "(chunk size) must be dividable by "
+                            "block size, but got chunk_size "
+                            f"({budget.token_budget}) % block_size "
+                            f"({block_size}) = {remainder}")
+                    if remaining_token_budget < num_new_tokens:
+                        num_new_tokens = (remaining_token_budget //
+                                          block_size) * block_size
             elif self.scheduler_config.is_multi_step:
                 if num_new_tokens > self._get_prompt_limit(seq_group):
                     # If the seq_group is in prompt-stage, pass the
