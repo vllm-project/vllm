@@ -24,8 +24,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.utils import (FlexibleArgumentParser, cuda_device_count_stateless,
-                        get_open_port, is_hip)
+from vllm.utils import (FlexibleArgumentParser, GB_bytes,
+                        cuda_device_count_stateless, get_open_port, is_hip)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -451,6 +451,37 @@ def fork_new_process_for_each_test(
             signal.signal(signal.SIGTERM, old_signal_handler)
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
+
+    return wrapper
+
+
+def large_gpu_test(*, min_gb: int):
+    """
+    Decorate a test to be skipped if no GPU is available or it does not have
+    sufficient memory.
+
+    Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
+    """
+    try:
+        if current_platform.is_cpu():
+            memory_gb = 0
+        else:
+            memory_gb = current_platform.get_device_total_memory() / GB_bytes
+    except Exception as e:
+        warnings.warn(
+            f"An error occurred when finding the available memory: {e}",
+            stacklevel=2,
+        )
+
+        memory_gb = 0
+
+    test_skipif = pytest.mark.skipif(
+        memory_gb < min_gb,
+        reason=f"Need at least {memory_gb}GB GPU memory to run the test.",
+    )
+
+    def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
+        return test_skipif(fork_new_process_for_each_test(f))
 
     return wrapper
 
