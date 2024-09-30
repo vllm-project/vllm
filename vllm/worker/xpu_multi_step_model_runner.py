@@ -236,18 +236,19 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
         output_proc_callback()
 
         cont = True
-        for model_output in model_input.cached_outputs:
+        for step_num, model_output in enumerate(model_input.cached_outputs):
             if not model_output.pythonized:
                 model_output.maybe_pythonize(model_input, self._copy_stream,
                                              self.pinned_sampled_token_ids)
                 if model_output.pythonized:
                     ctx = output_proc_callback.keywords["ctx"]
-                    is_async = False
-                    is_last_step = False
-                    ctx.output_queue.append(
-                        ([model_output.sampler_output
-                          ], ctx.seq_group_metadata_list,
-                         ctx.scheduler_outputs, is_async, is_last_step))
+                    ctx.append_output(
+                        outputs=[model_output.sampler_output], 
+                        seq_group_metadata_list=ctx.seq_group_metadata_list,
+                        scheduler_outputs=ctx.scheduler_outputs,
+                        is_async=False,
+                        is_last_step=False,
+                        is_first_step_output=step_num == 0)
                     output_proc_callback()
                 else:
                     cont = False
