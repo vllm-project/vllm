@@ -132,7 +132,6 @@ class GraniteMoeAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        # self.scaling = self.head_dim**-0.5
         self.scaling = (attention_multiplier if attention_multiplier
                         is not None else self.head_dim**-1)
         self.rope_theta = rope_theta
@@ -366,7 +365,9 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA):
             self.lm_head.weight = self.model.embed_tokens.weight
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size)
+                                                config.vocab_size,
+                                                scale=1 / self.config.logits_scaling)
+
         self.sampler = Sampler()
 
     def forward(
@@ -385,8 +386,6 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA):
                        sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
-        if logits is not None:
-            logits /= self.config.logits_scaling
         return logits
 
     def make_empty_intermediate_tensors(
