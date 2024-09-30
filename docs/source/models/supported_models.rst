@@ -281,7 +281,7 @@ Multimodal Language Models
     -
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
-    - Image\ :sup:`+` / Video\ :sup:`+`
+    - Image\ :sup:`E+` / Video\ :sup:`+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
   * - :code:`UltravoxModel`
