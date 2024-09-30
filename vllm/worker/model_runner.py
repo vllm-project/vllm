@@ -858,7 +858,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
 
         # Attention metadata.
-        # TODO (varun) : Handle flashinfer unsupported
         is_mscp: bool = self.scheduler_config.is_multi_step and \
                         self.scheduler_config.chunked_prefill_enabled
         use_graph_block_tables = cuda_graph_pad_size != -1 or \
