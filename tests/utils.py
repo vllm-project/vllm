@@ -205,8 +205,9 @@ def compare_all_settings(model: str,
 
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]
-    results = []
-    for args, env in zip(all_args, all_envs):
+    ref_results: List = []
+    for i, (args, env) in enumerate(zip(all_args, all_envs)):
+        compare_results: List = []
         with RemoteOpenAIServer(model,
                                 args,
                                 env_dict=env,
@@ -217,10 +218,13 @@ def compare_all_settings(model: str,
             models = client.models.list()
             models = models.data
             served_model = models[0]
-            results.append({
-                "test": "models_list",
-                "id": served_model.id,
-                "root": served_model.root,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "models_list",
+                "id":
+                served_model.id,
+                "root":
+                served_model.root,
             })
 
             # test with text prompt
@@ -229,11 +233,15 @@ def compare_all_settings(model: str,
                                                    max_tokens=5,
                                                    temperature=0.0)
 
-            results.append({
-                "test": "single_completion",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "single_completion",
+                "text":
+                completion.choices[0].text,
+                "finish_reason":
+                completion.choices[0].finish_reason,
+                "usage":
+                completion.usage,
             })
 
             # test using token IDs
@@ -244,11 +252,15 @@ def compare_all_settings(model: str,
                 temperature=0.0,
             )
 
-            results.append({
-                "test": "token_ids",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "token_ids",
+                "text":
+                completion.choices[0].text,
+                "finish_reason":
+                completion.choices[0].finish_reason,
+                "usage":
+                completion.usage,
             })
 
             # test seeded random sampling
@@ -258,11 +270,15 @@ def compare_all_settings(model: str,
                                                    seed=33,
                                                    temperature=1.0)
 
-            results.append({
-                "test": "seeded_sampling",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "seeded_sampling",
+                "text":
+                completion.choices[0].text,
+                "finish_reason":
+                completion.choices[0].finish_reason,
+                "usage":
+                completion.usage,
             })
 
             # test seeded random sampling with multiple prompts
@@ -272,7 +288,7 @@ def compare_all_settings(model: str,
                                                    seed=33,
                                                    temperature=1.0)
 
-            results.append({
+            (ref_results if i == 0 else compare_results).append({
                 "test":
                 "seeded_sampling",
                 "text": [choice.text for choice in completion.choices],
@@ -290,10 +306,13 @@ def compare_all_settings(model: str,
                 temperature=0.0,
             )
 
-            results.append({
-                "test": "simple_list",
-                "text0": batch.choices[0].text,
-                "text1": batch.choices[1].text,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "simple_list",
+                "text0":
+                batch.choices[0].text,
+                "text1":
+                batch.choices[1].text,
             })
 
             # test streaming
@@ -309,22 +328,25 @@ def compare_all_settings(model: str,
                 assert len(chunk.choices) == 1
                 choice = chunk.choices[0]
                 texts[choice.index] += choice.text
-            results.append({
+            (ref_results if i == 0 else compare_results).append({
                 "test": "streaming",
                 "texts": texts,
             })
 
-    n = len(results) // len(all_args)
-    ref_results = results[:n]
-    ref_args = all_args[0]
-    for i in range(1, len(all_args)):
-        compare_results = results[i * n:(i + 1) * n]
-        compare_args = all_args[i]
-        for ref_result, compare_result in zip(ref_results, compare_results):
-            assert ref_result == compare_result, (
-                f"Results for {model=} are not the same with "
-                f"{ref_args=} and {compare_args=}. "
-                f"{ref_result=} != {compare_result=}")
+            if i > 0:
+                # if any setting fails, raise an error early
+                ref_args = all_args[0]
+                ref_envs = all_envs[0]
+                compare_args = all_args[i]
+                compare_envs = all_envs[i]
+                for ref_result, compare_result in zip(ref_results,
+                                                      compare_results):
+                    assert ref_result == compare_result, (
+                        f"Results for {model=} are not the same.\n"
+                        f"{ref_args=} {ref_envs=}\n"
+                        f"{compare_args=} {compare_envs=}\n"
+                        f"{ref_result=}\n"
+                        f"{compare_result=}\n")
 
 
 def init_test_distributed_environment(
