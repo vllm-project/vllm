@@ -292,7 +292,7 @@ class Idefics2VisionTransformer(nn.Module):
         pixel_values,
         patch_attention_mask: Optional[torch.BoolTensor] = None,
         tgt_sizes: Optional[torch.IntTensor] = None,
-    ) -> torch.tensor:
+    ) -> torch.Tensor:
         hidden_states = self.embeddings(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
