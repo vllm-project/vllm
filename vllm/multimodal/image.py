@@ -56,7 +56,10 @@ class ImagePlugin(MultiModalPlugin):
                     .preprocess(data, return_tensors="pt") \
                     .data
             except Exception:
-                logger.error("Failed to process image (%s)", data)
+                logger.error(
+                    "Failed to process image (%s) with the default mapper. "
+                    "This is most likely an edge-case with this model's image "
+                    "processor in transformers, and not VLLM.", data)
                 raise
 
             return MultiModalInputs(batch_data)
