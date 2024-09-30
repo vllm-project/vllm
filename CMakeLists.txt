@@ -166,7 +166,16 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_GPU_FLAGS "--threads=${NVCC_THREADS}")
 endif()
 
+
+#
+# Use FetchContent for C++ dependencies that are compiled as part of vLLM's build process.
+# Configure it to place files in vllm/.deps, in order to play nicely with sccache.
+#
 include(FetchContent)
+get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
+file(MAKE_DIRECTORY "${FETCHCONTENT_BASE_DIR}")
+set(FETCHCONTENT_BASE_DIR "${PROJECT_ROOT_DIR}/.deps")
+message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 #
 # Define other extension targets
@@ -223,6 +232,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/gguf/gguf_kernel.cu"
     "csrc/quantization/fp8/fp8_marlin.cu"
     "csrc/custom_all_reduce.cu"
+    "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
@@ -315,6 +325,11 @@ set(VLLM_MOE_EXT_SRC
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
+      "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
       "csrc/moe/marlin_moe_ops.cu")
 endif()
 
