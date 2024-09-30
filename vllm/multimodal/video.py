@@ -56,7 +56,8 @@ class VideoPlugin(ImagePlugin):
         model_config = ctx.model_config
 
         # single video input as np.ndarray
-        if isinstance(data, np.ndarray):
+        if isinstance(data, np.ndarray) or (is_list_of(data, np.ndarray)
+                                            and len(data) == 1):
             video_processor = self._get_hf_video_processor(model_config)
             if video_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "

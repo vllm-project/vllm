@@ -233,7 +233,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             num_videos,
             image_token_id=hf_config.video_token_index,
             image_feature_size_override=video_feature_size,
-        )
+            mm_key="video")
 
         mm_data = dummy_video_for_clip(vision_config, num_frames=num_frames)
         return DummyData(seq_data, mm_data, ranges)
@@ -244,7 +244,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
             num_videos,
             image_token_id=hf_config.video_token_index,
             image_feature_size_override=video_feature_size,
-        )
+            mm_key="video")
 
         mm_data = dummy_video_for_siglip(vision_config, num_frames=num_frames)
         return DummyData(seq_data, mm_data, ranges)
@@ -326,7 +326,7 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
         video_feature_size = get_llava_onevision_video_tokens(ctx, num_frames)
         tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
-        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
             tokenizer,
             llm_inputs.get("prompt"),
             llm_inputs["prompt_token_ids"],
@@ -336,7 +336,8 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
 
         return LLMInputs(prompt_token_ids=new_token_ids,
                          prompt=new_prompt,
-                         multi_modal_data=multi_modal_data)
+                         multi_modal_data=multi_modal_data,
+                         multi_modal_placeholders={"video": ranges})
 
     elif is_list_of(video_data, np.ndarray):
         raise NotImplementedError(
