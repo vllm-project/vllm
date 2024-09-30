@@ -56,7 +56,7 @@ def get_physical_device_capability(device_id: int = 0) -> Tuple[int, int]:
 @with_nvml_context
 def get_physical_device_name(device_id: int = 0) -> str:
     handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
-    return pynvml.nvmlDeviceGetName(handle)
+    return str(pynvml.nvmlDeviceGetName(handle))
 
 
 @lru_cache(maxsize=8)
