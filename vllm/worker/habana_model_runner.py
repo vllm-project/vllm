@@ -178,8 +178,7 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     bs_buckets = warmup_range(bs_bucket_config)
     block_buckets = warmup_range(blocks_bucket_config)
     bmin, bstep, bmax = blocks_bucket_config
-    last_bucket = max_blocks if (max_blocks // bstep
-                                 == 0) else (max_blocks // bstep + 1) * bstep
+    last_bucket = round_up(max_blocks, bstep)
     for bs in bs_buckets:
         for blocks in block_buckets:
             if blocks < bs:
