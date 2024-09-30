@@ -60,7 +60,24 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptT
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+
+    # Inference with image embeddings as input with additional parameters
+    # Specifically, we are conducting a trial run of Qwen2VL with the new input format, as the model utilizes additional parameters for calculating positional encoding.
+    image_embeds = torch.load(...) # torch.Tensor of shape (1, image_feature_size, hidden_size of LM)
+    image_grid_thw = torch.load(...) # torch.Tensor of shape (1, 3)
+    mm_data['image'] = {
+        "image_embeds": image_embeds,
+        "image_grid_thw":  image_grid_thw,
+    }
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": mm_data,
+    })
     
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+
     # Batch inference
     image_1 = PIL.Image.open(...)
     image_2 = PIL.Image.open(...)
