@@ -130,7 +130,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         assert tpu_type is not None
         tpu_type = tpu_type.lower()
 
-        if "lite" not in tpu_type:
+        if (("lite" not in tpu_type) and ("v6" not in tpu_type)):
             if self.num_kv_heads % 2 == 0:
                 self.megacore_mode = "kv_head"
             else:
@@ -143,7 +143,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
+        kv_cache: Tuple[torch.Tensor, torch.Tensor],
         attn_metadata: PallasMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
@@ -155,8 +155,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            key_cache = [num_kv_heads, num_blocks, block_size, head_size]
-            value_cache = [num_kv_heads, num_blocks, block_size, head_size]
+            kv_cache[0] = [num_kv_heads, num_blocks, block_size, head_size]
+            kv_cache[1] = [num_kv_heads, num_blocks, block_size, head_size]
+                NOTE: kv_cache[0] and kv_cache[1] will be an empty tensor 
+                with shape [0] for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
@@ -173,7 +175,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         value = value.view(batch_size, seq_len, self.num_kv_heads,
                            self.head_size)
 
-        if kv_cache[0] is not None:
+        if kv_cache[0].numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
@@ -205,7 +207,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             output = output.permute(0, 2, 1, 3)
         else:
             # Decoding run.
-            assert kv_cache is not None
+            assert kv_cache[0].numel() > 0
 
             pages_per_compute_block = 16  # TODO(woosuk): Tune this value.
             if self.megacore_mode == "batch" and batch_size % 2 != 0:
