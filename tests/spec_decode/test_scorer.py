@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 
@@ -36,6 +38,7 @@ def test_scoroer(model_name: str, batch_size: int, propose_len: int,
     """
     Compare the batch expansion scorer and mqa scorer return the same score
     """
+    os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASH_ATTN'
     seed = 0
     block_size = 32
     num_gpu_blocks = 2048 // block_size
