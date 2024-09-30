@@ -123,6 +123,7 @@ def main():
         help="Start the vLLM OpenAI Compatible API server",
         usage="vllm serve <model_tag> [options]")
     serve_parser.add_argument("model_tag",
+                              nargs=argparse.REMAINDER,
                               type=str,
                               help="The model tag to serve")
     serve_parser.add_argument(
@@ -160,6 +161,7 @@ def main():
     chat_parser.set_defaults(dispatch_function=interactive_cli, command="chat")
 
     args = parser.parse_args()
+    print(args.model_tag)
     # One of the sub commands should be executed.
     if hasattr(args, "dispatch_function"):
         args.dispatch_function(args)
