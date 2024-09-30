@@ -60,7 +60,7 @@ def test_bad_nullable_kvs(arg):
          "sequence_parallel_norm_threshold": 2048,
      }, "override-neuron-config"),
 ])
-def test_mm_processor_kwargs_prompt_parser(arg, expected, option):
+def test_composite_arg_parser(arg, expected, option):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
