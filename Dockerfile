@@ -106,7 +106,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
-        && sccache --show-stats; \
+        && SCCACHE_LOG=debug sccache --show-stats; \
     fi
 
 ENV CCACHE_DIR=/root/.cache/ccache
