@@ -15,8 +15,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.utils import PyObjectCache, async_tensor_h2d
-from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
-                                      GPUModelRunnerBase,
+from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
     BroadcastableModelInput, _init_attn_metadata_from_tensor_dict,
@@ -631,9 +630,6 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             num_seqs,
             num_queries,
             turn_prefills_into_decodes=turn_prefills_into_decodes)
-
-        if model_input.num_seqs in _BATCH_SIZES_TO_CAPTURE:
-            attn_metadata.use_cuda_graph = True
 
         return model_input
 
