@@ -159,5 +159,4 @@ if __name__ == "__main__":
     parser.add_argument("--log-level", type=str, default="debug")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
-
     asyncio.run(run_server(args))

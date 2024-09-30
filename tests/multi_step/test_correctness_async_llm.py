@@ -142,3 +142,17 @@ async def test_multi_step(
         name_0="hf",
         name_1="vllm",
     )
+
+from vllm.scripts import main
+import sys
+
+def test_multi_step_chunked_prefix():
+    sys.argv = ['vllm',
+                'serve',
+                'JackFram/llama-160m',
+                '--num-scheduler-steps',
+                '8',
+                '--enable-prefix-caching',
+                '--enable-chunked-prefill']
+
+    main()
