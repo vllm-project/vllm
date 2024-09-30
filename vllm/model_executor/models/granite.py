@@ -402,10 +402,9 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA):
             )
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
-            
 
             logit_scale = getattr(config, "logit_scale", 1.0)
-            
+
             if hasattr(config, "logits_scaling"):
                 logit_scale /= config.logits_scaling
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
