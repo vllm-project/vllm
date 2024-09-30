@@ -11,6 +11,7 @@ from vllm.sequence import EmbeddingSequenceGroupOutput, PoolerOutput
 class PoolingType(IntEnum):
     """Enumeration for different types of pooling methods."""
     LAST = 0
+    ALL = 1
 
 
 class Pooler(nn.Module):
@@ -43,6 +44,12 @@ class Pooler(nn.Module):
         if self.pooling_type == PoolingType.LAST:
             last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
             pooled_data = hidden_states[last_token_flat_indices]
+        elif self.pooling_type == PoolingType.ALL:
+            offset = 0
+            pooled_data = []
+            for prompt_len in prompt_lens:
+                pooled_data.append(hidden_states[offset:offset + prompt_len])
+                offset += prompt_len
         else:
             raise ValueError(f"Invalid pooling type: {self.pooling_type}")
 

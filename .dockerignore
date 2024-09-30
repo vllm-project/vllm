@@ -1,4 +1,6 @@
-vllm/*.so
+/.github/
 /.venv
 /build
 dist
+Dockerfile*
+vllm/*.so

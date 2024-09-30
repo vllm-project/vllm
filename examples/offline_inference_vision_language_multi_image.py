@@ -28,12 +28,18 @@ class ModelRequestData(NamedTuple):
     chat_template: Optional[str]
 
 
+# NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
+# lower-end GPUs.
+# Unless specified, these settings have been tested to work on a single L4.
+
+
 def load_qwenvl_chat(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
-        max_num_seqs=5,
+        max_model_len=1024,
+        max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
     placeholders = "".join(f"Picture {i}: <img></img>\n"
@@ -83,6 +89,7 @@ def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
         model="microsoft/Phi-3.5-vision-instruct",
         trust_remote_code=True,
         max_model_len=4096,
+        max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
         mm_processor_kwargs={"num_crops": 4},
     )
@@ -106,9 +113,9 @@ def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
-        max_num_seqs=5,
         max_model_len=4096,
         limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={"max_dynamic_patch": 4},
     )
 
     placeholders = "\n".join(f"Image-{i}: <image>\n"
@@ -148,10 +155,11 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
+    # Tested on L40
     llm = LLM(
         model=model_name,
-        max_num_seqs=5,
         max_model_len=32768 if process_vision_info is None else 4096,
+        max_num_seqs=5,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
