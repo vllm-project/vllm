@@ -802,7 +802,7 @@ class EngineArgs:
             '--scheduling-policy',
             choices=['fcfs', 'priority'],
             default="fcfs",
-            help='The scheduling policy to use. "fcfs" (first come first serve'
+            help='The scheduling policy to use. "fcfs" (first come first served'
             ', i.e. requests are handled in order of arrival; default) '
             'or "priority" (requests are handled based on given '
             'priority (lower value means earlier handling) and time of '
