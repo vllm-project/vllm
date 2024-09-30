@@ -123,7 +123,7 @@ def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
     return blocks, target_width, target_height
 
 
-def calculate_num_blocks_wrapper(hf_config: PreTrainedConfig,
+def calculate_num_blocks_wrapper(hf_config: PretrainedConfig,
                                  max_dynamic_patch: Optional[int] = None):
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
@@ -183,7 +183,7 @@ def image_to_pixel_values(image: Image.Image, input_size: int, min_num: int,
     return pixel_values
 
 
-def image_to_pixel_values_wrapper(hf_config: PreTrainedConfig,
+def image_to_pixel_values_wrapper(hf_config: PretrainedConfig,
                                   max_dynamic_patch: Optional[int] = None):
     image_size = hf_config.vision_config.image_size
     min_num = hf_config.min_dynamic_patch
@@ -197,7 +197,7 @@ def image_to_pixel_values_wrapper(hf_config: PreTrainedConfig,
                    use_thumbnail=use_thumbnail)
 
 
-def get_internvl_num_patches(hf_config: PreTrainedConfig):
+def get_internvl_num_patches(hf_config: PretrainedConfig):
     vision_config = hf_config.vision_config
     downsample_ratio = hf_config.downsample_ratio
     image_size = vision_config.image_size
