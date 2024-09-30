@@ -153,8 +153,7 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         # Remove the batch dimension because we're wrapping it in a list.
         audio_features.append(single_audio_features.squeeze(0))
 
-    return (MultiModalInputs({"audio_embeds": audio_embeds})
-            if is_audio_embeds
+    return (MultiModalInputs({"audio_embeds": audio_embeds}) if is_audio_embeds
             else MultiModalInputs({"audio_features": audio_features}))
 
 
@@ -190,7 +189,7 @@ def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
                 max(
                     1,
                     math.ceil(feature_extractor_output_length /
-                            (uv_config.stack_factor * 2))),
+                              (uv_config.stack_factor * 2))),
                 get_ultravox_max_audio_tokens(ctx))
             audio_token_counts.append(audio_num_tokens)
 
