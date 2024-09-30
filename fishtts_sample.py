@@ -17,6 +17,10 @@ import onnxruntime
 import soundfile as sf
 import queue
 
+import tensorrt as trt
+import pycuda.driver as cuda
+import pycuda.autoinit
+
 torch.random.manual_seed(999)
 
 def convert_model():
@@ -130,49 +134,129 @@ for text in texts:
     token_ids.append(7003)
     llm_inputs.append(token_ids)
 
-chunk_size=20
-frame_shift=1200
-hidden_size = 1536
-speaker_embedding = torch.zeros((1, 192, 1), dtype=torch.float32).to('cuda')
 sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], ignore_eos=True, max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
 prompts = [
     {"prompt_token_ids": llm_input} for llm_input in llm_inputs
 ]
 
+ctx = cuda.Device(0).make_context()
+
 class Metrics:
-    def __init__(self):
+    def __init__(self, chunk_size=20):
+        self.chunk_size = chunk_size
         self.time_start = 0
         self.time_end = 0
-        self.time_first_byte = 0
         self.token_times = []
+        self.audio_chunk_times = []
         
     def calc_non_streaming(self):
         total_time = self.time_end - self.time_start
         audio_time = len(self.token_times) * 50 / 1000
         rtf = total_time / audio_time
         latent_time = self.token_times[-1] - self.time_start
-        first_byte_time = self.time_first_byte - self.time_start
+        first_byte_time = self.audio_chunk_times[0] - self.time_start
         print(f'latent time: {latent_time}, first byte time: {first_byte_time}, total time: {total_time}, audio time: {audio_time}, rtf: {rtf}')
 
     def calc_streaming(self):
         total_time = self.time_end - self.time_start
         audio_time = len(self.token_times) * 50 / 1000
         rtf = total_time / audio_time
-        first_chunk_time = self.token_times[chunk_size - 1] - self.time_start
-        first_byte_time = self.time_first_byte - self.time_start
+        first_chunk_time = self.token_times[self.chunk_size - 1] - self.time_start
+        first_byte_time = self.audio_chunk_times[0] - self.time_start
         print(f'first chunk time: {first_chunk_time}, first byte time: {first_byte_time}, total time: {total_time}, audio time: {audio_time}, rtf: {rtf}')
 
-def generate_chunk_audio(latent):
-    # pad to chunk_size
-    latent_len = latent.size(1)
-    if latent_len < chunk_size:
-        latent = torch.cat([latent, torch.zeros((1, chunk_size - latent_len % chunk_size, hidden_size), dtype=torch.float32).to('cuda')], 1)
-    onnxruntime_input = {k.name: to_numpy(v) for k, v in zip(ort_session.get_inputs(), (latent, speaker_embedding))}
-    onnxruntime_outputs = ort_session.run(None, onnxruntime_input)
-    onnxruntime_outputs = onnxruntime_outputs[0][0][0]
-    if latent_len < chunk_size:
-        return onnxruntime_outputs[:latent_len * frame_shift]
-    return onnxruntime_outputs
+class Generator:
+    def __init__(self, model_path, use_trt=False, chunk_size=20, hidden_size=1536, frame_shift=1200):
+        self.onnx_session = None
+        self.trt_engine = None
+        self.use_trt = use_trt
+        self.model_path = model_path
+        self.chunk_size = chunk_size
+        self.hidden_size = hidden_size
+        self.frame_shift = frame_shift
+        self.speaker_embedding = torch.zeros((1, 192, 1), dtype=torch.float32).to('cuda')
+    
+    def generate_audio_onnx(self, latent):
+        onnxruntime_input = {k.name: to_numpy(v) for k, v in zip(self.onnx_session.get_inputs(), (latent, self.speaker_embedding))}
+        onnxruntime_outputs = self.onnx_session.run(None, onnxruntime_input)
+        onnxruntime_outputs = onnxruntime_outputs[0][0][0]
+        return onnxruntime_outputs
+    
+    def generate_audio_trt(self, latent):
+        with self.trt_engine.create_execution_context() as context:
+            ctx.push()
+
+            stream = cuda.Stream()
+            context.set_input_shape('input', (1, self.chunk_size, self.hidden_size))
+            context.set_input_shape('speaker_embedding', (1, 192, 1))
+
+            bindings = []
+            bindings.append(latent.data_ptr())
+            bindings.append(self.speaker_embedding.data_ptr())
+            dtype = trt.nptype(self.trt_engine.get_tensor_dtype("output"))
+            size = trt.volume(context.get_tensor_shape('output'))
+            output_buffer = cuda.pagelocked_empty(size, dtype)
+            output_memory = cuda.mem_alloc(output_buffer.nbytes)
+            bindings.append(int(output_memory))
+            
+            for i in range(len(bindings)):
+                context.set_tensor_address(self.trt_engine.get_tensor_name(i), bindings[i])
+            
+            context.execute_async_v3(stream_handle=stream.handle)
+            stream.synchronize()
+
+            cuda.memcpy_dtoh_async(output_buffer, output_memory, stream)
+
+            ctx.pop()
+            return output_buffer
+    
+    def generate_audio(self, latent, metric: Metrics):
+        latent_len = latent.size(1)
+        total_audio = []
+        chunk_num = latent_len // self.chunk_size
+        for j in range(chunk_num):
+            latent_chunk = latent[:,j*self.chunk_size:(j+1)*self.chunk_size]
+            if self.use_trt:
+                audio_outputs = self.generate_audio_trt(latent_chunk)
+            else:
+                audio_outputs = self.generate_audio_onnx(latent_chunk)
+            total_audio.append(audio_outputs)
+            metric.audio_chunk_times.append(time.perf_counter())
+        if latent_len % self.chunk_size != 0:
+            latent_chunk = latent[:,chunk_num*self.chunk_size:]
+            latent_chunk = torch.cat([latent_chunk, torch.zeros((1, self.chunk_size - latent_chunk.size(1), self.hidden_size), dtype=torch.float32).to('cuda')], 1)
+            if self.use_trt:
+                audio_outputs = self.generate_audio_trt(latent_chunk)
+            else:
+                audio_outputs = self.generate_audio_onnx(latent_chunk)
+            audio_outputs = audio_outputs[:latent_len % self.chunk_size * self.frame_shift]
+            total_audio.append(audio_outputs)
+            metric.audio_chunk_times.append(time.perf_counter())
+
+        return total_audio
+
+    def warm_up_onnx(self):
+        self.onnx_session = onnxruntime.InferenceSession('/data/fishtts/genertor.onnx', providers=['CUDAExecutionProvider'])
+        warmup_input = torch.zeros(1, self.chunk_size, self.hidden_size).to('cuda')
+        self.generate_audio_onnx(warmup_input)
+        print(f'warmup onnx done')
+    
+    def warm_up_trt(self):
+        trt_logger = trt.Logger(trt.Logger.INFO)
+        trt_runtime = trt.Runtime(trt_logger)
+        with open('/data/fishtts/genertor.trt', 'rb') as f:
+            self.trt_engine = trt_runtime.deserialize_cuda_engine(f.read())
+        warmup_input = torch.zeros(1, self.chunk_size, self.hidden_size).to('cuda')
+        self.generate_audio_trt(warmup_input)
+        print(f'warmup trt done')
+
+    
+    def warm_up(self, use_trt):
+        self.use_trt = use_trt
+        if use_trt:
+            self.warm_up_trt()
+        else:
+            self.warm_up_onnx()
 
 def save_audio(total_audio, path):
     total_audio = np.concatenate(total_audio, axis=0)
@@ -181,7 +265,7 @@ def save_audio(total_audio, path):
 def run():
     llm = LLM(model='/data/fishtts', gpu_memory_utilization=0.7, dtype=torch.float32, skip_tokenizer_init=True)
     for i in range(len(prompts)):
-        metrics = Metrics()
+        metrics = Metrics(chunk_size=generator.chunk_size)
         metrics.time_start = time.perf_counter()
         outputs = llm.generate(prompts[i], sampling_params)
         for output in outputs:
@@ -190,20 +274,8 @@ def run():
             cur_time = time.perf_counter()
             metrics.token_times.extend([cur_time] * output_len)
             print(f'{i}:  {output_len}')
-
-            time_latent = time.perf_counter()
-            total_audio = []
-            chunk_num = output_len // chunk_size
-            for j in range(chunk_num):
-                latent = torch.stack(output.outputs[0].hidden_states, 0).unsqueeze(0).to('cuda')[:,j*chunk_size:(j+1)*chunk_size]
-                onnxruntime_outputs = generate_chunk_audio(latent)
-                metrics.time_first_byte = time.perf_counter()
-                total_audio.append(onnxruntime_outputs)
-            
-            if output_len % chunk_size != 0:
-                latent = torch.stack(output.outputs[0].hidden_states, 0).unsqueeze(0).to('cuda')[:,chunk_num*chunk_size:]
-                onnxruntime_outputs = generate_chunk_audio(latent)
-                total_audio.append(onnxruntime_outputs)
+            latent = torch.stack(output.outputs[0].hidden_states, 0).unsqueeze(0).to('cuda')
+            total_audio = generator.generate_audio(latent, metrics)
 
             save_audio(total_audio, f'hh_{i}.wav')
             print(f'save audio {i}')
@@ -219,17 +291,14 @@ async def generate_audio_streaming(latent_queue: asyncio.Queue, id, metrics: Met
         if latent is None:
             break
         latent_buffer.append(latent)
-        if len(latent_buffer) == chunk_size:
+        if len(latent_buffer) == generator.chunk_size:
             latent = torch.stack(latent_buffer, 0).unsqueeze(0).to('cuda')
-            audio_data_buffer.append(generate_chunk_audio(latent))
+            audio_data_buffer.extend(generator.generate_audio(latent, metrics))
             latent_buffer = []
-
-            if metrics.time_first_byte == 0:
-                metrics.time_first_byte = time.perf_counter()
 
     if len(latent_buffer) > 0:
         latent = torch.stack(latent_buffer, 0).unsqueeze(0).to('cuda')
-        audio_data_buffer.append(generate_chunk_audio(latent))
+        audio_data_buffer.extend(generator.generate_audio(latent, metrics))
         
     save_audio(audio_data_buffer, f'hh_{id}.wav')
     print(f'save audio {id}')
@@ -247,10 +316,7 @@ async def generate_token_streaming(engine: AsyncLLMEngine, prompt, id, latent_qu
     latent_queue.put_nowait(None)
     print(f'{id}:  {len(tokens)}')
 
-async def get_request(
-    input_requests,
-    request_rate: float,
-):
+async def get_request(input_requests, request_rate: float,):
     requests = iter(input_requests)
     for request in requests:
         yield request
@@ -265,7 +331,7 @@ async def get_request(
         await asyncio.sleep(interval)
 
 async def generate_streaming(engine, prompt, request_id) -> Metrics:
-    metrics = Metrics()
+    metrics = Metrics(chunk_size=generator.chunk_size)
     metrics.time_start = time.perf_counter()
     
     latent_queue = asyncio.Queue()
@@ -295,27 +361,29 @@ async def run_streaming(request_rate):
         for metrics in metrics_list:
             metrics.calc_streaming()
 
+
+generator = Generator('/data/fishtts', use_trt=False, chunk_size=20, hidden_size=1536, frame_shift=1200)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--streaming", action="store_true")
+    parser.add_argument("--streaming", action="store_true", default=False)
     parser.add_argument("--request-rate",
                         type=float,
                         default=-1,
                         help="request rate per second")
     parser.add_argument("--chunk-size",
                         type=int,
-                        default=20,
+                        default=None,
                         help="audio chunk size")
+    parser.add_argument("--use-trt", action="store_true", default=False)
 
     args = parser.parse_args()
     
     if args.chunk_size:
-        chunk_size = args.chunk_size
-    
-    ort_session = onnxruntime.InferenceSession('/data/fishtts/genertor.onnx', providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider'])
-    warmup_input = {k.name: to_numpy(v) for k, v in zip(ort_session.get_inputs(), (torch.zeros(1, chunk_size, hidden_size).to('cuda'), speaker_embedding))}
-    warmup_outputs = ort_session.run(None, warmup_input)
+        generator.chunk_size = args.chunk_size
 
+    generator.warm_up(args.use_trt)
+    
     if not args.streaming:
         run()
     else:
