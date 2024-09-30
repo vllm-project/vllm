@@ -180,9 +180,24 @@ def compare_two_settings(model: str,
         env1: The first set of environment variables to pass to the API server.
         env2: The second set of environment variables to pass to the API server.
     """
+    compare_all_settings(model, [arg1, arg2], [env1, env2], max_wait_seconds)
 
+
+def compare_all_settings(model: str,
+                         all_args: List[List[str]],
+                         all_envs: List[Optional[Dict[str, str]]],
+                         max_wait_seconds: Optional[float] = None) -> None:
+    """
+    Launch API server with several different sets of arguments/environments
+    and compare the results of the API calls with the first set of arguments.
+
+    Args:
+        model: The model to test.
+        all_args: A list of argument lists to pass to the API server.
+        all_envs: A list of environment dictionaries to pass to the API server.
+    """
     trust_remote_code = "--trust-remote-code"
-    if trust_remote_code in arg1 or trust_remote_code in arg2:
+    if any(trust_remote_code in args for args in all_args):
         tokenizer = AutoTokenizer.from_pretrained(model,
                                                   trust_remote_code=True)
     else:
@@ -191,7 +206,7 @@ def compare_two_settings(model: str,
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]
     results = []
-    for args, env in ((arg1, env1), (arg2, env2)):
+    for args, env in zip(all_args, all_envs):
         with RemoteOpenAIServer(model,
                                 args,
                                 env_dict=env,
@@ -299,13 +314,17 @@ def compare_two_settings(model: str,
                 "texts": texts,
             })
 
-    n = len(results) // 2
-    arg1_results = results[:n]
-    arg2_results = results[n:]
-    for arg1_result, arg2_result in zip(arg1_results, arg2_results):
-        assert arg1_result == arg2_result, (
-            f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
-            f"{arg1_result=} != {arg2_result=}")
+    n = len(results) // len(all_args)
+    ref_results = results[:n]
+    ref_args = all_args[0]
+    for i in range(1, len(all_args)):
+        compare_results = results[i * n:(i + 1) * n]
+        compare_args = all_args[i]
+        for ref_result, compare_result in zip(ref_results, compare_results):
+            assert ref_result == compare_result, (
+                f"Results for {model=} are not the same with "
+                f"{ref_args=} and {compare_args=}. "
+                f"{ref_result=} != {compare_result=}")
 
 
 def init_test_distributed_environment(
