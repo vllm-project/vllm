@@ -16,3 +16,4 @@
 /tests/distributed/test_same_node.py @youkaichao
 /tests/multi_step @alexm-neuralmagic @SolitaryThinker @comaniac
 /tests/weight_loading @mgoin @youkaichao
+/tests/basic_correctness/test_chunked_prefill @rkooo567 @comaniac
