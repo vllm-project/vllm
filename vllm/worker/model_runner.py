@@ -859,10 +859,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
-            seq_lens,
-            query_lens,
-            cuda_graph_pad_size,
-            batch_size)
+            seq_lens, query_lens, cuda_graph_pad_size, batch_size)
 
         # LoRA data.
         lora_requests = set()
