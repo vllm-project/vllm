@@ -743,6 +743,22 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             for i, patch_features_batch in enumerate(patch_embeddings)
         ]
 
+    def _add_image_newline(
+        self,
+        video_features: torch.Tensor,
+        videos: int = 1,
+        frames: int = 1,
+        strategy: str = "one_token",
+    ) -> torch.Tensor:
+        if strategy == "one_token":
+            video_features = video_features.reshape(
+                videos, frames * video_features.shape[1], -1)
+            image_newline = self.image_newline[None, None, :].repeat(
+                videos, 1, 1).to(video_features.device)
+            video_features = torch.cat((video_features, image_newline), dim=1)
+            return video_features
+        raise ValueError(f"Unexpected video newline strategy: {strategy}")
+
     def _video_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
@@ -751,9 +767,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        b, num_videos, frames, c, h, w = pixel_values.shape
-        assert (num_videos <= _MAX_NUM_VIDEOS)
-        pixel_values = pixel_values.reshape(b * num_videos * frames, c, h, w)
         video_features = vision_tower(pixel_values)
         video_features = self._select_image_features(
             video_features,
@@ -761,13 +774,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
         video_features = self.multi_modal_projector(video_features)
         video_features = self.apply_pooling(video_features)
-        video_features = video_features.reshape(
-            b * num_videos, frames * video_features.shape[1], -1)
-        image_newline = self.image_newline[None, None, :].repeat(
-            b * num_videos, 1, 1).to(video_features.device)
-        video_features = torch.cat((video_features, image_newline), dim=1)
-        video_features = video_features.flatten(0, 1)
-
         return video_features
 
     def _process_video_pixels(self, inputs: LlavaOnevisionVideoPixelInputs):
@@ -776,13 +782,28 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         video_pixels = inputs["data"]
 
         if isinstance(video_pixels, torch.Tensor):
+            b, num_videos, frames, c, h, w = video_pixels.shape
+            assert (num_videos <= _MAX_NUM_VIDEOS)
+            pixel_values = video_pixels.view(b * num_videos * frames, c, h, w)
             stacked_embeddings = self._video_pixels_to_features(
-                self.vision_tower, video_pixels)
+                self.vision_tower, pixel_values)
+            stacked_embeddings = self._add_image_newline(stacked_embeddings,
+                                                         videos=b * num_videos,
+                                                         frames=frames,
+                                                         strategy="one_token")
             return stacked_embeddings
         elif is_list_of(video_pixels, torch.Tensor):
-            stacked_pixels = torch.cat(video_pixels, dim=0).unsqueeze(0)
-            stacked_embeddings = self._video_pixels_to_features(
-                self.vision_tower, stacked_pixels)
+            stacked_embeddings = []
+            for video_pixel in video_pixels:
+                num_videos, frames, c, h, w = video_pixel.shape
+                pixel_values = video_pixel.view(num_videos * frames, c, h, w)
+                embeddings = self._video_pixels_to_features(
+                    self.vision_tower, pixel_values)
+                embeddings = self._add_image_newline(embeddings,
+                                                     videos=num_videos,
+                                                     frames=frames,
+                                                     strategy="one_token")
+                stacked_embeddings.append(embeddings)
             return stacked_embeddings
         else:
             raise ValueError(
