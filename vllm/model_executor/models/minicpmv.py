@@ -933,7 +933,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes)
 
     def is_default_weight_loading(self, name: str) -> bool:
-        return "resampler" in name  #or "vpm" in name
+        return "resampler" in name
 
 
 _SUPPORT_VERSION = {
