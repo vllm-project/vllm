@@ -714,7 +714,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         t: torch.Tensor,
         p: torch.Tensor,
         num_samples: int,
-        kv_caches: List[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -745,7 +745,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         )
 
         # Skip this in memory profiling at initialization.
-        if kv_caches[0][0] is not None:
+        if kv_caches[0][0].numel() > 0:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it

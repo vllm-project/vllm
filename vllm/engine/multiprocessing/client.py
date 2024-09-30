@@ -3,7 +3,7 @@ import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
-                    Union)
+                    Union, overload)
 
 import cloudpickle
 import zmq
@@ -20,9 +20,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCHealthRequest,
-                                         RPCProcessRequest, RPCStartupRequest,
-                                         RPCStartupResponse)
+                                         RPCError, RPCProcessRequest,
+                                         RPCStartupRequest, RPCStartupResponse,
+                                         RPCUProfileRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
@@ -32,16 +32,17 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.utils import deprecate_kwargs
 
 logger = init_logger(__name__)
 
 
 class MQClientClosedError(Exception):
     """Exception class raised when the client is used post-close.
-    
+
     The client can be closed, which closes the ZMQ context. This normally
-    happens on server shutdown. In some cases, methods like abort and 
-    do_log_stats will still be called and then try to open a socket, which 
+    happens on server shutdown. In some cases, methods like abort and
+    do_log_stats will still be called and then try to open a socket, which
     causes a ZMQError and creates a huge stack trace.
     So, we throw this error such that we can suppress it.
     """
@@ -95,9 +96,9 @@ class MQLLMEngineClient:
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
-        # IPC path for ack of check_health requests.
-        self.health_socket: Socket = self.context.socket(zmq.constants.PULL)
-        self.health_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
+        # IPC path for acking heartbeats.
+        self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
+        self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
 
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
@@ -124,34 +125,28 @@ class MQLLMEngineClient:
         finally:
             socket.close(linger=0)
 
-    async def run_check_health_loop(self, timeout: int):
-        """Background loop that continually probes the RPCServer for health.
-        
-        The loop sends CHECK_HEALTH requests to the INPUT_SOCKET, which
-        the MQLLMEngine server is blocking on.
-
-        The Server replies on the HEALTH_SOCKET (rather than on the 
-        OUTPUT_SOCKET such that the messages are not intermingled with
-        output streaming).
+    async def run_heartbeat_loop(self, timeout: int):
+        """Background loop that continually listens to the RPCServer for
+        heartbeats.
         """
-
         try:
             while True:
-                if await self.health_socket.poll(timeout=timeout) == 0:
-                    # Wakeup every N seconds and do a health probe.
-                    await self._send_one_way_rpc_request(
-                        RPCHealthRequest(), self.input_socket)
+                if await self.heartbeat_socket.poll(timeout=timeout) == 0:
+                    # No heartbeat was received. Set error and exit the loop
+                    self._set_errored(
+                        TimeoutError("No heartbeat received "
+                                     "from MQLLMEngine"))
+                    logger.debug("Shutting down MQLLMEngineClient check "
+                                 "health loop due to timeout")
+                    break
 
-                    # Wait for ack from the health socket.
-                    await self._await_ack(error_message="Health check failed.",
-                                          socket=self.health_socket)
                 else:
-                    # Server sent a health status message unprompted.
+                    # Heartbeat received- check the message
                     await self._check_success(
-                        error_message="Health check failed.",
-                        socket=self.health_socket)
+                        error_message="Heartbeat failed.",
+                        socket=self.heartbeat_socket)
 
-                logger.debug("Health probe successful.")
+                logger.debug("Heartbeat successful.")
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient check health loop.")
@@ -234,7 +229,7 @@ class MQLLMEngineClient:
 
             # Start health_loop.
             self.health_loop = asyncio.create_task(
-                self.run_check_health_loop(timeout=VLLM_RPC_TIMEOUT))
+                self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
 
     def close(self):
         """Destroy the ZeroMQ Context."""
@@ -351,7 +346,7 @@ class MQLLMEngineClient:
     async def check_health(self):
         """
         The check health loop probes the health status of the
-        Engine's health every N seconds and sets _errored_with 
+        Engine's health every N seconds and sets _errored_with
         if the engine is unhealthy.
         """
         if self._errored_with is not None:
@@ -373,6 +368,20 @@ class MQLLMEngineClient:
     def dead_error(self) -> BaseException:
         return ENGINE_DEAD_ERROR(self._errored_with)
 
+    @overload  # DEPRECATED
+    def generate(
+        self,
+        *,
+        inputs: PromptType,
+        sampling_params: SamplingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        ...
+
+    @overload
     def generate(
         self,
         prompt: PromptType,
@@ -380,7 +389,24 @@ class MQLLMEngineClient:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        ...
+
+    @deprecate_kwargs(
+        "inputs",
+        additional_message="Please use the 'prompt' parameter instead.",
+    )
+    def generate(
+        self,
+        prompt: Optional[PromptType] = None,
+        sampling_params: Optional[SamplingParams] = None,
+        request_id: Optional[str] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        *,
+        inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
@@ -398,10 +424,28 @@ class MQLLMEngineClient:
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
         """
+        if inputs is not None:
+            prompt = inputs
+        assert (prompt is not None and sampling_params is not None
+                and request_id is not None)
+
         return self._process_request(prompt, sampling_params, request_id,
                                      lora_request, trace_headers,
                                      prompt_adapter_request)
 
+    @overload  # DEPRECATED
+    def encode(
+        self,
+        *,
+        inputs: PromptType,
+        pooling_params: PoolingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+        ...
+
+    @overload
     def encode(
         self,
         prompt: PromptType,
@@ -409,6 +453,22 @@ class MQLLMEngineClient:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
+        ...
+
+    @deprecate_kwargs(
+        "inputs",
+        additional_message="Please use the 'prompt' parameter instead.",
+    )
+    def encode(
+        self,
+        prompt: Optional[PromptType] = None,
+        pooling_params: Optional[PoolingParams] = None,
+        request_id: Optional[str] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        *,
+        inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         """Generate outputs for a request from an embedding model.
 
@@ -428,6 +488,11 @@ class MQLLMEngineClient:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
             for the request.
         """
+        if inputs is not None:
+            prompt = inputs
+        assert (prompt is not None and pooling_params is not None
+                and request_id is not None)
+
         return self._process_request(prompt, pooling_params, request_id,
                                      lora_request, trace_headers)
 
@@ -497,3 +562,15 @@ class MQLLMEngineClient:
                     await self.abort(request_id)
         finally:
             self.output_queues.pop(request_id)
+
+    async def start_profile(self) -> None:
+        """Start profiling the engine"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUProfileRequest.START_PROFILE, socket=self.input_socket)
+
+    async def stop_profile(self) -> None:
+        """Stop profiling the engine"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)

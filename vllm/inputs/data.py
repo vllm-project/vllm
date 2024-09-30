@@ -46,7 +46,7 @@ which may be utilized for encoder/decoder models when
 the user desires to express both the encoder & decoder
 prompts explicitly, i.e. :class:`ExplicitEncoderDecoderPrompt`
 
-A prompt of type :class:`SingletonPromptType` may be employed
+A prompt of type :class:`SingletonPrompt` may be employed
 as (1) input to a decoder-only model, (2) input to
 the encoder of an encoder/decoder model, in the scenario
 where the decoder-prompt is not specified explicitly, or
@@ -66,22 +66,21 @@ _T2_co = TypeVar("_T2_co",
 
 # TODO: Make fields ReadOnly once mypy supports it
 class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
-    """Represents an encoder/decoder model input prompt,
-    comprising an explicit encoder prompt and a 
-    decoder prompt.
+    """
+    Represents an encoder/decoder model input prompt,
+    comprising an explicit encoder prompt and a decoder prompt.
 
-    The encoder and decoder prompts, respectively,
-    may formatted according to any of the
-    :class:`SingletonPromptType` schemas, and are not
-    required to have the same schema.
+    The encoder and decoder prompts, respectively, may be formatted
+    according to any of the :class:`SingletonPrompt` schemas,
+    and are not required to have the same schema.
 
     Only the encoder prompt may have multi-modal data.
 
     Note that an :class:`ExplicitEncoderDecoderPrompt` may not
     be used as an input to a decoder-only model,
-    and that the `encoder_prompt` and `decoder_prompt`
+    and that the :code:`encoder_prompt` and :code:`decoder_prompt`
     fields of this data structure themselves must be
-    :class:`SingletonPromptType` instances.
+    :class:`SingletonPrompt` instances.
     """
 
     encoder_prompt: _T1_co
@@ -139,6 +138,12 @@ class EncoderDecoderLLMInputs(LLMInputs):
     available.
     """
 
+    encoder_multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
+    """
+    Optional multi-modal data to pass to the encoder model,
+    if the model supports it.
+    """
+
 
 _T1 = TypeVar("_T1", bound=SingletonPrompt, default=SingletonPrompt)
 _T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)
@@ -172,3 +177,17 @@ def to_enc_dec_tuple_list(
     return [(enc_dec_prompt["encoder_prompt"],
              enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]
+
+
+def __getattr__(name: str):
+    if name == "PromptInput":
+        import warnings
+
+        msg = ("PromptInput has been renamed to PromptType. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PromptType
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -13,6 +13,7 @@ from typing import Set, Tuple, Union, cast
 import msgspec
 import torch
 
+from vllm.inputs import EncoderDecoderLLMInputs, LLMInputs
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -21,10 +22,11 @@ from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
-    from vllm.inputs import LLMInputs
     from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
+
+VLLM_INVALID_TOKEN_ID = -1
 
 
 # We use dataclass for now because it is used for
@@ -436,7 +438,7 @@ class Sequence:
         self.stop_reason: Union[int, str, None] = None
 
         # These are used to keep track of delta outputs
-        self._last_token_ids_offset: int = 0
+        self._last_output_token_ids_offset: int = 0
         self._last_output_text_offset: int = 0
 
         # Used for incremental detokenization
@@ -469,7 +471,15 @@ class Sequence:
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        return self.inputs.get("multi_modal_data") or {}
+        if self.inputs.get("multi_modal_data") and self.inputs.get(
+                "encoder_multi_modal_data"):
+            raise ValueError(
+                "Multi-modal data in both encoder and decoder is not supported."
+            )
+        inputs = self.inputs
+        return self.inputs.get("multi_modal_data") or (cast(
+            EncoderDecoderLLMInputs,
+            inputs).get("encoder_multi_modal_data")) or {}
 
     @property
     def lora_int_id(self) -> int:
@@ -499,18 +509,26 @@ class Sequence:
             return self.output_text[last_offset:length]
         return ""
 
-    def get_output_token_ids_to_return(self,
-                                       delta: bool) -> GenericSequence[int]:
+    def get_output_token_ids_to_return(
+            self, delta: bool) -> Union[GenericSequence[int], int]:
         """If delta is True, only new tokens since the last call to
         this method are returned"""
         if not delta:
             return self.get_output_token_ids()
-        length = self.get_output_len()
-        last_offset = self._last_token_ids_offset
-        if last_offset < length:
-            self._last_token_ids_offset = length
-            return self.data._output_token_ids[last_offset:]
-        return ()
+
+        output_len = self.get_output_len()
+
+        # Get the number of new tokens
+        num_new_tokens = output_len - self._last_output_token_ids_offset
+        self._last_output_token_ids_offset = output_len
+
+        # Return new tokens
+        if num_new_tokens == 1:
+            # Optimization for single decode token case
+            # (which is what we have most of the time)
+            return self.data._cached_all_token_ids[-1]
+
+        return self.data._cached_all_token_ids[-num_new_tokens:]
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
@@ -636,6 +654,7 @@ class SequenceGroup:
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
+        priority: User-defined priority of the request.
     """
 
     def __init__(
@@ -650,9 +669,11 @@ class SequenceGroup:
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
+        self.arrival_time = arrival_time
         self.is_single_seq = len(seqs) == 1
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
 
@@ -670,6 +691,9 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+        self.priority = priority
+
+        self.cached_request_output = None
 
     @property
     def prompt(self) -> Optional[str]:
@@ -719,9 +743,34 @@ class SequenceGroup:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
                          if self.prompt_adapter_request else 0
 
-    def init_multi_step(self, num_scheduler_steps: int) -> None:
-        self.state.num_steps = num_scheduler_steps
+    def init_multi_step(self, num_steps: int) -> None:
+        self.state.num_steps = num_steps
         self.state.current_step = 0
+
+    def init_multi_step_from_lookahead_slots(self, num_lookahead_slots: int,
+                                             num_scheduler_steps: int,
+                                             is_multi_step: bool,
+                                             enable_chunking: bool) -> None:
+
+        if not is_multi_step:
+            self.init_multi_step(num_steps=num_scheduler_steps)
+            return
+
+        # Multi-Step case
+        is_prefill = self.is_prefill()
+
+        # The asserts below reflect the expectations of the current system.
+        if is_prefill and enable_chunking:
+            assert num_lookahead_slots == num_scheduler_steps
+            self.init_multi_step(num_steps=num_lookahead_slots)
+        else:
+            is_decode: bool = not is_prefill
+            # If it is a prefill, num_lookahead_slots must be 0
+            assert num_lookahead_slots == 0 or is_decode
+            # If it is a decode, num_lookahead_slots + 1 must match
+            # the scheduler steps.
+            assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
+            self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
@@ -986,6 +1035,20 @@ class SequenceGroupMetadata(
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
 
+    # Multi-Step Chunked-Prefill property
+    @property
+    def is_single_step_prompt(self) -> bool:
+        # do_sample is true, only when the token_chunk_size matches the
+        # num_uncomputed_tokens of the sequence. This indicates that
+        # the prompt will finish processing in a single `execute_model`
+        # step.
+        return self.is_prompt and self.do_sample
+
+    def get_first_seq_id(self) -> int:
+        # This is an efficient way of fetching the seq_id when
+        # we know this SequenceGroup has only one sequence.
+        return next(iter(self.seq_data))
+
     def apply_delta(self,
                     sequence_group_metadata_delta: SequenceGroupMetadataDelta):
         for id, delta in sequence_group_metadata_delta.seq_data_delta.items():
@@ -998,7 +1061,8 @@ class SequenceGroupMetadata(
 
     def finish_step(self) -> None:
         assert self.state is not None
-        assert self.state.current_step < self.state.num_steps
+        assert self.state.current_step < self.state.num_steps, \
+            f"current step {self.state.current_step}, num_steps {self.state.num_steps}" # noqa
         self.state.current_step += 1
 
 
