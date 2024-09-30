@@ -25,6 +25,7 @@
 
 #include <iostream>
 
+#include "core/exception.hpp"
 #include "core/scalar_type.hpp"
 #include "marlin_kernels/marlin_moe_kernel_ku4b8.h"
 #include "marlin_kernels/marlin_moe_kernel_ku8b128.h"
@@ -191,7 +192,7 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
     int load_groups =
         tb_groups * STAGES * 2;          // Chunk size is 2x pipeline over dim K
     load_groups = max(load_groups, 32);  // We load at least 32 scale groups
-    return load_groups * tb_n * 2;
+    return load_groups * tb_n * 4;
 
   } else {
     int tb_scales = tb_groups * tb_n * 2;
@@ -531,6 +532,9 @@ torch::Tensor marlin_gemm_moe(
   TORCH_CHECK(b_scales.size(2) == size_n, "b_scales dim 2 = ", b_scales.size(2),
               " is not size_n = ", size_n);
   num_groups = b_scales.size(1);
+
+  TORCH_CHECK(VLLM_IMPLIES(!is_k_full, has_act_order),
+              "if is_k_full is false, has_act_order must be true");
 
   if (has_act_order) {
     if (is_k_full) {
