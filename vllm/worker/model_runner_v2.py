@@ -165,7 +165,8 @@ class GPUModelRunner:
             self.batched_states.add_request(req_state)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
-        pass
+        assert scheduler_output.total_num_scheduled_tokens > 0
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
     @torch.inference_mode()
     @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
@@ -176,6 +177,8 @@ class GPUModelRunner:
         self._update_states(scheduler_output)
         inputs = self._prepare_inputs(scheduler_output)
         input_ids, position_ids, attn_metadata = inputs
+        # Create the sampling metadata.
+        sampling_metadata = self.batched_states.get_sampling_metadata()
         hidden_states = self.model(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -184,8 +187,6 @@ class GPUModelRunner:
         )
 
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
-        # Create the sampling metadata.
-        sampling_metadata = self.batched_states.get_sampling_metadata()
         # Sample the next token and get logprobs if needed.
         sampler_output = self.model.sample(
             logits=logits,
@@ -319,8 +320,7 @@ class BatchedRequestStates:
         if sampling_params.top_k > 0:
             self.top_k_reqs.add(req_index)
 
-        # TODO
-        self.generators[req_index] = None
+        self.generators[req_index] = request.generator
 
         num_logprobs = sampling_params.logprobs
         if num_logprobs is not None and num_logprobs > 0:
