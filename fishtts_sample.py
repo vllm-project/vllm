@@ -139,7 +139,7 @@ prompts = [
     {"prompt_token_ids": llm_input} for llm_input in llm_inputs
 ]
 
-ctx = cuda.Device(0).make_context()
+# ctx = cuda.Device(0).make_context()
 
 class Metrics:
     def __init__(self, chunk_size=20):
@@ -184,15 +184,25 @@ class Generator:
     
     def generate_audio_trt(self, latent):
         with self.trt_engine.create_execution_context() as context:
-            ctx.push()
+            # ctx.push()
 
             stream = cuda.Stream()
             context.set_input_shape('input', (1, self.chunk_size, self.hidden_size))
             context.set_input_shape('speaker_embedding', (1, 192, 1))
 
             bindings = []
+
+            # d_input = cuda.mem_alloc(latent.nbytes)
+            # cuda.memcpy_htod_async(d_input, latent.cpu().numpy(), stream)
+            # cuda.memcpy_dtod_async(d_input, latent.data_ptr(), latent.nbytes, stream)
             bindings.append(latent.data_ptr())
+            
+            # d_speaker_embedding = cuda.mem_alloc(self.speaker_embedding.nbytes)
+            # cuda.memcpy_htod_async(d_speaker_embedding, self.speaker_embedding.cpu().numpy(), stream)
+            # cuda.memcpy_dtod_async(d_speaker_embedding, self.speaker_embedding.data_ptr(), self.speaker_embedding.nbytes, stream)
+            # bindings.append(int(d_speaker_embedding))
             bindings.append(self.speaker_embedding.data_ptr())
+
             dtype = trt.nptype(self.trt_engine.get_tensor_dtype("output"))
             size = trt.volume(context.get_tensor_shape('output'))
             output_buffer = cuda.pagelocked_empty(size, dtype)
@@ -207,7 +217,7 @@ class Generator:
 
             cuda.memcpy_dtoh_async(output_buffer, output_memory, stream)
 
-            ctx.pop()
+            # ctx.pop()
             return output_buffer
     
     def generate_audio(self, latent, metric: Metrics):
@@ -242,9 +252,9 @@ class Generator:
         print(f'warmup onnx done')
     
     def warm_up_trt(self):
-        trt_logger = trt.Logger(trt.Logger.INFO)
+        trt_logger = trt.Logger(trt.Logger.ERROR)
         trt_runtime = trt.Runtime(trt_logger)
-        with open('/data/fishtts/genertor.trt', 'rb') as f:
+        with open('/data/fishtts/genertor.fp16.trt', 'rb') as f:
             self.trt_engine = trt_runtime.deserialize_cuda_engine(f.read())
         warmup_input = torch.zeros(1, self.chunk_size, self.hidden_size).to('cuda')
         self.generate_audio_trt(warmup_input)
@@ -376,6 +386,7 @@ if __name__ == "__main__":
                         default=None,
                         help="audio chunk size")
     parser.add_argument("--use-trt", action="store_true", default=False)
+    parser.add_argument("--fp16", action="store_true", default=False)
 
     args = parser.parse_args()
     
