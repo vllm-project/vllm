@@ -304,7 +304,6 @@ def fp_eXmY_linear_forward_cuda(
                                                     _scales, splitK)
 
 
-
 if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @torch.library.register_fake("_C::gptq_marlin_24_gemm")
