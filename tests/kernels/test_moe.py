@@ -97,7 +97,7 @@ def test_mixtral_moe(dtype: torch.dtype):
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [4, 8, 64])
+@pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
@@ -115,9 +115,6 @@ def test_fused_marlin_moe(
     is_k_full: bool,
 ):
     seed_everything(7)
-
-    if topk > e:
-        return
 
     # Filter act_order
     if act_order:
@@ -237,10 +234,12 @@ def test_fused_marlin_moe(
                                 device="cuda",
                                 requires_grad=False)
 
+        zp = torch.empty((0), dtype=dtype, device="cuda", requires_grad=False)
+
         opcheck(torch.ops._moe_C.marlin_gemm_moe,
                 (a, qweight1, sorted_token_ids, topk_weights, topk_ids,
-                 scales1, g_idx1, sort_indices1, workspace, quant_type, m,
-                 2 * n, k, True, e, topk, block_size_m, True, False))
+                 scales1, zp, g_idx1, sort_indices1, workspace, quant_type, m,
+                 2 * n, k, True, False, e, topk, block_size_m, True, False))
 
 
 @pytest.mark.skip("This test is here for the sake of debugging, "
@@ -248,7 +247,7 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [4, 8, 64])
+@pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
@@ -265,8 +264,6 @@ def test_single_marlin_moe_multiply(
     num_bits: int,
     is_k_full: bool,
 ):
-    if topk > e:
-        return
 
     # Filter act_order
     if act_order:

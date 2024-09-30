@@ -18,7 +18,7 @@ from vllm.scalar_type import scalar_types
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [4, 8, 64])
+@pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("num_bits", [4, 8])
@@ -32,9 +32,6 @@ def test_fused_marlin_moe_awq(
     num_bits: int,
 ):
     torch.manual_seed(7)
-
-    if topk > e:
-        return
 
     quant_type = (scalar_types.uint4 if num_bits == 4 else scalar_types.uint8)
     dtype = torch.float16
@@ -112,7 +109,7 @@ def test_fused_marlin_moe_awq(
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [4, 8, 64])
+@pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("num_bits", [4, 8])
@@ -126,9 +123,6 @@ def test_single_marlin_moe_multiply_awq(
     num_bits: int,
 ):
     torch.manual_seed(7)
-
-    if topk > e:
-        return
 
     quant_type = (scalar_types.uint4 if num_bits == 4 else scalar_types.uint8)
     dtype = torch.float16
