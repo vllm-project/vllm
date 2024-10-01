@@ -59,7 +59,9 @@ class ImagePlugin(MultiModalPlugin):
                 logger.error(
                     "Failed to process image (%s) with the default mapper. "
                     "This is most likely an edge-case with this model's image "
-                    "processor in transformers, and not vLLM.", data)
+                    "processor in transformers (type: %s), and not vLLM.",
+                    data,
+                    type(image_processor).__name__)
                 raise
 
             return MultiModalInputs(batch_data)
