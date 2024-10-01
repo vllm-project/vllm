@@ -239,7 +239,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
             quant_config=quant_config,
             gather_output=True,
         )
-        self.language_model = PersimmonForCausalLM(config,
+        self.language_model = PersimmonForCausalLM(config.text_config,
                                                    cache_config=cache_config,
                                                    quant_config=quant_config)
 

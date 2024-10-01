@@ -213,10 +213,10 @@ class PersimmonModel(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.vocab_size = config.text_config.vocab_size
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            config.text_config.vocab_size, config.hidden_size)
+            config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([
             PersimmonDecoderLayer(config,
                                   cache_config=cache_config,
@@ -252,19 +252,19 @@ class PersimmonModel(nn.Module):
 class PersimmonForCausalLM(nn.Module):
 
     def __init__(self,
-                 config,
+                 config: PersimmonConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.vocab_size = config.text_config.vocab_size
+        self.vocab_size = config.vocab_size
         self.model = PersimmonModel(config,
                                     cache_config=cache_config,
                                     quant_config=quant_config)
-        self.lm_head = ParallelLMHead(config.text_config.vocab_size,
+        self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       bias=False)
-        self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
