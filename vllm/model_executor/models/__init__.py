@@ -222,7 +222,7 @@ class ModelRegistry:
                 "Model architecture %s is already registered, and will be "
                 "overwritten by the new model class %s.", model_arch,
                 model_cls.__name__)
-        global _OOT_MODELS
+
         _OOT_MODELS[model_arch] = model_cls
 
     @staticmethod
