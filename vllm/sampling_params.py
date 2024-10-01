@@ -1,6 +1,6 @@
 """Sampling parameters for text generation."""
 import copy
-from enum import IntEnum
+from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
@@ -8,6 +8,7 @@ import msgspec
 import torch
 from typing_extensions import Annotated
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -31,6 +32,15 @@ of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
 first argument, and returns a modified tensor of logits
 to sample from."""
+
+
+class RequestOutputKind(Enum):
+    # Return entire output so far in every RequestOutput
+    CUMULATIVE = 0
+    # Return only deltas in each RequestOutput
+    DELTA = 1
+    # Do not return intermediate RequestOuputs
+    FINAL_ONLY = 2
 
 
 class SamplingParams(
@@ -147,6 +157,7 @@ class SamplingParams(
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
@@ -182,6 +193,7 @@ class SamplingParams(
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
+        output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
     ) -> "SamplingParams":
         return SamplingParams(
             n=1 if n is None else n,
@@ -213,6 +225,7 @@ class SamplingParams(
             spaces_between_special_tokens=spaces_between_special_tokens,
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
+            output_kind=output_kind,
         )
 
     def __post_init__(self) -> None:
@@ -248,6 +261,10 @@ class SamplingParams(
 
         self._verify_args()
         if self.use_beam_search:
+            if not envs.VLLM_ALLOW_DEPRECATED_BEAM_SEARCH:
+                raise ValueError(
+                    "Using beam search as a sampling parameter is deprecated, and will be removed in the future release. Please use the `vllm.LLM.use_beam_search` method for dedicated beam search instead, or set the environment variable `VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1` to suppress this error. For more details, see https://github.com/vllm-project/vllm/issues/8306 ."  # noqa
+                )
             self._verify_beam_search()
         else:
             self._verify_non_beam_search()
@@ -261,9 +278,14 @@ class SamplingParams(
         self._all_stop_token_ids = set(self.stop_token_ids)
 
     def _verify_args(self) -> None:
+        if not isinstance(self.n, int):
+            raise ValueError(f"n must be an int, but is of "
+                             f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
-        assert isinstance(self.best_of, int)
+        if not isinstance(self.best_of, int):
+            raise ValueError(f'best_of must be an int, but is of '
+                             f'type {type(self.best_of)}')
         if self.best_of < self.n:
             raise ValueError(f"best_of must be greater than or equal to n, "
                              f"got n={self.n} and best_of={self.best_of}.")
@@ -317,6 +339,9 @@ class SamplingParams(
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
+        if self.best_of != self.n and self.output_kind == (
+                RequestOutputKind.DELTA):
+            raise ValueError("best_of must equal n to use output_kind=DELTA")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:

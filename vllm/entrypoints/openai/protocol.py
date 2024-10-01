@@ -12,7 +12,8 @@ from typing_extensions import Annotated, Required, TypedDict
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sampling_params import (LogitsProcessor, RequestOutputKind,
+                                  SamplingParams)
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
@@ -104,6 +105,11 @@ class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
+
+
+class RequestResponseMetadata(BaseModel):
+    request_id: str
+    final_usage_info: Optional[UsageInfo] = None
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):
@@ -204,6 +210,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description=
+        ("If this is set, the chat will be formatted so that the final "
+         "message in the chat is open-ended, without any EOS tokens. The "
+         "model will continue this message rather than starting a new one. "
+         "This allows you to \"prefill\" part of the model's response for it. "
+         "Cannot be used at the same time as `add_generation_prompt`."),
     )
     add_special_tokens: bool = Field(
         default=False,
@@ -316,6 +331,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
         )
 
     @model_validator(mode="before")
@@ -378,7 +395,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
-        if "tool_choice" not in data and "tools" in data:
+        if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
         # if "tool_choice" is specified -- validation
@@ -421,6 +438,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     raise ValueError(
                         "The tool specified in `tool_choice` does not match any"
                         " of the specified `tools`")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
         return data
 
 
@@ -559,6 +585,8 @@ class CompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
         )
 
     @model_validator(mode="before")
@@ -852,7 +880,17 @@ class TokenizeChatRequest(OpenAIBaseModel):
     messages: List[ChatCompletionMessageParam]
 
     add_generation_prompt: bool = Field(default=True)
+    continue_final_message: bool = Field(default=False)
     add_special_tokens: bool = Field(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
 
 
 TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]

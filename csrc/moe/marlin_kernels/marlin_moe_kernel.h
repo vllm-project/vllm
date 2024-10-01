@@ -440,7 +440,6 @@ __device__ void MarlinMoESingle(
           : 1;
   constexpr int s_sh_stage = s_tb_groups * s_sh_stride;
   int s_gl_rd_delta = s_gl_stride;
-
   // Scale size/strides with act_order
   constexpr int tb_k = 16 * thread_k_blocks;
   constexpr int g_idx_stage = has_act_order ? (tb_k * sizeof(int)) / 16 : 0;
@@ -669,7 +668,6 @@ __device__ void MarlinMoESingle(
         for (int j = 0; j < b_thread_vecs; j++) {
           cp_async4(&sh_b_stage[b_sh_wr_delta * i + b_sh_wr + j], B_ptr[i] + j);
         }
-
         B_ptr[i] += b_gl_rd_delta_o;
       }
 
@@ -1193,7 +1191,6 @@ __device__ void MarlinMoESingle(
 
       ((half2*)sh)[idx] = res;
     };
-
     if (threadIdx.x / 32 < thread_n_blocks / 4) {
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
@@ -1278,7 +1275,6 @@ __device__ void MarlinMoESingle(
     // ensure all shared memory accesses are static. Note that both pipelines
     // have even length meaning that the next iteration will always start at
     // index 0.
-
   #pragma unroll
     for (int pipe = 0; pipe < stages;) {
   #pragma unroll

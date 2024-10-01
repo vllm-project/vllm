@@ -25,6 +25,7 @@
 
 #include <iostream>
 
+#include "core/exception.hpp"
 #include "core/scalar_type.hpp"
 #include "marlin_kernels/marlin_moe_kernel_ku4b8.h"
 #include "marlin_kernels/marlin_moe_kernel_ku8b128.h"
@@ -191,7 +192,7 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
     int load_groups =
         tb_groups * STAGES * 2;          // Chunk size is 2x pipeline over dim K
     load_groups = max(load_groups, 32);  // We load at least 32 scale groups
-    return load_groups * tb_n * 2;
+    return load_groups * tb_n * 4;
 
   } else {
     int tb_scales = tb_groups * tb_n * 2;
@@ -455,8 +456,6 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
     int tot_m_blocks = ceildiv(tot_m, 16);
     for (int m_block = 0; m_block < tot_m_blocks;
          m_block += 4 * exec_cfg.max_m_blocks) {
-      int cfg_max_m_blocks = exec_cfg.max_m_blocks;
-
       if (false) {
       }
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4b8)
@@ -485,9 +484,9 @@ torch::Tensor marlin_gemm_moe(
     torch::Tensor& b_zeros, const torch::Tensor& g_idx,
     const torch::Tensor& perm, torch::Tensor& workspace,
     vllm::ScalarTypeTorchPtr const& b_q_type, int64_t size_m, int64_t size_n,
-    int64_t size_k, bool is_k_full, bool has_zp, int64_t num_experts,
-    int64_t topk, int64_t moe_block_size, bool replicate_input,
-    bool apply_weights) {
+    int64_t size_k, bool is_k_full, int64_t num_experts, int64_t topk,
+    int64_t moe_block_size, bool replicate_input, bool apply_weights) {
+  bool has_zp = b_zeros.size(1) != 0;
   if (has_zp) {
     TORCH_CHECK(*b_q_type == vllm::kU4 || *b_q_type == vllm::kU8,
                 "b_q_type must be u4 or u8 when has_zp = True. Got = ",
@@ -533,6 +532,9 @@ torch::Tensor marlin_gemm_moe(
   TORCH_CHECK(b_scales.size(2) == size_n, "b_scales dim 2 = ", b_scales.size(2),
               " is not size_n = ", size_n);
   num_groups = b_scales.size(1);
+
+  TORCH_CHECK(VLLM_IMPLIES(!is_k_full, has_act_order),
+              "if is_k_full is false, has_act_order must be true");
 
   if (has_act_order) {
     if (is_k_full) {

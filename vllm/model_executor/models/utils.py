@@ -1,5 +1,7 @@
-from typing import (Dict, Iterable, List, Literal, Optional, Protocol, Tuple,
-                    Union, overload)
+import itertools
+from collections import UserDict
+from typing import (Any, Dict, Iterable, List, Literal, Optional, Protocol,
+                    Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -16,7 +18,23 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 
 
-def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
+class WeightsGroup(UserDict):
+    """
+    Wraps grouped weights dictionary for a more informative error message
+    when attempting to access a weight component that does not exist.
+    """
+
+    def __getitem__(self, key: str) -> int:
+        try:
+            return super().__getitem__(key)
+        except KeyError as exc:
+            msg = (f"There is no weights named with the prefix: {key}. "
+                   f"Available prefix: {set(self.keys())}")
+            raise KeyError(msg) from exc
+
+
+def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]],
+                   prefix: str) -> Iterable[Tuple[str, torch.Tensor]]:
     """
     Helper function to load weights for inner vLLM models.
 
@@ -28,6 +46,22 @@ def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
         if prefix == name.pop(0):
             name = ".".join(name)
             yield name, loaded_weight
+
+
+def group_weights_with_prefix(
+    weights: Iterable[Tuple[str, torch.Tensor]]
+) -> Dict[str, Iterable[Tuple[str, torch.Tensor]]]:
+    """
+    Helper function to group weights with prefix
+    """
+    init_weights, repeated_weights = itertools.tee(weights, 2)
+    weights_prefix = {name.split(".")[0] for name, _ in init_weights}
+    repeated_weights = itertools.tee(repeated_weights, len(weights_prefix))
+
+    return WeightsGroup({
+        prefix: filter_weights(component, prefix)
+        for component, prefix in zip(repeated_weights, weights_prefix)
+    })
 
 
 def init_vllm_registered_model(
@@ -295,3 +329,21 @@ def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
         })
 
     return make_empty_intermediate_tensors
+
+
+class LLMWrapper(nn.Module):
+    """
+    To align with the key names of LoRA trained with PEFT, we need to add an 
+    additional layer to the llm's implementation.
+    """
+
+    def __init__(self, llm: nn.Module, name: str) -> None:
+        super().__init__()
+        self.model_name = name
+        setattr(self, name, llm)
+
+    def forward(self, *args, **kwargs) -> Any:
+        return getattr(self, self.model_name)(*args, **kwargs)
+
+    def embed_tokens(self, *args, **kwargs) -> Any:
+        return getattr(self, self.model_name).embed_tokens(*args, **kwargs)

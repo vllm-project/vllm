@@ -29,8 +29,9 @@ def query_marlin_supported_quant_types(has_zp: bool,
                                        device_capability: Optional[int] = None
                                        ):
     if device_capability is None:
-        major, minor = current_platform.get_device_capability()
-        device_capability = major * 10 + minor
+        capability_tuple = current_platform.get_device_capability()
+        device_capability = (-1 if capability_tuple is None else
+                             capability_tuple.to_int())
 
     if device_capability < 80:
         return []
@@ -52,8 +53,9 @@ def _check_marlin_supported(
         device_capability: Optional[int] = None) -> Tuple[bool, Optional[str]]:
 
     if device_capability is None:
-        major, minor = current_platform.get_device_capability()
-        device_capability = major * 10 + minor
+        capability_tuple = current_platform.get_device_capability()
+        device_capability = (-1 if capability_tuple is None else
+                             capability_tuple.to_int())
 
     supported_types = query_marlin_supported_quant_types(
         has_zp, device_capability)
@@ -118,6 +120,19 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
             "with --quantization gptq.")
 
 
+def check_marlin_supports_shape(output_size_per_partition: int,
+                                input_size_per_partition: int,
+                                input_size: int, group_size: int) \
+                                    -> Tuple[bool, Optional[str]]:
+    try:
+        verify_marlin_supports_shape(output_size_per_partition,
+                                     input_size_per_partition, input_size,
+                                     group_size)
+    except ValueError as e:
+        return False, e.__str__()
+    return True, None
+
+
 def marlin_make_workspace(output_size_per_partition: int,
                           device: torch.device) -> torch.Tensor:
     max_workspace_size = (output_size_per_partition //
@@ -142,6 +157,11 @@ def marlin_repeat_scales_on_all_ranks(act_order: bool, group_size: int,
 
 
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
+    return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
+                              requires_grad=False)
+
+
+def marlin_make_empty_zp(device: torch.device) -> torch.Tensor:
     return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
                               requires_grad=False)
 

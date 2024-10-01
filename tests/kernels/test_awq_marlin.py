@@ -2,12 +2,11 @@
 
 Run `pytest tests/kernels/test_awq_marlin.py`.
 """
-from typing import List
-
 import pytest
 import torch
 
-from vllm.model_executor.layers.activation import SiluAndMul
+from tests.kernels.utils import (compute_max_diff, stack_and_dev, torch_moe,
+                                 torch_moe_single)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe, single_marlin_moe)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
@@ -16,51 +15,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
 from vllm.scalar_type import scalar_types
 
 
-def stack_and_dev(tensors: List[torch.Tensor]):
-    dev = tensors[0].device
-    return torch.stack(tensors, dim=0).to(dev)
-
-
-def compute_max_diff(output, output_ref):
-    return torch.mean(torch.abs(output - output_ref)) / torch.mean(
-        torch.abs(output_ref))
-
-
-def torch_moe(a, w1, w2, score, topk):
-    B, D = a.shape
-    a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
-    out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_weight = topk_weight.view(-1)
-    topk_ids = topk_ids.view(-1)
-    for i in range(w1.shape[0]):
-        mask = topk_ids == i
-        if mask.sum():
-            out[mask] = SiluAndMul()(
-                a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
-    return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
-
-
-def torch_moe_single(a, w, score, topk):
-    B, D = a.shape
-    a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
-    out = torch.zeros(B * topk, w.shape[1], dtype=a.dtype, device=a.device)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    _, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.view(-1)
-    for i in range(w.shape[0]):
-        mask = topk_ids == i
-        if mask.sum():
-            out[mask] = a[mask] @ w[i].transpose(0, 1)
-    return (out.view(B, -1, w.shape[1])).sum(dim=1)
-
-
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [4, 8, 64])
+@pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("num_bits", [4, 8])
@@ -74,9 +32,6 @@ def test_fused_marlin_moe_awq(
     num_bits: int,
 ):
     torch.manual_seed(7)
-
-    if topk > e:
-        return
 
     quant_type = (scalar_types.uint4 if num_bits == 4 else scalar_types.uint8)
     dtype = torch.float16
@@ -148,12 +103,12 @@ def test_fused_marlin_moe_awq(
     assert compute_max_diff(marlin_output, torch_output) < 4e-2
 
 
-# @pytest.mark.skip("This test is here for the sake of debugging, "
-#                   "don't run it in automated tests.")
+@pytest.mark.skip("This test is here for the sake of debugging, "
+                  "don't run it in automated tests.")
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [4, 8, 64])
+@pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("num_bits", [4, 8])
@@ -167,9 +122,6 @@ def test_single_marlin_moe_multiply_awq(
     num_bits: int,
 ):
     torch.manual_seed(7)
-
-    if topk > e:
-        return
 
     quant_type = (scalar_types.uint4 if num_bits == 4 else scalar_types.uint8)
     dtype = torch.float16

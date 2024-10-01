@@ -29,6 +29,7 @@ def single_marlin_moe(
     w_zeros: Optional[torch.Tensor] = None,
     override_config: Optional[Dict[str, Any]] = None,
     num_bits: int = 8,
+    is_k_full: bool = True,
 ) -> torch.Tensor:
     """
     This function computes the multiplication of hidden_states with expert
@@ -91,9 +92,9 @@ def single_marlin_moe(
                             device=hidden_states.device,
                             requires_grad=False)
 
-    has_zp = w_zeros is not None
+    has_zero_point = w_zeros is not None
     if w_zeros is None:
-        w_zeros = torch.empty((0),
+        w_zeros = torch.empty((0, 0),
                               dtype=hidden_states.dtype,
                               device=hidden_states.device,
                               requires_grad=False)
@@ -110,12 +111,12 @@ def single_marlin_moe(
                                    device=hidden_states.device,
                                    requires_grad=False)
 
-    scalar_type = get_scalar_type(num_bits, has_zp)
+    scalar_type = get_scalar_type(num_bits, has_zero_point)
 
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        w_zeros, g_idx, sort_indices, workspace, scalar_type, M, N, K, True,
-        has_zp, E, topk, block_size_m, True, False)
+        w_zeros, g_idx, sort_indices, workspace, scalar_type, M, N, K,
+        is_k_full, E, topk, block_size_m, True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -137,6 +138,7 @@ def fused_marlin_moe(
     w2_zeros: Optional[torch.Tensor] = None,
     override_config: Optional[Dict[str, Any]] = None,
     num_bits: int = 8,
+    is_k_full: bool = True,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -181,6 +183,20 @@ def fused_marlin_moe(
     assert hidden_states.dtype == torch.float16
     assert num_bits in [4, 8]
 
+    has_no_act_order = (g_idx1 is None and g_idx2 is None
+                        and sort_indices1 is None and sort_indices2 is None)
+    has_all_act_order = (g_idx1 is not None and g_idx2 is not None
+                         and sort_indices1 is not None
+                         and sort_indices2 is not None)
+    assert has_no_act_order or has_all_act_order, (
+        "g_idx and sorted_indices "
+        "must be all not None or must be all None")
+
+    has_no_zp = w1_zeros is None and w2_zeros is None
+    has_all_zp = w1_zeros is not None and w2_zeros is not None
+    assert has_no_zp or has_all_zp, ("zero points must be both not None or "
+                                     "must be both None")
+
     M, K = hidden_states.shape
     E = w1.shape[0]
     N = w2.shape[1] * 16
@@ -207,45 +223,36 @@ def fused_marlin_moe(
                             device="cuda",
                             requires_grad=False)
 
-    has_zp1 = w1_zeros is not None
-    has_zp2 = w2_zeros is not None
-    if w1_zeros is None:
-        w1_zeros = torch.empty((0),
+    if has_no_zp:
+        w1_zeros = torch.empty((0, 0),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device,
                                requires_grad=False)
-    if w2_zeros is None:
-        w2_zeros = torch.empty((0),
+        w2_zeros = torch.empty((0, 0),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device,
                                requires_grad=False)
 
-    if g_idx1 is None:
+    if has_no_act_order:
         g_idx1 = torch.empty((0, 0),
                              dtype=torch.int32,
                              device=hidden_states.device,
                              requires_grad=False)
-
-    if g_idx2 is None:
         g_idx2 = torch.empty((0, 0),
                              dtype=torch.int32,
                              device=hidden_states.device,
                              requires_grad=False)
-
-    if sort_indices1 is None:
         sort_indices1 = torch.empty((0),
                                     dtype=torch.int32,
                                     device=hidden_states.device,
                                     requires_grad=False)
-
-    if sort_indices2 is None:
         sort_indices2 = torch.empty((0, 0),
                                     dtype=torch.int32,
                                     device=hidden_states.device,
                                     requires_grad=False)
 
-    scalar_type1 = get_scalar_type(num_bits, has_zp1)
-    scalar_type2 = get_scalar_type(num_bits, has_zp2)
+    scalar_type1 = get_scalar_type(num_bits, has_all_zp)
+    scalar_type2 = get_scalar_type(num_bits, has_all_zp)
 
     intermediate_cache2 = torch.empty(
         (M * topk_ids.shape[1], N),
@@ -268,8 +275,7 @@ def fused_marlin_moe(
         M,
         2 * N,
         K,
-        True,
-        has_zp1,
+        is_k_full,
         E,
         topk,
         block_size_m,
@@ -294,8 +300,7 @@ def fused_marlin_moe(
         M,
         K,
         N,
-        True,
-        has_zp2,
+        is_k_full,
         E,
         topk,
         block_size_m,
