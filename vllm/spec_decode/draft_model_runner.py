@@ -94,8 +94,6 @@ class TP1DraftModelRunner(ModelRunner):
             assert seq_group.is_prompt is False  # No prompt
             assert seq_group.prompt_logprob_indices == []  # No prompt
             assert seq_group.sample_indices == [i]  # Simple
-            assert seq_group.seq_len is None  # Decode
-            assert seq_group.query_len is None  # Decode
 
     def _gpu_advance_step(
             self, model_input: ModelInputForGPUWithSamplingMetadata,

@@ -146,7 +146,7 @@ class SamplingMetadata:
     def prepare(
         seq_group_metadata_list: List[SequenceGroupMetadata],
         seq_lens: List[int],
-        query_lens: Optional[List[int]],
+        query_lens: List[int],
         device: str,
         pin_memory: bool,
         generators: Optional[Dict[str, torch.Generator]] = None,
@@ -194,7 +194,7 @@ class SamplingMetadata:
 def _prepare_seq_groups(
     seq_group_metadata_list: List[SequenceGroupMetadata],
     seq_lens: List[int],
-    query_lens: Optional[List[int]],
+    query_lens: List[int],
     device: str,
     generators: Optional[Dict[str, torch.Generator]] = None,
     cache: Optional[SamplingMetadataCache] = None,
@@ -284,7 +284,8 @@ def _prepare_seq_groups(
         else:
             # Decode
             prompt_logprob_len = 0
-            sample_len = len(seq_ids) if do_sample else 0
+            query_len = query_lens[i] if query_lens is not None else 1
+            sample_len = len(seq_ids) * query_len if do_sample else 0
 
             if sampling_params.seed is not None and generators is not None:
                 generator = generators.get(seq_group_metadata.request_id)
@@ -440,14 +441,14 @@ class SamplingTensors:
 
             if seq_group.do_sample:
                 sample_lens = len(seq_group.sample_indices)
-                assert sample_lens == len(seq_ids)
-                temperatures += [temperature] * len(seq_ids)
-                top_ps += [top_p] * len(seq_ids)
-                top_ks += [top_k] * len(seq_ids)
-                min_ps += [min_p] * len(seq_ids)
-                presence_penalties += [p] * len(seq_ids)
-                frequency_penalties += [f] * len(seq_ids)
-                repetition_penalties += [r] * len(seq_ids)
+                assert sample_lens >= len(seq_ids)
+                temperatures += [temperature] * sample_lens
+                top_ps += [top_p] * sample_lens
+                top_ks += [top_k] * sample_lens
+                min_ps += [min_p] * sample_lens
+                presence_penalties += [p] * sample_lens
+                frequency_penalties += [f] * sample_lens
+                repetition_penalties += [r] * sample_lens
 
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
