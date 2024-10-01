@@ -509,7 +509,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
         # Repack scales
-        # Why does this take the intermediate size for size_k?
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_scales,
             size_k=layer.intermediate_size_per_partition,
