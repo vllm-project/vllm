@@ -169,8 +169,8 @@ class ModelRegistry:
     @staticmethod
     @lru_cache(maxsize=128)
     def _check_stateless(
-        model_arch: str,
         func: Callable[[object], bool],
+        model_arch: str,
     ) -> bool:
         """
         Run a boolean function against a model and return the result.
@@ -261,9 +261,7 @@ class ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        is_mm = partial(ModelRegistry._check_stateless,
-                        func=supports_multimodal)
-
+        is_mm = partial(ModelRegistry._check_stateless, supports_multimodal)
         return any(is_mm(arch) for arch in architectures)
 
     @staticmethod
@@ -273,8 +271,7 @@ class ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        is_pp = partial(ModelRegistry._check_stateless, func=supports_pp)
-
+        is_pp = partial(ModelRegistry._check_stateless, supports_pp)
         return any(is_pp(arch) for arch in architectures)
 
 
