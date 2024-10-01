@@ -24,6 +24,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
+from vllm.platforms import current_platform
 
 
 class ContextIDInfo(TypedDict):
@@ -48,18 +49,13 @@ LONG_LORA_INFOS: List[ContextIDInfo] = [{
 }]
 
 
-def is_hpu():
-    from importlib import util
-    return util.find_spec('habana_frameworks') is not None
-
-
 def cleanup():
     destroy_model_parallel()
     destroy_distributed_environment()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
-    if not is_hpu():
+    if not current_platform.is_hpu():
         torch.cuda.empty_cache()
     ray.shutdown()
 
@@ -84,7 +80,7 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 @pytest.fixture
 def dist_init():
     temp_file = tempfile.mkstemp()[1]
-    backend_type = "hccl" if is_hpu() else "nccl"
+    backend_type = "hccl" if current_platform.is_hpu() else "nccl"
     init_distributed_environment(
         world_size=1,
         rank=0,
@@ -260,7 +256,7 @@ def llama_2_7b_engine_extra_embeddings():
                              device_config=device_config,
                              **kwargs)
 
-    if is_hpu():
+    if current_platform.is_hpu():
         with patch("vllm.worker.habana_model_runner.get_model",
                    get_model_patched):
             engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
