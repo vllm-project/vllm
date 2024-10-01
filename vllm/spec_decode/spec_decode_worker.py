@@ -180,28 +180,34 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             "[Speculative Decoding] Configuring"
             " SpecDecodeWorker with sampler=%s", type(spec_decode_sampler))
 
-        if scorer_worker.model_runner.attn_backend.get_name() != "flash-attn":
-            disable_mqa_scorer = True
-            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
-                        "MQA is only available with flash attn backend.")
+        if not disable_mqa_scorer:
+            if scorer_worker.model_runner.attn_backend.get_name(
+            ) != "flash-attn":
+                disable_mqa_scorer = True
+                logger.info(
+                    "[Speculative Decoding] Disabling MQA scorer as the "
+                    "MQA is only available with flash attn backend.")
 
-        if ngram_prompt_lookup_max > 0:
-            disable_mqa_scorer = True
-            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
-                        "NGramWorker does not support MQA scorer.")
+            if ngram_prompt_lookup_max > 0:
+                disable_mqa_scorer = True
+                logger.info(
+                    "[Speculative Decoding] Disabling MQA scorer as the "
+                    "NGramWorker does not support MQA scorer.")
 
-        if "model_config" in draft_worker_kwargs and \
-            draft_worker_kwargs["model_config"].max_model_len < \
-                scorer_worker.model_config.max_model_len:
-            disable_mqa_scorer = True
-            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
-                        "draft model max_model_len is smaller than the target "
-                        "model max_model_len.")
+            if "model_config" in draft_worker_kwargs and \
+                draft_worker_kwargs["model_config"].max_model_len < \
+                    scorer_worker.model_config.max_model_len:
+                disable_mqa_scorer = True
+                logger.info(
+                    "[Speculative Decoding] Disabling MQA scorer as the "
+                    "draft model max_model_len is smaller than the target "
+                    "model max_model_len.")
 
-        if not scorer_worker.model_runner.model_config.enforce_eager:
-            disable_mqa_scorer = True
-            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
-                        "target model is not running in eager mode.")
+            if not scorer_worker.model_runner.model_config.enforce_eager:
+                disable_mqa_scorer = True
+                logger.info(
+                    "[Speculative Decoding] Disabling MQA scorer as the "
+                    "target model is not running in eager mode.")
 
         return SpecDecodeWorker(
             proposer_worker,
