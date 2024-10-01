@@ -1138,12 +1138,6 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             args = FlexibleArgumentParser._pull_args_from_config(args)
 
         # Convert underscores to dashes and vice versa in argument names
-        processed_args = self._format_args(args)
-
-        return super().parse_args(processed_args, namespace)
-
-    def _format_args(self, args: List[str]) -> List[str]:
-        """Convert underscores to dashes and vice versa in argument names"""
         processed_args = []
         for arg in args:
             if arg.startswith('--'):
@@ -1157,8 +1151,8 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        return processed_args
-    
+        return super().parse_args(processed_args, namespace)
+
     @staticmethod
     def _pull_args_from_config(args: List[str]) -> List[str]:
         """Method to pull arguments specified in the config file
@@ -1212,7 +1206,8 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults      
-        args = [args[0]] + [args[1]] + config_args + args[2:index] + args[index+2:]
+        args = [args[0]] + [args[1]] + config_args + \
+            args[2:index] + args[index+2:]
 
         return args
 
