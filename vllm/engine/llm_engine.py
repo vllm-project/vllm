@@ -1261,7 +1261,7 @@ class LLMEngine:
                     # decodes after the very first step. Therefore,
                     # we skip the update to the num_computed_tokens
                     # here.
-                    pass
+                    seq_group.update_num_computed_tokens(1)
                 else:
                     seq_group.update_num_computed_tokens(
                         seq_group_metadata.token_chunk_size)

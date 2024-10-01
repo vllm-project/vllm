@@ -473,13 +473,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if inter_data.is_prompt:
             context_len = seq_data.get_num_computed_tokens()
             seq_len = min(seq_len, context_len + token_chunk_size)
-        elif self.runner.scheduler_config.num_lookahead_slots > 1:
-            # We use num_lookahead_slots to check if speculative decoding
-            # is enabled.
-            context_len = seq_data.get_num_computed_tokens()
-        else:
+        elif self.runner.scheduler_config.is_multi_step:
             context_len = seq_len - 1
-
+        else:
+            context_len = seq_data.get_num_computed_tokens()
+        
         # Compute tokens.
         tokens = seq_data.get_token_ids()[context_len:seq_len]
 
