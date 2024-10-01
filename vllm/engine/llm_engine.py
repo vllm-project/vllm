@@ -1138,6 +1138,11 @@ class LLMEngine:
                     output_token_num = self.output_processor.process_outputs(
                         seq_group, output, is_async)
                     if self.speculative_config:
+                        # We -1 here because we always
+                        # (w/o speculative decoding) add the number of
+                        # computed tokens by one in the decoding phase.
+                        # Therefore, we remove that one token that
+                        # is already added.
                         seq_group.update_num_computed_tokens(output_token_num -
                                                              1)
 
