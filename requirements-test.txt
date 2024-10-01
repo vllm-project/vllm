@@ -14,7 +14,7 @@ librosa # required for audio test
 opencv-python # required for video test
 peft
 requests
-ray[adag]>=2.35
+ray[adag]==2.35
 sentence-transformers # required for embedding
 soundfile # required for audio test
 compressed-tensors==0.4.0 # required for compressed-tensors
@@ -30,5 +30,5 @@ datamodel_code_generator # required for minicpm3 test
 aiohttp
 
 # quantization
-bitsandbytes==0.42.0
+bitsandbytes>=0.44.0
 buildkite-test-collector==0.1.8

@@ -4,8 +4,10 @@ import itertools
 import math
 import pickle as pkl
 import time
-from typing import Callable, Iterable, List, Tuple
+from itertools import product
+from typing import Callable, Iterable, List, Optional, Tuple
 
+import pandas as pd
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
@@ -84,6 +86,10 @@ def loop_over_weights(
         fn(a, w_ref, w_q, w_s)
 
 
+_SWEEP_SCHEDULES_RESULTS: Optional[pd.DataFrame] = None
+_SWEEP_SCHEDULES_RESULTS_CSV: Optional[str] = None
+
+
 def bench(atype: torch.dtype,
           wtype: ScalarType,
           group_size: int,
@@ -94,6 +100,8 @@ def bench(atype: torch.dtype,
           sub_label: str,
           benchmark_marlinv1: bool = True,
           sweep_schedules: bool = True) -> Iterable[TMeasurement]:
+    global _SWEEP_SCHEDULES_RESULTS
+
     a, weights = make_bench_tensors(atype, wtype, group_size, m, n, k)
     sub_label += f", L={len(weights)}"
 
@@ -163,6 +171,11 @@ def bench(atype: torch.dtype,
         best_schedule = None
         schedules = ops.machete_supported_schedules(wtype)
         for schedule in reversed(schedules):
+            schedule_M = int(schedule.split("_")[0].split("x")[1])
+
+            # Prune known bad schedules
+            if schedule_M >= 2 * max(m, 16) or schedule_M < m // 4:
+                continue
 
             def run(a, _, w_q, w_s, schedule=schedule):
                 ops.machete_gemm(a,
@@ -174,6 +187,20 @@ def bench(atype: torch.dtype,
 
             res = bench_fn(label, sub_label, "machete_best",
                            lambda: loop_over_weights(a, weights_machete, run))
+
+            results_row = {
+                "M": m,
+                "K": k,
+                "N": n,
+                "group_size": group_size,
+                "schedule": schedule,
+                "median": res.median,
+            }
+            if _SWEEP_SCHEDULES_RESULTS is None:
+                _SWEEP_SCHEDULES_RESULTS = pd.DataFrame(
+                    columns=results_row.keys())
+            _SWEEP_SCHEDULES_RESULTS.\
+                loc[len(_SWEEP_SCHEDULES_RESULTS)] = results_row
 
             print(f"  {res.median:5.5} ", schedule)
             if not best or res.median < best.median:
@@ -235,18 +262,22 @@ def run_square_bench(args):
     dim_sizes = list(
         range(args.dim_start, args.dim_end + 1, args.dim_increment))
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
+
     data = run(args.dtype, args.sweep_schedules, MKNs)
 
     make_output(data, MKNs, f"square_bench-{args.dtype}")
 
 
 def run_range_bench(args):
-    dim_sizes = list(range(args.dim_start, args.dim_end, args.dim_increment))
-    n = len(dim_sizes)
-    Ms = [args.m_constant] * n if args.m_constant is not None else dim_sizes
-    Ks = [args.k_constant] * n if args.k_constant is not None else dim_sizes
-    Ns = [args.n_constant] * n if args.n_constant is not None else dim_sizes
-    MKNs = list(zip(Ms, Ks, Ns))
+    m_start, k_start, n_start = [int(x) for x in args.dim_start.split(",")]
+    m_end, k_end, n_end = [int(x) for x in args.dim_end.split(",")]
+    m_increment, k_increment, n_increment = \
+        [int(x) for x in args.dim_increment.split(",")]
+    Ms = list(range(m_start, m_end + 1, m_increment))
+    Ks = list(range(k_start, k_end + 1, k_increment))
+    Ns = list(range(n_start, n_end + 1, n_increment))
+    MKNs = list(product(Ms, Ks, Ns))
+
     data = run(args.dtype, args.sweep_schedules, MKNs)
 
     make_output(data, MKNs, f"range_bench-{args.dtype}")
@@ -333,6 +364,9 @@ Benchmark Machete GEMM.
         action="store_true",
         help="Run a sweep over all supported schedules",
     )
+    parser.add_argument("--sweep-csv-out",
+                        help="CSV to store sweep results",
+                        default="sch_sweep_results.csv")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
     square_parser = subparsers.add_parser("square_bench")
@@ -342,12 +376,21 @@ Benchmark Machete GEMM.
     square_parser.set_defaults(func=run_square_bench)
 
     range_parser = subparsers.add_parser("range_bench")
-    range_parser.add_argument("--dim-start", type=int, required=True)
-    range_parser.add_argument("--dim-end", type=int, required=True)
-    range_parser.add_argument("--dim-increment", type=int, required=True)
-    range_parser.add_argument("--m-constant", type=int, default=None)
-    range_parser.add_argument("--n-constant", type=int, default=None)
-    range_parser.add_argument("--k-constant", type=int, default=None)
+    range_parser.add_argument(
+        "--dim-start",
+        type=str,
+        required=True,
+        help="Start value for M,K,N as common separated list")
+    range_parser.add_argument(
+        "--dim-end",
+        type=str,
+        required=True,
+        help="End value (inclusive) for M,K,N as common separated list")
+    range_parser.add_argument(
+        "--dim-increment",
+        type=str,
+        required=True,
+        help="Increment value for M,K,N as common separated list")
     range_parser.set_defaults(func=run_range_bench)
 
     model_parser = subparsers.add_parser("model_bench")
@@ -369,4 +412,9 @@ Benchmark Machete GEMM.
     model_parser.set_defaults(func=run_model_bench)
 
     args = parser.parse_args()
+
+    _SWEEP_SCHEDULES_RESULTS_CSV = args.sweep_csv_out
     args.func(args)
+
+    if _SWEEP_SCHEDULES_RESULTS is not None:
+        _SWEEP_SCHEDULES_RESULTS.to_csv(_SWEEP_SCHEDULES_RESULTS_CSV)

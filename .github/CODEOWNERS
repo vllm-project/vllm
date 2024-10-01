@@ -1,0 +1,19 @@
+# See https://help.github.com/articles/about-codeowners/
+# for more info about CODEOWNERS file
+
+/tests/async_engine @njhill @robertgshaw2-neuralmagic @simon-mo
+/tests/test_inputs.py @DarkLight1337 @ywang96
+/tests/entrypoints @DarkLight1337 @robertgshaw2-neuralmagic @simon-mo 
+/tests/models @DarkLight1337 @ywang96
+/tests/multimodal @DarkLight1337 @ywang96
+/tests/prefix_caching @comaniac @KuntaiDu 
+/tests/spec_decode @njhill @LiuXiaoxuanPKU
+/tests/kernels @tlrmchlsmth @WoosukKwon 
+/tests/quantization @mgoin @robertgshaw2-neuralmagic
+/.buildkite/lm-eval-harness @mgoin @simon-mo 
+/tests/distributed/test_multi_node_assignment.py @youkaichao
+/tests/distributed/test_pipeline_parallel.py @youkaichao
+/tests/distributed/test_same_node.py @youkaichao
+/tests/multi_step @alexm-neuralmagic @SolitaryThinker @comaniac
+/tests/weight_loading @mgoin @youkaichao
+/tests/basic_correctness/test_chunked_prefill @rkooo567 @comaniac

@@ -172,7 +172,8 @@ class FlashInferState(AttentionState):
         state._prefill_wrapper = self._get_prefill_wrapper()
         return state
 
-    def graph_capture_get_metadata_for_batch(self, batch_size: int):
+    def graph_capture_get_metadata_for_batch(
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
         assert self._is_graph_capturing
         _indptr_buffer = self._graph_indptr_buffer[:batch_size + 1]
         _last_page_len_buffer = self._graph_last_page_len_buffer[:batch_size]
@@ -232,12 +233,17 @@ class FlashInferState(AttentionState):
         attn_metadata.begin_forward()
         return attn_metadata
 
-    def get_graph_input_buffers(self, attn_metadata):
+    def get_graph_input_buffers(self,
+                                attn_metadata,
+                                is_encoder_decoder_model: bool = False):
         return {
             "slot_mapping": attn_metadata.slot_mapping,
         }
 
-    def prepare_graph_input_buffers(self, input_buffers, attn_metadata):
+    def prepare_graph_input_buffers(self,
+                                    input_buffers,
+                                    attn_metadata,
+                                    is_encoder_decoder_model: bool = False):
         return
 
     def begin_forward(self, model_input):
@@ -404,17 +410,21 @@ class FlashInferMetadata(AttentionMetadata):
 
         return self
 
-    def advance_step(
-        self,
-        model_input: "ModelInputForGPUWithSamplingMetadata",
-        sampled_token_ids: Optional[torch.Tensor],
-        block_size: int,
-        num_seqs: int,
-        num_queries: int,
-    ):
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
         """
         Update metadata in-place to advance one decode step.
         """
+
+        assert not turn_prefills_into_decodes, \
+            ("Chunked prefill is not supported with flashinfer yet."
+             "turn_prefills_into_decodes is a Multi-Step + Chunked-Prefill "
+             "specific parameter.")
 
         assert num_seqs > 0
         assert num_queries > 0
@@ -740,7 +750,7 @@ class FlashInferImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
@@ -764,7 +774,7 @@ class FlashInferImpl(AttentionImpl):
         if attn_metadata.num_decode_tokens > 0:
             assert attn_metadata.num_prefill_tokens == 0, (
                 "Chunked prefill is not supported with flashinfer yet.")
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             # Use the same reshape and cache kernel as flash attention.
             ops.reshape_and_cache_flash(
                 key,
@@ -790,7 +800,7 @@ class FlashInferImpl(AttentionImpl):
             # when kv_cache is not provided.
             # This happens when vllm runs the profiling to
             # determine the number of blocks.
-            if kv_cache is None:
+            if kv_cache.numel() == 0:
                 output = torch.ops.vllm.flash_attn_varlen_func(
                     q=query,
                     k=key,
