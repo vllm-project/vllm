@@ -1260,7 +1260,8 @@ class LLMEngine:
                 else:
                     seq_group.update_num_computed_tokens(
                         seq_group_metadata.token_chunk_size)
-
+            else:
+                seq_group.update_num_computed_tokens(1)
             if seq_group_metadata.do_sample:
                 assert len(sequence_group_outputs.samples) == 1, (
                     "Async output processor expects a single sample"
@@ -1271,7 +1272,6 @@ class LLMEngine:
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
                 seq.append_token_id(sample.output_token, sample.logprobs)
-                seq_group.update_num_computed_tokens(1)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
