@@ -274,8 +274,8 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
             get_slice_image_placeholder(image_size, num_image)
 
     prompt = llm_inputs.get("prompt")
+    token_ids = llm_inputs.get("prompt_token_ids")
     if prompt is None:
-        token_ids = llm_inputs.get("prompt_token_ids")
         prompt = tokenizer.decode(token_ids)
 
     pattern = "(<image>./</image>)"
