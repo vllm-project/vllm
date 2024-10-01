@@ -1085,6 +1085,7 @@ class AsyncLLMEngine:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         """Generate outputs for a request from an embedding model.
 
@@ -1099,6 +1100,8 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
+            priority: The priority of the request.
+                Only applicable with priority scheduling.
 
         Yields:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
@@ -1151,6 +1154,7 @@ class AsyncLLMEngine:
                 pooling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
+                priority=priority,
         ):
             yield LLMEngine.validate_output(output, EmbeddingRequestOutput)
 
