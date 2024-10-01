@@ -448,6 +448,7 @@ class MQLLMEngineClient:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         ...
 
@@ -459,6 +460,7 @@ class MQLLMEngineClient:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         ...
 
@@ -473,6 +475,7 @@ class MQLLMEngineClient:
         request_id: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
@@ -500,7 +503,7 @@ class MQLLMEngineClient:
                 and request_id is not None)
 
         return self._process_request(prompt, pooling_params, request_id,
-                                     lora_request, trace_headers)
+                                     lora_request, trace_headers, priority)
 
     async def _process_request(
         self,

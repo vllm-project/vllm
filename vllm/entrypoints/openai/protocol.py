@@ -655,6 +655,16 @@ class EmbeddingRequest(OpenAIBaseModel):
 
     # doc: end-embedding-pooling-params
 
+    # doc: begin-embedding-extra-params
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+
+    # doc: end-embedding-extra-params
+
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
 
