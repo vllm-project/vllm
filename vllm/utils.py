@@ -1138,6 +1138,12 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             args = FlexibleArgumentParser._pull_args_from_config(args)
 
         # Convert underscores to dashes and vice versa in argument names
+        processed_args = self._format_args(args)
+
+        return super().parse_args(processed_args, namespace)
+
+    def _format_args(self, args: List[str]) -> List[str]:
+        """Convert underscores to dashes and vice versa in argument names"""
         processed_args = []
         for arg in args:
             if arg.startswith('--'):
@@ -1150,13 +1156,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                                           arg[len('--'):].replace('_', '-'))
             else:
                 processed_args.append(arg)
-        args, argv = super().parse_known_args(processed_args, namespace)
-        # Raise error if there are more unknown args than --dummy-tag
-        if len(argv) > 1:
-            msg = 'unrecognized arguments: {}'.format(' '.join(argv))
-            raise argparse.ArgumentError(None, msg)
-        return args
 
+        return processed_args
+    
     @staticmethod
     def _pull_args_from_config(args: List[str]) -> List[str]:
         """Method to pull arguments specified in the config file
@@ -1205,12 +1207,12 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = FlexibleArgumentParser._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
+        # followed by model_tag
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
-        # of cli > config > defaults
-        args = [args[0]] + config_args + ['--dummy-tag'] + \
-            args[1:index] + args[index + 2:]
+        # of cli > config > defaults      
+        args = [args[0]] + [args[1]] + config_args + args[2:index] + args[index+2:]
 
         return args
 
