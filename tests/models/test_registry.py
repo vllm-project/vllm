@@ -4,6 +4,7 @@ import pytest
 import torch.cuda
 
 from vllm.model_executor.models import _MODELS, ModelRegistry
+from vllm.platforms import current_platform
 
 from ..utils import fork_new_process_for_each_test
 
@@ -23,7 +24,7 @@ def test_registry_imports(model_arch):
 def test_registry_is_multimodal(model_arch, is_mm, init_cuda):
     assert ModelRegistry.is_multimodal_model(model_arch) is is_mm
 
-    if init_cuda:
+    if init_cuda and current_platform.is_cuda_alike():
         assert not torch.cuda.is_initialized()
 
         ModelRegistry.resolve_model_cls(model_arch)
@@ -43,7 +44,7 @@ def test_registry_is_multimodal(model_arch, is_mm, init_cuda):
 def test_registry_is_pp(model_arch, is_pp, init_cuda):
     assert ModelRegistry.is_pp_supported_model(model_arch) is is_pp
 
-    if init_cuda:
+    if init_cuda and current_platform.is_cuda_alike():
         assert not torch.cuda.is_initialized()
 
         ModelRegistry.resolve_model_cls(model_arch)
