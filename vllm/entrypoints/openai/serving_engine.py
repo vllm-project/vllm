@@ -27,11 +27,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import AtomicCounter
@@ -167,15 +165,6 @@ class OpenAIServing:
                                        status_code=status_code).model_dump()
         })
         return json_str
-
-    async def _guided_decode_logits_processor(
-            self, request: Union[ChatCompletionRequest, CompletionRequest],
-            tokenizer: AnyTokenizer) -> Optional[LogitsProcessor]:
-        decoding_config = await self.engine_client.get_decoding_config()
-        guided_decoding_backend = request.guided_decoding_backend \
-            or decoding_config.guided_decoding_backend
-        return await get_guided_decoding_logits_processor(
-            guided_decoding_backend, request, tokenizer)
 
     async def _check_model(
         self,
