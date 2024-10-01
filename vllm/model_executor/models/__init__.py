@@ -1,11 +1,17 @@
-import functools
 import importlib
-from typing import Dict, List, Optional, Tuple, Type
+import importlib.util
+import string
+import subprocess
+import sys
+from functools import lru_cache, partial
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.utils import is_hip
+
+from .interfaces import SupportsMultiModal, SupportsPP
 
 logger = init_logger(__name__)
 
@@ -117,6 +123,27 @@ _MODELS = {
     **_CONDITIONAL_GENERATION_MODELS,
 }
 
+_PP_SUPPORTED_MODELS = [
+    "AquilaForCausalLM",
+    "AquilaModel",
+    "DeepseekV2ForCausalLM",
+    "GPT2LMHeadModel",
+    "InternLM2ForCausalLM",
+    "InternLMForCausalLM",
+    "InternVLChatModel",
+    "JAISLMHeadModel",
+    "LlamaForCausalLM",
+    "LLaMAForCausalLM",
+    "MistralForCausalLM",
+    "MixtralForCausalLM",
+    "NemotronForCausalLM",
+    "Phi3ForCausalLM",
+    "Qwen2ForCausalLM",
+    "Qwen2MoeForCausalLM",
+    "QWenLMHeadModel",
+    "Qwen2VLForConditionalGeneration",
+]
+
 # Architecture -> type.
 # out of tree models
 _OOT_MODELS: Dict[str, Type[nn.Module]] = {}
@@ -150,12 +177,48 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
 class ModelRegistry:
 
     @staticmethod
-    @functools.lru_cache(maxsize=128)
-    def _get_model(model_arch: str):
-        module_name, model_cls_name = _MODELS[model_arch]
-        module = importlib.import_module(
-            f"vllm.model_executor.models.{module_name}")
-        return getattr(module, model_cls_name, None)
+    def _get_module_cls_name(model_arch: str) -> Tuple[str, str]:
+        module_relname, cls_name = _MODELS[model_arch]
+        return f"vllm.model_executor.models.{module_relname}", cls_name
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _get_model(model_arch: str) -> Optional[Type[nn.Module]]:
+        module_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
+        module = importlib.import_module(module_name)
+        return getattr(module, cls_name, None)
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _is_subclass_stateless(model_arch: str, class_: type) -> bool:
+        """
+        Test whether a model is a subclass of the given type.
+
+        This is run in a subprocess to avoid initializing CUDA for the main
+        program.
+        """
+        module_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
+
+        valid_name_characters = string.ascii_letters + string.digits + "._"
+        if any(s not in valid_name_characters for s in module_name):
+            raise ValueError(f"Unsafe module name detected for {model_arch}")
+        if any(s not in valid_name_characters for s in cls_name):
+            raise ValueError(f"Unsafe class name detected for {model_arch}")
+        if any(s not in valid_name_characters for s in class_.__module__):
+            raise ValueError(f"Unsafe module name detected for {class_}")
+        if any(s not in valid_name_characters for s in class_.__name__):
+            raise ValueError(f"Unsafe class name detected for {class_}")
+
+        stmts = ";".join([
+            f"from {module_name} import {cls_name}",
+            f"from {class_.__module__} import {class_.__name__}",
+            f"assert isinstance({cls_name}, {class_.__name__})",
+        ])
+
+        result = subprocess.run([sys.executable, "-c", stmts],
+                                capture_output=True)
+
+        return result.returncode == 0
 
     @staticmethod
     def _try_load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
@@ -202,17 +265,41 @@ class ModelRegistry:
         _OOT_MODELS[model_arch] = model_cls
 
     @staticmethod
-    def is_embedding_model(model_arch: str) -> bool:
-        return model_arch in _EMBEDDING_MODELS
+    def is_embedding_model(architectures: Union[str, List[str]]) -> bool:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        return any(arch in _EMBEDDING_MODELS for arch in architectures)
 
     @staticmethod
-    def is_multimodal_model(model_arch: str) -> bool:
+    def is_multimodal_model(architectures: Union[str, List[str]]) -> bool:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
 
-        # TODO: find a way to avoid initializing CUDA prematurely to
-        # use `supports_multimodal` to determine if a model is multimodal
-        # model_cls = ModelRegistry._try_load_model_cls(model_arch)
-        # from vllm.model_executor.models.interfaces import supports_multimodal
-        return model_arch in _MULTIMODAL_MODELS
+        is_mm = partial(ModelRegistry._is_subclass_stateless,
+                        class_=SupportsMultiModal)
+
+        return any(is_mm(arch) for arch in architectures)
+
+    @staticmethod
+    def is_pp_supported_model(architectures: Union[str, List[str]]) -> bool:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        is_pp = partial(ModelRegistry._is_subclass_stateless,
+                        class_=SupportsPP)
+
+        return any(is_pp(arch) for arch in architectures)
+
+    @staticmethod
+    def get_pp_supported_archs() -> List[str]:
+        return list(_PP_SUPPORTED_MODELS)
 
 
 __all__ = [
