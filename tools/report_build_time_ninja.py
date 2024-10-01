@@ -6,51 +6,35 @@
 # Modified version of: https://chromium.googlesource.com/chromium/tools/depot_tools.git/+/refs/heads/main/post_build_ninja_summary.py
 """Summarize the last ninja build, invoked with ninja's -C syntax.
 
-This script is designed to be automatically run after each ninja build in
-order to summarize the build's performance. Making build performance information
-more visible should make it easier to notice anomalies and opportunities. To use
-this script on Windows just set NINJA_SUMMARIZE_BUILD=1 and run autoninja.bat.
-
-On Linux you can get autoninja to invoke this script using this syntax:
-
-$ NINJA_SUMMARIZE_BUILD=1 autoninja -C out/Default/ chrome
-
-You can also call this script directly using ninja's syntax to specify the
-output directory of interest:
-
-> python3 post_build_ninja_summary.py -C out/Default
+> python3 tools/report_build_time_ninja.py -C build/..
 
 Typical output looks like this:
-
->ninja -C out\debug_component base
-ninja.exe -C out\debug_component base -j 960 -l 48  -d keeprsp
-ninja: Entering directory `out\debug_component'
-[1 processes, 1/1 @ 0.3/s : 3.092s ] Regenerating ninja files
-Longest build steps:
-       0.1 weighted s to build obj/base/base/trace_log.obj (6.7 s elapsed time)
-       0.2 weighted s to build nasm.exe, nasm.exe.pdb (0.2 s elapsed time)
-       0.3 weighted s to build obj/base/base/win_util.obj (12.4 s elapsed time)
-       1.2 weighted s to build base.dll, base.dll.lib (1.2 s elapsed time)
-Time by build-step type:
-       0.0 s weighted time to generate 6 .lib files (0.3 s elapsed time sum)
-       0.1 s weighted time to generate 25 .stamp files (1.2 s elapsed time sum)
-       0.2 s weighted time to generate 20 .o files (2.8 s elapsed time sum)
-       1.7 s weighted time to generate 4 PEFile (linking) files (2.0 s elapsed
-time sum)
-      23.9 s weighted time to generate 770 .obj files (974.8 s elapsed time sum)
-26.1 s weighted time (982.9 s elapsed time sum, 37.7x parallelism)
-839 build steps completed, average of 32.17/s
-
-If no gn clean has been done then results will be for the last non-NULL
-invocation of ninja. Ideas for future statistics, and implementations are
-appreciated.
-
-The "weighted" time is the elapsed time of each build step divided by the number
-of tasks that were running in parallel. This makes it an excellent approximation
-of how "important" a slow step was. A link that is entirely or mostly serialized
-will have a weighted time that is the same or similar to its elapsed time. A
-compile that runs in parallel with 999 other compiles will have a weighted time
-that is tiny."""
+```
+    Longest build steps for .cpp.o:
+           1.0 weighted s to build ...torch_bindings.cpp.o (12.4 s elapsed time)
+           2.0 weighted s to build ..._attn_c.dir/csrc... (23.5 s elapsed time)
+           2.6 weighted s to build ...torch_bindings.cpp.o (31.5 s elapsed time)
+           3.2 weighted s to build ...torch_bindings.cpp.o (38.5 s elapsed time)
+    Longest build steps for .so (linking):
+           0.1 weighted s to build _core_C.abi3.so (0.7 s elapsed time)
+           0.1 weighted s to build _moe_C.abi3.so (1.0 s elapsed time)
+           0.5 weighted s to build ...flash_attn_c.abi3.so (1.1 s elapsed time)
+           6.2 weighted s to build _C.abi3.so (6.2 s elapsed time)
+    Longest build steps for .cu.o:
+          15.3 weighted s to build ...machete_mm_... (183.5 s elapsed time)
+          15.3 weighted s to build ...machete_mm_... (183.5 s elapsed time)
+          15.3 weighted s to build ...machete_mm_... (183.6 s elapsed time)
+          15.3 weighted s to build ...machete_mm_... (183.7 s elapsed time)
+          15.5 weighted s to build ...machete_mm_... (185.6 s elapsed time)
+          15.5 weighted s to build ...machete_mm_... (185.9 s elapsed time)
+          15.5 weighted s to build ...machete_mm_... (186.2 s elapsed time)
+          37.4 weighted s to build ...scaled_mm_c3x.cu... (449.0 s elapsed time)
+          43.9 weighted s to build ...scaled_mm_c2x.cu... (527.4 s elapsed time)
+         344.8 weighted s to build ...attention_...cu.o (1087.2 s elapsed time)
+    1110.0 s weighted time (10120.4 s elapsed time sum, 9.1x parallelism)
+    134 build steps completed, average of 0.12/s
+```
+"""
 
 import argparse
 import errno

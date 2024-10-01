@@ -248,7 +248,7 @@ endmacro()
 # For the given `SRC_CUDA_ARCHS` list of gencode versions in the form 
 #  `<major>.<minor>[letter]` compute the "loose intersection" with the 
 #  `TGT_CUDA_ARCHS` list of gencodes. 
-# The loose interection is defined as:
+# The loose intersection is defined as:
 #   { max{ x \in tgt | x <= y } | y \in src, { x \in tgt | x <= y } != {} }
 #  where `<=` is the version comparison operator.
 # In other words, for each version in `TGT_CUDA_ARCHS` find the highest version
