@@ -457,7 +457,13 @@ def generate():
             )),
     ]
 
-    schedules = list(set([x[1] for x in default_heuristic]))
+    # Do not use schedules = list(set(...)) because we need to make sure
+    # the output list is deterministic; otherwise the generated kernel file
+    # will be non-deterministic and causes ccache miss.
+    schedules = []
+    for _, schedule_config in default_heuristic:
+        if schedule_config not in schedules:
+            schedules.append(schedule_config)
 
     impl_configs = []
 
