@@ -555,5 +555,5 @@ torch::Tensor marlin_gemm_moe(
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("marlin_mm_moe", &marlin_moe::marlin_mm_moe);
+  m.impl("marlin_mm_moe", &marlin_gemm_moe);
 }
