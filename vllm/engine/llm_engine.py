@@ -1110,6 +1110,8 @@ class LLMEngine:
                 update_prefill_num_computed_tokens(seq_group, seq_group_meta,
                                                    len(output),
                                                    is_first_step_output)
+            elif not is_async:
+                seq_group.update_num_computed_tokens(1)
 
             if outputs:
                 for o in outputs:
