@@ -1614,6 +1614,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        if kv_caches[0].numel() == 0:
+            from vllm.utils import GiB_bytes
+            free_gpu_memory_before_execution = torch.cuda.mem_get_info()[0]
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -1623,7 +1626,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                          device=self.device),
             **seqlen_agnostic_kwargs)
-
+        if kv_caches[0].numel() == 0:
+            free_gpu_memory_after_execution = torch.cuda.mem_get_info()[0]
+            reserved_memory = free_gpu_memory_before_execution - free_gpu_memory_after_execution
+            logger.info("reserved memory for model forward activation: %s GiB",
+                        reserved_memory / GiB_bytes)
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end.record()
