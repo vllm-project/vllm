@@ -434,7 +434,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens=seq_lens if seq_lens else None,
-            query_lens=seq_lens if seq_lens else None,
+            query_lens=seq_lens if seq_lens else [1] * batch_size,
             device=device,
             pin_memory=is_pin_memory_available())
         # the logits tensor is modified in-place by the sampler

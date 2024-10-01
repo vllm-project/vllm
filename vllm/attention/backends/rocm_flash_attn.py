@@ -116,9 +116,17 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
+
+    # Number of query tokens for each request in the batch.
+    # Currently, we require that all requests have the same number of query
+    # tokens during the decoding phase. When speculavie decoding is enabled,
+    # decode_query_len might be greater than 1. In all other cases, it is 1.
+    decode_query_len: Optional[int] = None
+
     _cached_prefill_metadata: Optional["ROCmFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["ROCmFlashAttentionMetadata"] = None
 

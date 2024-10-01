@@ -162,6 +162,7 @@ class EngineArgs:
     speculative_model_quantization: Optional[str] = None
     speculative_draft_tensor_parallel_size: Optional[int] = None
     num_speculative_tokens: Optional[int] = None
+    speculative_disable_mqa_scorer: Optional[bool] = False
     speculative_max_model_len: Optional[int] = None
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
@@ -641,6 +642,12 @@ class EngineArgs:
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding.')
         parser.add_argument(
+            '--speculative-disable-mqa-scorer',
+            action='store_true',
+            help=
+            'If set to True, the MQA scorer will be disabled in speculative '
+            ' and fall back to batch expansion')
+        parser.add_argument(
             '--speculative-draft-tensor-parallel-size',
             '-spec-draft-tp',
             type=int,
@@ -970,6 +977,7 @@ class EngineArgs:
             speculative_draft_tensor_parallel_size = \
                 self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_disable_mqa_scorer=self.speculative_disable_mqa_scorer,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,

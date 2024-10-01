@@ -468,43 +468,26 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Compute context length (the number of tokens that are
         # already computed) and sequence length (total number of tokens).
+
         seq_len = seq_data.get_len()
         if inter_data.is_prompt:
             context_len = seq_data.get_num_computed_tokens()
-        else:
-            # get_num_computed_tokens is incorrect for spec decoding.
-            # So, we should have a special logic here.
-            # TODO(sang): Fix it.
+            seq_len = min(seq_len, context_len + token_chunk_size)
+        elif self.runner.scheduler_config.is_multi_step or \
+            self.runner.model_config.is_encoder_decoder_model:
             context_len = seq_len - 1
-        seq_len = min(seq_len, context_len + token_chunk_size)
+        else:
+            context_len = seq_data.get_num_computed_tokens()
 
         # Compute tokens.
-        if inter_data.is_prompt:
-            tokens = seq_data.get_token_ids()
-            if context_len != 0 or seq_len < len(tokens):
-                tokens = tokens[context_len:seq_len]
-        else:
-            # Optimization. get_token_ids requires the entire copy of
-            # tokens.
-            tokens = seq_data.get_last_token_id()
+        tokens = seq_data.get_token_ids()[context_len:seq_len]
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
-
-        if isinstance(tokens, list):
-            inter_data.input_tokens[seq_idx].extend(tokens)
-        else:
-            inter_data.input_tokens[seq_idx].append(tokens)
-
-        if (seq_len - context_len) == 1:
-            inter_data.input_positions[seq_idx].append(seq_len - 1)
-        else:
-            inter_data.input_positions[seq_idx].extend(
-                range(context_len, seq_len))
-
-        inter_data.query_lens[
-            seq_idx] = seq_len - context_len if inter_data.is_prompt else 1
+        inter_data.input_tokens[seq_idx].extend(tokens)
+        inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
+        inter_data.query_lens[seq_idx] = seq_len - context_len
 
         if seq_data.mrope_position_delta is not None:
             if inter_data.mrope_input_positions is None:
