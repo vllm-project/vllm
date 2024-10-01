@@ -161,52 +161,19 @@ class ModelRegistry:
 
     @staticmethod
     @lru_cache(maxsize=128)
-    def _get_model(model_arch: str) -> Optional[Type[nn.Module]]:
+    def _try_get_model_stateful(model_arch: str) -> Optional[Type[nn.Module]]:
+        if model_arch not in _MODELS:
+            return None
+
         module_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
         module = importlib.import_module(module_name)
         return getattr(module, cls_name, None)
 
     @staticmethod
-    @lru_cache(maxsize=128)
-    def _check_stateless(
-        func: Callable[[object], bool],
-        model_arch: str,
-    ) -> bool:
-        """
-        Run a boolean function against a model and return the result.
-
-        This is run in a subprocess to avoid initializing CUDA for the main
-        program.
-        """
-        module_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
-
-        valid_name_characters = string.ascii_letters + string.digits + "._"
-        if any(s not in valid_name_characters for s in module_name):
-            raise ValueError(f"Unsafe module name detected for {model_arch}")
-        if any(s not in valid_name_characters for s in cls_name):
-            raise ValueError(f"Unsafe class name detected for {model_arch}")
-        if any(s not in valid_name_characters for s in func.__module__):
-            raise ValueError(f"Unsafe module name detected for {func}")
-        if any(s not in valid_name_characters for s in func.__name__):
-            raise ValueError(f"Unsafe class name detected for {func}")
-
-        stmts = ";".join([
-            f"from {module_name} import {cls_name}",
-            f"from {func.__module__} import {func.__name__}",
-            f"assert {func.__name__}({cls_name})",
-        ])
-
-        result = subprocess.run([sys.executable, "-c", stmts],
-                                capture_output=True)
-
-        return result.returncode == 0
-
-    @staticmethod
-    def _try_load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
+    def _try_get_model_stateless(model_arch: str) -> Optional[Type[nn.Module]]:
         if model_arch in _OOT_MODELS:
             return _OOT_MODELS[model_arch]
-        if model_arch not in _MODELS:
-            return None
+
         if is_hip():
             if model_arch in _ROCM_UNSUPPORTED_MODELS:
                 raise ValueError(
@@ -217,7 +184,15 @@ class ModelRegistry:
                     "Model architecture %s is partially supported by ROCm: %s",
                     model_arch, _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
 
-        return ModelRegistry._get_model(model_arch)
+        return None
+
+    @staticmethod
+    def _try_load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
+        model = ModelRegistry._try_get_model_stateless(model_arch)
+        if model is not None:
+            return model
+
+        return ModelRegistry._try_get_model_stateful(model_arch)
 
     @staticmethod
     def resolve_model_cls(
@@ -251,6 +226,50 @@ class ModelRegistry:
         _OOT_MODELS[model_arch] = model_cls
 
     @staticmethod
+    @lru_cache(maxsize=128)
+    def _check_stateless(
+        func: Callable[[Type[nn.Module]], bool],
+        model_arch: str,
+        *,
+        default: Optional[bool] = None,
+    ) -> bool:
+        """
+        Run a boolean function against a model and return the result.
+
+        This is run in a subprocess to avoid initializing CUDA for the main
+        program.
+        """
+        model = ModelRegistry._try_get_model_stateless(model_arch)
+        if model is not None:
+            return func(model)
+
+        if model_arch not in _MODELS and default is not None:
+            return default
+
+        module_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
+
+        valid_name_characters = string.ascii_letters + string.digits + "._"
+        if any(s not in valid_name_characters for s in module_name):
+            raise ValueError(f"Unsafe module name detected for {model_arch}")
+        if any(s not in valid_name_characters for s in cls_name):
+            raise ValueError(f"Unsafe class name detected for {model_arch}")
+        if any(s not in valid_name_characters for s in func.__module__):
+            raise ValueError(f"Unsafe module name detected for {func}")
+        if any(s not in valid_name_characters for s in func.__name__):
+            raise ValueError(f"Unsafe class name detected for {func}")
+
+        stmts = ";".join([
+            f"from {module_name} import {cls_name}",
+            f"from {func.__module__} import {func.__name__}",
+            f"assert {func.__name__}({cls_name})",
+        ])
+
+        result = subprocess.run([sys.executable, "-c", stmts],
+                                capture_output=True)
+
+        return result.returncode == 0
+
+    @staticmethod
     def is_embedding_model(architectures: Union[str, List[str]]) -> bool:
         if isinstance(architectures, str):
             architectures = [architectures]
@@ -266,7 +285,10 @@ class ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        is_mm = partial(ModelRegistry._check_stateless, supports_multimodal)
+        is_mm = partial(ModelRegistry._check_stateless,
+                        supports_multimodal,
+                        default=False)
+
         return any(is_mm(arch) for arch in architectures)
 
     @staticmethod
@@ -276,7 +298,10 @@ class ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        is_pp = partial(ModelRegistry._check_stateless, supports_pp)
+        is_pp = partial(ModelRegistry._check_stateless,
+                        supports_pp,
+                        default=False)
+
         return any(is_pp(arch) for arch in architectures)
 
 
