@@ -232,8 +232,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     return parser
 
 
-def validate_parsed_args(args):
-    """Quick checks / standardization that may raise prior to loading."""
+def validate_parsed_serve_args(args: argparse.Namespace):
+    """Quick checks for model serve args that raise prior to loading."""
+    if hasattr(args, "subparser") and args.subparser != "serve":
+        return
+
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
 

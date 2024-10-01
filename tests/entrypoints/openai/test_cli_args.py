@@ -4,7 +4,7 @@ import unittest
 import pytest
 
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
-                                              validate_parsed_args)
+                                              validate_parsed_serve_args)
 from vllm.entrypoints.openai.serving_engine import LoRAModulePath
 from vllm.utils import FlexibleArgumentParser
 
@@ -96,13 +96,13 @@ def test_enable_auto_choice_requires_tool_call_parser():
     parser = make_arg_parser(parser)
     args = parser.parse_args(args=["--enable-auto-tool-choice"])
     with pytest.raises(TypeError):
-        validate_parsed_args(args)
+        validate_parsed_serve_args(args)
     args = parser.parse_args(args=[
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "mistral",
     ])
-    validate_parsed_args(args)
+    validate_parsed_serve_args(args)
 
 
 def test_chat_template_fails_with_bad_path():
@@ -110,7 +110,7 @@ def test_chat_template_fails_with_bad_path():
     parser = make_arg_parser(parser)
     args = parser.parse_args(args=["--chat-template", "./foo/bar/baz"])
     with pytest.raises(ValueError):
-        validate_parsed_args(args)
+        validate_parsed_serve_args(args)
 
 
 if __name__ == '__main__':
