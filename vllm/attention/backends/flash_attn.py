@@ -351,9 +351,13 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
-    def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata",
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
                      sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int, num_seqs: int, num_queries: int):
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
         """
         Update metadata in-place to advance one decode step.
         """
@@ -363,6 +367,23 @@ class FlashAttentionMetadata(AttentionMetadata):
         if num_seqs != num_queries:
             assert num_seqs > num_queries
             assert self.use_cuda_graph
+
+        if turn_prefills_into_decodes:
+            # When Mutli-Step is enabled with Chunked-Prefill, prefills and
+            # decodes are scheduled together. In the first step, all the
+            # prefills turn into decodes. This update reflects that
+            # conversion.
+            assert self.num_decode_tokens + self.num_prefills == num_seqs
+            self.num_decode_tokens += self.num_prefills
+            self.num_prefills = 0
+            self.num_prefill_tokens = 0
+            self.max_prefill_seq_len = 0
+            self.max_query_len = 1
+
+            self.slot_mapping = self.slot_mapping[:num_seqs]
+        else:
+            assert self.seq_lens is not None
+            assert self.max_decode_seq_len == max(self.seq_lens)
 
         assert self.num_prefills == 0
         assert self.num_prefill_tokens == 0
@@ -375,7 +396,6 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.seq_lens_tensor.shape == (num_seqs, )
         assert self.max_query_len == 1
         assert self.max_prefill_seq_len == 0
-        assert self.max_decode_seq_len == max(self.seq_lens)
 
         assert self.query_start_loc is not None
         assert self.query_start_loc.shape == (num_queries + 1, )
@@ -677,6 +697,8 @@ class FlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -697,7 +719,7 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
 
@@ -716,8 +738,10 @@ class FlashAttentionImpl(AttentionImpl):
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-        assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+        assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                    f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
+        assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                    f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
 
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
@@ -734,7 +758,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if (kv_cache is None or prefill_meta.block_tables is None
+            if (kv_cache.numel() == 0 or prefill_meta.block_tables is None
                     or prefill_meta.block_tables.numel() == 0):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the

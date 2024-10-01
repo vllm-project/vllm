@@ -101,6 +101,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
+        seq_id = seq.seq_id
+        assert all(
+            [seq_id == output.samples[0].parent_seq_id for output in outputs])
 
         if is_async:
             # Async case: We process tokens one by one. Here, we know the token
@@ -173,6 +176,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 token_id=output_token_id,
                 logprobs=output_logprob,
             )
+            seq.data.update_num_computed_tokens(1)
 
             self._process_decode_and_stop(seq, sampling_params)
 
