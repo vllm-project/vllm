@@ -267,7 +267,7 @@ def llama_2_7b_engine_extra_embeddings():
     else:
         with patch("vllm.worker.model_runner.get_model", get_model_patched):
             engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
-            
+
     yield engine.llm_engine
     del engine
     cleanup()
