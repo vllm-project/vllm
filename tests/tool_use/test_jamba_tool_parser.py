@@ -1,17 +1,35 @@
 import json
-from typing import Dict
+from typing import Dict, List
 
 import pytest
 
+from vllm.entrypoints.openai.protocol import ToolCall, FunctionCall
 from vllm.entrypoints.openai.tool_parsers import JambaToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL = "ai21labs/Jamba-tiny-dev"
 
+
+@pytest.fixture(scope="module")
+def jamba_tokenizer():
+    return get_tokenizer(tokenizer_name=MODEL)
+
+
 @pytest.fixture
-def jamba_tool_parser():
-    tokenizer = get_tokenizer(tokenizer_name=MODEL)
-    return JambaToolParser(tokenizer)
+def jamba_tool_parser(jamba_tokenizer):
+    return JambaToolParser(jamba_tokenizer)
+
+
+def assert_tool_calls(actual_tool_calls: List[ToolCall],
+                      expected_tool_calls: List[ToolCall]):
+    assert len(actual_tool_calls) == len(expected_tool_calls)
+
+    for actual_tool_call, expected_tool_call in zip(actual_tool_calls, expected_tool_calls):
+        assert isinstance(actual_tool_call.id, str)
+        assert len(actual_tool_call.id) > 16
+
+        assert actual_tool_call.type == "function"
+        assert actual_tool_call.function == expected_tool_call.function
 
 
 def test_extract_tool_calls_no_tools(jamba_tool_parser):
@@ -21,85 +39,36 @@ def test_extract_tool_calls_no_tools(jamba_tool_parser):
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
 
-
-def test_extract_tool_calls_single_tool(jamba_tool_parser):
-    model_output = '''<tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}] </tool_calls>'''
+@pytest.mark.parametrize(
+    ids=[
+        "single_tool",
+        "single_tool_with_content",
+        "parallel_tools",
+    ],
+    argnames=["model_output", "expected_tool_calls", "expected_content"],
+    argvalues=[
+        (
+                '''<tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}] </tool_calls>''',
+                [ToolCall(function=FunctionCall(name="get_current_weather", arguments=json.dumps({"city": "Dallas", "state": "TX", "unit": "fahrenheit"})))],
+                None
+         ),
+        (
+                '''Sure! let me call the tool for you. <tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}] </tool_calls>''',
+                [ToolCall(function=FunctionCall(name="get_current_weather", arguments=json.dumps({"city": "Dallas", "state": "TX", "unit": "fahrenheit"})))],
+                "Sure! let me call the tool for you. "
+         ),
+        (
+                '''<tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}, \n{"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}] </tool_calls>''',
+                [ToolCall(function=FunctionCall(name="get_current_weather", arguments=json.dumps({"city": "Dallas", "state": "TX", "unit": "fahrenheit"}))),
+                 ToolCall(function=FunctionCall(name="get_current_weather", arguments=json.dumps({"city": "Orlando", "state": "FL", "unit": "fahrenheit"})))],
+                None
+        )
+    ],
+)
+def test_extract_tool_calls(jamba_tool_parser, model_output, expected_tool_calls, expected_content):
     extracted_tool_calls = jamba_tool_parser.extract_tool_calls(model_output)
     assert extracted_tool_calls.tools_called == True
-    assert len(extracted_tool_calls.tool_calls) == 1
-    tool_call = extracted_tool_calls.tool_calls[0]
-    assert isinstance(tool_call.id, str)
-    assert len(tool_call.id) > 16
 
-    assert tool_call.type == "function"
-    assert tool_call.function is not None
-    assert tool_call.function.name == "get_current_weather"
-    assert isinstance(tool_call.function.arguments, str)
+    assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
 
-    parsed_arguments = json.loads(tool_call.function.arguments)
-    assert isinstance(parsed_arguments, Dict)
-    assert parsed_arguments["city"] == "Dallas"
-    assert parsed_arguments["state"] == "TX"
-    assert parsed_arguments["unit"] == "fahrenheit"
-
-    assert extracted_tool_calls.content is None
-
-
-def test_extract_tool_calls_single_tool_with_content(jamba_tool_parser):
-    model_output = '''Sure! let me call the tool for you. <tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}] </tool_calls>'''
-    extracted_tool_calls = jamba_tool_parser.extract_tool_calls(model_output)
-    assert extracted_tool_calls.tools_called == True
-    assert len(extracted_tool_calls.tool_calls) == 1
-    tool_call = extracted_tool_calls.tool_calls[0]
-    assert isinstance(tool_call.id, str)
-    assert len(tool_call.id) > 16
-
-    assert tool_call.type == "function"
-    assert tool_call.function is not None
-    assert tool_call.function.name == "get_current_weather"
-    assert isinstance(tool_call.function.arguments, str)
-
-    parsed_arguments = json.loads(tool_call.function.arguments)
-    assert isinstance(parsed_arguments, Dict)
-    assert parsed_arguments["city"] == "Dallas"
-    assert parsed_arguments["state"] == "TX"
-    assert parsed_arguments["unit"] == "fahrenheit"
-
-    assert extracted_tool_calls.content == "Sure! let me call the tool for you. "
-
-def test_extract_tool_calls_parallel_tools(jamba_tool_parser):
-    model_output = '''<tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}, \n{"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}] </tool_calls>'''
-    extracted_tool_calls = jamba_tool_parser.extract_tool_calls(model_output)
-    assert extracted_tool_calls.tools_called == True
-    assert len(extracted_tool_calls.tool_calls) == 2
-    tool_call = extracted_tool_calls.tool_calls[0]
-    assert isinstance(tool_call.id, str)
-    assert len(tool_call.id) > 16
-
-    assert tool_call.type == "function"
-    assert tool_call.function is not None
-    assert tool_call.function.name == "get_current_weather"
-    assert isinstance(tool_call.function.arguments, str)
-
-    parsed_arguments = json.loads(tool_call.function.arguments)
-    assert isinstance(parsed_arguments, Dict)
-    assert parsed_arguments["city"] == "Dallas"
-    assert parsed_arguments["state"] == "TX"
-    assert parsed_arguments["unit"] == "fahrenheit"
-
-    tool_call = extracted_tool_calls.tool_calls[1]
-    assert isinstance(tool_call.id, str)
-    assert len(tool_call.id) > 16
-
-    assert tool_call.type == "function"
-    assert tool_call.function is not None
-    assert tool_call.function.name == "get_current_weather"
-    assert isinstance(tool_call.function.arguments, str)
-
-    parsed_arguments = json.loads(tool_call.function.arguments)
-    assert isinstance(parsed_arguments, Dict)
-    assert parsed_arguments["city"] == "Orlando"
-    assert parsed_arguments["state"] == "FL"
-    assert parsed_arguments["unit"] == "fahrenheit"
-
-    assert extracted_tool_calls.content is None
+    assert extracted_tool_calls.content == expected_content
