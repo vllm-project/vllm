@@ -397,9 +397,8 @@ class ModelConfig:
             architectures = getattr(self.hf_config, "architectures", [])
             if not ModelRegistry.is_pp_supported_model(architectures):
                 raise NotImplementedError(
-                    "Pipeline parallelism is only supported for the following "
-                    f"architectures: {ModelRegistry.get_pp_supported_archs()}."
-                )
+                    "Pipeline parallelism is not supported for this model. "
+                    "Supported models implement the `SupportsPP` interface.")
 
             if self.use_async_output_proc:
                 logger.warning("Async output processor is not supported with "

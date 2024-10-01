@@ -123,27 +123,6 @@ _MODELS = {
     **_CONDITIONAL_GENERATION_MODELS,
 }
 
-_PP_SUPPORTED_MODELS = [
-    "AquilaForCausalLM",
-    "AquilaModel",
-    "DeepseekV2ForCausalLM",
-    "GPT2LMHeadModel",
-    "InternLM2ForCausalLM",
-    "InternLMForCausalLM",
-    "InternVLChatModel",
-    "JAISLMHeadModel",
-    "LlamaForCausalLM",
-    "LLaMAForCausalLM",
-    "MistralForCausalLM",
-    "MixtralForCausalLM",
-    "NemotronForCausalLM",
-    "Phi3ForCausalLM",
-    "Qwen2ForCausalLM",
-    "Qwen2MoeForCausalLM",
-    "QWenLMHeadModel",
-    "Qwen2VLForConditionalGeneration",
-]
-
 # Architecture -> type.
 # out of tree models
 _OOT_MODELS: Dict[str, Type[nn.Module]] = {}
@@ -296,10 +275,6 @@ class ModelRegistry:
                         class_=SupportsPP)
 
         return any(is_pp(arch) for arch in architectures)
-
-    @staticmethod
-    def get_pp_supported_archs() -> List[str]:
-        return list(_PP_SUPPORTED_MODELS)
 
 
 __all__ = [
