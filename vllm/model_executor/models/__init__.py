@@ -173,7 +173,7 @@ class ModelRegistry:
         func: Callable[[object], bool],
     ) -> bool:
         """
-        Test whether a model is a subclass of the given type.
+        Run a boolean function against a model and return the result.
 
         This is run in a subprocess to avoid initializing CUDA for the main
         program.
