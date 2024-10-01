@@ -528,7 +528,7 @@ class FlashAttentionMetadataBuilder(
         if len(decode_query_lens) > 0:
             decode_query_len = max(decode_query_lens)
         else:
-            decode_query_len = 0
+            decode_query_len = 1
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
