@@ -53,11 +53,11 @@ Decoder-only Language Models
     -
   * - :code:`DeepseekForCausalLM`
     - DeepSeek
-    - :code:`deepseek-ai/deepseek-llm-67b-base`, `deepseek-ai/deepseek-llm-7b-chat` etc.
+    - :code:`deepseek-ai/deepseek-llm-67b-base`, :code:`deepseek-ai/deepseek-llm-7b-chat` etc.
     - 
   * - :code:`DeepseekV2ForCausalLM`
     - DeepSeek-V2
-    - :code:`deepseek-ai/DeepSeek-V2`, `deepseek-ai/DeepSeek-V2-Chat` etc.
+    - :code:`deepseek-ai/DeepSeek-V2`, :code:`deepseek-ai/DeepSeek-V2-Chat` etc.
     - 
   * - :code:`ExaoneForCausalLM`
     - EXAONE-3
