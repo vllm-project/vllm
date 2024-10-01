@@ -29,8 +29,6 @@ class BlockSpaceManager(ABC):
         version = version.lower()
 
         if version == "v1":
-            print('Asking for BlockManager V1')
-            return
             from vllm.core.block_manager_v1 import BlockSpaceManagerV1
             return BlockSpaceManagerV1
 
