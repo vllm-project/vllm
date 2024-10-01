@@ -338,5 +338,5 @@ TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, Meta, m) {
-  m.impl("gptq_marlin_repack_meta", &gptq_marlin_repack_meta);
+  m.impl("gptq_marlin_repack", &gptq_marlin_repack_meta);
 }
