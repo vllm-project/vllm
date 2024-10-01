@@ -71,10 +71,10 @@ def do_sample(llm: vllm.LLM,
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
-def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
-    # Cannot use as it will initialize torch.cuda too early...
-    # if torch.cuda.device_count() < tp_size:
-    #     pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
+                          tp_size):
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     llm = vllm.LLM(
         model=model.model_path,
@@ -164,11 +164,10 @@ def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.skip("Requires multiple GPUs")
-def test_quant_model_tp_equality(tinyllama_lora_files, model):
-    # Cannot use as it will initialize torch.cuda too early...
-    # if torch.cuda.device_count() < 2:
-    #     pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
+def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
+                                 model):
+    if num_gpus_available < 2:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
 
     llm_tp1 = vllm.LLM(
         model=model.model_path,
