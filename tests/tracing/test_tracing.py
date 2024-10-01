@@ -87,6 +87,17 @@ def test_traces(trace_service):
             f"The fake trace service didn't receive a trace within "
             f"the {timeout} seconds timeout")
 
+    request = trace_service.request
+    assert len(request.resource_spans) == 1, (
+        f"Expected 1 resource span, but got {len(trace_service.request.resource_spans)}"
+    )
+    assert len(request.resource_spans[0].scope_spans) == 1, (
+        f"Expected 1 scope span, but got {len(trace_service.request.resource_spans[0].scope_spans)}"
+    )
+    assert len(request.resource_spans[0].scope_spans[0].spans) == 1, (
+        f"Expected 1 span, but got {len(trace_service.request.resource_spans[0].scope_spans[0].spans)}"
+    )
+
     attributes = decode_attributes(trace_service.request.resource_spans[0].
                                    scope_spans[0].spans[0].attributes)
     assert attributes.get(SpanAttributes.LLM_RESPONSE_MODEL) == model
@@ -143,6 +154,17 @@ def test_traces_with_detailed_steps(trace_service):
         raise TimeoutError(
             f"The fake trace service didn't receive a trace within "
             f"the {timeout} seconds timeout")
+
+    request = trace_service.request
+    assert len(request.resource_spans) == 1, (
+        f"Expected 1 resource span, but got {len(trace_service.request.resource_spans)}"
+    )
+    assert len(request.resource_spans[0].scope_spans) == 1, (
+        f"Expected 1 scope span, but got {len(trace_service.request.resource_spans[0].scope_spans)}"
+    )
+    assert len(request.resource_spans[0].scope_spans[0].spans) == 1, (
+        f"Expected 1 span, but got {len(trace_service.request.resource_spans[0].scope_spans[0].spans)}"
+    )
 
     attributes = decode_attributes(trace_service.request.resource_spans[0].
                                    scope_spans[0].spans[0].attributes)
