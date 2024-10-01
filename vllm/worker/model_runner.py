@@ -739,9 +739,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 and batch_size <= self.runner.max_batchsize_to_capture)
 
     def _get_cuda_graph_pad_size(self,
-                             num_seqs: int,
-                             max_decode_seq_len: int,
-                             max_encoder_seq_len: int = 0) -> int:
+                                 num_seqs: int,
+                                 max_decode_seq_len: int,
+                                 max_encoder_seq_len: int = 0) -> int:
         """
         Determine the number of padding sequences required for running in
         CUDA graph mode. Returns -1 if CUDA graphs cannot be used.
@@ -774,7 +774,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # batch_size out of this function refers to the number of input
         # tokens being scheduled. This conflation of num_seqs as batch_size
-        # is valid as this is a decode-only case.  
+        # is valid as this is a decode-only case.
         batch_size = num_seqs
         if not self._use_captured_graph(batch_size, decode_only,
                                         max_decode_seq_len,
