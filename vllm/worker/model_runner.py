@@ -738,24 +738,44 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 and max_encoder_seq_len <= self.runner.max_seq_len_to_capture
                 and batch_size <= self.runner.max_batchsize_to_capture)
 
-    def _cuda_graph_pad_size(self,
-                             batch_size: int,
+    def _get_cuda_graph_pad_size(self,
                              num_seqs: int,
                              max_decode_seq_len: int,
                              max_encoder_seq_len: int = 0) -> int:
+        """
+        Determine the number of padding sequences required for running in
+        CUDA graph mode. Returns -1 if CUDA graphs cannot be used.
+
+        In the multi-step + chunked-prefill case, only the first step
+        has Prefills (if any). The rest of the steps are guaranteed to be all
+        decodes. In this case, we set up the padding as if all the sequences
+        are decodes so we may run all steps except the first step in CUDA graph
+        mode. The padding is accounted for in the multi-step `advance_step`
+        family of functions.
+
+        Args:
+            num_seqs (int): Number of sequences scheduled to run. 
+            max_decode_seq_len (int): Greatest of all the decode sequence
+                lengths. Used only in checking the viablility of using
+                CUDA graphs.
+            max_encoder_seq_len (int, optional): Greatest of all the encode
+                sequence lengths. Defaults to 0. Used only in checking the
+                viability of using CUDA graphs. 
+        Returns:
+            int: Returns the determined number of padding sequences. If
+                CUDA graphs is not viable, returns -1.
+        """
         is_mscp: bool = self.runner.scheduler_config.is_multi_step and \
                     self.runner.scheduler_config.chunked_prefill_enabled
-        # The input batch_size is the number of input-tokens that includes
-        # both the prefill and decode tokens. Generally, when the batch has
-        # prefills, we don't use CUDA graphs. i.e. _use_captured_graph() will
-        # be False.
-        # However, In the multi-step + chunked-prefill case, only the first
-        # step has Prefills (if any). The rest of the steps are guaranteed to
-        # be all decodes. In this case, we set up the padding as if all the
-        # sequences are decodes so we may run all steps expect the first step
-        # in CUDA graph mode.
-        batch_size = num_seqs if is_mscp else batch_size
         decode_only = self.decode_only or is_mscp
+        if not decode_only:
+            # Early exit so we can treat num_seqs as the batch_size below.
+            return -1
+
+        # batch_size out of this function refers to the number of input
+        # tokens being scheduled. This conflation of num_seqs as batch_size
+        # is valid as this is a decode-only case.  
+        batch_size = num_seqs
         if not self._use_captured_graph(batch_size, decode_only,
                                         max_decode_seq_len,
                                         max_encoder_seq_len):
@@ -823,14 +843,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             for data in self.inter_data_list
         }
 
-        batch_size = len(input_tokens)
-
-        cuda_graph_pad_size = self._cuda_graph_pad_size(
-            batch_size,
+        cuda_graph_pad_size = self._get_cuda_graph_pad_size(
             num_seqs=len(seq_lens),
             max_decode_seq_len=max_encoder_seq_len,
             max_encoder_seq_len=max_encoder_seq_len)
 
+        batch_size = len(input_tokens)
         if cuda_graph_pad_size != -1:
             # If cuda graph can be used, pad tensors accordingly.
             # See `capture_model` API for more details.
