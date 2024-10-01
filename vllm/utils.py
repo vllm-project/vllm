@@ -1150,8 +1150,12 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                                           arg[len('--'):].replace('_', '-'))
             else:
                 processed_args.append(arg)
-
-        return super().parse_args(processed_args, namespace)
+        args, argv = super().parse_known_args(processed_args, namespace)
+        # Raise error if there are more unknown args than --dummy-tag
+        if len(argv) > 1:
+            msg = 'unrecognized arguments: {}'.format(' '.join(argv))
+            raise argparse.ArgumentError(None, msg)
+        return args
 
     @staticmethod
     def _pull_args_from_config(args: List[str]) -> List[str]:
@@ -1205,7 +1209,8 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+        args = [args[0]] + config_args + ['--dummy-tag'] + \
+            args[1:index] + args[index + 2:]
 
         return args
 

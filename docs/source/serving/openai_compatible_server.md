@@ -143,9 +143,6 @@ $ vllm serve SOME_MODEL --config config.yaml
 In case an argument is supplied simultaneously using command line and the config file, the value from the commandline will take precedence.
 The order of priorities is `command line > config file values > defaults`.
 
-Try to avoid specifying `served-model-name` at the end of the config file, the positional argument `model_tag` will not be parsed normally if you do so, and you would likely see an error as below:
-`vllm serve: error: the following arguments are required: model_tag`
-
 ---
 
 ## Tool calling in the chat completion API
