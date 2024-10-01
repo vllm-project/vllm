@@ -484,9 +484,9 @@ torch::Tensor marlin_gemm_moe(
     torch::Tensor& b_zeros, const torch::Tensor& g_idx,
     const torch::Tensor& perm, torch::Tensor& workspace,
     vllm::ScalarTypeTorchPtr const& b_q_type, int64_t size_m, int64_t size_n,
-    int64_t size_k, bool is_k_full, bool has_zp, int64_t num_experts,
-    int64_t topk, int64_t moe_block_size, bool replicate_input,
-    bool apply_weights) {
+    int64_t size_k, bool is_k_full, int64_t num_experts, int64_t topk,
+    int64_t moe_block_size, bool replicate_input, bool apply_weights) {
+  bool has_zp = b_zeros.size(1) != 0;
   if (has_zp) {
     TORCH_CHECK(*b_q_type == vllm::kU4 || *b_q_type == vllm::kU8,
                 "b_q_type must be u4 or u8 when has_zp = True. Got = ",

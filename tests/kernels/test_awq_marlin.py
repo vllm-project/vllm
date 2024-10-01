@@ -87,7 +87,6 @@ def test_fused_marlin_moe_awq(
         score,
         topk_weights,
         topk_ids,
-        has_zero_point=True,
         w1_zeros=zp1,
         w2_zeros=zp2,
         num_bits=num_bits,
@@ -155,7 +154,6 @@ def test_single_marlin_moe_multiply_awq(
                                       score,
                                       topk,
                                       renormalize=False,
-                                      has_zero_point=True,
                                       w_zeros=zp,
                                       num_bits=num_bits)
 
