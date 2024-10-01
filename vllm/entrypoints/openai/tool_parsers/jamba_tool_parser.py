@@ -110,7 +110,7 @@ class JambaToolParser(ToolParser):
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content if content != " " else None)
+                    content=content if (len(content)>0 and content != " ") else None)
 
             except Exception as e:
                 logger.error("Error in extracting tool call from response %s",
