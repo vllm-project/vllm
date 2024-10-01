@@ -215,8 +215,8 @@ class PersimmonModel(nn.Module):
         super().__init__()
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                   config.hidden_size)
         self.layers = nn.ModuleList([
             PersimmonDecoderLayer(config,
                                   cache_config=cache_config,
