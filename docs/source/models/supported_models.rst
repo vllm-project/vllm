@@ -20,7 +20,7 @@ Decoder-only Language Models
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
   * - :code:`AquilaForCausalLM`
-    - Aquila & Aquila2
+    - Aquila, Aquila2
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
     - ✅︎
   * - :code:`ArcticForCausalLM`
@@ -28,7 +28,7 @@ Decoder-only Language Models
     - :code:`Snowflake/snowflake-arctic-base`, :code:`Snowflake/snowflake-arctic-instruct`, etc.
     -
   * - :code:`BaiChuanForCausalLM`
-    - Baichuan & Baichuan2
+    - Baichuan2, Baichuan
     - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
     - ✅︎
   * - :code:`BloomForCausalLM`
@@ -51,6 +51,14 @@ Decoder-only Language Models
     - DeciLM
     - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
     -
+  * - :code:`DeepseekForCausalLM`
+    - DeepSeek
+    - :code:`deepseek-ai/deepseek-llm-67b-base`, `deepseek-ai/deepseek-llm-7b-chat` etc.
+    - 
+  * - :code:`DeepseekV2ForCausalLM`
+    - DeepSeek-V2
+    - :code:`deepseek-ai/DeepSeek-V2`, `deepseek-ai/DeepSeek-V2-Chat` etc.
+    - 
   * - :code:`ExaoneForCausalLM`
     - EXAONE-3
     - :code:`LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc.
@@ -83,6 +91,10 @@ Decoder-only Language Models
     - GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM
     - :code:`EleutherAI/gpt-neox-20b`, :code:`EleutherAI/pythia-12b`, :code:`OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, :code:`databricks/dolly-v2-12b`, :code:`stabilityai/stablelm-tuned-alpha-7b`, etc.
     -
+  * - :code:`GraniteForCausalLM`
+    - Power-LM, Granite
+    - :code:`ibm/PowerLM-3b`, `ibm/granite-7b-base` etc.
+    - ✅︎
   * - :code:`InternLMForCausalLM`
     - InternLM
     - :code:`internlm/internlm-7b`, :code:`internlm/internlm-chat-7b`, etc.
@@ -177,7 +189,7 @@ Decoder-only Language Models
     -
   * - :code:`StableLmForCausalLM`
     - StableLM
-    - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
+    - :code:`stabilityai/stablelm-3b-4e1t`, :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
     -
   * - :code:`Starcoder2ForCausalLM`
     - Starcoder2
