@@ -30,7 +30,6 @@
 #include "marlin_kernels/marlin_moe_kernel_ku4b8.h"
 #include "marlin_kernels/marlin_moe_kernel_ku8b128.h"
 #include "marlin_kernels/marlin_moe_kernel_ku4.h"
-#include "marlin_kernels/marlin_moe_kernel_ku8.h"
 
 template <typename T>
 inline std::string str(T x) {
@@ -461,7 +460,6 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4b8)
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8b128)
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4)
-      CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8)
       else {
         TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
                                str(prob_n) + ", " + str(prob_k) + "]" +
@@ -488,9 +486,9 @@ torch::Tensor marlin_gemm_moe(
     int64_t moe_block_size, bool replicate_input, bool apply_weights) {
   bool has_zp = b_zeros.size(1) != 0;
   if (has_zp) {
-    TORCH_CHECK(*b_q_type == vllm::kU4 || *b_q_type == vllm::kU8,
-                "b_q_type must be u4 or u8 when has_zp = True. Got = ",
-                b_q_type->str());
+    TORCH_CHECK(
+        *b_q_type == vllm::kU4,
+        "b_q_type must be u4 when has_zp = True. Got = ", b_q_type->str());
   } else {
     TORCH_CHECK(
         *b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,

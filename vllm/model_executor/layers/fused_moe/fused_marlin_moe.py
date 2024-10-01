@@ -12,7 +12,8 @@ from vllm.scalar_type import scalar_types
 
 def get_scalar_type(num_bits: int, has_zp: bool):
     if has_zp:
-        return scalar_types.uint4 if num_bits == 4 else scalar_types.uint8
+        assert num_bits == 4
+        return scalar_types.uint4
     else:
         return scalar_types.uint4b8 if num_bits == 4 else scalar_types.uint8b128
 
