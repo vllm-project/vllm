@@ -48,17 +48,17 @@ def test_extract_tool_calls_no_tools(jamba_tool_parser):
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
         (
-                '''<tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}] </tool_calls>''',
+                ''' <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>''',
                 [ToolCall(function=FunctionCall(name="get_current_weather", arguments=json.dumps({"city": "Dallas", "state": "TX", "unit": "fahrenheit"})))],
                 None
          ),
         (
-                '''Sure! let me call the tool for you. <tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}] </tool_calls>''',
+                ''' Sure! let me call the tool for you.<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>''',
                 [ToolCall(function=FunctionCall(name="get_current_weather", arguments=json.dumps({"city": "Dallas", "state": "TX", "unit": "fahrenheit"})))],
-                "Sure! let me call the tool for you. "
+                " Sure! let me call the tool for you."
          ),
         (
-                '''<tool_calls> [\n{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}, \n{"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}] </tool_calls>''',
+                ''' <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>''',
                 [ToolCall(function=FunctionCall(name="get_current_weather", arguments=json.dumps({"city": "Dallas", "state": "TX", "unit": "fahrenheit"}))),
                  ToolCall(function=FunctionCall(name="get_current_weather", arguments=json.dumps({"city": "Orlando", "state": "FL", "unit": "fahrenheit"})))],
                 None
