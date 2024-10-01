@@ -576,7 +576,9 @@ class ModelConfig:
     @property
     def is_encoder_decoder_model(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
-        return getattr(self.hf_config, "is_encoder_decoder", False)
+        return getattr(self.hf_config, "is_encoder_decoder", False) or (
+            (hasattr(self.hf_config, "text_config") and getattr(
+                self.hf_config.text_config, "is_encoder_decoder", False)))
 
     @property
     def is_embedding_model(self) -> bool:
@@ -962,7 +964,7 @@ class SchedulerConfig:
             workers instead of an entire data. It should be enabled only
             when SPMD worker architecture is enabled. I.e.,
             VLLM_USE_RAY_SPMD_WORKER=1
-
+        policy: The scheduling policy to use. "fcfs" (default) or "priority".
     """
 
     def __init__(self,
@@ -978,12 +980,20 @@ class SchedulerConfig:
                  preemption_mode: Optional[str] = None,
                  num_scheduler_steps: int = 1,
                  multi_step_stream_outputs: bool = False,
-                 send_delta_data: bool = False) -> None:
+                 send_delta_data: bool = False,
+                 policy: str = "fcfs") -> None:
         if max_num_batched_tokens is None:
             if enable_chunked_prefill:
-                # It is the values that have the best balance between ITL
-                # and TTFT on A100. Note it is not optimized for throughput.
-                max_num_batched_tokens = 512
+                if num_scheduler_steps > 1:
+                    # Multi-step Chunked-Prefill doesn't allow prompt-chunking
+                    # for now. Have max_num_batched_tokens set to max_model_len
+                    # so we don't reject sequences on account of a short
+                    # max_num_batched_tokens.
+                    max_num_batched_tokens = max(max_model_len, 2048)
+                else:
+                    # It is the values that have the best balance between ITL
+                    # and TTFT on A100. Note it is not optimized for throughput.
+                    max_num_batched_tokens = 512
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
@@ -1020,6 +1030,7 @@ class SchedulerConfig:
         self.num_scheduler_steps = num_scheduler_steps
         self.multi_step_stream_outputs = multi_step_stream_outputs
         self.send_delta_data = send_delta_data
+        self.policy = policy
         self._verify_args()
 
     def _verify_args(self) -> None:
