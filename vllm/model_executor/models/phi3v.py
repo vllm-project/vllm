@@ -437,7 +437,8 @@ def input_processor_for_phi3v(ctx: InputContext,
                                              input_height=h,
                                              num_crops=num_crops))
     elif isinstance(image_data, torch.Tensor):
-        num_images, image_feature_size, hidden_size = image_data.shape
+        image_feature_size = [image_data.shape[0]]
+        image_data = [image_data]
     elif is_list_of(image_data, torch.Tensor):
         image_feature_size = [item.shape[0] for item in image_data]
     else:
@@ -613,7 +614,15 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
 
         if image_input["type"] == "image_embeds":
-            return list(torch.unbind(image_input["data"], dim=0))
+            image_data = image_input["data"]
+            if is_list_of(image_data, torch.Tensor):
+                # it's already a list of tensors
+                return image_data
+            if len(image_data.shape) == 2:
+                # 2D tensor
+                return image_data
+            # 3D tensor
+            return list(torch.unbind(image_data, dim=0))
 
         assert self.vision_embed_tokens is not None
         image_embeds = self.vision_embed_tokens(image_input["data"],
