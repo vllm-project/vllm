@@ -3,14 +3,14 @@ import string
 import subprocess
 import sys
 from functools import lru_cache, partial
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
 import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.utils import is_hip
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import supports_multimodal, supports_pp
 
 logger = init_logger(__name__)
 
@@ -168,7 +168,10 @@ class ModelRegistry:
 
     @staticmethod
     @lru_cache(maxsize=128)
-    def _is_subclass_stateless(model_arch: str, class_: type) -> bool:
+    def _check_stateless(
+        model_arch: str,
+        func: Callable[[object], bool],
+    ) -> bool:
         """
         Test whether a model is a subclass of the given type.
 
@@ -182,15 +185,15 @@ class ModelRegistry:
             raise ValueError(f"Unsafe module name detected for {model_arch}")
         if any(s not in valid_name_characters for s in cls_name):
             raise ValueError(f"Unsafe class name detected for {model_arch}")
-        if any(s not in valid_name_characters for s in class_.__module__):
-            raise ValueError(f"Unsafe module name detected for {class_}")
-        if any(s not in valid_name_characters for s in class_.__name__):
-            raise ValueError(f"Unsafe class name detected for {class_}")
+        if any(s not in valid_name_characters for s in func.__module__):
+            raise ValueError(f"Unsafe module name detected for {func}")
+        if any(s not in valid_name_characters for s in func.__name__):
+            raise ValueError(f"Unsafe class name detected for {func}")
 
         stmts = ";".join([
             f"from {module_name} import {cls_name}",
-            f"from {class_.__module__} import {class_.__name__}",
-            f"assert isinstance({cls_name}, {class_.__name__})",
+            f"from {func.__module__} import {func.__name__}",
+            f"assert {func.__name__}({cls_name})",
         ])
 
         result = subprocess.run([sys.executable, "-c", stmts],
@@ -258,8 +261,8 @@ class ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        is_mm = partial(ModelRegistry._is_subclass_stateless,
-                        class_=SupportsMultiModal)
+        is_mm = partial(ModelRegistry._check_stateless,
+                        func=supports_multimodal)
 
         return any(is_mm(arch) for arch in architectures)
 
@@ -270,8 +273,7 @@ class ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        is_pp = partial(ModelRegistry._is_subclass_stateless,
-                        class_=SupportsPP)
+        is_pp = partial(ModelRegistry._check_stateless, func=supports_pp)
 
         return any(is_pp(arch) for arch in architectures)
 
