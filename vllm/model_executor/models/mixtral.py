@@ -319,10 +319,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
 
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "embed_tokens",
-        "lm_head",
+        "qkv_proj", "o_proj", "embed_tokens", "lm_head", "w1", "w2", "w3",
+        "gate"
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
