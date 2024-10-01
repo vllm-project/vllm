@@ -6,7 +6,7 @@ import pytest
 import torch
 from transformers import AutoImageProcessor, AutoTokenizer
 
-from vllm.inputs import InputContext, LLMInputs
+from vllm.inputs import InputContext, token_inputs
 from vllm.model_executor.models.phi3v import _IMAGE_TOKEN_ID
 from vllm.multimodal import MultiModalRegistry
 from vllm.multimodal.utils import rescale_image_size
@@ -393,9 +393,9 @@ def test_input_processor_override(input_processor_for_phi3v: Callable,
     prompt = f"<|user|>\n{img_str}<|end|>\n<|assistant|>\n"
     images = [image_assets[0].pil_image] * num_imgs
 
-    llm_inputs = LLMInputs(prompt_token_ids=tokenizer.encode(prompt),
-                           prompt=prompt,
-                           multi_modal_data={"image": images})
+    llm_inputs = token_inputs(prompt_token_ids=tokenizer.encode(prompt),
+                              prompt=prompt,
+                              multi_modal_data={"image": images})
 
     proc_llm_inputs = input_processor_for_phi3v(
         ctx=ctx,
