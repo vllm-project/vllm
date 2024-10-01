@@ -92,8 +92,8 @@ Decoder-only Language Models
     - :code:`EleutherAI/gpt-neox-20b`, :code:`EleutherAI/pythia-12b`, :code:`OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, :code:`databricks/dolly-v2-12b`, :code:`stabilityai/stablelm-tuned-alpha-7b`, etc.
     -
   * - :code:`GraniteForCausalLM`
-    - Power-LM, Granite
-    - :code:`ibm/PowerLM-3b`, `ibm/granite-7b-base` etc.
+    - Granite, Power-LM
+    - :code:`ibm/granite-7b-base`, :code:`ibm/PowerLM-3b` etc.
     - ✅︎
   * - :code:`InternLMForCausalLM`
     - InternLM
