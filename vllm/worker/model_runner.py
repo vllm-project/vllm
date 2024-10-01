@@ -477,7 +477,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_len - 1
         else:
             context_len = seq_data.get_num_computed_tokens()
-        
+
         # Compute tokens.
         tokens = seq_data.get_token_ids()[context_len:seq_len]
 
