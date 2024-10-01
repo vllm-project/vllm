@@ -23,17 +23,18 @@ def post_http_request(prompt: str,
                       n: int = 1,
                       stream: bool = False) -> requests.Response:
     headers = {"User-Agent": "Test Client"}
-    pload = {
+    payload = {
         "prompt": prompt,
         "n": n,
         "use_beam_search": True,
+        "model": "facebook/opt-125m",
         "temperature": 0.0,
         "max_tokens": 16,
         "stream": stream,
     }
     response = requests.post(api_url,
                              headers=headers,
-                             json=pload,
+                             json=payload,
                              stream=stream)
     return response
 
@@ -50,7 +51,7 @@ def get_streaming_response(response: requests.Response) -> Iterable[List[str]]:
 
 def get_response(response: requests.Response) -> List[str]:
     data = json.loads(response.content)
-    output = data["text"]
+    output = data["choices"]
     return output
 
 
@@ -63,7 +64,7 @@ if __name__ == "__main__":
     parser.add_argument("--stream", action="store_true")
     args = parser.parse_args()
     prompt = args.prompt
-    api_url = f"http://{args.host}:{args.port}/generate"
+    api_url = f"http://{args.host}:{args.port}/v1/completions"
     n = args.n
     stream = args.stream
 
@@ -82,3 +83,6 @@ if __name__ == "__main__":
         output = get_response(response)
         for i, line in enumerate(output):
             print(f"Beam candidate {i}: {line!r}", flush=True)
+
+# In order to run this script, you need to run the API server first via
+# $ vllm serve facebook/opt-125m
