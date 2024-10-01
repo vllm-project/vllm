@@ -348,7 +348,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # a placeholder (it has wide hardware support).
         kv_caches = [
             torch.tensor([], dtype=torch.float32, device=self.device)
-        ] * num_layers
+            for _ in range(num_layers)
+        ]
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)

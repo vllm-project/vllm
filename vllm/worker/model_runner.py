@@ -1244,9 +1244,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # it by reference, rather by specializing on the value ``None``.
         # the `dtype` argument does not matter, and we use `float32` as
         # a placeholder (it has wide hardware support).
+        # it is important to create tensors inside the loop, rather than
+        # multiplying the list, to avoid Dynamo from treating them as
+        # tensor aliasing.
         kv_caches = [
             torch.tensor([], dtype=torch.float32, device=self.device)
-        ] * num_layers
+            for _ in range(num_layers)
+        ]
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
