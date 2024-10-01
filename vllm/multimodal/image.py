@@ -53,7 +53,7 @@ class ImagePlugin(MultiModalPlugin):
                                    "to process the image object")
             try:
                 batch_data = image_processor \
-                    .preprocess(data, return_tensors="pt") \
+                    .preprocess(data, input_data_format="channels_last", return_tensors="pt") \
                     .data
             except Exception:
                 logger.error("Failed to process image (%s)", data)
