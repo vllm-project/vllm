@@ -31,7 +31,7 @@ def test_registry_is_multimodal(model_arch, is_mm, init_cuda):
         if not torch.cuda.is_initialized():
             warnings.warn(
                 "This model no longer initializes CUDA on import. "
-                "Please test using a different model.",
+                "Please test using a different one.",
                 stacklevel=2)
 
 
@@ -51,5 +51,5 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
         if not torch.cuda.is_initialized():
             warnings.warn(
                 "This model no longer initializes CUDA on import. "
-                "Please test using a different model.",
+                "Please test using a different one.",
                 stacklevel=2)
