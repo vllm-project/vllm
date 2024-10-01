@@ -292,7 +292,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
 
-        # Update Neuron's generation configs from sampling_metadata
         self._update_neuron_sampling_params(model_input.sampling_metadata)
 
         hidden_states = self.model(

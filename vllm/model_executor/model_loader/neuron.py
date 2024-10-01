@@ -12,7 +12,7 @@ from transformers import PretrainedConfig
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import get_quantization_config
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceOutput)
@@ -48,7 +48,6 @@ class NeuronCasualLM(nn.Module):
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
                                                 logits_as_input=True)
-        self.sampler = Sampler()
 
         # Lazy initialized
         self.model: nn.Module
