@@ -372,8 +372,7 @@ class EngineArgs:
             '--use-v2-block-manager',
             default=EngineArgs.use_v2_block_manager,
             action='store_true',
-            help=
-            'Use BlockSpaceMangerV2. By default this is set to True. '
+            help='Use BlockSpaceMangerV2. By default this is set to True. '
             'Set to False to use BlockSpaceManagerV1')
         parser.add_argument(
             '--num-lookahead-slots',
