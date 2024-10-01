@@ -152,7 +152,7 @@ endif()
 #
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   clear_cuda_arches(CUDA_ARCH_FLAGS)
-  extract_unique_cuda_arches_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
+  extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
 endif()
 
@@ -248,8 +248,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     BUILD_PTX_FOR_HIGHEST_ARCH)
 
   # Only build marlin if we are building for at least some compatible archs
-  get_minimal_compatible_cuda_archs("8.0;8.6;8.9")
-  if (COMPATIBLE_ARCHS)
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.9" ${CUDA_ARCHS})
+  if (MARLIN_ARCHS)
     set(MARLIN_SRCS 
        "csrc/quantization/fp8/fp8_marlin.cu"
        "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
@@ -260,10 +260,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
        "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_SRCS}"
-      CUDA_ARCHS "${COMPATIBLE_ARCHS}"
+      CUDA_ARCHS "${MARLIN_ARCHS}"
       BUILD_PTX_FOR_HIGHEST_ARCH)
     list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
-    message(STATUS "Building Marlin kernels for archs: ${COMPATIBLE_ARCHS}")
+    message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
   else()
     message(STATUS "Not building Marlin kernels as no compatible archs found"
                    "in CUDA target architectures")
@@ -274,18 +274,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
   # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
   # Only build scaled_mm_c3x if we are building for something compatible with sm90a
-  get_minimal_compatible_cuda_archs("9.0a")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND COMPATIBLE_ARCHS)
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" ${CUDA_ARCHS})
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_ARCHS)
 
     set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
     # No need to BUILD_PTX_FOR_HIGHEST_ARCH since sm90a is not 
     # forward compatible
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
-      CUDA_ARCHS "${COMPATIBLE_ARCHS}")
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C3X=1")
-    message(STATUS "Building scaled_mm_c3x for archs: ${COMPATIBLE_ARCHS}")
+    message(STATUS "Building scaled_mm_c3x for archs: ${SCALED_MM_ARCHS}")
   else()
     message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
                    "in CUDA target architectures or CUDA Compiler version is "
@@ -298,8 +298,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # The machete kernels only work on hopper and require CUDA 12.0 or later.
   # Only build Machete kernels if we are building for something compatible with sm90a
-  get_minimal_compatible_cuda_archs("9.0a")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND COMPATIBLE_ARCHS)
+  cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" ${CUDA_ARCHS})
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND MACHETE_ARCHS)
     #
     # For the Machete kernels we automatically generate sources for various 
     # preselected input type pairs and schedules.
@@ -342,12 +342,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # forward compatible
     set_gencode_flags_for_srcs(
       SRCS "${MACHETE_GEN_SOURCES}"
-      CUDA_ARCHS "${COMPATIBLE_ARCHS}")
+      CUDA_ARCHS "${MACHETE_ARCHS}")
 
     list(APPEND VLLM_EXT_SRC
       csrc/quantization/machete/machete_pytorch.cu)
 
-    message(STATUS "Building Machete kernels for archs: ${COMPATIBLE_ARCHS}")
+    message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
   else()
     message(STATUS "Not building Machete kernels as no compatible archs found "
                    "in CUDA target architectures or CUDA Compiler version is "
@@ -382,14 +382,33 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/topk_softmax_kernels.cu")
 
+set_gencode_flags_for_srcs(
+  SRCS "${VLLM_MOE_EXT_SRC}"
+  CUDA_ARCHS "${CUDA_ARCHS}"
+  BUILD_PTX_FOR_HIGHEST_ARCH)
+
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_MOE_EXT_SRC
-      "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
-      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.h"
-      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
-      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
-      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
-      "csrc/moe/marlin_moe_ops.cu")
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.9" ${CUDA_ARCHS})
+  if (MARLIN_MOE_ARCHS)
+    set(MARLIN_MOE_SRC
+        "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
+        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.h"
+        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
+        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
+        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
+        "csrc/moe/marlin_moe_ops.cu")
+
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_MOE_SRC}"
+      CUDA_ARCHS "${MARLIN_MOE_ARCHS}"
+      BUILD_PTX_FOR_HIGHEST_ARCH)
+
+    list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_SRC}")
+    message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
+  else()
+    message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
+                   "in CUDA target architectures")
+  endif()
 endif()
 
 message(STATUS "Enabling moe extension.")

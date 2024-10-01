@@ -133,6 +133,16 @@ macro(string_to_ver OUT_VER IN_STR)
   string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
 endmacro()
 
+#
+# Clear all `-gencode` flags from `CMAKE_CUDA_FLAGS` and store them in
+# `CUDA_ARCH_FLAGS`.
+#
+# Example:
+#   CMAKE_CUDA_FLAGS="-Wall -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75"
+#   clear_cuda_arches(CUDA_ARCH_FLAGS)
+#   CUDA_ARCH_FLAGS="-gencode arch=compute_70,code=sm_70;-gencode arch=compute_75,code=sm_75"
+#   CMAKE_CUDA_FLAGS="-Wall"
+#
 macro(clear_cuda_arches CUDA_ARCH_FLAGS)
     # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
     string(REGEX MATCHALL "-gencode arch=[^ ]+" CUDA_ARCH_FLAGS
@@ -144,8 +154,17 @@ macro(clear_cuda_arches CUDA_ARCH_FLAGS)
       ${CMAKE_CUDA_FLAGS})
 endmacro()
 
-
-function(extract_unique_cuda_arches_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
+#
+# Extract unique CUDA architectures from a list of compute capabilities codes in 
+# the form `<major><minor>[<letter>]`, convert them to the form sort 
+# `<major>.<minor>`, dedupes them and then sorts them in ascending order and 
+# stores them in `OUT_ARCHES`.
+#
+# Example:
+#   CUDA_ARCH_FLAGS="-gencode arch=compute_75,code=sm_75;...;-gencode arch=compute_90a,code=sm_90a" 
+#   extract_unique_cuda_archs_ascending(OUT_ARCHES CUDA_ARCH_FLAGS)
+#   OUT_ARCHES="7.5;...;9.0"
+function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(_CUDA_ARCHES)
   foreach(_ARCH ${CUDA_ARCH_FLAGS})
     string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
@@ -153,36 +172,8 @@ function(extract_unique_cuda_arches_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
       set(_COMPUTE ${CMAKE_MATCH_1})
     endif()
 
-    string(REGEX MATCH "code=sm_\([0-9]+a?\)" _SM ${_ARCH})
-    if (_SM)
-      set(_SM ${CMAKE_MATCH_1})
-    endif()
-
-    string(REGEX MATCH "code=compute_\([0-9]+a?\)" _CODE ${_ARCH})
-    if (_CODE)
-      set(_CODE ${CMAKE_MATCH_1})
-    endif()
-
-    if (NOT _COMPUTE)
-      message(FATAL_ERROR
-        "Could not determine virtual architecture from: ${_ARCH}.")
-    endif()
-
-    if ((NOT _SM) AND (NOT _CODE))
-      message(FATAL_ERROR
-        "Could not determine a codegen architecture from: ${_ARCH}.")
-    endif()
-
-    if (_SM)
-      set(_VIRT "-real")
-      set(_CODE_ARCH ${_SM})
-    else()
-      set(_VIRT "-virtual")
-      set(_CODE_ARCH ${_CODE})
-    endif()
-
-    string_to_ver(_CODE_VER ${_CODE_ARCH})
-    list(APPEND _CUDA_ARCHES ${_CODE_VER})
+    string_to_ver(_COMPUTE_VER ${_COMPUTE})
+    list(APPEND _CUDA_ARCHES ${_COMPUTE_VER})
   endforeach()
 
   list(REMOVE_DUPLICATES _CUDA_ARCHES)
@@ -190,7 +181,18 @@ function(extract_unique_cuda_arches_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(${OUT_ARCHES} ${_CUDA_ARCHES} PARENT_SCOPE)
 endfunction()
 
-
+#
+# For a specific file set the `-gencode` flag in compile options conditionally 
+# for the CUDA language. 
+#
+# Example:
+#   set_gencode_flag_for_srcs(
+#     SRCS "foo.cu"
+#     ARCH "compute_75"
+#     CODE "sm_75")
+#   adds: "-gencode arch=compute_75,code=sm_75" to the compile options for 
+#    `foo.cu` (only for the CUDA language).
+#
 macro(set_gencode_flag_for_srcs)
   set(options)
   set(oneValueArgs ARCH CODE)
@@ -205,7 +207,16 @@ macro(set_gencode_flag_for_srcs)
   )
 endmacro(set_gencode_flag_for_srcs)
 
-
+#
+# For a list of source files set the `-gencode` flags in the files specific 
+#  compile options (specifically for the CUDA language).
+#
+# arguments are:
+#  SRCS: list of source files
+#  CUDA_ARCHS: list of CUDA architectures in the form `<major>.<minor>[letter]`
+#  BUILD_PTX_FOR_HIGHEST_ARCH: if set to true, then the PTX code will be built
+#    for the highest architecture in `CUDA_ARCHS`.
+#
 macro(set_gencode_flags_for_srcs)
   set(options BUILD_PTX_FOR_HIGHEST_ARCH)
   set(oneValueArgs)
@@ -233,7 +244,27 @@ macro(set_gencode_flags_for_srcs)
   message(DEBUG "Cuda gencode flags for ${arg_SRCS}: ${arg_CUDA_ARCHS}")
 endmacro()
 
-macro(get_minimal_compatible_cuda_archs SRC_CUDA_ARCHS)
+#
+# For the given `SRC_CUDA_ARCHS` list of gencode versions in the form 
+#  `<major>.<minor>[letter]` compute the "loose intersection" with the 
+#  `TGT_CUDA_ARCHS` list of gencodes. 
+# The loose interection is defined as:
+#   { max{ x \in tgt | x <= y } | y \in src, { x \in tgt | x <= y } != {} }
+#  where `<=` is the version comparison operator.
+# In other words, for each version in `TGT_CUDA_ARCHS` find the highest version
+#  in `SRC_CUDA_ARCHS` that is less or equal to the version in `TGT_CUDA_ARCHS`.
+# We have special handling for 9.0a, if 9.0a is in `SRC_CUDA_ARCHS` and 9.0 is
+#  in `TGT_CUDA_ARCHS` then we should remove 9.0a from `SRC_CUDA_ARCHS` and add
+#  9.0a to the result. 
+# The result is stored in `OUT_CUDA_ARCHS`.
+#
+# Example:
+#   SRC_CUDA_ARCHS="7.5;8.0;8.6;9.0;9.0a"
+#   TGT_CUDA_ARCHS="8.0;8.9;9.0"
+#   cuda_archs_loose_intersection(OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
+#   OUT_CUDA_ARCHS="8.0;8.6;9.0;9.0a"
+#
+function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
   list(REMOVE_DUPLICATES SRC_CUDA_ARCHS)
   list(SORT SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
 
@@ -242,7 +273,7 @@ macro(get_minimal_compatible_cuda_archs SRC_CUDA_ARCHS)
   set(_CUDA_ARCHS)
     if ("9.0a" IN_LIST SRC_CUDA_ARCHS)
     list(REMOVE_ITEM SRC_CUDA_ARCHS "9.0a")
-    if ("9.0" IN_LIST CUDA_ARCHS)
+    if ("9.0" IN_LIST TGT_CUDA_ARCHS)
         set(_CUDA_ARCHS "9.0a")
     endif()
   endif()
@@ -263,14 +294,14 @@ macro(get_minimal_compatible_cuda_archs SRC_CUDA_ARCHS)
   endif()
   endforeach()
 
-  set(COMPATIBLE_ARCHS ${_CUDA_ARCHS})
-  message(STATUS "COMPATIBLE_ARCHS: ${_CUDA_ARCHS}")
-endmacro()
+  set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
+endfunction()
 
 #
 # Override the GPU architectures detected by cmake/torch and filter them by
 # `GPU_SUPPORTED_ARCHES`. Sets the final set of architectures in
-# `GPU_ARCHES`.
+# `GPU_ARCHES`. This only applies to the HIP language since for CUDA we set 
+# the architectures on a per file basis.
 #
 # Note: this is defined as a macro since it updates `CMAKE_CUDA_FLAGS`.
 #
