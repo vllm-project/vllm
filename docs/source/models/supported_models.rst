@@ -109,7 +109,7 @@ Decoder-only Language Models
     -
   * - :code:`JambaForCausalLM`
     - Jamba
-    - :code:`ai21labs/Jamba-v0.1`, etc.
+    - :code:`ai21labs/AI21-Jamba-1.5-Large`, :code:`ai21labs/AI21-Jamba-1.5-Mini`, :code:`ai21labs/Jamba-v0.1`, etc.
     - ✅︎
   * - :code:`LlamaForCausalLM`
     - Llama 3.1, Llama 3, Llama 2, LLaMA, Yi
