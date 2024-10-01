@@ -221,7 +221,12 @@ class ModelRegistry:
 
     @staticmethod
     def resolve_model_cls(
-            architectures: List[str]) -> Tuple[Type[nn.Module], str]:
+        architectures: Union[str, List[str]], ) -> Tuple[Type[nn.Module], str]:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
         for arch in architectures:
             model_cls = ModelRegistry._try_load_model_cls(arch)
             if model_cls is not None:
