@@ -219,6 +219,8 @@ class Worker(LocalOrDistributedWorkerBase):
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
 
+        free_gpu_memory_before_profiling = torch.cuda.mem_get_info()[0]
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
@@ -229,8 +231,10 @@ class Worker(LocalOrDistributedWorkerBase):
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
+        reserved_memory = free_gpu_memory_before_profiling - free_gpu_memory
+        logger.info("reserved memory for max workload: %s GiB",
+                    reserved_memory / GiB_bytes)
         peak_memory = self.init_gpu_memory - free_gpu_memory
-        logger.info("Peak memory usage: %s GiB", peak_memory / GiB_bytes)
         assert peak_memory > 0, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_gpu_memory}, current free memory"
