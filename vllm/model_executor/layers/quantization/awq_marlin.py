@@ -11,14 +11,11 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
-    marlin_make_empty_g_idx, marlin_make_workspace, marlin_moe_permute_scales,
-    marlin_permute_scales, moe_awq_to_marlin_zero_points)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
-    marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
+    marlin_make_empty_g_idx, marlin_make_workspace, marlin_moe_permute_scales,
+    marlin_permute_scales, moe_awq_to_marlin_zero_points,
     verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
@@ -379,7 +376,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_n=layer.w13_qweight.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
         )
-        replace_tensor(layer, "w13_qweight", marlin_w13_qweight)
+        replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
 
         marlin_w2_qweight = ops.awq_marlin_moe_repack(
             layer.w2_qweight,
@@ -388,7 +385,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_n=layer.w2_qweight.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
         )
-        replace_tensor(layer, "w2_qweight", marlin_w2_qweight)
+        replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
 
         # Why does this take the intermediate size for size_k?
         marlin_w13_scales = marlin_moe_permute_scales(
@@ -398,7 +395,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             group_size=self.quant_config.group_size,
         )
 
-        replace_tensor(layer, "w13_scales", marlin_w13_scales)
+        replace_parameter(layer, "w13_scales", marlin_w13_scales)
 
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
@@ -406,21 +403,21 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_n=layer.w2_scales.shape[2],
             group_size=self.quant_config.group_size,
         )
-        replace_tensor(layer, "w2_scales", marlin_w2_scales)
+        replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
         marlin_w13_zp = moe_awq_to_marlin_zero_points(
             layer.w13_qzeros,
             size_k=layer.w13_qzeros.shape[1],
             size_n=layer.w13_qzeros.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits)
-        replace_tensor(layer, "w13_qzeros", marlin_w13_zp)
+        replace_parameter(layer, "w13_qzeros", marlin_w13_zp)
 
         marlin_w2_zp = moe_awq_to_marlin_zero_points(
             layer.w2_qzeros,
             size_k=layer.w2_qzeros.shape[1],
             size_n=layer.w2_qzeros.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits)
-        replace_tensor(layer, "w2_qzeros", marlin_w2_zp)
+        replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 
     def apply(
         self,
