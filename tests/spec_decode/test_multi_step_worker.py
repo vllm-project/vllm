@@ -673,7 +673,10 @@ def test_use_draft_model_runner_advance_step():
     worker.model_runner._gpu_advance_step.side_effect = ValueError(
         exception_secret)
 
-    seq_group_metadata_list, _, _ = create_batch(batch_size, k)
+    seq_group_metadata_list, _, _ = create_batch(batch_size,
+                                                 k,
+                                                 block_size=block_size,
+                                                 num_gpu_blocks=num_gpu_blocks)
 
     # Fallback (should not call) when num_steps=1.
     execute_model_req = ExecuteModelRequest(
