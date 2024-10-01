@@ -1205,7 +1205,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
-        # of cli > config > defaults      
+        # of cli > config > defaults
         args = [args[0]] + [args[1]] + config_args + \
             args[2:index] + args[index+2:]
 
