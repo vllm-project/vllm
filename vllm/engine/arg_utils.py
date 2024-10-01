@@ -368,10 +368,13 @@ class EngineArgs:
                             action='store_true',
                             help='Disables sliding window, '
                             'capping to sliding window size')
-        parser.add_argument('--use-v2-block-manager',
-                            default=EngineArgs.use_v2_block_manager,
-                            action='store_true',
-                            help='Use BlockSpaceMangerV2.')
+        parser.add_argument(
+            '--use-v2-block-manager',
+            default=EngineArgs.use_v2_block_manager,
+            action='store_true',
+            help=
+            'Use BlockSpaceMangerV2. By default this is set to True. '
+            'Set to False to use BlockSpaceManagerV1')
         parser.add_argument(
             '--num-lookahead-slots',
             type=int,
