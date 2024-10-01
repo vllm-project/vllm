@@ -236,8 +236,8 @@ class ModelRegistry:
         """
         Run a boolean function against a model and return the result.
 
-        This is run in a subprocess to avoid initializing CUDA for the main
-        program.
+        If the model is not imported, the function is run inside a subprocess to
+        avoid initializing CUDA for the main program.
         """
         model = ModelRegistry._try_get_model_stateless(model_arch)
         if model is not None:
