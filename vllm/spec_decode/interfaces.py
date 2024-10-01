@@ -75,10 +75,11 @@ class SpeculativeProposer(ABC):
 
 class SpeculativeScorer(ABC):
 
-    @abstractmethod
     def __init__(self, scorer_worker: WorkerBase, device: str,
                  vocab_size: int):
-        pass
+        self._scorer_worker = scorer_worker
+        self._device = device
+        self._vocab_size = vocab_size
 
     @abstractmethod
     def score_proposals(

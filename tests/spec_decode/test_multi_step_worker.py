@@ -251,8 +251,6 @@ def test_same_output_for_multi_step():
     for i, _ in enumerate(prompts):
         for multi_step, single_step in zip(multi_step_output,
                                            single_step_output):
-            print(multi_step)
-            print(single_step)
             multi_step_output_token_ids[i].append(
                 multi_step[i].samples[0].output_token)
             single_step_output_token_ids[i].append(

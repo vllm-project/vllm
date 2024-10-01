@@ -2,19 +2,12 @@ from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
-from vllm.worker.worker_base import WorkerBase
 
 SeqId = int
 TargetSeqId = int
 
 
 class MQAScorer(SpeculativeScorer):
-
-    def __init__(self, scorer_worker: WorkerBase, device: str,
-                 vocab_size: int):
-        self._scorer_worker = scorer_worker
-        self._device = device
-        self._vocab_size = vocab_size
 
     def score_proposals(
         self,
