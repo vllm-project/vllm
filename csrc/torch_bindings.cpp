@@ -210,13 +210,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
       "SymInt size_k, SymInt size_n, int num_bits) -> Tensor");
-  // impls in source file
+  // impl in source file
 
   // awq_marlin repack from AWQ.
   ops.def(
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
       "SymInt size_n, int num_bits) -> Tensor");
-  // impls in source file
+  // impl in source file
 
   // Dequantization for GGML.
   ops.def("ggml_dequantize(Tensor W, int type, int m, int n) -> Tensor");
