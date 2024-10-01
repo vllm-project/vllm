@@ -284,7 +284,8 @@ def _prepare_seq_groups(
         else:
             # Decode
             prompt_logprob_len = 0
-            sample_len = len(seq_ids) * query_lens[i] if do_sample else 0
+            query_len = query_lens[i] if query_lens is not None else 1
+            sample_len = len(seq_ids) * query_len if do_sample else 0
 
             if sampling_params.seed is not None and generators is not None:
                 generator = generators.get(seq_group_metadata.request_id)

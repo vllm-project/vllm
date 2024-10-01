@@ -470,8 +470,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # already computed) and sequence length (total number of tokens).
         context_len = seq_data.get_num_computed_tokens()
         seq_len = seq_data.get_len()
+
         if inter_data.is_prompt:
             seq_len = min(seq_len, context_len + token_chunk_size)
+        elif self.runner.scheduler_config.is_multi_step:
+            # For multi-step, in the decoding phase,
+            # we always just use the last token as the input.
+            context_len = seq_len - 1
 
         # Compute tokens.
         tokens = seq_data.get_token_ids()[context_len:seq_len]
