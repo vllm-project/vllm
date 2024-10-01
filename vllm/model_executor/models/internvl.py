@@ -32,7 +32,7 @@ from vllm.utils import is_list_of
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, group_weights_with_prefix,
                     init_vllm_registered_model, merge_multimodal_embeddings)
 
@@ -362,7 +362,7 @@ def dummy_data_for_internvl(ctx: InputContext,
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_internvl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_internvl)
-class InternVLChatModel(nn.Module, SupportsMultiModal):
+class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self,
                  config: PretrainedConfig,

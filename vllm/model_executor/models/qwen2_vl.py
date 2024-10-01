@@ -55,7 +55,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalInputs)
@@ -68,6 +67,7 @@ from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
 from vllm.transformers_utils.processor import get_processor
 from vllm.utils import is_cpu
 
+from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
 
@@ -883,7 +883,8 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     "video", get_max_qwen2_vl_video_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen2_vl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen2_vl)
-class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                      SupportsPP):
 
     def __init__(self,
                  config: Qwen2VLConfig,

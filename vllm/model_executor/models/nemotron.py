@@ -34,8 +34,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -46,7 +45,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronConfig
 
-from .interfaces import SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
 # The architecture is pretty similar to Llama, with these changes:
@@ -372,7 +371,7 @@ class NemotronModel(nn.Module):
         return hidden_states
 
 
-class NemotronForCausalLM(nn.Module, SupportsLoRA):
+class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
