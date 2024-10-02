@@ -3,5 +3,6 @@
 
 # OpenVINO dependencies
 torch >= 2.1.2
-openvino ~= 2024.3.0
-optimum-intel[openvino] >= 1.18.2
+openvino ~= 2024.4.0
+openvino-tokenizers[transformers] ~= 2024.4.0
+optimum-intel[openvino] >= 1.19.0
