@@ -13,7 +13,7 @@ from .conftest import run_equality_correctness_test
         "model_name": "JackFram/llama-68m",
 
         # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
+        "enforce_eager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -22,12 +22,15 @@ from .conftest import run_equality_correctness_test
                              "speculative_model": "JackFram/llama-160m",
                              "num_speculative_tokens": 3,
                              "disable_logprobs_during_spec_decoding": False,
-                         }, {
+                         }, 
+                         {
+                            # TODO HERE fails when disabling logprobs and still requesting them
                              "speculative_model": "JackFram/llama-160m",
                              "num_speculative_tokens": 3,
                              "disable_logprobs_during_spec_decoding": True,
-                         }])
-@pytest.mark.parametrize("batch_size", [8])
+                         } 
+                         ])
+@pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -36,12 +39,22 @@ from .conftest import run_equality_correctness_test
     ])
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("logprobs", [1, 6])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4, 12])
 def test_logprobs_equality(vllm_runner, common_llm_kwargs,
                            per_test_common_llm_kwargs, baseline_llm_kwargs,
                            test_llm_kwargs, batch_size: int, output_len: int,
-                           seed: int, logprobs: int):
+                           seed: int, logprobs: int, prefill_chunk_size: int):
     """Verify output logprobs are equal with and without speculative decoding.
     """
+    if prefill_chunk_size > 0:
+        common_llm_kwargs.update(
+            **{
+                "enable_chunked_prefill": True,
+                "max_num_batched_tokens": prefill_chunk_size,
+                "max_num_seqs": prefill_chunk_size
+            })
+    else:
+        common_llm_kwargs["enable_chunked_prefill"] = False
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
