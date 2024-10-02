@@ -1,5 +1,5 @@
-from typing import (TYPE_CHECKING, Generic, Iterable, List, Optional, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
+                    Optional, Tuple, Union)
 
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
@@ -119,6 +119,14 @@ class LLMInputs(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+    """
+
+    mm_processor_kwargs: NotRequired[Optional[Dict[str, Any]]]
+    """
+    Optional multi-modal processor kwargs to be forwarded to the
+    multimodal input mapper & processor. Note that if multiple modalities
+    have registered mappers etc for the model being considered, we attempt
+    to pass the mm_processor_kwargs to each of them.
     """
 
 
