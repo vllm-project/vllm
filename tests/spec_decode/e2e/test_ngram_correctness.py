@@ -49,6 +49,16 @@ from .conftest import run_equality_correctness_test
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": True,
+        "speculative_disable_mqa_scorer": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
     {
         "speculative_model": "[ngram]",
