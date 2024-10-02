@@ -293,6 +293,9 @@ class InputRegistry:
         model_cls, _ = get_model_architecture(model_config)
         processor = self._get_model_input_processor(model_cls)
 
+        # Handle multimodal processor kwargs with priority:
+        #     Inference kwargs -> Init kwargs -> {}
+        # If it's empty, it'll fall back to the default kwarg values
         mm_processor_kwargs = self._resolve_processor_kwargs(
             inputs, processor, model_config)
 
