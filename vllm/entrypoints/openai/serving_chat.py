@@ -87,8 +87,6 @@ class OpenAIServingChat(OpenAIServing):
                 self.tool_parser = MistralToolParser
             elif tool_parser == "hermes":
                 self.tool_parser = Hermes2ProToolParser
-            elif tool_parser == "granite":
-                self.tool_parser = GraniteToolParser
             elif tool_parser == "llama3_json":
                 self.tool_parser = Llama3JsonToolParser
             elif tool_parser == "granite-20b-fc":
