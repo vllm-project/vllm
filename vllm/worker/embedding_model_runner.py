@@ -6,6 +6,7 @@ import torch
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalInputs
@@ -119,7 +120,8 @@ class EmbeddingModelRunner(
                                          device=self.device),
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        with set_forward_context(model_input.attn_metadata):
+            hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.
         if not self.is_driver_worker:
