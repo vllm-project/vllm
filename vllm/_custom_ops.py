@@ -422,18 +422,18 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                               size_k: int) -> torch.Tensor:
         return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
 
-    @torch.library.register_fake("_C::machete_gemm")
-    def machete_gemm_fake(
+    @torch.library.register_fake("_C::machete_mm")
+    def machete_mm_fake(
         a: torch.Tensor,
-        # Should be the tensor returned by machete_prepack_B
-        b_q: torch.Tensor,
+        b_q: torch.
+    Tensor,  # Should be the tensor returned by machete_prepack_B
         b_type: ScalarType,
-        b_scales: Optional[torch.Tensor] = None,
-        b_zeros: Optional[torch.Tensor] = None,
+        out_type: Optional[torch.dtype] = None,
+        b_group_scales: Optional[torch.Tensor] = None,
+        b_group_zeros: Optional[torch.Tensor] = None,
         b_group_size: Optional[int] = None,
-        c: Optional[torch.Tensor] = None,
-        alpha: Optional[float] = None,
-        beta: Optional[float] = None,
+        b_channel_scales: Optional[torch.Tensor] = None,
+        b_token_scales: Optional[torch.Tensor] = None,
         schedule: Optional[str] = None,
     ) -> torch.Tensor:
         m = a.size(0)
@@ -441,8 +441,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((m, n), device=a.device, dtype=a.dtype)
 
     @torch.library.register_fake("_C::machete_prepack_B")
-    def machete_prepack_B_fake(b_q_weight: torch.Tensor, a_type: torch.dtype,
-                               b_type: ScalarType) -> torch.Tensor:
+    def machete_prepack_B_fake(b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
+        group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
 
