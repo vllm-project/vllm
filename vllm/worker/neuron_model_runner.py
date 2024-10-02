@@ -247,7 +247,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         else:
             (input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
-            seq_lens = []
+            seq_lens = None
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens,
