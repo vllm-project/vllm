@@ -63,12 +63,11 @@ def test_baichuan_lora(baichuan_lora_files):
         assert output2[i] == expected_lora_output[i]
 
 
-@pytest.mark.skip("Requires multiple GPUs")
 @pytest.mark.parametrize("fully_sharded", [True, False])
-def test_baichuan_tensor_parallel_equality(baichuan_lora_files, fully_sharded):
-    # Cannot use as it will initialize torch.cuda too early...
-    # if torch.cuda.device_count() < 4:
-    #     pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
+def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
+                                           num_gpus_available, fully_sharded):
+    if num_gpus_available < 4:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
 
     llm_tp1 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,

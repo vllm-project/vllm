@@ -148,6 +148,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
+                    priority=request.priority,
                 )
 
                 generators.append(generator)

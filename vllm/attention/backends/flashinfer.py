@@ -410,17 +410,21 @@ class FlashInferMetadata(AttentionMetadata):
 
         return self
 
-    def advance_step(
-        self,
-        model_input: "ModelInputForGPUWithSamplingMetadata",
-        sampled_token_ids: Optional[torch.Tensor],
-        block_size: int,
-        num_seqs: int,
-        num_queries: int,
-    ):
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
         """
         Update metadata in-place to advance one decode step.
         """
+
+        assert not turn_prefills_into_decodes, \
+            ("Chunked prefill is not supported with flashinfer yet."
+             "turn_prefills_into_decodes is a Multi-Step + Chunked-Prefill "
+             "specific parameter.")
 
         assert num_seqs > 0
         assert num_queries > 0
@@ -591,7 +595,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
 
-        max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
 
@@ -630,7 +633,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 dtype=torch.int,
                 device=device,
             )
-        assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         assert device is not None
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,

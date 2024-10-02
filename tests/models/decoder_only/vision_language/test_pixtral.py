@@ -17,7 +17,7 @@ from vllm import EngineArgs, LLMEngine, SamplingParams, TokensPrompt
 from vllm.multimodal import MultiModalDataBuiltins
 from vllm.sequence import Logprob, SampleLogprobs
 
-from ....utils import VLLM_PATH
+from ....utils import VLLM_PATH, large_gpu_test
 from ...utils import check_logprobs_close
 
 if TYPE_CHECKING:
@@ -121,10 +121,7 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
             for tokens, text, logprobs in json_data]
 
 
-@pytest.mark.skip(
-    reason=
-    "Model is too big, test passed on A100 locally but will OOM on CI machine."
-)
+@large_gpu_test(min_gb=80)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_model_len", MAX_MODEL_LEN)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -157,10 +154,7 @@ def test_chat(
                          name_1="output")
 
 
-@pytest.mark.skip(
-    reason=
-    "Model is too big, test passed on A100 locally but will OOM on CI machine."
-)
+@large_gpu_test(min_gb=80)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
