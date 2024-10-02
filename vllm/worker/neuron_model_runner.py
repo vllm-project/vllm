@@ -54,6 +54,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     # NEURON has an upper limit on the top_k
     _MAX_NEURON_SAMPLING_TOP_K = 256
 
+    # NEURON needs to update sampling parameters when request IDs change across 
+    # batches. This variable stores the previous batch's request IDs to decide
+    # if an update is needed.
+    _previous_batch_request_ids: List[str] = []
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -79,7 +84,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
-        self.model_config.sampling_params = GenerationConfig(
+        self.model_config.neuron_sampling_params = GenerationConfig(
             max_length=self.scheduler_config.max_model_len,
             do_sample=True,
             per_batch_line=True,
@@ -241,22 +246,33 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
 
+        # Once the request IDs are changed in current iteration, we will update 
+        # the on-device sampling parameters.
+        current_batch_request_ids = [
+            seq_group_meta_data.request_id
+            for seq_group_meta_data in seq_group_metadata_list
+        ]
+        if current_batch_request_ids != self._previous_batch_request_ids:
+            self._update_neuron_sampling_params(sampling_metadata)
+            self._previous_batch_request_ids = current_batch_request_ids
+
         return ModelInputForNeuron(input_tokens=input_tokens,
                                    input_positions=input_positions,
                                    input_block_ids=input_block_ids,
                                    sampling_metadata=sampling_metadata,
                                    multi_modal_kwargs=multi_modal_kwargs)
 
-    def _update_neuron_sampling_params(self, sampling_metadata):
+    def _update_neuron_sampling_params(self, 
+                                       sampling_metadata: SamplingMetadata):
         # Update Neuron sampling parameters (GenerationConfig in Neuron)
-        current_sampling_params = self.model_config.sampling_params
+        current_sampling_params = self.model_config.neuron_sampling_params
         assert current_sampling_params is not None, (
             f"Failed to update sampling_params, "
             f"current sampling params is {current_sampling_params}")
 
-        top_k = current_sampling_params.top_k.copy()
-        top_p = current_sampling_params.top_p.copy()
-        temperature = current_sampling_params.temperature.copy()
+        top_k = current_sampling_params.top_k
+        top_p = current_sampling_params.top_p
+        temperature = current_sampling_params.temperature
         for index, sequence_group_to_sample in enumerate(
                 sampling_metadata.seq_groups):
             top_k[index] = self._convert_to_neuron_top_k(
@@ -265,15 +281,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             temperature[index] = \
                 sequence_group_to_sample.sampling_params.temperature
 
-        # Only update the sampling parameters if there is a change.
-        if (top_k != current_sampling_params.top_k
-                or top_p != current_sampling_params.top_p
-                or temperature != current_sampling_params.temperature):
-            current_sampling_params.top_k = top_k
-            current_sampling_params.top_p = top_p
-            current_sampling_params.temperature = temperature
-
-            self.model.model.update_generation_config(current_sampling_params)
+        self.model.model.update_generation_config(current_sampling_params)
 
     def _convert_to_neuron_top_k(self, top_k: int) -> int:
         if top_k < 0 or top_k > self._MAX_NEURON_SAMPLING_TOP_K:
@@ -291,8 +299,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         if num_steps > 1:
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
-
-        self._update_neuron_sampling_params(model_input.sampling_metadata)
 
         hidden_states = self.model(
             input_ids=model_input.input_tokens,

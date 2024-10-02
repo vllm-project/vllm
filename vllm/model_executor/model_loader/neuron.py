@@ -175,7 +175,7 @@ def _get_default_neuron_config(model_config: ModelConfig,
         if model_config.quantization else None,
         continuous_batching=continuous_batching_config,
         weight_tiling=bool(model_config.quantization),
-        on_device_generation=copy.deepcopy(model_config.sampling_params))
+        on_device_generation=copy.deepcopy(model_config.neuron_sampling_params))
     return default_neuron_args
 
 
