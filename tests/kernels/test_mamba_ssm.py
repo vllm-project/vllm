@@ -3,6 +3,8 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from tests.kernels.utils import opcheck
+from vllm import _custom_ops as ops  # noqa: F401
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn, selective_state_update)
 from vllm.utils import seed_everything
@@ -161,6 +163,59 @@ def selective_scan_ref(u,
     return out if not return_last_state else (out, last_state)
 
 
+def selective_scan_opcheck_fn(u,
+                              delta,
+                              A,
+                              B,
+                              C,
+                              D=None,
+                              z=None,
+                              delta_bias=None,
+                              delta_softplus=False,
+                              return_last_state=False,
+                              position_indices=None,
+                              prev_state=None):
+    """if return_last_state is True, returns (out, last_state)
+    last_state has shape (batch, dim, dstate).
+    """
+    if u.stride(-1) != 1:
+        u = u.contiguous()
+    if delta.stride(-1) != 1:
+        delta = delta.contiguous()
+    if D is not None:
+        D = D.contiguous()
+    if B.stride(-1) != 1:
+        B = B.contiguous()
+    if C.stride(-1) != 1:
+        C = C.contiguous()
+    if z is not None and z.stride(-1) != 1:
+        z = z.contiguous()
+    if B.dim() == 3:
+        B = B.unsqueeze(1)
+    if C.dim() == 3:
+        C = C.unsqueeze(1)
+    n_chunks = int((u.shape[-1] + 2048 - 1) / 2048)
+    x = torch.zeros((
+        u.shape[0],
+        u.shape[1],
+        n_chunks,
+        int(A.shape[1] * 2),
+    ),
+                    device=u.device,
+                    dtype=torch.float32,
+                    requires_grad=False)
+    x[:, :, 0, 0::2] = 1
+    if prev_state is not None:
+        x[:, :, 0, 1::2].copy_(prev_state)
+
+    # Disable test_autograd_registration for now as it seems to trigger
+    # a bogus error.
+    opcheck(torch.ops._C.selective_scan_fwd,
+            (u, delta, A, B, C, D, z, delta_bias, delta_softplus,
+             position_indices, x),
+            test_utils=["test_schema", "test_faketensor"])
+
+
 @pytest.mark.parametrize('wtype', [torch.float32])
 @pytest.mark.parametrize('itype', [torch.float32])
 @pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
@@ -273,6 +328,17 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
     if return_last_state:
         assert state is not None and state_ref is not None
         assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
+
+    selective_scan_opcheck_fn(u,
+                              delta,
+                              A,
+                              B,
+                              C,
+                              D,
+                              z=z,
+                              delta_bias=delta_bias,
+                              delta_softplus=delta_softplus,
+                              return_last_state=return_last_state)
 
 
 @pytest.mark.parametrize("itype",

@@ -236,6 +236,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/gguf/gguf_kernel.cu"
     "csrc/quantization/fp8/fp8_marlin.cu"
     "csrc/custom_all_reduce.cu"
+    "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
@@ -333,6 +334,11 @@ set(VLLM_MOE_EXT_SRC
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
+      "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
+      "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
       "csrc/moe/marlin_moe_ops.cu")
 endif()
 

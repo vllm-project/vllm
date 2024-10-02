@@ -9,11 +9,12 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_ip, get_open_port
+from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
@@ -214,6 +215,8 @@ class MessageQueue:
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
             remote_subscribe_port = get_open_port()
+            if is_valid_ipv6_address(connect_ip):
+                self.remote_socket.setsockopt(IPV6, 1)
             socket_addr = f"tcp://*:{remote_subscribe_port}"
             self.remote_socket.bind(socket_addr)
 
@@ -274,6 +277,8 @@ class MessageQueue:
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
+            if is_valid_ipv6_address(handle.connect_ip):
+                self.remote_socket.setsockopt(IPV6, 1)
             socket_addr = f"tcp://{handle.connect_ip}:{handle.remote_subscribe_port}"
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
