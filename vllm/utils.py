@@ -1286,6 +1286,23 @@ def supports_kw(callable: Callable[..., object], kw_name: str) -> bool:
                for param in params.values())
 
 
+def resolve_mm_processor_kwargs(inputs, processor,
+                                model_config) -> Dict[str, Any]:
+
+    # Filter inference time multimodal processor kwargs provided
+    runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
+        processor, overrides=inputs.get("mm_processor_kwargs"))
+
+    # Filter init time multimodal processor kwargs provided
+    init_mm_kwargs = get_allowed_kwarg_only_overrides(
+        processor, overrides=model_config.mm_processor_kwargs)
+
+    # Merge the final processor kwargs, prioritizing inference
+    # time values over the initialization time values.
+    mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
+    return mm_processor_kwargs
+
+
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
     overrides: Optional[Dict[str, Any]],

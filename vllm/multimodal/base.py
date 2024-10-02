@@ -1,7 +1,7 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import (Callable, Dict, List, Mapping, Optional, Tuple, Type,
+from typing import (Any, Callable, Dict, List, Mapping, Optional, Tuple, Type,
                     TypedDict, TypeVar, Union, cast, final)
 
 import numpy as np
@@ -243,7 +243,8 @@ class MultiModalPlugin(ABC):
         return wrapper
 
     def map_input(self, model_config: ModelConfig,
-                  data: MultiModalData[object]) -> MultiModalInputs:
+                  data: MultiModalData[object],
+                  mm_processor_kwargs: Dict[str, Any]) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.
@@ -263,9 +264,19 @@ class MultiModalPlugin(ABC):
         model_cls, _ = get_model_architecture(model_config)
 
         mapper = self._input_mappers.get(model_cls)
-        # Only get processor kwargs at mapping time if we are not using the
-        # input mapper; no overrides are used on the default here because they
-        # should be passed to the huggingface resource at initialization time.
+
+        # There's a nasty edge-case here if the default mapper is being used
+        # and the underlying huggingface resource has init time kwargs that
+        # do not line up with its inference time kwargs - we probably need to
+        # warn with a fallback that rebuilds a mapper based on the model_cls
+        # to reinitialize the HF resource, otherwise things are pretty likely
+        # to crash with cryptic errors, like placeholder mismatches, from
+        # correctly handing it in the input processor and not in the input
+        # mapper.
+        if mm_processor_kwargs is not None:
+            raise NotImplementedError(
+                "TODO - need to implement runtime processor kwarg merging")
+
         if mapper is not None and mapper != self._default_input_mapper:
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
                 mapper, overrides=model_config.mm_processor_kwargs)

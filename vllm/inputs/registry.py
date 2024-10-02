@@ -9,7 +9,8 @@ from transformers import PretrainedConfig
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.utils import get_allowed_kwarg_only_overrides, print_warning_once
+from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
+                        resolve_mm_processor_kwargs)
 
 from .data import LLMInputs
 
@@ -296,7 +297,7 @@ class InputRegistry:
         # Handle multimodal processor kwargs with priority:
         #     Inference kwargs -> Init kwargs -> {}
         # If it's empty, it'll fall back to the default kwarg values
-        mm_processor_kwargs = self._resolve_processor_kwargs(
+        mm_processor_kwargs = resolve_mm_processor_kwargs(
             inputs, processor, model_config)
 
         return processor(InputContext(model_config), inputs,
@@ -308,21 +309,3 @@ class InputRegistry:
         specific model.
         """
         return functools.partial(self.process_input, model_config)
-
-    @staticmethod
-    def _resolve_processor_kwargs(
-            inputs: LLMInputs, processor: InputProcessor,
-            model_config: "ModelConfig") -> Dict[str, Any]:
-
-        # Filter inference time multimodal processor kwargs provided
-        runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
-            processor, overrides=inputs.get("mm_processor_kwargs"))
-
-        # Filter init time multimodal processor kwargs provided
-        init_mm_kwargs = get_allowed_kwarg_only_overrides(
-            processor, overrides=model_config.mm_processor_kwargs)
-
-        # Merge the final processor kwargs, prioritizing inference
-        # time values over the initialization time values.
-        mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
-        return mm_processor_kwargs
