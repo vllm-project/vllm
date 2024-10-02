@@ -245,8 +245,15 @@ class FlashAttentionMetadata(AttentionMetadata):
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
-    # Maximum query length in the batch. None for decoding.
+    # Maximum query length in the batch.
     max_query_len: Optional[int]
+
+    # Number of query tokens for each request in the batch.
+    # Currently, we require that all requests have the same number of query
+    # tokens during the decoding phase. When speculavie decoding is enabled,
+    # decode_query_len might be greater than 1. In all other cases, it is 1.
+    decode_query_len: Optional[int]
+
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
     max_prefill_seq_len: int
@@ -303,6 +310,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+            decode_query_len=0,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_seq_len=0,
@@ -331,7 +339,8 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            max_query_len=None,
+            decode_query_len=self.decode_query_len,
+            max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             query_start_loc=None,
@@ -342,9 +351,13 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
-    def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata",
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
                      sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int, num_seqs: int, num_queries: int):
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
         """
         Update metadata in-place to advance one decode step.
         """
@@ -354,6 +367,23 @@ class FlashAttentionMetadata(AttentionMetadata):
         if num_seqs != num_queries:
             assert num_seqs > num_queries
             assert self.use_cuda_graph
+
+        if turn_prefills_into_decodes:
+            # When Mutli-Step is enabled with Chunked-Prefill, prefills and
+            # decodes are scheduled together. In the first step, all the
+            # prefills turn into decodes. This update reflects that
+            # conversion.
+            assert self.num_decode_tokens + self.num_prefills == num_seqs
+            self.num_decode_tokens += self.num_prefills
+            self.num_prefills = 0
+            self.num_prefill_tokens = 0
+            self.max_prefill_seq_len = 0
+            self.max_query_len = 1
+
+            self.slot_mapping = self.slot_mapping[:num_seqs]
+        else:
+            assert self.seq_lens is not None
+            assert self.max_decode_seq_len == max(self.seq_lens)
 
         assert self.num_prefills == 0
         assert self.num_prefill_tokens == 0
@@ -366,7 +396,6 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.seq_lens_tensor.shape == (num_seqs, )
         assert self.max_query_len == 1
         assert self.max_prefill_seq_len == 0
-        assert self.max_decode_seq_len == max(self.seq_lens)
 
         assert self.query_start_loc is not None
         assert self.query_start_loc.shape == (num_queries + 1, )
@@ -441,9 +470,6 @@ class FlashAttentionMetadataBuilder(
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
             else:
-                assert query_len == 1, (
-                    "seq_len: {}, context_len: {}, query_len: {}".format(
-                        seq_len, context_len, query_len))
                 self.num_decode_tokens += query_len
                 self.curr_seq_lens.append(curr_seq_len)
 
@@ -498,6 +524,11 @@ class FlashAttentionMetadataBuilder(
         use_captured_graph = cuda_graph_pad_size != -1
 
         max_query_len = max(query_lens)
+        decode_query_lens = query_lens[self.num_prefills:]
+        if len(decode_query_lens) > 0:
+            decode_query_len = max(decode_query_lens)
+        else:
+            decode_query_len = 1
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
@@ -566,6 +597,7 @@ class FlashAttentionMetadataBuilder(
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
+            decode_query_len=decode_query_len,
             max_prefill_seq_len=max_prefill_seq_len,
             max_decode_seq_len=max_decode_seq_len,
             query_start_loc=query_start_loc,
@@ -665,6 +697,8 @@ class FlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -685,7 +719,7 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
 
@@ -704,8 +738,10 @@ class FlashAttentionImpl(AttentionImpl):
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-        assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+        assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                    f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
+        assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                    f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
 
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
@@ -722,7 +758,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if (kv_cache is None or prefill_meta.block_tables is None
+            if (kv_cache.numel() == 0 or prefill_meta.block_tables is None
                     or prefill_meta.block_tables.numel() == 0):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
@@ -762,8 +798,12 @@ class FlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
+            _, num_head, head_dim = decode_query.shape
+            decode_query = decode_query.reshape(-1,
+                                                decode_meta.decode_query_len,
+                                                num_head, head_dim)
             decode_output = torch.ops.vllm.flash_attn_with_kvcache(
-                decode_query.unsqueeze(1),
+                decode_query,
                 key_cache,
                 value_cache,
                 block_table=decode_meta.block_tables,
@@ -772,7 +812,7 @@ class FlashAttentionImpl(AttentionImpl):
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
                 softcap=self.logits_soft_cap,
-            ).squeeze(1)
+            )
 
         if prefill_output is None:
             assert decode_output is not None
@@ -780,5 +820,11 @@ class FlashAttentionImpl(AttentionImpl):
         if decode_output is None:
             assert prefill_output is not None
             return prefill_output.view(num_prefill_tokens, hidden_size)
+
+        # Chunked prefill does not work with speculative decoding.
+        # Therefore, the query length for decode should be 1 in chunked prefill.
+        assert decode_meta is not None
+        assert decode_meta.decode_query_len == 1
+        decode_output = decode_output.squeeze(1)
         output = torch.cat([prefill_output, decode_output], dim=0)
         return output.view(num_tokens, hidden_size)
