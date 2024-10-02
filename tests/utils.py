@@ -565,7 +565,6 @@ def large_gpu_test(*, min_gb: int):
     """
     Decorate a test to be skipped if no GPU is available or it does not have
     sufficient memory.
-
     Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
     """
     try:

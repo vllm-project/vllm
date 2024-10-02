@@ -168,7 +168,6 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
-
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
@@ -1240,12 +1239,10 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
-        # If the feature combo become valid
-        if enable_chunked_prefill:
+        if not use_v2_block_manager:
             raise ValueError(
-                "Speculative decoding and chunked prefill are "
-                f"currently mutually exclusive ({enable_chunked_prefill=}).")
+                "Speculative decoding requires usage of the V2 "
+                "block manager. Enable it with --use-v2-block-manager.")
 
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
@@ -1310,6 +1307,13 @@ class SpeculativeConfig:
                         "This speculative model supports a maximum of "
                         f"num_speculative_tokens={n_predict}, but "
                         f"{num_speculative_tokens=} was provided.")
+
+            if enable_chunked_prefill and draft_hf_config.model_type in [
+                    "medusa", "mlp_speculator", "eagle"
+            ]:
+                raise ValueError(
+                    "Chunked prefill and hidden-state based draft models are "
+                    "not compatible.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
