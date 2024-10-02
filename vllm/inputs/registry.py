@@ -293,8 +293,8 @@ class InputRegistry:
         model_cls, _ = get_model_architecture(model_config)
         processor = self._get_model_input_processor(model_cls)
 
-        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-            processor, overrides=model_config.mm_processor_kwargs)
+        mm_processor_kwargs = self._resolve_processor_kwargs(
+            inputs, processor, model_config)
 
         return processor(InputContext(model_config), inputs,
                          **mm_processor_kwargs)
@@ -305,3 +305,21 @@ class InputRegistry:
         specific model.
         """
         return functools.partial(self.process_input, model_config)
+
+    @staticmethod
+    def _resolve_processor_kwargs(
+            inputs: LLMInputs, processor: InputProcessor,
+            model_config: "ModelConfig") -> Dict[str, Any]:
+
+        # Filter inference time multimodal processor kwargs provided
+        runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
+            processor, overrides=inputs.get("mm_processor_kwargs"))
+
+        # Filter init time multimodal processor kwargs provided
+        init_mm_kwargs = get_allowed_kwarg_only_overrides(
+            processor, overrides=model_config.mm_processor_kwargs)
+
+        # Merge the final processor kwargs, prioritizing inference
+        # time values over the initialization time values.
+        mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
+        return mm_processor_kwargs
