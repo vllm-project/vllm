@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import argparse
+from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm import ModelRegistry
@@ -17,18 +18,12 @@ def run_inference(
     max_seqs_in_batch=32,
     num_repeat_prompts=2,
     measure_perf=False,
+    perf_prompt_len=None,
     greedy_sampling=False,  # Option to use greedy decoding instead of top-k/p
 ):
     # Generation args
     ignore_eos = True if measure_perf else False
     
-    # Load prompts from a JSON file
-    with open(prompts_json, 'r') as file:
-        prompts = json.load(file)
-    assert isinstance(prompts, list), "Prompts must be a list of strings"
-    if num_repeat_prompts is not None:
-        prompts = prompts * num_repeat_prompts
-    print("Number of prompts:", len(prompts))
     if greedy_sampling:
         sampling_params = SamplingParams(max_tokens=default_max_tokens, ignore_eos=ignore_eos, temperature=0.0)
     else:
@@ -38,31 +33,66 @@ def run_inference(
     ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)
     llm = LLM(model="meta-llama/Meta-Llama-3.1-70B", block_size=64, max_num_seqs=max_seqs_in_batch, max_model_len=4096, disable_log_stats=False)
 
-    if measure_perf:
-        # Note: disable_log_stats=False is required for llm to use stat loggers
+    if not measure_perf:
+        # Load prompts from a JSON file
+        with open(prompts_json, 'r') as file:
+            prompts = json.load(file)
+        assert isinstance(prompts, list), "Prompts must be a list of strings"
+        if num_repeat_prompts is not None:
+            prompts = prompts * num_repeat_prompts
+        print("Number of prompts:", len(prompts))
+        
+        generate_tokens(llm, prompts, sampling_params, print_output=True)
+    else:
+        print("Note: Ignoring prompts for performance measurement")
+        run_inference_perf(llm, sampling_params, max_seqs_in_batch, input_prompt_len=perf_prompt_len)
+
+
+def run_inference_perf(
+    llm : LLM,
+    sampling_params,
+    max_seqs_in_batch,
+    prompts=None,
+    input_prompt_len=None  # Used to generate dummy prompts if prompts is None
+):
+    assert llm.llm_engine.log_stats, "disable_log_stats=False is required for llm to use stat loggers"
+    if prompts is not None:
+        print("Measuring performance with given prompts")
         prompts = prompts[:max_seqs_in_batch]  # Only run a single batch for performance measurement
-        sampling_params = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
-        sampling_params.max_tokens = 2  # 1 prefill output token + 1 decode output token
-        print("Starting compile run")
-        generate_tokens(llm, prompts, sampling_params, print_output=False)
-        print("Finished compile run")
-        llm.llm_engine.stat_loggers['global'].reset()  # Reset stats before inference run
-
-    print("Starting inference run")
-    generate_tokens(llm, prompts, sampling_params, print_output=(not measure_perf))
-    print("Finished inference run")
+    else:
+        assert input_prompt_len is not None, "input_prompt_len is required to generate dummy prompts"
+        print("Measuring performance with dummy prompts of length", input_prompt_len)
+        prompt_token_ids = [[0]*input_prompt_len]*max_seqs_in_batch  # dummy prompts
+    sampling_params = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
+    sampling_params.max_tokens = 2  # 1 prefill output token + 1 decode output token
     
-    if measure_perf:
-        ttft = llm.llm_engine.stat_loggers['global'].time_to_first_token.avg
-        tpot = llm.llm_engine.stat_loggers['global'].time_per_output_token.avg
-        print(f"Average time to first token (batch): {ttft} s")
-        print(f"Average decode throughput: {1/tpot} t/s/u")
+    # Compile run
+    print("Starting compile run")
+    generate_tokens(llm, prompts, sampling_params, prompt_token_ids, print_output=False)
+    print("Finished compile run")
+    llm.llm_engine.stat_loggers['global'].reset()  # Reset stats before inference run
+
+    # Inference runs
+    print("Starting inference runs")
+    N_warmup = 5
+    N_inference = 15
+    for i in tqdm(range(N_inference), desc="Inference runs"):
+        if i == N_warmup:  # Reset stats after warmup
+            llm.llm_engine.stat_loggers['global'].reset()
+        generate_tokens(llm, prompts, sampling_params, prompt_token_ids, print_output=False)
+    print("Finished inference runs")
+
+    # Collect stats
+    ttft = llm.llm_engine.stat_loggers['global'].time_to_first_token.avg
+    tpot = llm.llm_engine.stat_loggers['global'].time_per_output_token.avg
+    print(f"Average time to first token (batch): {ttft} s")
+    print(f"Average decode throughput: {1/tpot} t/s/u")
     
 
-def generate_tokens(llm : LLM, prompts, sampling_params : List[SamplingParams], print_output=True):
+def generate_tokens(llm : LLM, prompts, sampling_params, prompt_token_ids=None, print_output=True):
     # Generate texts from the prompts. The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompts, sampling_params, prompt_token_ids)
     # Print the outputs.
     for output in outputs:
         prompt = output.prompt
@@ -75,6 +105,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompts_json", type=str, default="tt_metal/prompts.json", help="Path to JSON file containing prompts")
     parser.add_argument("--measure_perf", action="store_true", help="Measure performance")
+    parser.add_argument("--perf_prompt_len", type=int, default=127, help="Length of dummy prompts for performance measurement")
     args = parser.parse_args()
 
-    run_inference(args.prompts_json, measure_perf=args.measure_perf)
+    run_inference(args.prompts_json, measure_perf=args.measure_perf, perf_prompt_len=args.perf_prompt_len)
