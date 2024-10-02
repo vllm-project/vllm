@@ -12,6 +12,7 @@
             "reuse_server": false
         },
         "lmdeploy_server_parameters": {
+            "dtype": "bfloat16"
         },
         "lmdeploy_client_parameters": {
         },
@@ -22,7 +23,7 @@
         },
         "trt_server_parameters": {
             "model_type": "llama",
-            "model_dtype": "float16",
+            "model_dtype": "bfloat16",
             "max_batch_size": 2048,
             "max_input_len": 4096,
             "max_seq_len": 6144,
@@ -37,13 +38,15 @@
             "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
             "num_scheduler_steps": 10,
-            "max_num_seqs": 512
+            "max_num_seqs": 512,
+            "dtype": "bfloat16"
         },
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
             "disable_radix_cache": "",
-            "enable_torch_compile": ""
+            "enable_torch_compile": "",
+            "dtype": "bfloat16"
         },
         "sglang_client_parameters": {
         }
@@ -64,6 +67,7 @@
             "reuse_server": true
         },
         "lmdeploy_server_parameters": {
+            "dtype": "bfloat16"
         },
         "lmdeploy_client_parameters": {
         },
@@ -74,7 +78,7 @@
         },
         "trt_server_parameters": {
             "model_type": "llama",
-            "model_dtype": "float16",
+            "model_dtype": "bfloat16",
             "max_batch_size": 2048,
             "max_input_len": 4096,
             "max_seq_len": 6144,
@@ -89,13 +93,15 @@
             "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
             "num_scheduler_steps": 10,
-            "max_num_seqs": 512
+            "max_num_seqs": 512,
+            "dtype": "bfloat16"
         },
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
             "disable_radix_cache": "",
-            "enable_torch_compile": ""
+            "enable_torch_compile": "",
+            "dtype": "bfloat16"
         },
         "sglang_client_parameters": {
         }
@@ -116,6 +122,7 @@
             "reuse_server": true
         },
         "lmdeploy_server_parameters": {
+            "dtype": "bfloat16"
         },
         "lmdeploy_client_parameters": {
         },
@@ -126,7 +133,7 @@
         },
         "trt_server_parameters": {
             "model_type": "llama",
-            "model_dtype": "float16",
+            "model_dtype": "bfloat16",
             "max_batch_size": 2048,
             "max_input_len": 4096,
             "max_seq_len": 6144,
@@ -141,13 +148,15 @@
             "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
             "num_scheduler_steps": 10,
-            "max_num_seqs": 512
+            "max_num_seqs": 512,
+            "dtype": "bfloat16"
         },
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
             "disable_radix_cache": "",
-            "enable_torch_compile": ""
+            "enable_torch_compile": "",
+            "dtype": "bfloat16"
         },
         "sglang_client_parameters": {
         }
@@ -165,6 +174,7 @@
             "reuse_server": false
         },
         "lmdeploy_server_parameters": {
+            "dtype": "bfloat16"
         },
         "lmdeploy_client_parameters": {
         },
@@ -175,7 +185,7 @@
         },
         "trt_server_parameters": {
             "model_type": "llama",
-            "model_dtype": "float16",
+            "model_dtype": "bfloat16",
             "max_batch_size": 2048,
             "max_input_len": 4096,
             "max_seq_len": 6144,
@@ -190,12 +200,14 @@
             "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
             "num_scheduler_steps": 10,
-            "max_num_seqs": 512
+            "max_num_seqs": 512,
+            "dtype": "bfloat16"
         },
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
-            "disable_radix_cache": ""
+            "disable_radix_cache": "",
+            "dtype": "bfloat16"
         },
         "sglang_client_parameters": {
         }
@@ -216,6 +228,7 @@
             "reuse_server": true
         },
         "lmdeploy_server_parameters": {
+            "dtype": "bfloat16"
         },
         "lmdeploy_client_parameters": {
         },
@@ -226,7 +239,7 @@
         },
         "trt_server_parameters": {
             "model_type": "llama",
-            "model_dtype": "float16",
+            "model_dtype": "bfloat16",
             "max_batch_size": 2048,
             "max_input_len": 4096,
             "max_seq_len": 6144,
@@ -241,12 +254,14 @@
             "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
             "num_scheduler_steps": 10,
-            "max_num_seqs": 512
+            "max_num_seqs": 512,
+            "dtype": "bfloat16"
         },
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
-            "disable_radix_cache": ""
+            "disable_radix_cache": "",
+            "dtype": "bfloat16"
         },
         "sglang_client_parameters": {
         }
@@ -267,6 +282,7 @@
             "reuse_server": true
         },
         "lmdeploy_server_parameters": {
+            "dtype": "bfloat16"
         },
         "lmdeploy_client_parameters": {
         },
@@ -277,7 +293,7 @@
         },
         "trt_server_parameters": {
             "model_type": "llama",
-            "model_dtype": "float16",
+            "model_dtype": "bfloat16",
             "max_batch_size": 2048,
             "max_input_len": 4096,
             "max_seq_len": 6144,
@@ -292,12 +308,14 @@
             "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
             "num_scheduler_steps": 10,
-            "max_num_seqs": 512
+            "max_num_seqs": 512,
+            "dtype": "bfloat16"
         },
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
-            "disable_radix_cache": ""
+            "disable_radix_cache": "",
+            "dtype": "bfloat16"
         },
         "sglang_client_parameters": {
         }

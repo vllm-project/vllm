@@ -134,7 +134,8 @@ steps:
                   - name: TEST_SELECTOR
                     value: "llama70B"
 
-  
+
+  # FIXME(Kuntai): uncomment this after NVIDIA gives us their test docker image 
   # - label: "A100 trt benchmark"
   #   priority: 100
   #   agents:
@@ -148,6 +149,7 @@ steps:
   #               <<: *common_container_settings
 
 
+  # FIXME(Kuntai): uncomment this after TGI supports `--ignore-eos`.
   # - label: "A100 tgi benchmark"
   #   priority: 100
   #   agents:
