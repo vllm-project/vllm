@@ -122,6 +122,7 @@ TEST_TYPES = [
 #  have kernels and some kernels support multiple quantization methods.
 IS_SUPPORTED_BY_GPU = current_platform.has_device_capability(90)
 
+
 def rand_data(shape, dtype=torch.float16, scale=1):
     if dtype.is_floating_point:
         return (scale * torch.rand(shape, device="cuda") - 0.3).to(dtype)
@@ -363,7 +364,6 @@ def test_machete_cuda_graph():
     a = rand_data((m, k), torch.float16)
     b = rand_data((k, n), torch.float16)
     wtype = scalar_types.uint4b8
-    atype = torch.float16
     stype = torch.float16
     group_size = 128
     zero_points = False

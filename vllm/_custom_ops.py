@@ -441,8 +441,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((m, n), device=a.device, dtype=a.dtype)
 
     @torch.library.register_fake("_C::machete_prepack_B")
-    def machete_prepack_B_fake(b_q_weight: torch.Tensor,
-                               a_type: torch.dtype,
+    def machete_prepack_B_fake(b_q_weight: torch.Tensor, a_type: torch.dtype,
                                b_type: ScalarType) -> torch.Tensor:
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
