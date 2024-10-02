@@ -244,8 +244,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
-    CUDA_ARCHS "${CUDA_ARCHS}"
-    BUILD_PTX_FOR_HIGHEST_ARCH)
+    CUDA_ARCHS "${CUDA_ARCHS}")
 
   # Only build marlin if we are building for at least some compatible archs
   cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.9" ${CUDA_ARCHS})
@@ -260,8 +259,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
        "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_SRCS}"
-      CUDA_ARCHS "${MARLIN_ARCHS}"
-      BUILD_PTX_FOR_HIGHEST_ARCH)
+      CUDA_ARCHS "${MARLIN_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
     message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
   else()
@@ -274,12 +272,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
   # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
   # Only build scaled_mm_c3x if we are building for something compatible with sm90a
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" ${CUDA_ARCHS})
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_ARCHS)
 
     set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
-    # No need to BUILD_PTX_FOR_HIGHEST_ARCH since sm90a is not 
-    # forward compatible
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
@@ -298,7 +294,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # The machete kernels only work on hopper and require CUDA 12.0 or later.
   # Only build Machete kernels if we are building for something compatible with sm90a
-  cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" ${CUDA_ARCHS})
+  cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND MACHETE_ARCHS)
     #
     # For the Machete kernels we automatically generate sources for various 
@@ -338,7 +334,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     file(GLOB MACHETE_GEN_SOURCES "csrc/quantization/machete/generated/*.cu")
     list(APPEND VLLM_EXT_SRC ${MACHETE_GEN_SOURCES})
 
-    # No need to BUILD_PTX_FOR_HIGHEST_ARCH since sm90a is not 
     # forward compatible
     set_gencode_flags_for_srcs(
       SRCS "${MACHETE_GEN_SOURCES}"
@@ -384,11 +379,10 @@ set(VLLM_MOE_EXT_SRC
 
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
-  CUDA_ARCHS "${CUDA_ARCHS}"
-  BUILD_PTX_FOR_HIGHEST_ARCH)
+  CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.9" ${CUDA_ARCHS})
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.9" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
     set(MARLIN_MOE_SRC
         "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
@@ -400,8 +394,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_MOE_SRC}"
-      CUDA_ARCHS "${MARLIN_MOE_ARCHS}"
-      BUILD_PTX_FOR_HIGHEST_ARCH)
+      CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
 
     list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_SRC}")
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")

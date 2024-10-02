@@ -205,6 +205,8 @@ macro(set_gencode_flag_for_srcs)
     APPEND PROPERTY
     COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:${_FLAG}>"
   )
+
+  message(DEBUG "Setting gencode flag for ${arg_SRCS}: ${_FLAG}")
 endmacro(set_gencode_flag_for_srcs)
 
 #
@@ -214,12 +216,13 @@ endmacro(set_gencode_flag_for_srcs)
 # arguments are:
 #  SRCS: list of source files
 #  CUDA_ARCHS: list of CUDA architectures in the form `<major>.<minor>[letter]`
-#  BUILD_PTX_FOR_HIGHEST_ARCH: if set to true, then the PTX code will be built
-#    for the highest architecture in `CUDA_ARCHS`.
+#  BUILD_PTX_FOR_ARCH: if set to true, then the PTX code will be built
+#    for architecture `BUILD_PTX_FOR_ARCH` if there is a CUDA_ARCH in CUDA_ARCHS 
+#    that is larger than BUILD_PTX_FOR_ARCH.
 #
 macro(set_gencode_flags_for_srcs)
-  set(options BUILD_PTX_FOR_HIGHEST_ARCH)
-  set(oneValueArgs)
+  set(options)
+  set(oneValueArgs BUILD_PTX_FOR_ARCH)
   set(multiValueArgs SRCS CUDA_ARCHS)
   cmake_parse_arguments(arg "${options}" "${oneValueArgs}"
                         "${multiValueArgs}" ${ARGN} )
@@ -232,16 +235,17 @@ macro(set_gencode_flags_for_srcs)
       CODE "sm_${_ARCH}")
   endforeach()
 
-  if (${arg_BUILD_PTX_FOR_HIGHEST_ARCH})
+  if (${arg_BUILD_PTX_FOR_ARCH})
+    list(SORT arg_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
     list(GET arg_CUDA_ARCHS -1 _HIGHEST_ARCH)
-    string(REPLACE "." "" _HIGHEST_ARCH "${_HIGHEST_ARCH}")
-    set_gencode_flag_for_srcs(
-      SRCS ${arg_SRCS}
-      ARCH "compute_${_HIGHEST_ARCH}"
-      CODE "compute_${_HIGHEST_ARCH}")
+    if (_HIGHEST_ARCH VERSION_GREATER_EQUAL ${arg_BUILD_PTX_FOR_ARCH})
+      string(REPLACE "." "" _PTX_ARCH "${arg_BUILD_PTX_FOR_ARCH}")
+      set_gencode_flag_for_srcs(
+        SRCS ${arg_SRCS}
+        ARCH "compute_${_PTX_ARCH}"
+        CODE "compute_${_PTX_ARCH}")
+    endif()
   endif()
-
-  message(DEBUG "Cuda gencode flags for ${arg_SRCS}: ${arg_CUDA_ARCHS}")
 endmacro()
 
 #
@@ -266,17 +270,18 @@ endmacro()
 #
 function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
   list(REMOVE_DUPLICATES SRC_CUDA_ARCHS)
-  list(SORT SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
 
   # if 9.0a is in SRC_CUDA_ARCHS and 9.0 is in CUDA_ARCHS then we should
   # remove 9.0a from SRC_CUDA_ARCHS and add 9.0a to _CUDA_ARCHS
   set(_CUDA_ARCHS)
-    if ("9.0a" IN_LIST SRC_CUDA_ARCHS)
+  if ("9.0a" IN_LIST SRC_CUDA_ARCHS)
     list(REMOVE_ITEM SRC_CUDA_ARCHS "9.0a")
     if ("9.0" IN_LIST TGT_CUDA_ARCHS)
-        set(_CUDA_ARCHS "9.0a")
+      set(_CUDA_ARCHS "9.0a")
     endif()
   endif()
+
+  list(SORT SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
 
   # for each ARCH in CUDA_ARCHS find the highest arch in SRC_CUDA_ARCHS that is 
   # less or eqault to ARCH
@@ -294,6 +299,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   endif()
   endforeach()
 
+  list(REMOVE_DUPLICATES _CUDA_ARCHS)
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
 endfunction()
 
