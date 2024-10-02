@@ -288,7 +288,6 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True,
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,

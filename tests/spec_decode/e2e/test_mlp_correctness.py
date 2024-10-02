@@ -446,8 +446,6 @@ def test_mlp_disable_queue(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
         "speculative_model": SPEC_MODEL,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])

@@ -201,7 +201,6 @@ def test_swap(
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
 @pytest.mark.parametrize("beam_width", [4])
-@pytest.mark.parametrize("use_v2_block_manager", [True, False])
 def test_swap_infeasible(
     vllm_runner,
     example_prompts,
@@ -210,7 +209,6 @@ def test_swap_infeasible(
     max_tokens: int,
     beam_width: int,
     worker_use_ray: bool,
-    use_v2_block_manager: bool,
 ) -> None:
     """Verify infeasible swap request will be ignored."""
     BLOCK_SIZE = 16
@@ -227,7 +225,6 @@ def test_swap_infeasible(
             num_gpu_blocks_override=prefill_blocks + decode_blocks,
             max_model_len=(prefill_blocks + decode_blocks) * BLOCK_SIZE,
             worker_use_ray=worker_use_ray,
-            use_v2_block_manager=use_v2_block_manager,
     ) as vllm_model:
         sampling_params = SamplingParams(n=beam_width,
                                          use_beam_search=True,
