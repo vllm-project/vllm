@@ -234,12 +234,14 @@ def test_fused_marlin_moe(
                                 device="cuda",
                                 requires_grad=False)
 
-        zp = torch.empty((0), dtype=dtype, device="cuda", requires_grad=False)
-
+        zp = torch.empty((0, 0),
+                         dtype=dtype,
+                         device="cuda",
+                         requires_grad=False)
         opcheck(torch.ops._moe_C.marlin_gemm_moe,
                 (a, qweight1, sorted_token_ids, topk_weights, topk_ids,
                  scales1, zp, g_idx1, sort_indices1, workspace, quant_type, m,
-                 2 * n, k, True, False, e, topk, block_size_m, True, False))
+                 2 * n, k, True, e, topk, block_size_m, True, False))
 
 
 @pytest.mark.skip("This test is here for the sake of debugging, "

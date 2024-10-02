@@ -30,7 +30,6 @@
 #include "marlin_kernels/marlin_moe_kernel_ku4b8.h"
 #include "marlin_kernels/marlin_moe_kernel_ku8b128.h"
 #include "marlin_kernels/marlin_moe_kernel_ku4.h"
-#include "marlin_kernels/marlin_moe_kernel_ku8.h"
 
 template <typename T>
 inline std::string str(T x) {
@@ -158,6 +157,7 @@ thread_config_t small_batch_thread_configs[] = {
     {128, 64, 128},   // Reduce N 2X, same K
     {64, 256, 256},   // Reduce K 2X, increase N 2X
     {64, 128, 128},   // Reduce K 2X, same N
+    {64, 64, 128},    // Reduce both 2X
 };
 
 thread_config_t large_batch_thread_configs[] = {
@@ -168,6 +168,7 @@ thread_config_t large_batch_thread_configs[] = {
     {128, 128, 256},  // Reduce N 2X, increase K 2X
     {64, 128, 128},   // Reduce N 2X, same K
     {128, 64, 128},   // Reduce N 4X, increase K 2X
+    {64, 64, 128},    // Reduce N 4X, same K
 };
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
@@ -461,7 +462,6 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4b8)
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8b128)
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4)
-      CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8)
       else {
         TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
                                str(prob_n) + ", " + str(prob_k) + "]" +
@@ -484,13 +484,13 @@ torch::Tensor marlin_gemm_moe(
     torch::Tensor& b_zeros, const torch::Tensor& g_idx,
     const torch::Tensor& perm, torch::Tensor& workspace,
     vllm::ScalarTypeTorchPtr const& b_q_type, int64_t size_m, int64_t size_n,
-    int64_t size_k, bool is_k_full, bool has_zp, int64_t num_experts,
-    int64_t topk, int64_t moe_block_size, bool replicate_input,
-    bool apply_weights) {
+    int64_t size_k, bool is_k_full, int64_t num_experts, int64_t topk,
+    int64_t moe_block_size, bool replicate_input, bool apply_weights) {
+  bool has_zp = b_zeros.size(1) != 0;
   if (has_zp) {
-    TORCH_CHECK(*b_q_type == vllm::kU4 || *b_q_type == vllm::kU8,
-                "b_q_type must be u4 or u8 when has_zp = True. Got = ",
-                b_q_type->str());
+    TORCH_CHECK(
+        *b_q_type == vllm::kU4,
+        "b_q_type must be u4 when has_zp = True. Got = ", b_q_type->str());
   } else {
     TORCH_CHECK(
         *b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,

@@ -21,7 +21,6 @@ from vllm.scalar_type import scalar_types
 @pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
-@pytest.mark.parametrize("num_bits", [4, 8])
 def test_fused_marlin_moe_awq(
     m: int,
     n: int,
@@ -29,11 +28,11 @@ def test_fused_marlin_moe_awq(
     e: int,
     topk: int,
     group_size: int,
-    num_bits: int,
 ):
     torch.manual_seed(7)
 
-    quant_type = (scalar_types.uint4 if num_bits == 4 else scalar_types.uint8)
+    num_bits = 4
+    quant_type = scalar_types.uint4
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -87,7 +86,6 @@ def test_fused_marlin_moe_awq(
         score,
         topk_weights,
         topk_ids,
-        has_zero_point=True,
         w1_zeros=zp1,
         w2_zeros=zp2,
         num_bits=num_bits,
@@ -112,7 +110,6 @@ def test_fused_marlin_moe_awq(
 @pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
-@pytest.mark.parametrize("num_bits", [4, 8])
 def test_single_marlin_moe_multiply_awq(
     m: int,
     n: int,
@@ -120,11 +117,11 @@ def test_single_marlin_moe_multiply_awq(
     e: int,
     topk: int,
     group_size: int,
-    num_bits: int,
 ):
     torch.manual_seed(7)
 
-    quant_type = (scalar_types.uint4 if num_bits == 4 else scalar_types.uint8)
+    num_bits = 4
+    quant_type = scalar_types.uint4
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
@@ -155,7 +152,6 @@ def test_single_marlin_moe_multiply_awq(
                                       score,
                                       topk,
                                       renormalize=False,
-                                      has_zero_point=True,
                                       w_zeros=zp,
                                       num_bits=num_bits)
 
