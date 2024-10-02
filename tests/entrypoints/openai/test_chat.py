@@ -447,6 +447,53 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
                                             chunk.usage.completion_tokens)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
+)
+async def test_chat_completion_stream_options_and_logprobs_with_long_prompts(
+        client: openai.AsyncOpenAI, model_name: str):
+    # Test stream with long prompt
+    messages = [{
+        "role": "system",
+        "content": "You are a helpful assistant."
+    }, {
+        "role": "user",
+        "content": "What is the capital of France?" * 3000
+    }]
+    stream = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=10,
+        temperature=0.0,
+        stream=True,
+        stream_options={
+            "include_usage": True,
+            "continuous_usage_stats": True
+        },
+        logprobs=True,
+        top_logprobs=5,
+    )
+
+    tokens_received = 0
+    async for chunk in stream:
+        assert chunk.usage.prompt_tokens >= 0
+        assert chunk.usage.completion_tokens >= 0
+        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
+                                            chunk.usage.completion_tokens)
+
+        if chunk.choices[0].delta.content == "":
+            # when there is no tokens generated
+            assert chunk.usage.completion_tokens == 0
+            assert chunk.choices[0].logprobs is None
+        else:
+            tokens_received += 1
+
+        if chunk.choices[0].finish_reason is not None:
+            assert chunk.usage.completion_tokens == tokens_received
+
+
 # NOTE: Not sure why, but when I place this after `test_guided_regex_chat`
 # (i.e. using the same ordering as in the Completions API tests), the test
 # will fail on the second `guided_decoding_backend` even when I swap their order
