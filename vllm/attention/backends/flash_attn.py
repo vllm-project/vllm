@@ -494,8 +494,9 @@ class FlashAttentionMetadataBuilder(
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
-    def _use_graph_block_tables(self, num_seqs: int,
-                                block_tables: List[List[int]]) -> torch.Tensor:
+    def _get_graph_runner_block_tables(
+            self, num_seqs: int,
+            block_tables: List[List[int]]) -> torch.Tensor:
         # The shape of graph_block_tables is
         # [max batch size, max context len // block size].
         max_batch_size, max_blocks = self.runner.graph_block_tables.shape
@@ -550,7 +551,7 @@ class FlashAttentionMetadataBuilder(
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
-            block_tables = self._use_graph_block_tables(
+            block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
             block_tables = make_tensor_with_pad(
