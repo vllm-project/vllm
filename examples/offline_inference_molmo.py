@@ -9,7 +9,6 @@ from typing import Optional
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
-from vllm_molmo.molmo import MolmoForCausalLM
 
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
