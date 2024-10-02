@@ -105,6 +105,7 @@ _MULTIMODAL_MODELS = {
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "MllamaForConditionalGeneration": ("mllama",
                                        "MllamaForConditionalGeneration"),
+    "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
