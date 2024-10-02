@@ -84,7 +84,11 @@ endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
-list(APPEND LIBS dnnl numa)
+list(APPEND LIBS numa)
+
+if (NOT POWER9_FOUND AND NOT POWER10_FOUND)
+    list(APPEND LIBS dnnl)
+endif()
 
 #
 # _C extension
