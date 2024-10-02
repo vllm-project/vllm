@@ -301,11 +301,11 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
         temperature=temperature,
     )
 
-    print('Getting token ids with BlockManagerV1')
+    print('Getting token ids with BlockManager')
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids with BlockManagerV2')
+    print('Getting token ids with BlockManager, with lookahead slots.')
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
