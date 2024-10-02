@@ -106,7 +106,6 @@ def test_speculative_model_quantization_config(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 3,
     }])
