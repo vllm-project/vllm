@@ -999,10 +999,6 @@ class EngineArgs:
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")
-            if self.enable_chunked_prefill and self.enable_prefix_caching:
-                raise ValueError("Multi-Step is not supported with "
-                                 "both Chunked-Prefill and Prefix-Caching "
-                                 "enabled together.")
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
