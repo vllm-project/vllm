@@ -500,6 +500,30 @@ class FlashAttentionMetadataBuilder(
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
+    def _get_graph_runner_block_tables(
+            self, num_seqs: int,
+            block_tables: List[List[int]]) -> torch.Tensor:
+        # The shape of graph_block_tables is
+        # [max batch size, max context len // block size].
+        max_batch_size, max_blocks = self.runner.graph_block_tables.shape
+        assert max_batch_size >= num_seqs
+
+        graph_block_tables = self.runner.graph_block_tables[:num_seqs]
+        for i, block_table in enumerate(block_tables):
+            if block_table:
+                num_blocks = len(block_table)
+                if num_blocks <= max_blocks:
+                    graph_block_tables[i, :num_blocks] = block_table
+                else:
+                    # It may be possible to have more blocks allocated due
+                    # to lookahead slots of multi-step, however, they are
+                    # not used anyway, so can be safely ignored.
+                    graph_block_tables[
+                        i, :max_blocks] = block_table[:max_blocks]
+
+        return torch.from_numpy(graph_block_tables).to(
+            device=self.runner.device, non_blocking=True)
+
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
@@ -533,29 +557,13 @@ class FlashAttentionMetadataBuilder(
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
 
+        num_seqs = len(seq_lens)
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
-            num_decode_tokens = batch_size
-
-            # The shape of graph_block_tables is
-            # [max batch size, max context len // block size].
-            input_block_tables = self.runner.graph_block_tables[:batch_size]
-            max_blocks = input_block_tables.shape[1]
-            for i, block_table in enumerate(self.block_tables):
-                if block_table:
-                    num_blocks = len(block_table)
-                    if num_blocks <= max_blocks:
-                        input_block_tables[i, :num_blocks] = block_table
-                    else:
-                        # It may be possible to have more blocks allocated due
-                        # to lookahead slots of multi-step, however, they are
-                        # not used anyway, so can be safely ignored.
-                        input_block_tables[
-                            i, :max_blocks] = block_table[:max_blocks]
-
-            block_tables = torch.from_numpy(input_block_tables).to(
-                device=device, non_blocking=True)
+            num_decode_tokens = batch_size - self.num_prefill_tokens
+            block_tables = self._get_graph_runner_block_tables(
+                num_seqs, self.block_tables)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
