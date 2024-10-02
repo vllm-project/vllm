@@ -134,9 +134,6 @@ class SamplingMetadata:
         num_prompts: int,
         skip_sampler_cpu_output: bool = False,
         reuse_sampling_tensors: bool = False,
-        # Used when multi-step is enabled with chunked-prefill. Refer to
-        # the comment in prepare_multistep_tensors.
-        selected_token_indices_multistep: Optional[torch.Tensor] = None
     ) -> None:
         self.seq_groups = seq_groups
         self.selected_token_indices = selected_token_indices
@@ -144,52 +141,6 @@ class SamplingMetadata:
         self.num_prompts = num_prompts
         self.skip_sampler_cpu_output = skip_sampler_cpu_output
         self.reuse_sampling_tensors = reuse_sampling_tensors
-        self.selected_token_indices_multistep = selected_token_indices_multistep
-
-    def prepare_multistep_tensors(self, num_queries: int, device: str,
-                                  pin_memory: bool):
-        """
-        Invoked when Multi-Step is enabled with Chunked-Prefill. 
-        When Multi-Step is enabled with Chunked-Prefill, the prompts and
-        decodes are scheduled together.
-        self.selected_token_indices is constructed for the first-step in
-        Multi-Step. However, the scheduled prompts, are fully processed
-        in the first-step and are processed as decodes in the rest of the steps.
-        This function prepares a "selected_token_indices" to be used
-        in the rest of the steps.
-
-        Example:
-        Let 2 prompts and 2 decodes be scheduled together. Let the
-        num-tokens to process for the 2 prompts be 5 and 8 resply.
-
-        In that case, self.sampled_token_indices will be,
-        [4, 12, 13, 14] as it is constructed for the first-step in
-        multi-step.
-        However, the prompts turns to decodes after the first-step
-        and the num-tokens for the previously-prompt sequences will
-        be 1 and 1 as they are decodes now. The self.sampled_token_indices
-        must be updated to [0,1,2,3].
-        prepare_multistep_tensors prepares the "selected_token_indices"
-        to be used in steps 2-N.
-        """
-        selected_token_indices_multistep = list(range(num_queries))
-        self.selected_token_indices_multistep = \
-            async_tensor_h2d(selected_token_indices_multistep,
-                             dtype=torch.long,
-                             target_device=device,
-                             pin_memory=pin_memory)
-
-    def advance_step(self):
-        """
-        Invoked when Multi-Step and Chunked-Prefill are enabled together.
-        The prefills that may have been scheduled, are fully processed in
-        the very first step and have turned into decodes.
-        Updated selected_token_indices to reflect that. Please refer to
-        the prepare_multistep_tensors docstring for an example.
-        """
-        if self.selected_token_indices_multistep is not None:
-            # Swap to account for Single Step Prompts becoming Decodes
-            self.selected_token_indices = self.selected_token_indices_multistep
 
     @staticmethod
     def prepare(
