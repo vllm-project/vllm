@@ -520,7 +520,7 @@ class Scheduler:
         ret.swapped_out.clear()
 
         ret.num_lookahead_slots = self._get_num_lookahead_slots(
-            is_prefill=False)
+            is_prefill=False, enable_chunking=enable_chunking)
 
         ret.decode_seq_groups_list.clear()
         ret.prefill_seq_groups_list.clear()
@@ -559,7 +559,7 @@ class Scheduler:
 
             # NOTE(woosuk): Preemption happens only when there is no available
             # slot to keep all the sequence groups in the RUNNING state.
-            while not self._can_append_slots(seq_group):
+            while not self._can_append_slots(seq_group, enable_chunking):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
@@ -609,7 +609,7 @@ class Scheduler:
                 if not cont_loop:
                     break
             else:
-                self._append_slots(seq_group, blocks_to_copy)
+                self._append_slots(seq_group, blocks_to_copy, enable_chunking)
                 is_prefill = seq_group.is_prefill()
 
                 scheduled_seq_group: ScheduledSequenceGroup = \
@@ -682,7 +682,8 @@ class Scheduler:
             # If the sequence group cannot be swapped in, stop.
             is_prefill = seq_group.is_prefill()
             alloc_status = self.block_manager.can_swap_in(
-                seq_group, self._get_num_lookahead_slots(is_prefill))
+                seq_group,
+                self._get_num_lookahead_slots(is_prefill, enable_chunking))
             if alloc_status == AllocStatus.LATER:
                 break
             elif alloc_status == AllocStatus.NEVER:
@@ -725,7 +726,7 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             swapped_queue.popleft()
             self._swap_in(seq_group, blocks_to_swap_in)
-            self._append_slots(seq_group, blocks_to_copy)
+            self._append_slots(seq_group, blocks_to_copy, enable_chunking)
             is_prefill = seq_group.is_prefill()
             if is_prefill:
                 prefill_seq_groups.append(
@@ -745,12 +746,13 @@ class Scheduler:
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_copy=blocks_to_copy,
             num_lookahead_slots=self._get_num_lookahead_slots(
-                is_prefill=False),
+                is_prefill=False, enable_chunking=enable_chunking),
             infeasible_seq_groups=infeasible_seq_groups,
         )
 
     def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
-        if self.scheduler_config.chunked_prefill_enabled:
+        if self.scheduler_config.chunked_prefill_enabled and \
+                not self.scheduler_config.is_multi_step:
             prompt_limit = self.scheduler_config.max_model_len
         else:
             prompt_limit = min(self.scheduler_config.max_model_len,
@@ -897,15 +899,21 @@ class Scheduler:
                 waiting_queue.popleft()
                 continue
 
+            num_lookahead_slots: int = 0
+            if self.scheduler_config.is_multi_step and enable_chunking:
+                num_lookahead_slots = self._get_num_lookahead_slots(
+                    True, enable_chunking)
+
             # If the sequence group cannot be allocated, stop.
-            can_allocate = self.block_manager.can_allocate(seq_group)
+            can_allocate = self.block_manager.can_allocate(
+                seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
-                    "Input prompt (%d tokens) is too long"
-                    " and exceeds the capacity of block_manager",
-                    num_new_tokens)
+                    "Input prompt (%d tokens) + lookahead slots (%d) is "
+                    "too long and exceeds the capacity of block_manager",
+                    num_new_tokens, num_lookahead_slots)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -937,9 +945,24 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
-            seq_group.init_multi_step(
-                num_scheduler_steps=self._get_num_lookahead_slots(
-                    is_prefill=True) + 1)
+
+            if enable_chunking and self.scheduler_config.is_multi_step:
+                blocks_to_copy: List[Tuple[int, int]] = []
+                # init_multi_step_from_lookahead_slots happens in append_slots
+                self._append_slots(seq_group, blocks_to_copy, enable_chunking)
+                # This assert will trip when a copy-on-write happens. This is
+                # not a concern as the very first sequence-group block
+                # allocation happens above. Still, we have the assert to
+                # catch any edge-cases.
+                assert not blocks_to_copy
+            else:
+                seq_group.init_multi_step_from_lookahead_slots(
+                    num_lookahead_slots,
+                    num_scheduler_steps=self.scheduler_config.
+                    num_scheduler_steps,
+                    is_multi_step=self.scheduler_config.is_multi_step,
+                    enable_chunking=enable_chunking)
+
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
@@ -954,7 +977,8 @@ class Scheduler:
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
             ignored_seq_groups=ignored_seq_groups,
-            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=True))
+            num_lookahead_slots=self._get_num_lookahead_slots(
+                is_prefill=True, enable_chunking=enable_chunking))
 
     def _schedule_default(self) -> SchedulerOutputs:
         """Schedule queued requests.
@@ -1151,7 +1175,8 @@ class Scheduler:
         else:
             return self._schedule_default()
 
-    def _can_append_slots(self, seq_group: SequenceGroup) -> bool:
+    def _can_append_slots(self, seq_group: SequenceGroup,
+                          enable_chunking: bool) -> bool:
         """Determine whether or not we have enough space in the KV cache to
         continue generation of the sequence group.
         """
@@ -1162,13 +1187,17 @@ class Scheduler:
             self.artificial_preempt_cnt -= 1
             return False
 
-        # Appending slots only occurs in decoding.
-        is_prefill = False
+        is_prefill = seq_group.is_prefill()
+        num_lookahead_slots = self._get_num_lookahead_slots(
+            is_prefill, enable_chunking)
+
+        if is_prefill and num_lookahead_slots > 0:
+            # Appending prefill slots only happens multi-step and
+            # chunked-prefill are enabled together.
+            assert self.scheduler_config.is_multi_step and enable_chunking
 
         return self.block_manager.can_append_slots(
-            seq_group=seq_group,
-            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill),
-        )
+            seq_group=seq_group, num_lookahead_slots=num_lookahead_slots)
 
     def _allow_async_output_proc(self, seq_group: SequenceGroup) -> bool:
         no_beam_search = seq_group.sampling_params is None or (
@@ -1184,7 +1213,7 @@ class Scheduler:
         # such as self.running, self.swapped, and self.waiting.
         scheduler_start_time = time.perf_counter()
 
-        scheduler_outputs = self._schedule()
+        scheduler_outputs: SchedulerOutputs = self._schedule()
         now = time.time()
 
         if not self.cache_config.enable_prefix_caching:
@@ -1381,11 +1410,10 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
-    def _append_slots(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_copy: List[Tuple[int, int]],
-    ) -> None:
+    def _append_slots(self,
+                      seq_group: SequenceGroup,
+                      blocks_to_copy: List[Tuple[int, int]],
+                      enable_chunking: bool = False) -> None:
         """Appends new slots to the sequences in the given sequence group.
 
         Args:
@@ -1396,11 +1424,25 @@ class Scheduler:
                 int is the destination block index. This list is updated with
                 the new source and destination block indices for the appended
                 slots.
+            enable_chunking (bool): True if chunked prefill is enabled.
         """
-        num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
-        seq_group.init_multi_step(num_scheduler_steps=num_lookahead_slots + 1)
+        is_prefill: bool = seq_group.is_prefill()
+        num_lookahead_slots: int = self._get_num_lookahead_slots(
+            is_prefill, enable_chunking)
 
-        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+        seq_group.init_multi_step_from_lookahead_slots(
+            num_lookahead_slots,
+            num_scheduler_steps=self.scheduler_config.num_scheduler_steps,
+            is_multi_step=self.scheduler_config.is_multi_step,
+            enable_chunking=enable_chunking)
+
+        seq_status: Optional[SequenceStatus] = SequenceStatus.RUNNING
+        if self.scheduler_config.is_multi_step and enable_chunking:
+            # In multi-step chunked-prefill any sequence type can have
+            # slots appended.
+            seq_status = None
+
+        for seq in seq_group.get_seqs(status=seq_status):
             cows = self.block_manager.append_slots(seq, num_lookahead_slots)
             if len(cows) > 0:
                 blocks_to_copy.extend(cows)
@@ -1511,16 +1553,32 @@ class Scheduler:
             passed_delay = True
         return passed_delay
 
-    def _get_num_lookahead_slots(self, is_prefill: bool) -> int:
+    def _get_num_lookahead_slots(self, is_prefill: bool,
+                                 enable_chunking: bool) -> int:
         """The number of slots to allocate per sequence per step, beyond known
         token ids. Speculative decoding uses these slots to store KV activations
         of tokens which may or may not be accepted.
 
         Speculative decoding does not yet support prefill, so we do not perform
         lookahead allocation for prefill.
+
+        When chunking is enabled with multi-step, we allocate lookahead slots
+        for the prefills for when the prefills turn into decodes in the first
+        step.
         """
         if is_prefill:
-            return 0
+            if self.scheduler_config.is_multi_step and enable_chunking:
+                # num_lookahead_slots was introduced in the context of decodes,
+                # in Speculative Decoding.
+                # When the num_scheduler_steps is 8, say, then the
+                # num_lookahead_slots is 7. Meaning, we are doing a 1-step of
+                # decode anyways and we wish to do 7 more.
+                #
+                # "lookaheads" for prefills, is introduced in support for
+                # Chunked-Prefill in Multi-Step.
+                return self.scheduler_config.num_lookahead_slots + 1
+            else:
+                return 0
 
         return self.scheduler_config.num_lookahead_slots
 
@@ -1547,10 +1605,29 @@ class Scheduler:
         # in a decode phase. Do not chunk.
         if enable_chunking and len(seqs) == 1:
             remaining_token_budget = budget.remaining_token_budget()
-            if self.cache_config.enable_prefix_caching:
+            if self.scheduler_config.is_multi_step:
+                # The current multi-step + chunked prefill capability does
+                # not actually support chunking prompts.
+                #
+                # Therefore, `num_new_tokens` is computed in the same fashion
+                # for both multi-step+chunked-prefill &
+                # multi-step+chunked-prefill+APC
+                #
+                # Prompts with more tokens than the current remaining budget
+                # are postponed to future scheduler steps
+                if num_new_tokens > self._get_prompt_limit(seq_group):
+                    # If the seq_group is in prompt-stage, pass the
+                    # num_new_tokens as-is so the caller can ignore
+                    # the sequence.
+                    pass
+                else:
+                    num_new_tokens = 0 \
+                        if num_new_tokens > remaining_token_budget \
+                        else num_new_tokens
+            elif self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled, we always allocate
-                # the number of new tokens that is dividable by the block size
-                # to avoid partial block matching.
+                # the number of new tokens that is dividable by the block
+                # size to avoid partial block matching.
                 block_size = self.cache_config.block_size
                 remainder = budget.token_budget % block_size
                 if remainder != 0:

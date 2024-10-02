@@ -468,43 +468,26 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Compute context length (the number of tokens that are
         # already computed) and sequence length (total number of tokens).
+
         seq_len = seq_data.get_len()
         if inter_data.is_prompt:
             context_len = seq_data.get_num_computed_tokens()
-        else:
-            # get_num_computed_tokens is incorrect for spec decoding.
-            # So, we should have a special logic here.
-            # TODO(sang): Fix it.
+            seq_len = min(seq_len, context_len + token_chunk_size)
+        elif self.runner.scheduler_config.is_multi_step or \
+            self.runner.model_config.is_encoder_decoder_model:
             context_len = seq_len - 1
-        seq_len = min(seq_len, context_len + token_chunk_size)
+        else:
+            context_len = seq_data.get_num_computed_tokens()
 
         # Compute tokens.
-        if inter_data.is_prompt:
-            tokens = seq_data.get_token_ids()
-            if context_len != 0 or seq_len < len(tokens):
-                tokens = tokens[context_len:seq_len]
-        else:
-            # Optimization. get_token_ids requires the entire copy of
-            # tokens.
-            tokens = seq_data.get_last_token_id()
+        tokens = seq_data.get_token_ids()[context_len:seq_len]
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
-
-        if isinstance(tokens, list):
-            inter_data.input_tokens[seq_idx].extend(tokens)
-        else:
-            inter_data.input_tokens[seq_idx].append(tokens)
-
-        if (seq_len - context_len) == 1:
-            inter_data.input_positions[seq_idx].append(seq_len - 1)
-        else:
-            inter_data.input_positions[seq_idx].extend(
-                range(context_len, seq_len))
-
-        inter_data.query_lens[
-            seq_idx] = seq_len - context_len if inter_data.is_prompt else 1
+        inter_data.input_tokens[seq_idx].extend(tokens)
+        inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
+        inter_data.query_lens[seq_idx] = seq_len - context_len
 
         if seq_data.mrope_position_delta is not None:
             if inter_data.mrope_input_positions is None:
@@ -1007,8 +990,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Used to cache python objects
         self.inter_data_cache: Dict[int, PyObjectCache] = {}
+
+        # Using the PythonizationCache in Pipeline-Parallel clobbers the
+        # SequenceGroupToSample object. In Pipeline-Parallel, we have
+        # more than 1 Scheduler, resulting in a potential back-to-back
+        # prepare_model_inputs() call. This clobbers the cached
+        # SequenceGroupToSample objects, as we reset the cache during
+        # every prepare_model_inputs() call.
         self.sampling_metadata_cache: SamplingMetadataCache = \
-            SamplingMetadataCache()
+              SamplingMetadataCache() \
+                if self.parallel_config.pipeline_parallel_size == 1 else None
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1026,10 +1017,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.model_memory_usage / float(2**30))
 
         if self.lora_config:
-            assert supports_lora(self.model), "Model does not support LoRA"
-            assert not supports_multimodal(
+            assert supports_lora(
                 self.model
-            ), "To be tested: Multi-modal model with LoRA settings."
+            ), f"{self.model.__class__.__name__} does not support LoRA yet."
+
+            if supports_multimodal(self.model):
+                logger.warning("Regarding multimodal models, vLLM currently "
+                               "only supports adding LoRA to language model.")
+            # It's necessary to distinguish between the max_position_embeddings
+            # of VLMs and LLMs.
+            if hasattr(self.model.config, "max_position_embeddings"):
+                max_pos_embeddings = self.model.config.max_position_embeddings
+            else:
+                max_pos_embeddings = (
+                    self.model.config.text_config.max_position_embeddings)
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
@@ -1039,8 +1040,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.device,
                 self.model.embedding_modules,
                 self.model.embedding_padding_modules,
-                max_position_embeddings=self.model.config.
-                max_position_embeddings,
+                max_position_embeddings=max_pos_embeddings,
             )
             self.model = self.lora_manager.create_lora_manager(self.model)
 
@@ -1223,7 +1223,17 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        # it is important to create tensors inside the loop, rather than
+        # multiplying the list, to avoid Dynamo from treating them as
+        # tensor aliasing.
+        kv_caches = [
+            torch.tensor([], dtype=torch.float32, device=self.device)
+            for _ in range(num_layers)
+        ]
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
