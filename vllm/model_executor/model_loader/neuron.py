@@ -12,7 +12,7 @@ from transformers import PretrainedConfig
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import get_quantization_config
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceOutput)
@@ -40,14 +40,18 @@ _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str, str]] = {
 
 class NeuronCasualLM(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-    ) -> None:
+    def __init__(self,
+                 config: PretrainedConfig,
+                 on_device_sampling_disabled: bool = False) -> None:
         super().__init__()
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
                                                 logits_as_input=True)
+
+        self.on_device_sampling_disabled = on_device_sampling_disabled
+        if self.on_device_sampling_disabled:
+            # Use default sampler
+            self.sampler = Sampler()
 
         # Lazy initialized
         self.model: nn.Module
@@ -73,6 +77,11 @@ class NeuronCasualLM(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
+
+        if self.on_device_sampling_disabled:
+            next_tokens = self.sampler(logits, sampling_metadata)
+            return next_tokens
+
         hidden_states = logits.flatten()
         next_tokens = []
         sample_idx = 0
@@ -175,8 +184,19 @@ def _get_default_neuron_config(model_config: ModelConfig,
         if model_config.quantization else None,
         continuous_batching=continuous_batching_config,
         weight_tiling=bool(model_config.quantization),
-        on_device_generation=copy.deepcopy(model_config.neuron_sampling_params))
+        on_device_generation=_get_neuron_on_device_generation_config(
+            model_config))
     return default_neuron_args
+
+
+def _get_neuron_on_device_generation_config(model_config: ModelConfig):
+    if not _is_neuron_on_device_sampling_disabled(model_config):
+        return copy.deepcopy(model_config.neuron_sampling_params)
+    return None
+
+
+def _is_neuron_on_device_sampling_disabled(model_config: ModelConfig) -> bool:
+    return not getattr(model_config, "neuron_sampling_params", None)
 
 
 def _get_neuron_config_after_override(default_neuron_config,
@@ -192,7 +212,9 @@ def get_neuron_model(model_config: ModelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
 
     # Create a model instance.
-    model = NeuronCasualLM(model_config.hf_config)
+    model = NeuronCasualLM(
+        model_config.hf_config,
+        _is_neuron_on_device_sampling_disabled(model_config))
 
     default_neuron_config_args = _get_default_neuron_config(
         model_config, parallel_config, scheduler_config)

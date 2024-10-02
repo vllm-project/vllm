@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -54,11 +55,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     # NEURON has an upper limit on the top_k
     _MAX_NEURON_SAMPLING_TOP_K = 256
 
-    # NEURON needs to update sampling parameters when request IDs change across 
-    # batches. This variable stores the previous batch's request IDs to decide
-    # if an update is needed.
-    _previous_batch_request_ids: List[str] = []
-
     def __init__(
         self,
         model_config: ModelConfig,
@@ -84,16 +80,33 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
-        self.model_config.neuron_sampling_params = GenerationConfig(
-            max_length=self.scheduler_config.max_model_len,
-            do_sample=True,
-            per_batch_line=True,
-            top_k=[self._MAX_NEURON_SAMPLING_TOP_K] \
-                * self.scheduler_config.max_num_seqs,
-            top_p=[1.0] * self.scheduler_config.max_num_seqs,
-            temperature=[1.0] * self.scheduler_config.max_num_seqs,
-            dynamic=True,
-            global_top_k=self._MAX_NEURON_SAMPLING_TOP_K)
+
+        # Once NEURON_ON_DEVICE_SAMPLING_DISABLED is set to True, turn off
+        # on-device sampling
+        self._on_device_sampling_disabled = os.getenv(
+            "NEURON_ON_DEVICE_SAMPLING_DISABLED", False) == 'True'
+
+        # NEURON needs to update sampling parameters when request IDs change
+        # across batches. This variable stores the previous batch's request IDs
+        # to determine if an update is needed.
+        self._previous_batch_request_ids: List[str] = []
+
+        if not self._on_device_sampling_disabled:
+            logger.warning("On-device sampling is turned on in Neuron by "
+                           "default, only top_k, top_p, and temperature are "
+                           "current supported sampling parameters. To turn off "
+                           "the on-device sampling, please set the environment "
+                           "variable NEURON_ON_DEVICE_SAMPLING_DISABLED=True.")
+            self.model_config.neuron_sampling_params = GenerationConfig(
+                max_length=self.scheduler_config.max_model_len,
+                do_sample=True,
+                per_batch_line=True,
+                top_k=[self._MAX_NEURON_SAMPLING_TOP_K] \
+                    * self.scheduler_config.max_num_seqs,
+                top_p=[1.0] * self.scheduler_config.max_num_seqs,
+                temperature=[1.0] * self.scheduler_config.max_num_seqs,
+                dynamic=True,
+                global_top_k=self._MAX_NEURON_SAMPLING_TOP_K)
 
     def load_model(self) -> None:
         if find_spec("transformers_neuronx") is not None:
@@ -246,15 +259,16 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
 
-        # Once the request IDs are changed in current iteration, we will update 
-        # the on-device sampling parameters.
-        current_batch_request_ids = [
-            seq_group_meta_data.request_id
-            for seq_group_meta_data in seq_group_metadata_list
-        ]
-        if current_batch_request_ids != self._previous_batch_request_ids:
-            self._update_neuron_sampling_params(sampling_metadata)
-            self._previous_batch_request_ids = current_batch_request_ids
+        if not self._on_device_sampling_disabled:
+            # Once the request IDs are changed in current iteration, we will
+            # update the on-device sampling parameters.
+            current_batch_request_ids = [
+                seq_group_meta_data.request_id
+                for seq_group_meta_data in seq_group_metadata_list
+            ]
+            if current_batch_request_ids != self._previous_batch_request_ids:
+                self._update_neuron_sampling_params(sampling_metadata)
+                self._previous_batch_request_ids = current_batch_request_ids
 
         return ModelInputForNeuron(input_tokens=input_tokens,
                                    input_positions=input_positions,
@@ -262,7 +276,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                    sampling_metadata=sampling_metadata,
                                    multi_modal_kwargs=multi_modal_kwargs)
 
-    def _update_neuron_sampling_params(self, 
+    def _update_neuron_sampling_params(self,
                                        sampling_metadata: SamplingMetadata):
         # Update Neuron sampling parameters (GenerationConfig in Neuron)
         current_sampling_params = self.model_config.neuron_sampling_params
