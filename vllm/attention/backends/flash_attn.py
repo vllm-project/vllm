@@ -128,40 +128,6 @@ def _(
     return torch.empty_like(decode_query)
 
 
-@torch.library.custom_op("vllm::reshape_and_cache_flash",
-                         mutates_args=["kv_cache"])
-def reshape_and_cache_flash(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
-) -> None:
-    """Inductor cannot deal with inplace operations on views.
-    See https://github.com/pytorch/pytorch/issues/131192
-    and https://github.com/pytorch/pytorch/issues/130174
-    This is a workaround to hide the view operation from the inductor.
-    """
-    return torch.ops._C_cache_ops.reshape_and_cache_flash(
-        key, value, kv_cache[0], kv_cache[1], slot_mapping, kv_cache_dtype,
-        k_scale, v_scale)
-
-
-@reshape_and_cache_flash.register_fake  # type: ignore
-def _(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
-) -> None:
-    pass
-
-
 class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
@@ -779,10 +745,11 @@ def unified_flash_attention(
         # Reshape the input keys and values and store them in the cache.
         # If kv_cache is not provided, the new key and value tensors are
         # not cached. This happens during the initial memory profiling run.
-        torch.ops.vllm.reshape_and_cache_flash(
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
-            kv_cache,
+            kv_cache[0],
+            kv_cache[1],
             attn_metadata.slot_mapping.flatten(),
             kv_cache_dtype,
             k_scale,
