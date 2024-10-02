@@ -16,10 +16,10 @@ from vllm import _custom_ops as ops
 DTYPES = [torch.float16, torch.bfloat16, torch.int8]
 SIZES=[(128, 128), (1024, 8192)]
 MNK = [
-    (64, 64, 64),
-    (64, 256, 512),
+    (128, 128, 128),
+    (128, 512, 1024),
     (512, 512, 512),
-    (512, 2048, 4096)
+    (1024, 2048, 4096)
 ]
 
 def dense_matmul(A, B, dtype):
