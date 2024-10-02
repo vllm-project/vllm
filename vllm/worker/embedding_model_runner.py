@@ -103,7 +103,8 @@ class EmbeddingModelRunner(
         # a placeholder (it has wide hardware support).
         kv_caches = [
             torch.tensor([], dtype=torch.float32, device=self.device)
-        ] * num_layers
+            for _ in range(num_layers)
+        ]
 
         execute_model_kwargs = {
             "input_ids":
