@@ -3,9 +3,11 @@ from typing import Any
 
 _forward_context: Any = None
 
+
 def get_forward_context() -> Any:
     """Get the current forward context."""
     return _forward_context
+
 
 @contextmanager
 def set_forward_context(context: Any):
