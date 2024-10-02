@@ -1,5 +1,6 @@
 # Test the LLMEngine with multi-step-decoding
 
+import copy
 from typing import Optional
 
 import pytest
@@ -201,8 +202,6 @@ def test_multi_step_llm_w_prompt_logprobs(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("tp_size", [1])
-@pytest.mark.parametrize("enable_chunked_prefill", [True])
-@pytest.mark.parametrize("enable_prefix_caching", [True])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
@@ -214,32 +213,45 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
     model: str,
     dtype: str,
     tp_size: int,
-    enable_chunked_prefill: bool,
-    enable_prefix_caching: bool,
     max_tokens: int,
     enforce_eager: int,
     num_scheduler_steps: int,
     num_prompts: int,
     num_logprobs: Optional[int],
 ) -> None:
-    """Test vLLM engine with multi-step scheduling via sync LLM Engine.
+    """Test vLLM engine with multi-step+"single-step chunked prefill"+APC.
 
-    Set up a HuggingFace (HF) transformers model as a ground-truth reference.
+    Set up contrived scenario which tests for a possible failure mode of
+    scheduling with multi-step+"single-step chunked prefill"+APC
 
-    Prompt them with the same example prompts.
+    "single-step chunked prefill" here refers to the current vLLM multi-step+
+    chunked-prefill implementation, which requires that a prefill may only
+    be scheduled in the same step as decodes if the prefill prompt fits in a
+    single chunk (note that "complete" multi-step+chunked-prefill would allow
+    a prefill to span multiple chunks & multiple steps but that is not yet
+    the case.)
 
-    Validate:
-    * Generated tokens match
-    * Generated logprobs are all very close
+    "APC" is short for "automatic prefix caching".
+
+    This test creates a scenario where the scheduler must decide whether/how
+    to schedule a prefill with a prompt that exceeds the available token budget.
+    The correct behavior for multi-step+"single-step chunked prefill"+APC is to
+    put off scheduling the prefill until a future step.
+
+    Validate that:
+    * Multi-step kernels do not raise an exception due to incorrect scheduler
+      behavior
+    * Generated tokens match between
+      multi-step+"single-step chunked prefill"+APC and
+      single-step scheduling.
+    * (If logprobs are enabled) check logprobs are close enough
 
     Args:
-      hf_runner: HF transformers model runner fixture
       vllm_runner: vLLM model runner fixture
       example_prompts: test fixture providing example prompts
       model: model under test (same for single- and multi-step engines)
       dtype: tensor datatype for engine to utilize
       tp_size: degree of tensor-parallelism
-      enable_chunked_prefill: chunked-prefill on/off
       max_tokens: the maximum number of tokens to generate
       enforce_eager
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
@@ -249,20 +261,44 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
                     completions endpoint; `None` -> 1 logprob returned.
     """
 
+    # Set up contrived test for correct scheduling behavior with
+    # multi-step+"single-step chunked prefill"+APC.
+    #
+    # Assume block_size=16
+    #
+    # Assume max_num_batched_tokens=48
+    #   => Per-step token budget=48
+    #
+    # 1. Scheduler schedules 0th prompt (24 tokens)
+    #      => Remaining token budget=24
+    # 2. Scheduler attempts to schedule 1st prompt (30 tokens)
+    #    * 30 tokens exceeds 24 token remaining budget
+    #    * Correct behavior: do not schedule this prompt in this step
+    #    * Incorrect behavior: schedule prompt chunk
+    #      * `do_sample=False` for this prompt in this step
+    #      * Chunk size = (remaining tokens // block size) * block size
+    #
+    # The Incorrect scheduling behavior - if it occurs - will cause an exception
+    # in the model runner resulting from `do_sample=False`.
     assert len(example_prompts) >= 2
-    example_prompts[0] = ('vLLM is a high-throughput and memory-efficient '
-                          'inference and serving engine for LLMs.\n')  # 24 tok
-    example_prompts[1] = (
+    challenge_prompts = copy.deepcopy(example_prompts)
+    challenge_prompts[0] = ('vLLM is a high-throughput and memory-efficient '
+                            'inference and serving engine for LLMs.\n'
+                            )  # 24 tok
+    challenge_prompts[1] = (
         'Briefly describe the major milestones in the '
         'development of artificial intelligence from 1950 to 2020.\n'
     )  # 30 tok
 
-    if len(example_prompts) < num_prompts:
-        example_prompts = (example_prompts *
-                           ((num_prompts // len(example_prompts)) + 1))
-    example_prompts = example_prompts[:num_prompts]
-    assert len(example_prompts) == num_prompts
+    # If necessary, adjust the length of `challenge_prompts` to match
+    # `num_prompts`
+    if len(challenge_prompts) < num_prompts:
+        challenge_prompts = (challenge_prompts *
+                             ((num_prompts // len(challenge_prompts)) + 1))
+    challenge_prompts = challenge_prompts[:num_prompts]
+    assert len(challenge_prompts) == num_prompts
 
+    # Single-step scheduler baseline
     with vllm_runner(
             model,
             dtype=dtype,
@@ -277,10 +313,11 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             block_size=16,
     ) as vllm_model:
         outputs_baseline = (vllm_model.generate_greedy(
-            example_prompts, max_tokens) if num_logprobs is None else
+            challenge_prompts, max_tokens) if num_logprobs is None else
                             vllm_model.generate_greedy_logprobs(
-                                example_prompts, max_tokens, num_logprobs))
+                                challenge_prompts, max_tokens, num_logprobs))
 
+    # multi-step+"single-step chunked prefill"+APC
     with vllm_runner(
             model,
             dtype=dtype,
@@ -288,8 +325,8 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
             use_v2_block_manager=True,
-            enable_chunked_prefill=enable_chunked_prefill,
-            enable_prefix_caching=enable_prefix_caching,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
             num_scheduler_steps=num_scheduler_steps,
             max_model_len=48,
             max_num_batched_tokens=48,
@@ -297,11 +334,12 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             block_size=16,
     ) as vllm_model:
         outputs_w_features = (vllm_model.generate_greedy(
-            example_prompts, max_tokens) if num_logprobs is None else
+            challenge_prompts, max_tokens) if num_logprobs is None else
                               vllm_model.generate_greedy_logprobs(
-                                  example_prompts, max_tokens, num_logprobs))
+                                  challenge_prompts, max_tokens, num_logprobs))
 
     if num_logprobs is None:
+        # No-logprobs test
         check_outputs_equal(
             outputs_0_lst=outputs_baseline,
             outputs_1_lst=outputs_w_features,
@@ -309,6 +347,7 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             name_1="multi-step+features",
         )
     else:
+        # Yes-logprobs test
         check_logprobs_close(
             outputs_0_lst=outputs_baseline,
             outputs_1_lst=outputs_w_features,
