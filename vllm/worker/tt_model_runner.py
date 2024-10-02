@@ -102,8 +102,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         self.cache_config = cache_config
         self.load_config = load_config
 
-        self.device = self.device_config.device
-
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
 

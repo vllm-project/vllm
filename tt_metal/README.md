@@ -32,8 +32,7 @@ Git-checkout the following branches in each repo separately:
 
 ## Accessing the Meta-Llama-3.1 Hugging Face Model
 
-To run Meta-Llama-3.1, it is required to have access to the model on Hugging Face. 
-Steps:
+To run Meta-Llama-3.1, it is required to have access to the model on Hugging Face. To gain access:
 1. Request access on [https://huggingface.co/meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B).
 2. Once you have received access, create and copy your access token from the settings tab on Hugging Face.
 3. Run this code in python and paste your access token:
@@ -52,8 +51,14 @@ Steps:
 2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1-70B, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b) for preparing the weights and environment variables.
 
 ## Running the offline inference example
+To generate tokens for sample prompts:
 ```python
 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py
+```
+
+To measure performance for a single batch (with the default prompt length of 127 tokens):
+```python
+WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --measure_perf
 ```
 
 ## Running the server example (experimental)
