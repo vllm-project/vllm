@@ -218,7 +218,7 @@ def fused_marlin_moe(
 
     sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
 
-    max_workspace_size = ((M + 255) // 256) * (max(2 * N, K) // 64) * 16
+    max_workspace_size = (max(2 * N, K) // 64) * 16
     workspace = torch.zeros(max_workspace_size,
                             dtype=torch.int,
                             device="cuda",

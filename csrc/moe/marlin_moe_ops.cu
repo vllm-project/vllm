@@ -157,6 +157,7 @@ thread_config_t small_batch_thread_configs[] = {
     {128, 64, 128},   // Reduce N 2X, same K
     {64, 256, 256},   // Reduce K 2X, increase N 2X
     {64, 128, 128},   // Reduce K 2X, same N
+    {64, 64, 128},    // Reduce both 2X
 };
 
 thread_config_t large_batch_thread_configs[] = {
@@ -167,6 +168,7 @@ thread_config_t large_batch_thread_configs[] = {
     {128, 128, 256},  // Reduce N 2X, increase K 2X
     {64, 128, 128},   // Reduce N 2X, same K
     {128, 64, 128},   // Reduce N 4X, increase K 2X
+    {64, 64, 128},    // Reduce N 4X, same K
 };
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
