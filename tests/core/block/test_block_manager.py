@@ -383,7 +383,7 @@ def test_swap_in_infeasible(num_lookahead_slots, enable_caching):
     block_size = 8
     num_cpu_blocks = 1
     num_gpu_blocks = 1
-    block_manager = BlockSpaceManagerV2(block_size,
+    block_manager = MainBlockSpaceManager(block_size,
                                         num_cpu_blocks,
                                         num_gpu_blocks,
                                         watermark=0,
