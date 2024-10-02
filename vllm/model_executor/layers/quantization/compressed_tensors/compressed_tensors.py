@@ -73,7 +73,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod(self)
+            return CompressedTensorsMoEMethod.get_moe_method(self)
         return None
 
     @classmethod
@@ -138,10 +138,11 @@ class CompressedTensorsConfig(QuantizationConfig):
             or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
         is_tensor = (weight_strategy and input_quant.strategy
                      == QuantizationStrategy.TENSOR.value)
-        is_symmetric = weight_quant.symmetric and input_quant.symmetric
         is_static = not weight_quant.dynamic and not input_quant.dynamic
 
-        return is_8_bits and is_tensor and is_symmetric and is_static
+        # Both symmetric and asymmetric input quantization supported.
+        # Only symmetric weight quantization supported.
+        return is_8_bits and is_tensor and weight_quant.symmetric and is_static
 
     def _is_dynamic_token_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:
@@ -151,10 +152,11 @@ class CompressedTensorsConfig(QuantizationConfig):
             or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
         is_token = (weight_strategy and input_quant.strategy
                     == QuantizationStrategy.TOKEN.value)
-        is_symmetric = weight_quant.symmetric and input_quant.symmetric
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
-        return is_8_bits and is_token and is_symmetric and is_dynamic
+        # Both symmetric and asymmetric input quantization supported.
+        # Only symmetric weight quantization supported.
+        return is_8_bits and is_token and weight_quant.symmetric and is_dynamic
 
     def _is_fp8_w8a8(self, weight_quant: BaseModel,
                      input_quant: BaseModel) -> bool:
@@ -265,12 +267,14 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Int8(
                     strategy=weight_quant.strategy,
-                    is_static_input_scheme=True)
+                    is_static_input_scheme=True,
+                    input_symmetric=input_quant.symmetric)
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Int8(
                     strategy=weight_quant.strategy,
-                    is_static_input_scheme=False)
+                    is_static_input_scheme=False,
+                    input_symmetric=input_quant.symmetric)
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
