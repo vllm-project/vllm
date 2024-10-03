@@ -23,7 +23,6 @@ PromptComponents = Tuple[Optional[str], List[int],
                          Optional["MultiModalDataDict"]]
 DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
                                 Optional["MultiModalDataDict"]]
-_DEFAULT_BOS_TOKEN_ID = 1
 
 
 class InputPreprocessor:
@@ -53,13 +52,7 @@ class InputPreprocessor:
                            "is not initialized")
             return None
 
-        bos_token_id = self.tokenizer.get_lora_tokenizer(
-            lora_request).bos_token_id
-
-        if bos_token_id is None and self.model_config.is_encoder_model:
-            bos_token_id = _DEFAULT_BOS_TOKEN_ID
-
-        return bos_token_id
+        return self.tokenizer.get_lora_tokenizer(lora_request).bos_token_id
 
     def get_eos_token_id(self,
                          lora_request: Optional[LoRARequest] = None
@@ -91,10 +84,9 @@ class InputPreprocessor:
         dec_start_token_id = getattr(self.model_config.hf_config,
                                      'decoder_start_token_id', None)
         if dec_start_token_id is None:
-            if not self.model_config.is_encoder_model:
-                logger.warning(
-                    "Falling back on <BOS> for decoder start token id "
-                    "because decoder start token id is not available.")
+            print_warning_once("Falling back on <BOS> for decoder start token "
+                               "id because decoder start token id is not "
+                               "available.")
             dec_start_token_id = self.get_bos_token_id()
 
         return dec_start_token_id
