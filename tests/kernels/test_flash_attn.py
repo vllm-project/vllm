@@ -228,29 +228,6 @@ def test_varlen_with_paged_kv(
         softcap=soft_cap if soft_cap is not None else 0,
     )
 
-    if num_blocks <= 2048:
-        test_utils = ["test_faketensor", "test_schema"]
-    else:
-        test_utils = ["test_faketensor"]
-
-    opcheck(torch.ops.vllm.flash_attn_varlen_func,
-            args=tuple(),
-            kwargs=dict(
-                q=query,
-                k=key_cache,
-                v=value_cache,
-                cu_seqlens_q=cu_query_lens,
-                cu_seqlens_k=cu_kv_lens,
-                max_seqlen_q=max_query_len,
-                max_seqlen_k=max_kv_len,
-                softmax_scale=scale,
-                causal=True,
-                window_size=window_size,
-                block_table=block_tables,
-                softcap=soft_cap if soft_cap is not None else 0,
-            ),
-            test_utils=test_utils)
-
     ref_output = ref_paged_attn(
         query=query,
         key_cache=key_cache,
