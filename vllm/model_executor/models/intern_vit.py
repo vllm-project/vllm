@@ -54,7 +54,7 @@ class InternVisionEmbeddings(nn.Module):
         self.position_embedding = nn.Parameter(
             torch.randn(1, self.num_positions, self.embed_dim))
 
-    def _get_pos_embed(self, pos_embed, H, W):
+    def _get_pos_embed(self, pos_embed: torch.Tensor, H: int, W: int):
         target_dtype = pos_embed.dtype
         pos_embed = pos_embed.float().reshape(
             1, self.image_size // self.patch_size,
@@ -63,9 +63,19 @@ class InternVisionEmbeddings(nn.Module):
                                   size=(H, W),
                                   mode='bicubic',
                                   align_corners=False)
-        pos_embed = pos_embed.reshape(1, -1, H * W).permute(0, 2,
-                                                            1).to(target_dtype)
-        return pos_embed
+        return pos_embed.reshape(1, -1, H * W).permute(0, 2,
+                                                       1).to(target_dtype)
+
+    def _get_position_embedding(self, H: int, W: int) -> torch.Tensor:
+        position_embedding = self.position_embedding
+
+        return torch.cat(
+            [
+                position_embedding[:, :1, :],
+                self._get_pos_embed(position_embedding[:, 1:, :], H, W),
+            ],
+            dim=1,
+        )
 
     def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor:
         target_dtype = self.patch_embedding.weight.dtype
@@ -76,12 +86,7 @@ class InternVisionEmbeddings(nn.Module):
         class_embeds = self.class_embedding.expand(batch_size, 1,
                                                    -1).to(target_dtype)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-        position_embedding = torch.cat([
-            self.position_embedding[:, :1, :],
-            self._get_pos_embed(self.position_embedding[:, 1:, :], height,
-                                width)
-        ],
-                                       dim=1)
+        position_embedding = self._get_position_embedding(height, width)
         embeddings = embeddings + position_embedding.to(target_dtype)
         return embeddings
 
@@ -241,14 +246,8 @@ class InternVisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
         self.norm_type = config.norm_type
 
-        # fallback to sdpa attention if tp unavailable
-        tp_size = get_tensor_model_parallel_world_size()
-        num_heads = config.num_attention_heads
-        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.attn = InternParallelAttention(config,
-                                                quant_config=quant_config)
-        else:
-            self.attn = InternSdpaAttention(config)
+        self.attn = self._init_attn(config, quant_config)
+
         self.mlp = InternMLP(config, quant_config=quant_config)
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim,
                                              eps=config.layer_norm_eps)
@@ -259,6 +258,17 @@ class InternVisionEncoderLayer(nn.Module):
                                 torch.ones(self.embed_dim))
         self.ls2 = nn.Parameter(config.initializer_factor *
                                 torch.ones(self.embed_dim))
+
+    def _init_attn(self, config: PretrainedConfig,
+                   quant_config: Optional[QuantizationConfig]):
+        # fallback to sdpa attention if tp unavailable
+        tp_size = get_tensor_model_parallel_world_size()
+        num_heads = config.num_attention_heads
+
+        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
+            return InternParallelAttention(config, quant_config=quant_config)
+
+        return InternSdpaAttention(config)
 
     def forward(
         self,
@@ -287,9 +297,14 @@ class InternVisionEncoder(nn.Module):
         else:
             num_hidden_layers = num_hidden_layers_override
         self.layers = nn.ModuleList([
-            InternVisionEncoderLayer(config=config, quant_config=quant_config)
+            self._init_encoder_layer(config, quant_config)
             for _ in range(num_hidden_layers)
         ])
+
+    def _init_encoder_layer(self, config: PretrainedConfig,
+                            quant_config: Optional[QuantizationConfig]):
+        return InternVisionEncoderLayer(config=config,
+                                        quant_config=quant_config)
 
     def forward(self, inputs_embeds: torch.Tensor):
 
