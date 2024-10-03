@@ -448,6 +448,35 @@ def runai_safetensors_weights_iterator(
             yield from streamer.get_tensors()
 
 
+def fastsafetensors_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    from fastsafetensors import SafeTensorsFileLoader, SingleGroup
+    """Iterate over the weights in the model safetensor files 
+    using fastsafetensor library."""
+    pg = SingleGroup()
+    if torch.distributed.is_initialized():
+        pg = torch.distributed.group.WORLD
+
+    device = torch.device(f'cuda:{pg.rank()}')
+    weight_files_sub_lists = [
+        hf_weights_files[i:i + pg.size()]
+        for i in range(0, len(hf_weights_files), pg.size())
+    ]
+
+    for f_list in weight_files_sub_lists:
+        loader = SafeTensorsFileLoader(pg, device)
+        rank_file_map = {i: [f] for i, f in enumerate(f_list)}
+        loader.add_filenames(rank_file_map)
+        fb = loader.copy_files_to_device()
+        keys = list(fb.key_to_rank_lidx.keys())
+        for k in keys:
+            t = fb.get_tensor(k)
+            yield k, t
+        fb.close()
+        loader.close()
+
+
 def pt_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
