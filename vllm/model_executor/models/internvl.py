@@ -389,8 +389,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
                 + vision_feature_layer + 1
         else:
             num_hidden_layers = vision_feature_layer + 1
-        self.vision_model = InternVisionModel(
-            config.vision_config, num_hidden_layers_override=num_hidden_layers)
+        self.vision_model = self._init_vision_model(config, num_hidden_layers)
 
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
@@ -405,6 +404,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             self.sampler = self.language_model.sampler
         else:
             self.sampler = Sampler()
+
+    def _init_vision_model(self, config: PretrainedConfig,
+                           num_hidden_layers: int):
+        return InternVisionModel(config.vision_config,
+                                 num_hidden_layers_override=num_hidden_layers)
 
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
         vit_hidden_size = config.vision_config.hidden_size

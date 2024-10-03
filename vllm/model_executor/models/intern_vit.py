@@ -325,10 +325,20 @@ class InternVisionModel(nn.Module):
         self.config = config
 
         self.embeddings = InternVisionEmbeddings(config)
-        self.encoder = InternVisionEncoder(
+        self.encoder = self._init_encoder(
+            config,
+            quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+        )
+
+    def _init_encoder(self, config: PretrainedConfig,
+                      quant_config: Optional[QuantizationConfig],
+                      num_hidden_layers_override: Optional[int]):
+        return InternVisionEncoder(
             config=config,
             quant_config=quant_config,
-            num_hidden_layers_override=num_hidden_layers_override)
+            num_hidden_layers_override=num_hidden_layers_override,
+        )
 
     def resize_pos_embeddings(self, old_size, new_size, patch_size):
         pos_emb = self.embeddings.position_embedding

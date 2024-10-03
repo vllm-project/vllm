@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .intern_vit import (InternVisionEmbeddings, InternVisionEncoder,
-                         InternVisionEncoderLayer)
+                         InternVisionEncoderLayer, InternVisionModel)
 from .internvl import (InternVLChatModel, dummy_data_for_internvl,
                        get_max_internvl_image_tokens,
                        input_mapper_for_internvl, input_processor_for_internvl)
@@ -192,6 +192,18 @@ class NVLMVisionEncoder(InternVisionEncoder):
         return NVLMVisionEncoderLayer(config=config, quant_config=quant_config)
 
 
+class NVLMVisionModel(InternVisionModel):
+
+    def _init_encoder(self, config: PretrainedConfig,
+                      quant_config: Optional[QuantizationConfig],
+                      num_hidden_layers_override: Optional[int]):
+        return NVLMVisionEncoder(
+            config=config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+        )
+
+
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_internvl)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_internvl)
@@ -211,3 +223,8 @@ class NVLM_D_Model(InternVLChatModel):
             nn.GELU(),
             nn.Linear(llm_intermediate_size, llm_hidden_size, bias=False),
         )
+
+    def _init_vision_model(self, config: PretrainedConfig,
+                           num_hidden_layers: int):
+        return NVLMVisionModel(config.vision_config,
+                               num_hidden_layers_override=num_hidden_layers)
