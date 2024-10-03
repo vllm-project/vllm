@@ -1,6 +1,6 @@
 from .data import (EncoderDecoderLLMInputs, ExplicitEncoderDecoderPrompt,
                    LLMInputs, PromptType, SingletonPrompt, TextPrompt,
-                   TokensPrompt, build_explicit_enc_dec_prompt, 
+                   TokensPrompt, build_explicit_enc_dec_prompt,
                    to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from .registry import InputContext, InputRegistry
 
