@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -58,10 +58,14 @@ class SequenceGroupOutputProcessor(ABC):
     @abstractmethod
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput],
-                        is_async: bool) -> None:
+                        is_async: bool) -> Optional[int]:
         """Process new token ids for the sequence group. Handles logic such as
         detokenization, stop checking, and freeing/forking sequences in the
         scheduler.
+        
+        Return the number of new tokens generated in the sequence group.
+        The returned value is optional because it is only used for 
+        speculative decoding mqa scorer.
         """
         pass
 

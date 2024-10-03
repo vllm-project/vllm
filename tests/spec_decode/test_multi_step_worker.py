@@ -173,7 +173,6 @@ def test_same_output_for_multi_step():
         block_size,
         num_gpu_blocks,
         seed,
-        model_runner_cls=TP1DraftModelRunner,
     )
 
     worker = create_worker(
