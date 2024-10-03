@@ -1,4 +1,5 @@
 from vllm import LLM, SamplingParams
+import torch
 
 # Sample prompts.
 prompts = [
@@ -8,10 +9,10 @@ prompts = [
     "The future of AI is",
 ]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+sampling_params = SamplingParams(temperature=0.0, top_p=0.95)
 
 # Create an LLM.
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="meta-llama/Meta-Llama-3-8b", tensor_parallel_size=2, enforce_eager=True, dtype=torch.float16)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
