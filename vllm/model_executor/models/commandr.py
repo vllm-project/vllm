@@ -83,7 +83,7 @@ class CohereMLP(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: CohereConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()

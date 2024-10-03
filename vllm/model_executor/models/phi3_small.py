@@ -365,7 +365,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,

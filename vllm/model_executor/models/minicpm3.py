@@ -48,7 +48,7 @@ class MiniCPM3Attention(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,

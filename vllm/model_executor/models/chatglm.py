@@ -36,7 +36,7 @@ class GLMAttention(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
@@ -127,7 +127,7 @@ class GLMMLP(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: ChatGLMConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -170,7 +170,7 @@ class GLMBlock(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
@@ -241,7 +241,7 @@ class GLMTransformer(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -291,7 +291,7 @@ class ChatGLMModel(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):

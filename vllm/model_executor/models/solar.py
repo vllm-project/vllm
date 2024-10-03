@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
@@ -98,7 +99,7 @@ class SolarAttention(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -187,7 +188,7 @@ class SolarDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -267,7 +268,7 @@ class SolarModel(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
@@ -406,7 +407,7 @@ class SolarForCausalLM(nn.Module, SupportsLoRA):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,

@@ -317,7 +317,7 @@ class OPTForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
-        config,
+        config: OPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
