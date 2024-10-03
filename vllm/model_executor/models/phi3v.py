@@ -618,11 +618,13 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
             if is_list_of(image_data, torch.Tensor):
                 # it's already a list of tensors
                 return image_data
-            if len(image_data.shape) == 2:
-                # 2D tensor
-                return image_data
-            # 3D tensor
-            return list(torch.unbind(image_data, dim=0))
+            if len(image_data.shape) == 3:
+                # 3D tensor
+                return list(torch.unbind(image_data, dim=0))
+            raise ValueError(
+                "We expect batched 2D tensors;"
+                "this can be either a list of 2D tensors or a single 3D tensor."
+            )
 
         assert self.vision_embed_tokens is not None
         image_embeds = self.vision_embed_tokens(image_input["data"],
