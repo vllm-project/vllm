@@ -322,9 +322,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                          device=self.device),
         )
 
-        # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
+        # Compute the logits only if the on-device sampling is turned off as 
+        # on-device sampling outputs the token ids.
+        if self._on_device_sampling_disabled:
+            logits = self.model.compute_logits(hidden_states,
                                            model_input.sampling_metadata)
+        else:
+            logits = hidden_states
 
         # Sample the next token.
         output = self.model.sample(

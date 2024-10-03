@@ -82,13 +82,14 @@ class NeuronCasualLM(nn.Module):
             next_tokens = self.sampler(logits, sampling_metadata)
             return next_tokens
 
-        hidden_states = logits.flatten()
+        # On-device sampling outputs the token ids directly.
+        sampled_token_ids = logits.flatten()
         next_tokens = []
         sample_idx = 0
         for seq_group in sampling_metadata.seq_groups:
             samples = []
             for seq_id in seq_group.seq_ids:
-                token_id = hidden_states[sample_idx].item()
+                token_id = sampled_token_ids[sample_idx].item()
                 samples.append(
                     SequenceOutput(parent_seq_id=seq_id,
                                    output_token=token_id,
