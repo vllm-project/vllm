@@ -9,9 +9,8 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -22,8 +21,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import (group_weights_with_prefix, is_pp_missing_parameter,
-                    merge_multimodal_embeddings)
+from .utils import group_weights_with_prefix, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -151,14 +149,15 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.quant_config = quant_config
         self.language_model = GemmaForCausalLM(config.text_config,
                                                cache_config, quant_config)
-        self.unpadded_vocab_size = config.text_config.vocab_size
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.text_config.vocab_size,
-                                                logit_scale)
-        self.sampler = Sampler()
+        self.language_model.logits_processor.scale *= logit_scale
+
         self.make_empty_intermediate_tensors = (
-            self.language_model.model.make_empty_intermediate_tensors)
+            self.language_model.make_empty_intermediate_tensors)
+
+    @property
+    def sampler(self):
+        return self.language_model.sampler
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -244,25 +243,29 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs: object) -> Union[SamplerOutput, IntermediateTensors]:
-
-        parsed_image_input = self._parse_and_validate_image_input(**kwargs)
-
-        if parsed_image_input is not None:
-            vision_embeddings = self._process_image_input(parsed_image_input)
-            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
-            vision_embeddings = vision_embeddings * (self.config.hidden_size**
-                                                     -0.5)
-
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
-                self.config.image_token_index)
-
+        if intermediate_tensors is not None:
             input_ids = None
-        else:
             inputs_embeds = None
+        else:
+            parsed_image_input = self._parse_and_validate_image_input(**kwargs)
+
+            if parsed_image_input is not None:
+                vision_embeddings = self._process_image_input(
+                    parsed_image_input)
+                # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
+                vision_embeddings = vision_embeddings * (
+                    self.config.hidden_size**-0.5)
+
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, vision_embeddings,
+                    self.config.image_token_index)
+
+                input_ids = None
+            else:
+                inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
@@ -298,8 +301,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         # load mlp projector
         mlp_params_dict = dict(self.multi_modal_projector.named_parameters())
         for name, loaded_weight in weights_group["multi_modal_projector"]:
-            if is_pp_missing_parameter(name, self.multi_modal_projector):
-                continue
             param = mlp_params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)

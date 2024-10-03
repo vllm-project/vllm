@@ -373,6 +373,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+
         self.make_empty_intermediate_tensors = (
             self.llm.make_empty_intermediate_tensors)
 
@@ -500,9 +501,12 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        image_inputs = self._parse_and_validate_inputs(input_ids, **kwargs)
+        if intermediate_tensors is not None:
+            vlm_embeddings = None
+        else:
+            image_inputs = self._parse_and_validate_inputs(input_ids, **kwargs)
 
-        vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs)
+            vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs)
 
         output = self.llm(
             input_ids=None,

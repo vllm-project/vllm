@@ -926,7 +926,12 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         pixel_values: Optional[torch.Tensor] = None
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        pixel_values = self._get_image_input_type(pixel_values)
+        if intermediate_tensors is not None:
+            input_ids = None
+            pixel_values = None
+        else:
+            pixel_values = self._get_image_input_type(pixel_values)
+
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, intermediate_tensors,
                                          pixel_values)

@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -11,7 +12,7 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -21,7 +22,7 @@ from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (group_weights_with_prefix, init_vllm_registered_model,
-                    is_pp_missing_parameter, merge_multimodal_embeddings)
+                    merge_multimodal_embeddings)
 
 # We use this internally as placeholders since there is no image token
 # defined on the HuggingFace repo
@@ -511,6 +512,13 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return Sampler()
+
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
@@ -634,20 +642,24 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         See also:
             :class:`Blip2ImageInputs`
         """
-        image_input = self._parse_and_validate_image_input(**kwargs)
-
-        if image_input is not None:
-            vision_embeddings = self._process_image_input(image_input)
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
-                BLIP2_IMAGE_TOKEN_ID)
-
+        if intermediate_tensors is not None:
             input_ids = None
-        else:
             inputs_embeds = None
+        else:
+            image_input = self._parse_and_validate_image_input(**kwargs)
+
+            if image_input is not None:
+                vision_embeddings = self._process_image_input(image_input)
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, vision_embeddings,
+                    BLIP2_IMAGE_TOKEN_ID)
+
+                input_ids = None
+            else:
+                inputs_embeds = None
 
         hidden_states = self.language_model.model(
             input_ids,
@@ -692,8 +704,6 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # load qformer
         qformer_params_dict = dict(self.qformer.named_parameters())
         for name, loaded_weight in weights_group["qformer"]:
-            if is_pp_missing_parameter(name, self.qformer):
-                continue
             param = qformer_params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
@@ -702,8 +712,6 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # load mlp projector
         mlp_params_dict = dict(self.language_projection.named_parameters())
         for name, loaded_weight in weights_group["language_projection"]:
-            if is_pp_missing_parameter(name, self.language_projection):
-                continue
             param = mlp_params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)

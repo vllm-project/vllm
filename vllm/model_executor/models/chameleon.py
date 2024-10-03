@@ -981,17 +981,21 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
 
-        image_input = self._parse_and_validate_image_input(**kwargs)
+        if intermediate_tensors is not None:
+            input_ids = None
+        else:
+            image_input = self._parse_and_validate_image_input(**kwargs)
 
-        if image_input is not None:
-            assert self.model.vqmodel is not None
-            image_tokens = self.model.get_image_tokens(image_input["data"].to(
-                self.config.torch_dtype))
-            image_token_id = self.model.vocabulary_mapping.image_token_id
-            special_image_mask = input_ids == image_token_id
-            image_tokens = image_tokens.to(input_ids.device, input_ids.dtype)
-            input_ids = input_ids.masked_scatter(special_image_mask,
-                                                 image_tokens)
+            if image_input is not None:
+                assert self.model.vqmodel is not None
+                image_tokens = self.model.get_image_tokens(
+                    image_input["data"].to(self.config.torch_dtype))
+                image_token_id = self.model.vocabulary_mapping.image_token_id
+                special_image_mask = input_ids == image_token_id
+                image_tokens = image_tokens.to(input_ids.device,
+                                               input_ids.dtype)
+                input_ids = input_ids.masked_scatter(special_image_mask,
+                                                     image_tokens)
 
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors)
