@@ -800,13 +800,10 @@ class EngineArgs:
             "lower performance.")
         parser.add_argument(
             '--override-neuron-config',
-            type=lambda configs: {
-                str(key): value
-                for key, value in
-                (config.split(':') for config in configs.split(','))
-            },
+            type=json.loads,
             default=None,
-            help="override or set neuron device configuration.")
+            help="Override or set neuron device configuration. "
+            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
 
         parser.add_argument(
             '--scheduling-policy',
