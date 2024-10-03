@@ -758,8 +758,10 @@ def unified_flash_attention(
 
     num_prefill_tokens = attn_metadata.num_prefill_tokens
     num_decode_tokens = attn_metadata.num_decode_tokens
-    assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-    assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+    assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
+    assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
+                f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
 
     # Query for decode. KV is not needed because it is already cached.
     decode_query = query[num_prefill_tokens:]
@@ -816,8 +818,11 @@ def unified_flash_attention(
 
     if decode_meta := attn_metadata.decode_metadata:
         # Decoding run.
+        _, num_head, head_dim = decode_query.shape
+        decode_query = decode_query.reshape(-1, decode_meta.decode_query_len,
+                                            num_head, head_dim)
         decode_output = torch.ops.vllm.flash_attn_with_kvcache(
-            decode_query.unsqueeze(1),
+            decode_query,
             key_cache,
             value_cache,
             block_table=decode_meta.block_tables,
@@ -834,6 +839,12 @@ def unified_flash_attention(
     if decode_output is None:
         assert prefill_output is not None
         return prefill_output.view(num_prefill_tokens, hidden_size)
+
+    # Chunked prefill does not work with speculative decoding.
+    # Therefore, the query length for decode should be 1 in chunked prefill.
+    assert decode_meta is not None
+    assert decode_meta.decode_query_len == 1
+    decode_output = decode_output.squeeze(1)
     output = torch.cat([prefill_output, decode_output], dim=0)
     return output.view(num_tokens, hidden_size)
 
