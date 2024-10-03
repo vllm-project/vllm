@@ -342,6 +342,9 @@ class LLMWrapper(nn.Module):
 
     def __getattr__(self, key: str):
         llm = super().__getattr__(self.model_name)
+        if key == self.model_name:
+            return llm
+
         return getattr(llm, key)
 
     # We need to explicitly override this
