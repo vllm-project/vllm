@@ -3,9 +3,9 @@ from typing import List, Optional, Tuple
 import pytest
 import torch
 
-import vllm.attention.backends.flash_attn  # noqa: F401
 from tests.kernels.utils import opcheck
 from vllm.utils import seed_everything
+from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 256]
@@ -213,7 +213,7 @@ def test_varlen_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    output = torch.ops.vllm.flash_attn_varlen_func(
+    output = flash_attn_varlen_func(
         q=query,
         k=key_cache,
         v=value_cache,
