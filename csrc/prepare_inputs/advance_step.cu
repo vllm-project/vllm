@@ -17,6 +17,17 @@ __global__ void advance_step_flashattn_kernel(
     long const* sampled_token_ids_ptr, long* input_positions_ptr,
     int* seq_lens_ptr, long* slot_mapping_ptr, int const* block_tables_ptr,
     int64_t const block_tables_stride) {
+  int const n_pad = num_seqs - num_queries;
+  if (n_pad && blockIdx.x == 0) {
+    // Handle cuda graph padding
+    int const offset = num_queries;
+    for (int i = threadIdx.x; i < n_pad; i += blockDim.x) {
+      input_tokens_ptr[offset + i] = 0;
+      input_positions_ptr[offset + i] = 0;
+      slot_mapping_ptr[offset + i] = -1;
+    }
+  }
+
   int num_query_blocks = div_ceil(num_queries, num_threads);
 
   if (blockIdx.x >= num_query_blocks) {

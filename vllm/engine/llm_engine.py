@@ -25,6 +25,7 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
+from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
@@ -33,6 +34,8 @@ from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
@@ -843,6 +846,9 @@ class LLMEngine:
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
 
+        sampling_params = self._build_logits_processors(
+            sampling_params, lora_request)
+
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
@@ -1104,6 +1110,8 @@ class LLMEngine:
                 update_prefill_num_computed_tokens(seq_group, seq_group_meta,
                                                    len(output),
                                                    is_first_step_output)
+            elif not is_async:
+                seq_group.update_num_computed_tokens(1)
 
             if outputs:
                 for o in outputs:
@@ -1127,8 +1135,16 @@ class LLMEngine:
             else:
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
-                    self.output_processor.process_outputs(
+                    output_token_num = self.output_processor.process_outputs(
                         seq_group, output, is_async)
+                    if self.speculative_config:
+                        # We -1 here because we always
+                        # (w/o speculative decoding) add the number of
+                        # computed tokens by one in the decoding phase.
+                        # Therefore, we remove that one token that
+                        # is already added.
+                        seq_group.update_num_computed_tokens(output_token_num -
+                                                             1)
 
             if seq_group.is_finished():
                 finished_now.append(i)
@@ -1245,11 +1261,12 @@ class LLMEngine:
                     # decodes after the very first step. Therefore,
                     # we skip the update to the num_computed_tokens
                     # here.
-                    pass
+                    seq_group.update_num_computed_tokens(1)
                 else:
                     seq_group.update_num_computed_tokens(
                         seq_group_metadata.token_chunk_size)
-
+            else:
+                seq_group.update_num_computed_tokens(1)
             if seq_group_metadata.do_sample:
                 assert len(sequence_group_outputs.samples) == 1, (
                     "Async output processor expects a single sample"
@@ -1260,7 +1277,6 @@ class LLMEngine:
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
                 seq.append_token_id(sample.output_token, sample.logprobs)
-                seq_group.update_num_computed_tokens(1)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1895,3 +1911,51 @@ class LLMEngine:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def _build_logits_processors(
+            self, sampling_params: SamplingParams,
+            lora_request: Optional[LoRARequest]) -> SamplingParams:
+        """Constructs logits processors based on the guided_decoding,
+        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
+        those fields and adds the constructed logits processors to the
+        logits_processors field. Returns the modified sampling params."""
+
+        logits_processors = []
+        if (guided_decoding := sampling_params.guided_decoding) is not None:
+
+            logger.debug(
+                "Building guided decoding logits processor in "
+                "LLMEngine. Params: %s", guided_decoding)
+
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+            guided_decoding.backend = guided_decoding.backend or \
+                self.decoding_config.guided_decoding_backend
+
+            processor = get_local_guided_decoding_logits_processor(
+                guided_params=guided_decoding, tokenizer=tokenizer)
+            if processor:
+                logits_processors.append(processor)
+
+            # Unset so this doesn't get passed down to the model
+            sampling_params.guided_decoding = None
+
+        if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+
+            processors = get_logits_processors(
+                logit_bias=sampling_params.logit_bias,
+                allowed_token_ids=sampling_params.allowed_token_ids,
+                tokenizer=tokenizer)
+            logits_processors.extend(processors)
+
+            # Unset so these don't get passed down to the model
+            sampling_params.logit_bias = None
+            sampling_params.allowed_token_ids = None
+
+        if logits_processors:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = logits_processors
+            else:
+                sampling_params.logits_processors.extend(logits_processors)
+
+        return sampling_params
