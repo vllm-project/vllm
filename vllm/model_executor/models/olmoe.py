@@ -258,8 +258,8 @@ class OlmoeModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: OlmoeDecoderLayer(config, int(prefix.split(".")[
-                -1]), cache_config, quant_config),
+            lambda prefix: OlmoeDecoderLayer(config, int(
+                prefix.split(".")[-1]), cache_config, quant_config),
             prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
 
