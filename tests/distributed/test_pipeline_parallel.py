@@ -37,16 +37,33 @@ class PPTestSettings:
     @staticmethod
     def detailed(
         *,
+        tp_base: int = 1,
+        pp_base: int = 2,
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(1, 2, eager_mode=False, chunked_prefill=False),
-                ParallelSetup(1, 4, eager_mode=False, chunked_prefill=True),
-                ParallelSetup(1, 4, eager_mode=True, chunked_prefill=False),
-                ParallelSetup(2, 2, eager_mode=False, chunked_prefill=True),
-                ParallelSetup(2, 2, eager_mode=True, chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
+                              eager_mode=False,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
+                              eager_mode=False,
+                              chunked_prefill=True),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
+                              eager_mode=True,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=2 * tp_base,
+                              pp_size=pp_base,
+                              eager_mode=False,
+                              chunked_prefill=True),
+                ParallelSetup(tp_size=2 * tp_base,
+                              pp_size=pp_base,
+                              eager_mode=True,
+                              chunked_prefill=False),
             ],
             distributed_backends=["mp", "ray"],
             trust_remote_code=trust_remote_code,
@@ -56,12 +73,17 @@ class PPTestSettings:
     @staticmethod
     def fast(
         *,
+        tp_base: int = 1,
+        pp_base: int = 2,
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(1, 2, eager_mode=True, chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
+                              eager_mode=True,
+                              chunked_prefill=False),
             ],
             distributed_backends=["mp"],
             trust_remote_code=trust_remote_code,
@@ -88,8 +110,8 @@ GENERATION_MODEL_SETTINGS = {
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "THUDM/chatglm3-6b": PPTestSettings.fast(trust_remote_code=True),
+    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(tp_base=2, trust_remote_code=True),  # noqa: E501
     # TODO: Test on larger GPU
-    # "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     # "databricks/dbrx-instruct": PPTestSettings.fast(),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(trust_remote_code=True),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
@@ -114,8 +136,7 @@ GENERATION_MODEL_SETTINGS = {
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(trust_remote_code=True),
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
-    # TODO: Test on larger GPU
-    # "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(),
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(tp_base=4),
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
@@ -133,15 +154,14 @@ GENERATION_MODEL_SETTINGS = {
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
-    # TODO: Test on larger GPU
-    # "upstage/solar-pro-preview-instruct": PPTestSettings.fast(),
+    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(tp_base=2),
     # FIXME: Cannot load tokenizer in latest transformers version
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
 }
 
 EMBEDDING_MODEL_SETTINGS = {  # type: ignore[var-annotated]
     # [FAST TESTS]
-    # TODO: Implement test
+    # Uses Llama
     # "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
 }
 
