@@ -505,15 +505,18 @@ class OpenAIServingChat(OpenAIServing):
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
                         # only happens if we are NOT using guided decoding
-                        if tool_parser:
+                        if tool_choice_auto:
+                            assert tool_parser is not None
                             index = len(
                                 tool_parser.prev_tool_call_arr) - 1 if len(
                                     tool_parser.prev_tool_call_arr) > 0 else 0
                         else:
                             index = 0
 
-                        if self._should_check_for_unstreamed_tool_arg_tokens(
-                                delta_message, output) and tool_parser:
+                        if tool_choice_auto and \
+                            self._should_check_for_unstreamed_tool_arg_tokens(
+                                delta_message, output):
+                            assert tool_parser is not None
                             # get the expected call based on partial JSON
                             # parsing which "autocompletes" the JSON
                             expected_call = json.dumps(
