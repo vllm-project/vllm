@@ -42,22 +42,42 @@ def test_bad_nullable_kvs(arg):
         nullable_kvs(arg)
 
 
-@pytest.mark.parametrize(("arg", "expected"), [
-    (None, None),
-    ("{}", {}),
-    ('{"num_crops": 4}', {
-        "num_crops": 4
-    }),
-    ('{"foo": {"bar": "baz"}}', {
-        "foo": {
-            "bar": "baz"
-        }
-    }),
+# yapf: disable
+@pytest.mark.parametrize(("arg", "expected", "option"), [
+    (None, None, "mm-processor-kwargs"),
+    ("{}", {}, "mm-processor-kwargs"),
+    (
+        '{"num_crops": 4}',
+        {
+            "num_crops": 4
+        },
+        "mm-processor-kwargs"
+    ),
+    (
+        '{"foo": {"bar": "baz"}}',
+        {
+            "foo":
+            {
+                "bar": "baz"
+            }
+        },
+        "mm-processor-kwargs"
+    ),
+    (
+        '{"cast_logits_dtype":"bfloat16","sequence_parallel_norm":true,"sequence_parallel_norm_threshold":2048}',
+        {
+            "cast_logits_dtype": "bfloat16",
+            "sequence_parallel_norm": True,
+            "sequence_parallel_norm_threshold": 2048,
+        },
+        "override-neuron-config"
+    ),
 ])
-def test_mm_processor_kwargs_prompt_parser(arg, expected):
+# yapf: enable
+def test_composite_arg_parser(arg, expected, option):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
     else:
-        args = parser.parse_args(["--mm-processor-kwargs", arg])
-    assert args.mm_processor_kwargs == expected
+        args = parser.parse_args([f"--{option}", arg])
+    assert getattr(args, option.replace("-", "_")) == expected
