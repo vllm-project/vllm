@@ -35,7 +35,7 @@ class BlockSpaceManager(ABC):
         if version == "v2":
             from vllm.core.block_manager_v2 import BlockSpaceManagerV2
             return BlockSpaceManagerV2
-        
+
         if version == "embedding":
             from vllm.core.embedding_model_block_manager import (
                 EmbeddingModelBlockSpaceManager)
