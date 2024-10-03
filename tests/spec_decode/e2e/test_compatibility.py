@@ -100,6 +100,7 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
     "model": "JackFram/llama-68m",
     "speculative_model": "JackFram/llama-68m",
     "num_speculative_tokens": 5,
+    "use_v2_block_manager": False,
 }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
