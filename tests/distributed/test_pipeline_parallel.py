@@ -179,7 +179,7 @@ MULTIMODAL_MODEL_SETTINGS = {
     # TODO: Implement PP
     # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
     "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2, tokenizer_mode="mistral"),
+    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2, tokenizer_mode="mistral"),  # noqa: E501
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(trust_remote_code=True),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
     "fixie-ai/ultravox-v0_3": PPTestSettings.fast(),
