@@ -182,10 +182,7 @@ def merge_multimodal_embeddings(input_ids: torch.Tensor,
 
 class LayerFn(Protocol):
 
-    def __call__(
-        self,
-        prefix="",
-    ) -> torch.nn.Module:
+    def __call__(self, prefix: str) -> torch.nn.Module:
         ...
 
 
