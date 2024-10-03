@@ -550,3 +550,49 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             sampling_metadata=model_input.sampling_metadata,
         )
         return [output]
+
+
+class CPUEncoderDecoderModelRunner(CPUModelRunner):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        load_config: LoadConfig,
+        lora_config: Optional[LoRAConfig],
+        kv_cache_dtype: Optional[str] = "auto",
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        is_driver_worker: bool = False,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(model_config, parallel_config, scheduler_config,
+                         device_config, cache_config, load_config, lora_config,
+                         kv_cache_dtype, prompt_adapter_config, is_driver_worker,
+                         *args, **kwargs)
+
+    def load_model(self) -> None:
+        raise NotImplementedError(
+            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
+
+    def prepare_model_input(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None
+    ) -> ModelInputForCPUWithSamplingMetadata:
+        raise NotImplementedError(
+            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
+
+    @torch.no_grad()
+    def execute_model(
+        self,
+        model_input: ModelInputForCPUWithSamplingMetadata,
+        kv_caches: List[torch.Tensor],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        num_steps: int = 1,
+    ) -> Optional[List[SamplerOutput]]:
+        raise NotImplementedError(
+            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
