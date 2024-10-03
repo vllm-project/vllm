@@ -102,7 +102,7 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
     "num_speculative_tokens": 5,
 }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [{"use_v2_block_manager": False}])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_xfail_block_manager_v1(test_llm_generator):
     """Verify that speculative decoding with block manager v1 fails.
