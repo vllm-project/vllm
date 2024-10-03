@@ -55,7 +55,7 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
 
-        if envs.VLLM_TEST_COMPILE_NO_CUSTOM_OPS:
+        if envs.VLLM_TEST_TORCH_COMPILE_LEVEL >= 2:
             return self.forward_native
 
         if is_hip():
