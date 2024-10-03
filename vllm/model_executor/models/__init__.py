@@ -2,6 +2,7 @@ import importlib
 import string
 import subprocess
 import sys
+import uuid
 from functools import lru_cache, partial
 from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
@@ -236,8 +237,10 @@ class ModelRegistry:
         """
         Run a boolean function against a model and return the result.
 
-        If the model is not imported, the function is run inside a subprocess to
-        avoid initializing CUDA for the main program.
+        If the model is not found, returns the provided default value.
+
+        If the model is not already imported, the function is run inside a
+        subprocess to avoid initializing CUDA for the main program.
         """
         model = ModelRegistry._try_get_model_stateless(model_arch)
         if model is not None:
@@ -257,15 +260,24 @@ class ModelRegistry:
             raise ValueError(f"Unsafe module name detected for {func}")
         if any(s not in valid_name_characters for s in func.__name__):
             raise ValueError(f"Unsafe class name detected for {func}")
+        
+        err_id = uuid.uuid4()
 
         stmts = ";".join([
             f"from {module_name} import {cls_name}",
             f"from {func.__module__} import {func.__name__}",
-            f"assert {func.__name__}({cls_name})",
+            f"assert {func.__name__}({cls_name}), '{err_id}'",
         ])
 
         result = subprocess.run([sys.executable, "-c", stmts],
                                 capture_output=True)
+
+        err_lines = [line.decode() for line in result.stderr.splitlines()]
+        if err_lines and err_lines[-1] != f"AssertionError: {err_id}":
+            err_str = "\n".join(err_lines)
+            raise RuntimeError(
+                "An unexpected error occurred while importing the model in "
+                f"another process. Error log:\n{err_str}")
 
         return result.returncode == 0
 
