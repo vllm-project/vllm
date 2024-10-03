@@ -118,7 +118,9 @@ steps:
   - vllm/core/
   - tests/distributed
   - tests/spec_decode/e2e/test_integration_dist_tp4
+  - tests/compile
   commands:
+  - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
@@ -224,7 +226,7 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_full_graph_smoke.py
+  - pytest -v -s compile/test_basic_correctness.py
 
 - label: "PyTorch Fullgraph Test" # 18min
   source_file_dependencies:
@@ -388,7 +390,7 @@ steps:
   - tests/distributed/
   - vllm/compilation
   commands:
-  - pytest -v -s ./compile/test_full_graph_multi_gpu.py
+  - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus

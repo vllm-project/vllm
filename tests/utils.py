@@ -180,9 +180,24 @@ def compare_two_settings(model: str,
         env1: The first set of environment variables to pass to the API server.
         env2: The second set of environment variables to pass to the API server.
     """
+    compare_all_settings(model, [arg1, arg2], [env1, env2], max_wait_seconds)
+
+
+def compare_all_settings(model: str,
+                         all_args: List[List[str]],
+                         all_envs: List[Optional[Dict[str, str]]],
+                         max_wait_seconds: Optional[float] = None) -> None:
+    """
+    Launch API server with several different sets of arguments/environments
+    and compare the results of the API calls with the first set of arguments.
+    Args:
+        model: The model to test.
+        all_args: A list of argument lists to pass to the API server.
+        all_envs: A list of environment dictionaries to pass to the API server.
+    """
 
     trust_remote_code = "--trust-remote-code"
-    if trust_remote_code in arg1 or trust_remote_code in arg2:
+    if any(trust_remote_code in args for args in all_args):
         tokenizer = AutoTokenizer.from_pretrained(model,
                                                   trust_remote_code=True)
     else:
@@ -190,8 +205,9 @@ def compare_two_settings(model: str,
 
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]
-    results = []
-    for args, env in ((arg1, env1), (arg2, env2)):
+    ref_results: List = []
+    for i, (args, env) in enumerate(zip(all_args, all_envs)):
+        compare_results: List = []
         with RemoteOpenAIServer(model,
                                 args,
                                 env_dict=env,
@@ -202,10 +218,13 @@ def compare_two_settings(model: str,
             models = client.models.list()
             models = models.data
             served_model = models[0]
-            results.append({
-                "test": "models_list",
-                "id": served_model.id,
-                "root": served_model.root,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "models_list",
+                "id":
+                served_model.id,
+                "root":
+                served_model.root,
             })
 
             # test with text prompt
@@ -214,11 +233,15 @@ def compare_two_settings(model: str,
                                                    max_tokens=5,
                                                    temperature=0.0)
 
-            results.append({
-                "test": "single_completion",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "single_completion",
+                "text":
+                completion.choices[0].text,
+                "finish_reason":
+                completion.choices[0].finish_reason,
+                "usage":
+                completion.usage,
             })
 
             # test using token IDs
@@ -229,11 +252,15 @@ def compare_two_settings(model: str,
                 temperature=0.0,
             )
 
-            results.append({
-                "test": "token_ids",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "token_ids",
+                "text":
+                completion.choices[0].text,
+                "finish_reason":
+                completion.choices[0].finish_reason,
+                "usage":
+                completion.usage,
             })
 
             # test seeded random sampling
@@ -243,11 +270,15 @@ def compare_two_settings(model: str,
                                                    seed=33,
                                                    temperature=1.0)
 
-            results.append({
-                "test": "seeded_sampling",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "seeded_sampling",
+                "text":
+                completion.choices[0].text,
+                "finish_reason":
+                completion.choices[0].finish_reason,
+                "usage":
+                completion.usage,
             })
 
             # test seeded random sampling with multiple prompts
@@ -257,7 +288,7 @@ def compare_two_settings(model: str,
                                                    seed=33,
                                                    temperature=1.0)
 
-            results.append({
+            (ref_results if i == 0 else compare_results).append({
                 "test":
                 "seeded_sampling",
                 "text": [choice.text for choice in completion.choices],
@@ -275,10 +306,13 @@ def compare_two_settings(model: str,
                 temperature=0.0,
             )
 
-            results.append({
-                "test": "simple_list",
-                "text0": batch.choices[0].text,
-                "text1": batch.choices[1].text,
+            (ref_results if i == 0 else compare_results).append({
+                "test":
+                "simple_list",
+                "text0":
+                batch.choices[0].text,
+                "text1":
+                batch.choices[1].text,
             })
 
             # test streaming
@@ -294,18 +328,25 @@ def compare_two_settings(model: str,
                 assert len(chunk.choices) == 1
                 choice = chunk.choices[0]
                 texts[choice.index] += choice.text
-            results.append({
+            (ref_results if i == 0 else compare_results).append({
                 "test": "streaming",
                 "texts": texts,
             })
 
-    n = len(results) // 2
-    arg1_results = results[:n]
-    arg2_results = results[n:]
-    for arg1_result, arg2_result in zip(arg1_results, arg2_results):
-        assert arg1_result == arg2_result, (
-            f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
-            f"{arg1_result=} != {arg2_result=}")
+            if i > 0:
+                # if any setting fails, raise an error early
+                ref_args = all_args[0]
+                ref_envs = all_envs[0]
+                compare_args = all_args[i]
+                compare_envs = all_envs[i]
+                for ref_result, compare_result in zip(ref_results,
+                                                      compare_results):
+                    assert ref_result == compare_result, (
+                        f"Results for {model=} are not the same.\n"
+                        f"{ref_args=} {ref_envs=}\n"
+                        f"{compare_args=} {compare_envs=}\n"
+                        f"{ref_result=}\n"
+                        f"{compare_result=}\n")
 
 
 def init_test_distributed_environment(
