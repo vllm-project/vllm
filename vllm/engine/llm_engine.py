@@ -349,7 +349,8 @@ class LLMEngine:
             observability_config=self.observability_config,
         )
 
-        self._initialize_kv_caches()
+        if not self.model_config.embedding_mode:
+            self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -1878,9 +1879,6 @@ class LLMEngine:
 
     def is_encoder_decoder_model(self):
         return self.input_preprocessor.is_encoder_decoder_model()
-
-    def is_encoder_model(self):
-        return self.model_config.is_encoder_model
 
     def is_embedding_model(self):
         return self.model_config.is_embedding_model
