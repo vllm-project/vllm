@@ -1,5 +1,5 @@
 import functools
-from typing import Callable, List, Optional
+from typing import Callable, List
 
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
@@ -106,7 +106,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             # was already appended, so we only need to do the rest of the
             # postprocessor: Detokenization + stopping logic
             self._process_decode_and_stop(seq, sequence_group.sampling_params)
-            return None
         else:
             # Standard multi-step case
 
@@ -122,8 +121,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             ]
             assert valid_samples
 
-            return self._process_seq_outputs(seq, valid_samples,
-                                             sequence_group.sampling_params)
+            self._process_seq_outputs(seq, valid_samples,
+                                      sequence_group.sampling_params)
 
     def _process_decode_and_stop(self, seq: Sequence,
                                  sampling_params: SamplingParams) -> None:
@@ -141,7 +140,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def _process_seq_outputs(self, seq: Sequence,
                              valid_samples: List[SequenceOutput],
-                             sampling_params: SamplingParams) -> int:
+                             sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
 

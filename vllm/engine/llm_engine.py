@@ -966,8 +966,7 @@ class LLMEngine:
         return
 
     def _update_num_computed_tokens_for_multi_step_prefill(
-            self,
-            seq_group: SequenceGroup,
+            self, seq_group: SequenceGroup,
             seq_group_meta: SequenceGroupMetadata,
             is_first_step_output: Optional[bool]):
         """
@@ -990,19 +989,20 @@ class LLMEngine:
             # the tokens are appended to the sequence.
             return
 
-        do_update: bool = False 
+        do_update: bool = False
         if self.scheduler_config.chunked_prefill_enabled:
             # In multi-step + chunked-prefill case, the prompt sequences
             # that are scheduled are fully processed in the first step.
-            do_update = is_first_step_output is None or is_first_step_output == True
+            do_update = is_first_step_output is None or is_first_step_output
         else:
             # Normal multi-step decoding case. In this case prompt-sequences
             # are actually single-stepped. Always update in this case.
             assert seq_group.state.num_steps == 1
-            do_update = True 
+            do_update = True
 
         if do_update:
-            seq_group.update_num_computed_tokens(seq_group_meta.token_chunk_size)
+            seq_group.update_num_computed_tokens(
+                seq_group_meta.token_chunk_size)
 
     def _process_model_outputs(self,
                                ctx: SchedulerContext,
@@ -1116,7 +1116,7 @@ class LLMEngine:
             else:
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
-                    output_token_num = self.output_processor.process_outputs(
+                    self.output_processor.process_outputs(
                         seq_group, output, is_async)
 
             if seq_group.is_finished():
@@ -1246,7 +1246,8 @@ class LLMEngine:
                 seq = seq_group.seqs[0]
 
                 if self.scheduler_config.is_multi_step:
-                    is_prefill_append = seq.data.get_num_uncomputed_tokens() == 0
+                    is_prefill_append = seq.data.get_num_uncomputed_tokens(
+                    ) == 0
                     seq.append_token_id(sample.output_token, sample.logprobs)
                     if not is_prefill_append:
                         seq_group.update_num_computed_tokens(1)
