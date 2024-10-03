@@ -19,7 +19,7 @@ def check_no_caching_or_swa_for_blockmgr_encdec(
     '''
 
     if seq_group.is_encoder_decoder():
-        if hasattr(block_mgr, 'max_block_sliding_window'):
+        if block_mgr.max_block_sliding_window is not None:
             raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
 
         if block_mgr.enable_caching:
