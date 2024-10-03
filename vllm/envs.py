@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
     VLLM_MOE_PADDING: bool = False
     VLLM_FP8_PADDING: bool = True
+    VLLM_NO_TUNED_GEMM: bool = False
 
 
 def get_default_cache_root():
@@ -486,6 +487,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Pad the weight for moe kernel or not
     "VLLM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_FP8_PADDING", "1"))),
+
+    # Not supported by mllama3.2
+    "VLLM_NO_TUNED_GEMM":
+    lambda: bool(int(os.getenv("VLLM_NO_TUNED_GEMM", "0"))),
 }
 
 # end-env-vars-definition

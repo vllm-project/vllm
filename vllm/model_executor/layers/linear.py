@@ -20,6 +20,9 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            RowvLLMParameter)
 from vllm.model_executor.utils import set_weight_attrs
 
+import torch.nn.functional as F
+import vllm.envs as envs
+
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
@@ -131,7 +134,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return tgemm.mm(x, layer.weight, bias)
+        if envs.VLLM_NO_TUNED_GEMM:
+            return F.linear(x, layer.weight, bias)
+        else:
+            return tgemm.mm(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
