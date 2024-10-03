@@ -17,6 +17,8 @@ def compare_embeddings(embeddings1, embeddings2):
         for e1, e2 in zip(embeddings1, embeddings2)
     ]
     return similarities
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models(
