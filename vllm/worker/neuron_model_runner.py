@@ -81,10 +81,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
 
-        # Once NEURON_ON_DEVICE_SAMPLING_DISABLED is set to a non-zero value, 
+        # Once NEURON_ON_DEVICE_SAMPLING_DISABLED is set to a non-zero value,
         # turn off on-device sampling.
-        self._on_device_sampling_disabled = int(os.getenv(
-            "NEURON_ON_DEVICE_SAMPLING_DISABLED", "0"))
+        self._on_device_sampling_disabled = int(
+            os.getenv("NEURON_ON_DEVICE_SAMPLING_DISABLED", "0"))
 
         # NEURON needs to update sampling parameters when request IDs change
         # across batches. This variable stores the previous batch's request IDs
@@ -92,11 +92,12 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self._previous_batch_request_ids: List[str] = []
 
         if not self._on_device_sampling_disabled:
-            logger.warning("On-device sampling is turned on in Neuron by "
-                           "default, only top_k, top_p, and temperature are "
-                           "current supported sampling parameters. To turn off "
-                           "the on-device sampling, please set the environment "
-                           "variable NEURON_ON_DEVICE_SAMPLING_DISABLED=1.")
+            logger.warning(
+                "On-device sampling is turned on in Neuron by default, only "
+                "top_k, top_p, and temperature are current supported sampling "
+                "parameters. To turn off the on-device sampling, please set "
+                "the environment variable NEURON_ON_DEVICE_SAMPLING_DISABLED=1."
+            )
             self.model_config.neuron_sampling_params = GenerationConfig(
                 max_length=self.scheduler_config.max_model_len,
                 do_sample=True,
@@ -322,11 +323,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                          device=self.device),
         )
 
-        # Compute the logits only if the on-device sampling is turned off as 
+        # Compute the logits only if the on-device sampling is turned off as
         # on-device sampling outputs the token ids.
         if self._on_device_sampling_disabled:
             logits = self.model.compute_logits(hidden_states,
-                                           model_input.sampling_metadata)
+                                               model_input.sampling_metadata)
         else:
             logits = hidden_states
 
