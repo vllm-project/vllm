@@ -86,31 +86,3 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
                                       sampling_params)
 
 
-@pytest.mark.parametrize("common_llm_kwargs", [{
-    "model": "JackFram/llama-68m",
-    "speculative_model": "JackFram/llama-68m",
-    "num_speculative_tokens": 5,
-}])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("seed", [1])
-def test_spec_decode_xfail_block_manager_v1(test_llm_generator):
-    """Verify that speculative decoding with block manager v1 fails.
-    """
-    output_len = 128
-    temperature = 0.0
-
-    prompts = [
-        "Hello, my name is",
-    ]
-
-    sampling_params = SamplingParams(
-        max_tokens=output_len,
-        ignore_eos=True,
-        temperature=temperature,
-    )
-
-    with pytest.raises(ValueError,
-                       match="Speculative decoding requires usage of the V2"):
-        get_output_from_llm_generator(test_llm_generator, prompts,
-                                      sampling_params)
