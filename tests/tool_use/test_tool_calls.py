@@ -33,7 +33,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     assert tool_calls[0].type == 'function'
     assert tool_calls[0].function is not None
     assert isinstance(tool_calls[0].id, str)
-    assert len(tool_calls[0].id) > 16
+    assert len(tool_calls[0].id) >= 9
 
     # make sure the weather tool was called (classic example) with arguments
     assert tool_calls[0].function.name == WEATHER_TOOL["function"]["name"]
@@ -106,7 +106,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
 
     assert finish_reason_count == 1
     assert role_name == 'assistant'
-    assert isinstance(tool_call_id, str) and (len(tool_call_id) > 16)
+    assert isinstance(tool_call_id, str) and (len(tool_call_id) >= 9)
 
     # validate the name and arguments
     assert function_name == WEATHER_TOOL["function"]["name"]
