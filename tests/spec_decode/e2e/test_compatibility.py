@@ -84,5 +84,3 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
     with pytest.raises(ValueError, match="cannot be larger than"):
         get_output_from_llm_generator(test_llm_generator, prompts,
                                       sampling_params)
-
-
