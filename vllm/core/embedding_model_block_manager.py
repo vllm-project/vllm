@@ -1,4 +1,4 @@
-from typing import List, Tuple	# TODO: Remove this file if possible.
+from typing import List, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager	
 from vllm.sequence import Sequence, SequenceGroup	
