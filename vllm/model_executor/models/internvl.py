@@ -395,14 +395,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
 
-        vit_hidden_size = config.vision_config.hidden_size
-        llm_hidden_size = config.text_config.hidden_size
-
-        self.mlp1 = nn.Sequential(
-            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio)**2),
-            nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio)**2,
-                      llm_hidden_size), nn.GELU(),
-            nn.Linear(llm_hidden_size, llm_hidden_size))
+        self.mlp1 = self._init_mlp1(config)
 
         self.img_context_token_id = None
         self.make_empty_intermediate_tensors = (
@@ -412,6 +405,18 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             self.sampler = self.language_model.sampler
         else:
             self.sampler = Sampler()
+
+    def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
+        vit_hidden_size = config.vision_config.hidden_size
+        llm_hidden_size = config.text_config.hidden_size
+
+        return nn.Sequential(
+            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio)**2),
+            nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio)**2,
+                      llm_hidden_size),
+            nn.GELU(),
+            nn.Linear(llm_hidden_size, llm_hidden_size),
+        )
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
