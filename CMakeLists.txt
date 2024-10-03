@@ -246,7 +246,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   # Only build marlin if we are building for at least some compatible archs
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.9" ${CUDA_ARCHS})
+  # keep building marlin for 9.0 as there are some group sizes and shapes that
+  # are not supported by machete yet
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.9;9.0" ${CUDA_ARCHS})
   if (MARLIN_ARCHS)
     set(MARLIN_SRCS 
        "csrc/quantization/fp8/fp8_marlin.cu"
@@ -402,7 +404,7 @@ set_gencode_flags_for_srcs(
   CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.9" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.9;9.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
     set(MARLIN_MOE_SRC
         "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
