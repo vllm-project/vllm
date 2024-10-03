@@ -765,7 +765,8 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
             slot_mapping = slot_mapping.flatten()
             attn_metadata.slot_mapping = slot_mapping
 
-        hidden_states = self.model(
+        # directly call `forward` to avoid interference from compilation
+        hidden_states = self.model.forward(
             token_ids,
             position_ids,
             kv_caches,
