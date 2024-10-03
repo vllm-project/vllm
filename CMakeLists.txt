@@ -245,9 +245,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     SRCS "${VLLM_EXT_SRC}"
     CUDA_ARCHS "${CUDA_ARCHS}")
 
-  # Only build marlin if we are building for at least some compatible archs
-  # keep building marlin for 9.0 as there are some group sizes and shapes that
-  # are not supported by machete yet
+  # Only build Marlin kernels if we are building for at least some compatible archs.
+  # Keep building Marlin for 9.0 as there are some group sizes and shapes that
+  # are not supported by Machete yet.
   cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.9;9.0" ${CUDA_ARCHS})
   if (MARLIN_ARCHS)
     set(MARLIN_SRCS 
