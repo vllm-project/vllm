@@ -45,7 +45,6 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -59,7 +58,7 @@ from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import is_pp_missing_parameter
 
 _KEYS_TO_MODIFY_MAPPING = {
@@ -338,7 +337,7 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
     return MultiModalInputs(batch_data)
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.

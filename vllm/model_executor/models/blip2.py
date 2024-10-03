@@ -19,7 +19,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (group_weights_with_prefix, init_vllm_registered_model,
                     is_pp_missing_parameter, merge_multimodal_embeddings)
 
@@ -475,7 +475,7 @@ def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_blip2_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_blip2)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
-class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self,
                  config: Blip2Config,

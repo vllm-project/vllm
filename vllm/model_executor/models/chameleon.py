@@ -33,7 +33,7 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import print_warning_once
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
@@ -909,7 +909,8 @@ class ChameleonModel(nn.Module):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_chameleon_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_chameleon)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_chameleon)
-class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal):
+class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                        SupportsPP):
 
     def __init__(
         self,

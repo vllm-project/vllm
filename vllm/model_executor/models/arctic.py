@@ -18,8 +18,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig, DeepSpeedFPParameter)
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -32,6 +31,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.arctic import ArcticConfig
 
+from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
@@ -411,7 +411,7 @@ class ArcticModel(nn.Module):
         return hidden_states
 
 
-class ArcticForCausalLM(nn.Module):
+class ArcticForCausalLM(nn.Module, SupportsPP):
 
     def __init__(self,
                  config: ArcticConfig,

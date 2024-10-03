@@ -10,10 +10,11 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
+from .interfaces import SupportsPP
 from .utils import is_pp_missing_parameter
 
 
-class LlamaEmbeddingModel(nn.Module):
+class LlamaEmbeddingModel(nn.Module, SupportsPP):
     """A model that uses Llama with additional embedding functionalities.
 
    This class encapsulates the LlamaModel and provides an interface for
