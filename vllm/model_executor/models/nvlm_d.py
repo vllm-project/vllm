@@ -101,11 +101,10 @@ class NVLMParallelAttention(nn.Module):
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
 
-            q_var = q.transpose(1, 2).flatten(
-                -2, -1)[:, :, :self.embed_dim].pow(2).mean(-1, keepdim=True)
-
-            k_var = k.transpose(1, 2).flatten(
-                -2, -1)[:, :, :self.embed_dim].pow(2).mean(-1, keepdim=True)
+            q_var = q.flatten(-2, -1)[:, :, :self.embed_dim].pow(2).mean(
+                -1, keepdim=True)
+            k_var = k.flatten(-2, -1)[:, :, :self.embed_dim].pow(2).mean(
+                -1, keepdim=True)
 
             q = self.q_norm.forward_native(q.flatten(-2, -1),
                                            variance=q_var).view(
@@ -167,11 +166,10 @@ class NVLMSdpaAttention(nn.Module):
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
 
-            q_var = q.transpose(1, 2).flatten(
-                -2, -1)[:, :, :self.embed_dim].pow(2).mean(-1, keepdim=True)
-
-            k_var = k.transpose(1, 2).flatten(
-                -2, -1)[:, :, :self.embed_dim].pow(2).mean(-1, keepdim=True)
+            q_var = q.flatten(-2, -1)[:, :, :self.embed_dim].pow(2).mean(
+                -1, keepdim=True)
+            k_var = k.flatten(-2, -1)[:, :, :self.embed_dim].pow(2).mean(
+                -1, keepdim=True)
 
             q = self.q_norm.forward_native(q.flatten(-2, -1),
                                            variance=q_var).view(
