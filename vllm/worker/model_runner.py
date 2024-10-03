@@ -24,6 +24,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
+from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -1499,7 +1500,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
-                    graph_runner.capture(**capture_inputs)
+                    with set_forward_context(attn_metadata):
+                        graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
@@ -1641,15 +1643,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-        hidden_or_intermediate_states = model_executable(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=model_input.attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                         device=self.device),
-            **seqlen_agnostic_kwargs)
+        with set_forward_context(model_input.attn_metadata):
+            hidden_or_intermediate_states = model_executable(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                kv_caches=kv_caches,
+                attn_metadata=model_input.attn_metadata,
+                intermediate_tensors=intermediate_tensors,
+                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                             device=self.device),
+                **seqlen_agnostic_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
