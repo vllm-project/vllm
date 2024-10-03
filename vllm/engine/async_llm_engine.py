@@ -20,6 +20,8 @@ from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
@@ -363,11 +365,18 @@ class _AsyncLLMEngine(LLMEngine):
                 self.cached_scheduler_outputs[
                     virtual_engine] = SchedulerOutputState()
 
+            # is_first_step_output is True only when the num_steps of all
+            # the sequences are 1. When the num_steps > 1,
+            # multi_step_model_runner does the first-step output append.
+            is_first_step_output: bool = False if not seq_group_metadata_list \
+                else seq_group_metadata_list[0].state.num_steps == 1
+
             ctx.append_output(outputs=outputs,
                               seq_group_metadata_list=seq_group_metadata_list,
                               scheduler_outputs=scheduler_outputs,
                               is_async=allow_async_output_proc,
-                              is_last_step=True)
+                              is_last_step=True,
+                              is_first_step_output=is_first_step_output)
 
             if outputs and allow_async_output_proc:
                 assert len(
@@ -413,6 +422,7 @@ class _AsyncLLMEngine(LLMEngine):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         ...
 
@@ -426,6 +436,7 @@ class _AsyncLLMEngine(LLMEngine):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         ...
 
@@ -442,6 +453,7 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request: Optional[LoRARequest] = None,
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            priority: int = 0,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -453,6 +465,9 @@ class _AsyncLLMEngine(LLMEngine):
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+        if priority != 0 and not self.scheduler_config.policy == "priority":
+            raise ValueError(f"Got priority {priority} but "
+                             "Priority scheduling is not enabled.")
         if arrival_time is None:
             arrival_time = time.time()
 
@@ -464,6 +479,18 @@ class _AsyncLLMEngine(LLMEngine):
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
 
+        if isinstance(params, SamplingParams) and \
+            params.guided_decoding is not None:
+            # Guided decoding has an async implementation for building logits
+            # processors in a separate threadpool.
+            # We want to invoke that here instead of using the blocking
+            # implementation in the LLMEngine
+            params = await build_guided_decoding_logits_processor_async(
+                sampling_params=params,
+                tokenizer=self.get_tokenizer(lora_request),
+                default_guided_backend=self.decoding_config.
+                guided_decoding_backend)
+
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
@@ -472,12 +499,43 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
+            priority=priority,
         )
 
     async def check_health_async(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()
         self.model_executor.check_health()
+
+
+async def build_guided_decoding_logits_processor_async(
+        sampling_params: SamplingParams, tokenizer: AnyTokenizer,
+        default_guided_backend: str) -> SamplingParams:
+    """Constructs logits processors based on the guided_decoding,
+    logits_bias, and allowed_token_ids fields in sampling_params. Deletes
+    those fields and adds the constructed logits processors to the
+    logits_processors field. Modifies sampling params in-place and returns
+    the modified sampling params."""
+    if (guided_decoding := sampling_params.guided_decoding) is None:
+        return sampling_params
+
+    logger.debug("Building guided decoding logits processor. "
+                 "Params: %s", guided_decoding)
+
+    guided_decoding.backend = guided_decoding.backend or default_guided_backend
+
+    processor = await get_guided_decoding_logits_processor(
+        guided_params=guided_decoding, tokenizer=tokenizer)
+
+    if processor:
+        if sampling_params.logits_processors is None:
+            sampling_params.logits_processors = []
+        sampling_params.logits_processors.append(processor)
+
+    # Unset guided decoding params after constructing the lp from them
+    sampling_params.guided_decoding = None
+
+    return sampling_params
 
 
 class AsyncLLMEngine:
@@ -822,6 +880,7 @@ class AsyncLLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> Coroutine[None, None, AsyncGenerator[Union[
             RequestOutput, EmbeddingRequestOutput], None]]:
         ...
@@ -836,6 +895,7 @@ class AsyncLLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> Coroutine[None, None, AsyncGenerator[Union[
             RequestOutput, EmbeddingRequestOutput], None]]:
         ...
@@ -853,6 +913,7 @@ class AsyncLLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
         *,
         inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
@@ -870,6 +931,11 @@ class AsyncLLMEngine:
                     "error that caused the background loop to stop "
                     "(AsyncEngineDeadError).")
 
+        if (priority != 0
+                and not self.engine.scheduler_config.policy == "priority"):
+            raise ValueError(f"Got priority {priority} but "
+                             "Priority scheduling is not enabled.")
+
         stream = self._request_tracker.add_request(
             request_id,
             verbose=self.log_requests,
@@ -878,7 +944,9 @@ class AsyncLLMEngine:
             arrival_time=arrival_time or time.time(),
             lora_request=lora_request,
             trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+            priority=priority,
+        )
 
         return stream.generator()
 
@@ -889,7 +957,8 @@ class AsyncLLMEngine:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
@@ -906,6 +975,8 @@ class AsyncLLMEngine:
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
+            priority: The priority of the request.
+                Only applicable with priority scheduling.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine
@@ -961,6 +1032,7 @@ class AsyncLLMEngine:
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
+                priority=priority,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
 
@@ -971,6 +1043,7 @@ class AsyncLLMEngine:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         """Generate outputs for a request from an embedding model.
 
@@ -985,6 +1058,8 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
+            priority: The priority of the request.
+                Only applicable with priority scheduling.
 
         Yields:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
@@ -1037,6 +1112,7 @@ class AsyncLLMEngine:
                 pooling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
+                priority=priority,
         ):
             yield LLMEngine.validate_output(output, EmbeddingRequestOutput)
 

@@ -1,9 +1,12 @@
 import json
 import re
+from random import choices
+from string import ascii_letters, digits
 from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
+from pydantic import Field
 
 from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -18,6 +21,19 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+ALPHANUMERIC = ascii_letters + digits
+
+
+class MistralToolCall(ToolCall):
+    id: str = Field(
+        default_factory=lambda: MistralToolCall.generate_random_id())
+
+    @staticmethod
+    def generate_random_id():
+        # Mistral Tool Call Ids must be alphanumeric with a maximum length of 9.
+        # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
+        return "".join(choices(ALPHANUMERIC, k=9))
 
 
 class MistralToolParser(ToolParser):
@@ -71,8 +87,8 @@ class MistralToolParser(ToolParser):
             # load the JSON, and then use it to build the Function and
             # Tool Call
             function_call_arr = json.loads(raw_tool_call)
-            tool_calls: List[ToolCall] = [
-                ToolCall(
+            tool_calls: List[MistralToolCall] = [
+                MistralToolCall(
                     type="function",
                     function=FunctionCall(
                         name=raw_function_call["name"],
