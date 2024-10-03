@@ -1,45 +1,36 @@
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Type, cast
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalInputs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.worker.enc_dec_model_runner import (EncoderDecoderModelInput,
-                                              EncoderDecoderModelRunnerBase)
-from vllm.worker.model_runner import ModelInputForGPUBuilder
+from vllm.worker.model_runner import (GPUModelRunnerBase, ModelInputForGPU,
+                                      ModelInputForGPUBuilder)
 
 logger = init_logger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
-class EmbeddingModelInput(EncoderDecoderModelInput):
+class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
     """
     Used by the EmbeddingModelRunner.
     """
     pooling_metadata: Optional["PoolingMetadata"] = None
 
-    @classmethod
-    def from_broadcasted_tensor_dict(
-        cls,
-        tensor_dict: Dict[str, Any],
-        attn_backend: Optional["AttentionBackend"] = None,
-    ) -> "EmbeddingModelInput":
-        return cast(
-            EmbeddingModelInput,
-            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
-
-class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
-    _model_input_cls: Type[EmbeddingModelInput] = EmbeddingModelInput
+class EmbeddingModelRunner(
+        GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
+    _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
+        ModelInputForGPUWithPoolingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
     def __init__(
@@ -71,7 +62,7 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: EmbeddingModelInput,
+        model_input: ModelInputForGPUWithPoolingMetadata,
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
@@ -121,10 +112,6 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
             model_input.input_tokens,
             "positions":
             model_input.input_positions,
-            "encoder_input_ids":
-            model_input.encoder_input_tokens,
-            "encoder_positions":
-            model_input.encoder_input_positions,
             "kv_caches":
             kv_caches,
             "attn_metadata":
@@ -133,7 +120,8 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
                                          device=self.device),
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        with set_forward_context(model_input.attn_metadata):
+            hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.
         if not self.is_driver_worker:
@@ -145,8 +133,10 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> EmbeddingModelInput:
-        return EmbeddingModelInput.from_broadcasted_tensor_dict(
+            self,
+            tensor_dict: Dict[str,
+                              Any]) -> ModelInputForGPUWithPoolingMetadata:
+        return ModelInputForGPUWithPoolingMetadata.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
         )
@@ -156,34 +146,14 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
-    ) -> EmbeddingModelInput:
+    ) -> ModelInputForGPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
-
-        (
-            attn_metadata,
-            encoder_input_tokens_tensor,
-            encoder_input_positions_tensor,
-            encoder_seq_lens,
-        ) = super()._prepare_encoder_model_input_tensors(
-            seq_group_metadata_list, model_input)
-
-        model_input = dataclasses.replace(
-            model_input,
-            attn_metadata=attn_metadata,
-            encoder_input_tokens=encoder_input_tokens_tensor,
-            encoder_input_positions=encoder_input_positions_tensor,
-        )
-
         # Prepare PoolingMetadata.
-        seq_lens = model_input.seq_lens\
-            if not self.model_config.is_encoder_model \
-            else encoder_seq_lens
-        assert seq_lens is not None, "model is_encoder_model: "\
-                                     f"{self.model_config.is_encoder_model}"
+        assert model_input.seq_lens is not None
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
-                                                 seq_lens)
+                                                 model_input.seq_lens)
 
         return dataclasses.replace(model_input,
                                    pooling_metadata=pooling_metadata)
@@ -195,7 +165,7 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
     ) -> PoolingMetadata:
         """Prepare PoolingMetadata for the sequence group metadata list."""
         seq_groups: List[Tuple[List[int], PoolingParams]] = []
-        for seq_group_metadata in seq_group_metadata_list:
+        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             pooling_params = seq_group_metadata.pooling_params
             seq_groups.append((seq_ids, pooling_params))
