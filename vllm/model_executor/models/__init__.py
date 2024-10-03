@@ -260,7 +260,7 @@ class ModelRegistry:
             raise ValueError(f"Unsafe module name detected for {func}")
         if any(s not in valid_name_characters for s in func.__name__):
             raise ValueError(f"Unsafe class name detected for {func}")
-        
+
         err_id = uuid.uuid4()
 
         stmts = ";".join([
