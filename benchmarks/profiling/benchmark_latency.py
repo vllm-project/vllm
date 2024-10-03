@@ -9,7 +9,6 @@ from typing import List, Optional
 
 import numpy as np
 import torch
-from rpdTracerControl import rpdTracerControl as rpd
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
@@ -24,6 +23,7 @@ def main(args: argparse.Namespace):
 
     @contextmanager
     def rpd_profiler_context():
+        from rpdTracerControl import rpdTracerControl as rpd
         llm.start_profile()
         yield
         llm.stop_profile()

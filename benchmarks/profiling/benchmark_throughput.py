@@ -9,7 +9,6 @@ from typing import List, Optional, Tuple
 
 import torch
 import uvloop
-from rpdTracerControl import rpdTracerControl as rpd
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
@@ -98,6 +97,7 @@ def run_vllm(
 
     @contextmanager
     def rpd_profiler_context():
+        from rpdTracerControl import rpdTracerControl as rpd
         llm.start_profile()
         yield
         llm.stop_profile()
