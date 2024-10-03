@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
-    VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
@@ -202,18 +201,19 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_DEPRECATED_BEAM_SEARCH":
     lambda: os.environ.get("VLLM_ALLOW_DEPRECATED_BEAM_SEARCH", "0") == "1",
 
-    # Internal flag to enable Dynamo graph capture
-    "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
-    lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
+    # torch.compile optimization level
+    # 0: no optimization (don't use torch.compile)
+    # 1: capture the graph, run in eager mode (seconds of compilation time)
+    # 2: capture the graph, compile with inductor (minutes of compilation time)
+    # 3: capture the graph, compile with inductor max-autotune (dozens of minutes of compilation time) # noqa
+    "VLLM_TEST_TORCH_COMPILE_LEVEL":
+    lambda: int(os.environ.get("VLLM_TEST_TORCH_COMPILE_LEVEL", "0")),
+
+    # Internal flag for Dynamo testing
     "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
     lambda:
     (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
      ("true", "1")),
-
-    # Internal flag to control whether we use custom op,
-    # or use the native pytorch implementation
-    "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
-    lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
@@ -302,11 +302,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
     lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
-
-    # OpenVINO device selection
-    # default is CPU
-    "VLLM_OPENVINO_DEVICE":
-    lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
     # default is 4GB
