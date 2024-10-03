@@ -38,6 +38,13 @@ except (ImportError, OSError):
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
 
+try:
+    from fastsafetensors import SafeTensorsFileLoader, SingleGroup
+except ImportError:
+    fastsafetensors = PlaceholderModule("fastsafetensors")
+    SafeTensorsFileLoader = fastsafetensors.placeholder_attr("SafeTensorsFileLoader")
+    SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
+
 logger = init_logger(__name__)
 
 # use system-level temp directory for file locks, so that multiple users
@@ -446,6 +453,43 @@ def runai_safetensors_weights_iterator(
         ):
             streamer.stream_file(st_file)
             yield from streamer.get_tensors()
+
+
+def fastsafetensors_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:    
+    """Iterate over the weights in the model safetensor files 
+    using fastsafetensor library."""    
+    enable_tqdm = not torch.distributed.is_initialized(
+    ) or torch.distributed.get_rank() == 0
+
+    if torch.distributed.is_initialized():
+        pg = torch.distributed.group.WORLD
+    else:
+        pg = SingleGroup()
+    
+    device = torch.device(f'cuda:{pg.rank()}')
+    weight_files_sub_lists = [
+        hf_weights_files[i:i + pg.size()]
+        for i in range(0, len(hf_weights_files), pg.size())
+    ]
+    
+    for f_list in tqdm(
+            weight_files_sub_lists,
+            desc="Loading safetensors using Fastsafetensor loader",
+            disable=not enable_tqdm,
+            bar_format=_BAR_FORMAT,
+    ):    
+        loader = SafeTensorsFileLoader(pg, device)
+        rank_file_map = {i: [f] for i, f in enumerate(f_list)}
+        loader.add_filenames(rank_file_map)
+        fb = loader.copy_files_to_device()
+        keys = list(fb.key_to_rank_lidx.keys())
+        for k in keys:
+            t = fb.get_tensor(k)
+            yield k, t
+        fb.close()
+        loader.close()
 
 
 def pt_weights_iterator(
