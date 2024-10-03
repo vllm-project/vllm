@@ -10,8 +10,6 @@ client = OpenAI(
     base_url=openai_api_base,
 )
 
-from openai import NotGiven
-
 models = client.models.list()
 model = models.data[0].id
 
@@ -21,8 +19,6 @@ responses = client.embeddings.create(
         "The best thing about vLLM is that it supports many different models"
     ],
     model=model,
-    encoding_format="float",
-    dimensions=NotGiven(),
 )
 
 for data in responses.data:
