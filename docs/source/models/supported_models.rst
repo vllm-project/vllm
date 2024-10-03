@@ -74,7 +74,7 @@ Decoder-only Language Models
     - EXAONE-3
     - :code:`LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc.
     - ✅︎
-    - 
+    - ✅︎
   * - :code:`FalconForCausalLM`
     - Falcon
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
@@ -175,15 +175,15 @@ Decoder-only Language Models
     - :code:`nvidia/Minitron-8B-Base`, :code:`mgoin/Nemotron-4-340B-Base-hf-FP8`, etc.
     - ✅︎
     - ✅︎
-  * - :code:`OLMoEForCausalLM`
-    - OLMoE
-    - :code:`allenai/OLMoE-1B-7B-0924`, :code:`allenai/OLMoE-1B-7B-0924-Instruct`, etc.
-    -
-    - 
   * - :code:`OLMoForCausalLM`
     - OLMo
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
     -
+    - ✅︎
+  * - :code:`OLMoEForCausalLM`
+    - OLMoE
+    - :code:`allenai/OLMoE-1B-7B-0924`, :code:`allenai/OLMoE-1B-7B-0924-Instruct`, etc.
+    - ✅︎
     - ✅︎
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
@@ -248,8 +248,8 @@ Decoder-only Language Models
   * - :code:`SolarForCausalLM`
     - Solar Pro
     - :code:`upstage/solar-pro-preview-instruct`, etc.
-    -
-    - 
+    - ✅︎
+    - ✅︎
   * - :code:`XverseForCausalLM`
     - Xverse
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.

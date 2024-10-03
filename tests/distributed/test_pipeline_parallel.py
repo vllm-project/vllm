@@ -78,7 +78,7 @@ class PPTestSettings:
 # yapf: disable
 GENERATION_MODEL_SETTINGS = {
     # [DETAILED TESTS]
-    # "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
+    "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
     # [FAST TESTS]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
@@ -94,8 +94,7 @@ GENERATION_MODEL_SETTINGS = {
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(trust_remote_code=True),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
     "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    # TODO: Implement PP
-    # "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct": PPTestSettings.fast(),
+    "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct": PPTestSettings.fast(),
     "tiiuae/falcon-7b": PPTestSettings.fast(),
     "google/gemma-2b": PPTestSettings.fast(),
     "google/gemma-2-9b": PPTestSettings.fast(),
@@ -119,8 +118,7 @@ GENERATION_MODEL_SETTINGS = {
     # "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(),
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
-    # TODO: Implement PP
-    # "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
+    "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
@@ -135,7 +133,7 @@ GENERATION_MODEL_SETTINGS = {
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
-    # TODO: Implement PP
+    # TODO: Test on larger GPU
     # "upstage/solar-pro-preview-instruct": PPTestSettings.fast(),
     # FIXME: Cannot load tokenizer
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
