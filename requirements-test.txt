@@ -10,7 +10,6 @@ pytest-shard
 awscli
 einops # required for MPT, qwen-vl and Mamba
 httpx
-modelscope # required for modelscope tests
 librosa # required for audio tests
 opencv-python # required for video tests
 peft
