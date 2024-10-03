@@ -214,7 +214,7 @@ Decoder-only Language Models
     - Phi-3.5-MoE
     - :code:`microsoft/Phi-3.5-MoE-instruct`, etc.
     - ✅︎
-    - 
+    - ✅︎
   * - :code:`PersimmonForCausalLM`
     - Persimmon
     - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.

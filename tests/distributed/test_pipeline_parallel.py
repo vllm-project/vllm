@@ -125,7 +125,7 @@ GENERATION_MODEL_SETTINGS = {
     "microsoft/phi-2": PPTestSettings.fast(),
     "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    # TODO: Implement PP
+    # FIXME: https://github.com/vllm-project/vllm/issues/8553
     # "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
@@ -135,7 +135,7 @@ GENERATION_MODEL_SETTINGS = {
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
     # TODO: Test on larger GPU
     # "upstage/solar-pro-preview-instruct": PPTestSettings.fast(),
-    # FIXME: Cannot load tokenizer
+    # FIXME: Cannot load tokenizer in latest transformers version
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
 }
 
