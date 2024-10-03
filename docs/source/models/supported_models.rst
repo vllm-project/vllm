@@ -48,7 +48,7 @@ Decoder-only Language Models
   * - :code:`CohereForCausalLM`
     - Command-R
     - :code:`CohereForAI/c4ai-command-r-v01`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`DbrxForCausalLM`
     - DBRX
@@ -148,12 +148,12 @@ Decoder-only Language Models
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`MiniCPM3ForCausalLM`
     - MiniCPM3
     - :code:`openbmb/MiniCPM3-4B`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`MistralForCausalLM`
     - Mistral, Mistral-Instruct
@@ -203,7 +203,7 @@ Decoder-only Language Models
   * - :code:`Phi3ForCausalLM`
     - Phi-3
     - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, :code:`microsoft/Phi-3-medium-128k-instruct`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`Phi3SmallForCausalLM`
     - Phi-3-Small
@@ -213,7 +213,7 @@ Decoder-only Language Models
   * - :code:`PhiMoEForCausalLM`
     - Phi-3.5-MoE
     - :code:`microsoft/Phi-3.5-MoE-instruct`, etc.
-    -
+    - ✅︎
     - 
   * - :code:`PersimmonForCausalLM`
     - Persimmon
@@ -253,7 +253,7 @@ Decoder-only Language Models
   * - :code:`XverseForCausalLM`
     - Xverse
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
-    -
+    - ✅︎
     - ✅︎
 
 .. note::
