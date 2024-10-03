@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
@@ -39,6 +40,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.minicpm import (MiniCPMDecoderLayer,
                                                 MiniCPMForCausalLM,
                                                 MiniCPMModel)
+
+from .utils import make_layers
 
 
 class MiniCPM3Attention(nn.Module):
@@ -198,12 +201,18 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
 
 class MiniCPM3Model(MiniCPMModel):
 
-    def _init_layers(self):
-        self.layers = nn.ModuleList([
-            MiniCPM3DecoderLayer(self.config, self.cache_config,
-                                 self.quant_config)
-            for _ in range(self.config.num_hidden_layers)
-        ])
+    def _init_layers(
+        self,
+        prefix: str,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig],
+        quant_config: Optional[QuantizationConfig],
+    ):
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: MiniCPM3DecoderLayer(config, cache_config,
+                                                quant_config),
+            prefix=f"{prefix}.layers")
 
 
 class MiniCPM3ForCausalLM(MiniCPMForCausalLM):

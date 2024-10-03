@@ -243,6 +243,10 @@ class MPTModel(nn.Module):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             hidden_states = self.wte(input_ids)
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+
         for i in range(self.start_layer, self.end_layer):
             block = self.blocks[i]
             hidden_states = block(

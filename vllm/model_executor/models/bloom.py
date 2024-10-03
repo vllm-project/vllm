@@ -273,7 +273,7 @@ class BloomModel(nn.Module):
                 attn_metadata,
             )
         if not get_pp_group().is_last_rank:
-            intermediate_tensors["hidden_states"] = hidden_states
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 

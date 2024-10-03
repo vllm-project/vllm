@@ -328,7 +328,7 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if is_pp_missing_parameter(name, params_dict):
+            if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
 

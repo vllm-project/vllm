@@ -311,12 +311,12 @@ class GraniteModel(nn.Module):
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
             residual = None
+
+            hidden_states *= self.config.embedding_multiplier
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
-        hidden_states *= self.config.embedding_multiplier
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
