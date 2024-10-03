@@ -275,6 +275,11 @@ Multimodal Language Models
     - Image
     - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
     -
+  * - :code:`NVLM_D`
+    - NVLM-D 1.0
+    - Image\ :sup:`E+`
+    - :code:`nvidia/NVLM-D-72B`, etc.
+    - 
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
     - Image\ :sup:`E`

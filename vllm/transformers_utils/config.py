@@ -55,6 +55,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
+    "NVLM_D": InternVLChatConfig,
     "solar": SolarConfig,
     "ultravox": UltravoxConfig,
     "qwen2_vl": Qwen2VLConfig,
