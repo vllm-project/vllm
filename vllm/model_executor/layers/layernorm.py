@@ -27,6 +27,7 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        variance: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
@@ -35,7 +36,9 @@ class RMSNorm(CustomOp):
             x = x + residual.to(torch.float32)
             residual = x.to(orig_dtype)
 
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
+        if variance is None:
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         x = x.to(orig_dtype) * self.weight
         if residual is None:
@@ -47,7 +50,11 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        variance: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if variance is not None:
+            return self.forward_native(x, residual, variance)
+
         from vllm import _custom_ops as ops
 
         if residual is not None:
@@ -71,7 +78,11 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        variance: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if variance is not None:
+            return self.forward_native(x, residual, variance)
+
         from vllm._ipex_ops import ipex_ops as ops
 
         if residual is not None:
