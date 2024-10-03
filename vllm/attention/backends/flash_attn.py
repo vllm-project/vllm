@@ -20,52 +20,8 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
 
-# yapf: disable
-from vllm.vllm_flash_attn import flash_attn_varlen_func
-from vllm.vllm_flash_attn import (
-    flash_attn_with_kvcache as _flash_attn_with_kvcache)
-
-# yapf: enable
-
-
-@torch.library.custom_op("vllm::flash_attn_with_kvcache", mutates_args=[])
-def flash_attn_with_kvcache(
-    decode_query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    cache_seqlens: Optional[torch.Tensor] = None,
-    block_table: Optional[torch.Tensor] = None,
-    softmax_scale: Optional[float] = None,
-    causal: bool = False,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    softcap: float = 0.0,
-) -> torch.Tensor:
-    return _flash_attn_with_kvcache(
-        decode_query,
-        key_cache,
-        value_cache,
-        cache_seqlens=cache_seqlens,
-        block_table=block_table,
-        softmax_scale=softmax_scale,
-        causal=causal,
-        alibi_slopes=alibi_slopes,
-        softcap=softcap,
-    )
-
-
-@flash_attn_with_kvcache.register_fake  # type: ignore
-def _(
-    decode_query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    cache_seqlens: Optional[torch.Tensor] = None,
-    block_table: Optional[torch.Tensor] = None,
-    softmax_scale: Optional[float] = None,
-    causal: bool = False,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    softcap: float = 0.0,
-) -> torch.Tensor:
-    return torch.empty_like(decode_query)
+from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+                                  flash_attn_with_kvcache)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -761,10 +717,10 @@ def unified_flash_attention(
         _, num_head, head_dim = decode_query.shape
         decode_query = decode_query.reshape(-1, decode_meta.decode_query_len,
                                             num_head, head_dim)
-        decode_output = torch.ops.vllm.flash_attn_with_kvcache(
-            decode_query,
-            key_cache,
-            value_cache,
+        decode_output = flash_attn_with_kvcache(
+            q=decode_query,
+            k_cache=key_cache,
+            v_cache=value_cache,
             block_table=decode_meta.block_tables,
             cache_seqlens=decode_meta.seq_lens_tensor,
             softmax_scale=softmax_scale,
