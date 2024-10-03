@@ -16,6 +16,7 @@ from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
 @pytest.mark.asyncio
 async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
                                    server_config: ServerConfig):
+
     if not server_config.get("supports_parallel", True):
         pytest.skip("The {} model doesn't support parallel tool calls".format(
             server_config["model"]))
@@ -143,6 +144,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
                                                 server_config: ServerConfig):
+
     if not server_config.get("supports_parallel", True):
         pytest.skip("The {} model doesn't support parallel tool calls".format(
             server_config["model"]))

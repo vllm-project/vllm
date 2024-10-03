@@ -79,9 +79,14 @@ CONFIGS: Dict[str, ServerConfig] = {
         "arguments": [
             "--tool-call-parser", "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
-            "--ignore-patterns=\"consolidated.safetensors\"",
-            "--tokenizer-mode", "mistral"
+            "--ignore-patterns=\"consolidated.safetensors\""
         ],
+        "system_prompt":
+        "You are a helpful assistant with access to tools. If a tool"
+        " that you have would be helpful to answer a user query, "
+        "call the tool. Otherwise, answer the user's query directly "
+        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
+        "to the user's question - just respond to it normally."
     },
     "internlm": {
         "model":
@@ -94,12 +99,6 @@ CONFIGS: Dict[str, ServerConfig] = {
         ],
         "supports_parallel":
         False,
-        "system_prompt":
-        "You are a helpful assistant with access to tools. If a tool"
-        " that you have would be helpful to answer a user query, "
-        "call the tool. Otherwise, answer the user's query directly "
-        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
-        "to the user's question - just respond to it normally."
     }
 }
 
