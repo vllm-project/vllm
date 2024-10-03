@@ -270,7 +270,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   #
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
-  # CUDA 12.0 or later (and only works on Hoppper, 9.0/9.0a for now).
+  # CUDA 12.0 or later (and only work on Hopper, 9.0/9.0a for now).
   cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0;9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
@@ -284,9 +284,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't 
     # build any 3x kernels
     set(SCALED_MM_3X_ARCHS)
-    message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
-                   "in CUDA target architectures or CUDA Compiler version is "
-                   "not >= 12.0")
+
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
+      message(STATUS "Not building scaled_mm_c3x as CUDA Compiler version is "
+                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                     "later if you intend on running FP8 quantized models on "
+                     "Hopper.")
+    else()
+      message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
+                     "in CUDA target architectures")
+    endif()
   endif()
 
   #
@@ -305,9 +312,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C2X=1")
     message(STATUS "Building scaled_mm_c2x for archs: ${SCALED_MM_2X_ARCHS}")
   else()
-    message(STATUS "Not building scaled_mm_c2x as no compatible archs found "
-                   "in CUDA target architectures (or archs are already built "
-                   "for 3x)")
+    if (SCALED_MM_3X_ARCHS)
+      message(STATUS "Not building scaled_mm_c2x as all archs are already built"
+                     " for and covered by scaled_mm_c3x")
+    else()
+      message(STATUS "Not building scaled_mm_c2x as no compatible archs found "
+                    "in CUDA target architectures")
+    endif()
   endif()
 
 
@@ -325,6 +336,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(MACHETE_GEN_SCRIPT 
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
     file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
+
+    message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
+    message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
 
     if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
         OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
@@ -366,9 +380,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
     message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
   else()
-    message(STATUS "Not building Machete kernels as no compatible archs found "
-                   "in CUDA target architectures or CUDA Compiler version is "
-                   "not >= 12.0")
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 
+        AND MACHETE_ARCHS)
+      message(STATUS "Not building Machete kernels as CUDA Compiler version is "
+                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                     "later if you intend on running w4a16 quantized models on "
+                     "Hopper.")
+    else()
+      message(STATUS "Not building Machete kernels as no compatible archs "
+                     "found in CUDA target architectures")
+    endif()
   endif()
 # if CUDA endif
 endif()
