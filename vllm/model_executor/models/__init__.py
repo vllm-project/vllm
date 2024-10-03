@@ -76,7 +76,7 @@ _GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
-    "BertForMaskedLM": ("bert_embedding", "BertEmbeddingModel"),
+    "BertModel": ("bert_embedding", "BertEmbeddingModel"),
 }
 
 _MULTIMODAL_MODELS = {
