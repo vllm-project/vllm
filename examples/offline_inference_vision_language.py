@@ -252,6 +252,24 @@ def run_qwen2_vl(question, modality):
     return llm, prompt, stop_token_ids
 
 
+# Pixtral
+def run_pixtral(question, modality):
+    assert modality == "image"
+
+    model_name = "mistral-community/pixtral-12b"
+
+    llm = LLM(
+        model=model_name,
+        max_model_len=10000,
+        max_num_seqs=16,
+        enforce_eager=True,
+    )
+
+    prompt = f"<s>[INST]{question}\n[IMG][/INST]"
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 # LLama
 def run_mllama(question, modality):
     assert modality == "image"
@@ -289,6 +307,7 @@ model_example_map = {
     "internvl_chat": run_internvl,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
+    "pixtral": run_pixtral,
     "mllama": run_mllama,
 }
 

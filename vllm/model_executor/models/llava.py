@@ -4,7 +4,8 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import CLIPVisionConfig, LlavaConfig, SiglipVisionConfig
+from transformers import (CLIPVisionConfig, LlavaConfig, PixtralVisionConfig,
+                          SiglipVisionConfig)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -22,6 +23,10 @@ from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_max_clip_image_tokens,
                    input_processor_for_clip)
 from .interfaces import SupportsMultiModal
+from .pixtral import (PixtralHFVisionModel, dummy_image_for_pixtral_hf,
+                      dummy_seq_data_for_pixtral_hf,
+                      get_max_pixtral_hf_image_tokens,
+                      input_processor_for_pixtral_hf)
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
@@ -77,6 +82,8 @@ def get_max_llava_image_tokens(ctx: InputContext):
         num_image_tokens = get_max_clip_image_tokens(vision_config)
     elif isinstance(vision_config, SiglipVisionConfig):
         num_image_tokens = get_max_siglip_image_tokens(vision_config)
+    elif isinstance(vision_config, PixtralVisionConfig):
+        num_image_tokens = get_max_pixtral_hf_image_tokens(vision_config)
     else:
         msg = f"Unsupported vision config: {type(vision_config)}"
         raise NotImplementedError(msg)
@@ -119,6 +126,17 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int,
         )
 
         mm_data = dummy_image_for_siglip(vision_config, num_images)
+        return seq_data, mm_data
+    elif isinstance(vision_config, PixtralVisionConfig):
+        seq_data = dummy_seq_data_for_pixtral_hf(
+            vision_config,
+            seq_len,
+            num_images,
+            image_token_id=hf_config.image_token_index,
+            image_feature_size_override=image_feature_size,
+        )
+
+        mm_data = dummy_image_for_pixtral_hf(vision_config, num_images)
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -163,6 +181,14 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
+    elif isinstance(vision_config, PixtralVisionConfig):
+        return input_processor_for_pixtral_hf(
+            model_config,
+            vision_config,
+            llm_inputs,
+            image_token_id=hf_config.image_token_index,
+            image_feature_size_override=image_feature_size,
+        )
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -189,6 +215,9 @@ def _init_vision_tower(hf_config: LlavaConfig):
             vision_config,
             num_hidden_layers_override=num_hidden_layers,
         )
+    elif isinstance(vision_config, PixtralVisionConfig):
+        # TODO: allow layer override?
+        return PixtralHFVisionModel(vision_config)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -210,6 +239,14 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         self.multimodal_config = multimodal_config
 
+        # HACK: Special cases for pixtral
+        if (config.text_config.architectures is None
+                and config.text_config.model_type == "mistral"):
+            config.text_config.architectures = ["MistralForCausalLM"]
+        if (config.projector_hidden_act is None
+                and config.vision_config.hidden_act == "gelu"):
+            config.projector_hidden_act = "gelu"
+
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = _init_vision_tower(config)
         self.multi_modal_projector = LlavaMultiModalProjector(
@@ -223,6 +260,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
+        # HACK due to:
+        # expected shape of pixel values is ('batch_size', '3', '1024', '1024')
+        # You supplied (2, 1, 3, 1024, 1024).
+        # data = data.reshape(-1, *data.shape[-3:])
         actual_dims = tuple(data.shape[1:])
 
         if actual_dims != expected_dims:
