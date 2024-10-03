@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import DEVICE_OPTIONS, EngineArgs
-from vllm.inputs import PromptType
+from vllm.inputs import PromptInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
@@ -30,8 +30,7 @@ def main(args: argparse.Namespace):
         rpd.top_totals()
 
     @contextmanager
-    def torch_profiler_context(profile_dir: Optional[str] = None,
-                               trace_file_name=None):
+    def torch_profiler_context(profile_dir: Optional[str] = None):
         p = torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -48,14 +47,26 @@ def main(args: argparse.Namespace):
             print(p.key_averages().table(sort_by="self_cuda_time_total",
                                          row_limit=-1))
 
-    def get_profiling_context(profile_dir: Optional[str] = None,
-                              trace_file_name=None):
+    def get_profiling_context(profile_dir: Optional[str] = None):
         if args.profile_torch:
-            return torch_profiler_context(profile_dir, trace_file_name)
+            return torch_profiler_context(profile_dir)
         elif args.profile_rpd:
             return rpd_profiler_context()
         else:
             return nullcontext()
+
+    if args.profile_torch or args.profile_rpd:
+        profile_dir = Path(args.profile_dir
+                           or "./vllm_benchmark_latency_result")
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        name = os.path.basename(os.path.normpath(args.model))
+        model_trace_name = (
+            f"{name}_in_{args.input_len}_out_{args.output_len}_"
+            f"batch_{args.batch_size}_tp_{args.tensor_parallel_size}")
+        print(f"Profiling (results will be saved to '{profile_dir}')...")
+        if args.profile_rpd:
+            profile_dir /= f"{model_trace_name}.rpd"
+            os.environ["VLLM_RPD_PROFILER_DIR"] = str(profile_dir)
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
@@ -100,19 +111,19 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_prompts: List[PromptType] = [{
+    dummy_inputs: List[PromptInputs] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
     def run_to_completion(profile_dir: Optional[str] = None):
         if profile_dir:
-            with get_profiling_context():
-                llm.generate(dummy_prompts,
+            with get_profiling_context(profile_dir):
+                llm.generate(dummy_inputs,
                              sampling_params=sampling_params,
                              use_tqdm=False)
         else:
             start_time = time.perf_counter()
-            llm.generate(dummy_prompts,
+            llm.generate(dummy_inputs,
                          sampling_params=sampling_params,
                          use_tqdm=False)
             end_time = time.perf_counter()
@@ -124,11 +135,6 @@ def main(args: argparse.Namespace):
         run_to_completion(profile_dir=None)
 
     if args.profile_torch or args.profile_rpd:
-        profile_dir = args.profile_dir
-        if not profile_dir:
-            profile_dir = Path(".") / "vllm_benchmark_latency_result"
-            os.makedirs(profile_dir, exist_ok=True)
-        print(f"Profiling (results will be saved to '{profile_dir}')...")
         run_to_completion(profile_dir=profile_dir)
         return
 

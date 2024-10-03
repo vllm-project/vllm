@@ -163,11 +163,8 @@ class rpd_trace():
                  skip=False):
         self.skip = skip
         if not self.skip:
-            if 'RANK' in os.environ or int(os.getenv('WORLD_SIZE', 1)) > 1:
-                filename = f"{filename}_pid{os.getpid()}"
             self.name = name
             self.args = args if args else ""
-            print(f"filename type {type(filename)}")
             self.rpd = self.initialize_rpd_tracer(filename, nvtx)
 
     def _recreate_cm(self):
