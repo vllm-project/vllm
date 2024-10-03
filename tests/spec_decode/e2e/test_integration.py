@@ -102,3 +102,47 @@ def test_speculative_model_quantization_config(vllm_runner, common_llm_kwargs,
                                   max_output_len=32,
                                   seed=seed,
                                   temperature=0.0)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "model_name": MAIN_MODEL,
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 3,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_disable_mqa_scorer": True,
+                         }])
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("seed", [1])
+def test_mqa_scorer(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                    baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                    output_len: int, seed: int):
+    """Verify that ngram speculative decoding generates the same output 
+    with batch expansion scorer and mqa scorer.
+    """
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)

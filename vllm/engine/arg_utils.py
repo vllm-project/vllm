@@ -107,7 +107,7 @@ class EngineArgs:
     block_size: int = 16
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
-    use_v2_block_manager: bool = False
+    use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
@@ -162,6 +162,7 @@ class EngineArgs:
     speculative_model_quantization: Optional[str] = None
     speculative_draft_tensor_parallel_size: Optional[int] = None
     num_speculative_tokens: Optional[int] = None
+    speculative_disable_mqa_scorer: Optional[bool] = False
     speculative_max_model_len: Optional[int] = None
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
@@ -368,9 +369,12 @@ class EngineArgs:
                             action='store_true',
                             help='Disables sliding window, '
                             'capping to sliding window size')
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            help='Use BlockSpaceMangerV2.')
+        parser.add_argument(
+            '--use-v2-block-manager',
+            default=EngineArgs.use_v2_block_manager,
+            action='store_true',
+            help='Use BlockSpaceMangerV2. By default this is set to True. '
+            'Set to False to use BlockSpaceManagerV1')
         parser.add_argument(
             '--num-lookahead-slots',
             type=int,
@@ -641,6 +645,12 @@ class EngineArgs:
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding.')
         parser.add_argument(
+            '--speculative-disable-mqa-scorer',
+            action='store_true',
+            help=
+            'If set to True, the MQA scorer will be disabled in speculative '
+            ' and fall back to batch expansion')
+        parser.add_argument(
             '--speculative-draft-tensor-parallel-size',
             '-spec-draft-tp',
             type=int,
@@ -790,13 +800,10 @@ class EngineArgs:
             "lower performance.")
         parser.add_argument(
             '--override-neuron-config',
-            type=lambda configs: {
-                str(key): value
-                for key, value in
-                (config.split(':') for config in configs.split(','))
-            },
+            type=json.loads,
             default=None,
-            help="override or set neuron device configuration.")
+            help="Override or set neuron device configuration. "
+            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
 
         parser.add_argument(
             '--scheduling-policy',
@@ -970,6 +977,7 @@ class EngineArgs:
             speculative_draft_tensor_parallel_size = \
                 self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_disable_mqa_scorer=self.speculative_disable_mqa_scorer,
             speculative_disable_by_batch_size=self.
             speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,
@@ -991,10 +999,6 @@ class EngineArgs:
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")
-            if self.enable_chunked_prefill and self.enable_prefix_caching:
-                raise ValueError("Multi-Step is not supported with "
-                                 "both Chunked-Prefill and Prefix-Caching "
-                                 "enabled together.")
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
