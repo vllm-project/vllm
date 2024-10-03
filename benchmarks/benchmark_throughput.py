@@ -345,11 +345,10 @@ def main(args: argparse.Namespace):
             args.enforce_eager, args.kv_cache_dtype,
             args.quantization_param_path, args.device,
             args.enable_prefix_caching, args.enable_chunked_prefill,
-            args.max_num_batched_tokens, args.max_num_seqs, 
-            args.distributed_executor_backend,
-            args.gpu_memory_utilization, args.num_scheduler_steps,
-            args.use_v2_block_manager, args.download_dir, args.load_format,
-            args.disable_async_output_proc
+            args.max_num_batched_tokens, args.max_num_seqs,
+            args.distributed_executor_backend, args.gpu_memory_utilization,
+            args.num_scheduler_steps, args.use_v2_block_manager,
+            args.download_dir, args.load_format, args.disable_async_output_proc
         ]
 
         if args.async_engine:
@@ -369,8 +368,7 @@ def main(args: argparse.Namespace):
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(prompt_len + output_len
                            for _, prompt_len, output_len in requests)
-    total_output_tokens = sum(output_len
-                           for _, _, output_len in requests)
+    total_output_tokens = sum(output_len for _, _, output_len in requests)
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
