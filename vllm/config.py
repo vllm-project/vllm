@@ -970,7 +970,7 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
-                 use_v2_block_manager: bool = False,
+                 use_v2_block_manager: bool = True,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
