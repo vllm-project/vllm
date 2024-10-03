@@ -1,7 +1,7 @@
 import itertools
 from collections import UserDict
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Optional,
-                    Protocol, Tuple, Union, overload)
+from typing import (Any, Dict, Iterable, List, Literal, Optional, Protocol,
+                    Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -312,8 +312,7 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     return False
 
 
-def make_empty_intermediate_tensors_factory(keys: List[str],
-                                            hidden_size: int) -> Callable:
+def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
 
     def make_empty_intermediate_tensors(
         batch_size: int,
