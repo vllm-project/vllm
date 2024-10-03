@@ -1,7 +1,7 @@
 [
     {
         "test_name": "llama8B_tp1_sharegpt",
-        "qps_list": [2,4,8,16,32,"inf"],
+        "qps_list": [4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
             "tp": 1,
@@ -53,7 +53,7 @@
     },
     {
         "test_name": "llama8B_tp1_sonnet_512_16",
-        "qps_list": [2,4,8,16,32,"inf"],
+        "qps_list": [4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
             "tp": 1,
@@ -108,7 +108,7 @@
     },
     {
         "test_name": "llama8B_tp1_sonnet_512_256",
-        "qps_list": [2,4,8,16,32,"inf"],
+        "qps_list": [4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
             "tp": 1,
@@ -163,7 +163,7 @@
     },
     {
         "test_name": "llama70B_tp4_sharegpt",
-        "qps_list": [2,4,8,16,32,"inf"],
+        "qps_list": [4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
             "tp": 4,
@@ -214,7 +214,7 @@
     },
     {
         "test_name": "llama70B_tp4_sonnet_512_16",
-        "qps_list": [2,4,8,16,32,"inf"],
+        "qps_list": [4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
             "tp": 4,
@@ -268,7 +268,7 @@
     },
     {
         "test_name": "llama70B_tp4_sonnet_512_256",
-        "qps_list": [2,4,8,16,32,"inf"],
+        "qps_list": [4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
             "tp": 4,
