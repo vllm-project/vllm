@@ -251,7 +251,7 @@ Decoder-only Language Models
     - ✅︎
     - ✅︎
   * - :code:`XverseForCausalLM`
-    - Xverse
+    - XVERSE
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
     - ✅︎
     - ✅︎
