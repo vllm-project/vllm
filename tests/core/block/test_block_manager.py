@@ -384,10 +384,10 @@ def test_swap_in_infeasible(num_lookahead_slots, enable_caching):
     num_cpu_blocks = 1
     num_gpu_blocks = 1
     block_manager = MainBlockSpaceManager(block_size,
-                                        num_cpu_blocks,
-                                        num_gpu_blocks,
-                                        watermark=0,
-                                        enable_caching=enable_caching)
+                                          num_cpu_blocks,
+                                          num_gpu_blocks,
+                                          watermark=0,
+                                          enable_caching=enable_caching)
     prompt_length = block_size - 3
     assert prompt_length > 0
     prompt, seq_group = create_dummy_prompt("1", prompt_length=prompt_length)
