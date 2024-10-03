@@ -272,12 +272,13 @@ class ModelRegistry:
         result = subprocess.run([sys.executable, "-c", stmts],
                                 capture_output=True)
 
-        err_lines = [line.decode() for line in result.stderr.splitlines()]
-        if err_lines and err_lines[-1] != f"AssertionError: {err_id}":
-            err_str = "\n".join(err_lines)
-            raise RuntimeError(
-                "An unexpected error occurred while importing the model in "
-                f"another process. Error log:\n{err_str}")
+        if result.returncode != 0:
+            err_lines = [line.decode() for line in result.stderr.splitlines()]
+            if err_lines and err_lines[-1] != f"AssertionError: {err_id}":
+                err_str = "\n".join(err_lines)
+                raise RuntimeError(
+                    "An unexpected error occurred while importing the model in "
+                    f"another process. Error log:\n{err_str}")
 
         return result.returncode == 0
 
