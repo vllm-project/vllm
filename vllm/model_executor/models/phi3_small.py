@@ -336,8 +336,8 @@ class Phi3SmallModel(nn.Module):
         positions: Optional[torch.LongTensor],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        intermediate_tensors: IntermediateTensors,
-    ):
+        intermediate_tensors: Optional[IntermediateTensors],
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             hidden_states = self.embed_tokens(input_ids)
             if (self.mup_embedding_multiplier is not None

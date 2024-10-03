@@ -246,9 +246,12 @@ class OlmoModel(nn.Module):
                                                     config.hidden_size))
 
     def forward(
-        self, input_ids: torch.Tensor, positions: torch.Tensor,
-        kv_caches: List[torch.Tensor], attn_metadata: AttentionMetadata,
-        intermediate_tensors: IntermediateTensors
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.

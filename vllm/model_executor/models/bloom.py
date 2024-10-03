@@ -256,7 +256,7 @@ class BloomModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        intermediate_tensors: IntermediateTensors,
+        intermediate_tensors: Optional[IntermediateTensors],
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             hidden_states = self.word_embeddings(input_ids)
