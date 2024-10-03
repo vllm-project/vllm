@@ -1,4 +1,5 @@
 import importlib
+import os
 import string
 import subprocess
 import sys
@@ -272,7 +273,8 @@ class ModelRegistry:
         ])
 
         result = subprocess.run([sys.executable, "-c", stmts],
-                                capture_output=True)
+                                capture_output=True,
+                                env=os.environ.copy())
 
         if result.returncode != 0:
             err_lines = [line.decode() for line in result.stderr.splitlines()]
