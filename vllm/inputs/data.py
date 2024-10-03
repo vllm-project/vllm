@@ -179,18 +179,6 @@ def to_enc_dec_tuple_list(
             for enc_dec_prompt in enc_dec_prompts]
 
 
-def build_decoder_prompt(
-    prompt: _T2, ) -> ExplicitEncoderDecoderPrompt[SingletonPrompt, _T2]:
-    return build_explicit_enc_dec_prompt(encoder_prompt="",
-                                         decoder_prompt=prompt)
-
-
-def build_decoder_prompts(
-    prompts: Iterable[_T2],
-) -> List[ExplicitEncoderDecoderPrompt[SingletonPrompt, _T2]]:
-    return [build_decoder_prompt(prompt) for prompt in prompts]
-
-
 def __getattr__(name: str):
     if name == "PromptInput":
         import warnings
