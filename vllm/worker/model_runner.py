@@ -14,10 +14,10 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -47,8 +47,7 @@ from vllm.prompt_adapter.worker_manager import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, is_hip, is_pin_memory_available,
-                        supports_dynamo)
+                        flatten_2d_lists, is_hip, is_pin_memory_available)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -1125,15 +1124,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
-            from vllm.compilation.backends import vllm_backend
-            from vllm.plugins import get_torch_compile_backend
-            backend = get_torch_compile_backend() or vllm_backend
-            self.model = torch.compile(
-                self.model,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend)
-
     def save_sharded_state(
         self,
         path: str,
@@ -1426,7 +1416,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         batch_size_capture_list = [
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
-
+        if isinstance(self.model, TorchCompileWrapperWithCustomDispatcher):
+            self.model.set_sizes_to_specialize(batch_size_capture_list)
         with self.attn_state.graph_capture(
                 max_batch_size), graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
