@@ -10,8 +10,9 @@ pytest-shard
 awscli
 einops # required for MPT, qwen-vl and Mamba
 httpx
-librosa # required for audio test
-opencv-python # required for video test
+modelscope # required for modelscope tests
+librosa # required for audio tests
+opencv-python # required for video tests
 peft
 requests
 ray[adag]==2.35
