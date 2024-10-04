@@ -903,6 +903,11 @@ class EngineArgs:
                     "--enable-prefix-caching is currently not "
                     "supported for multimodal models and has been disabled.")
             self.enable_prefix_caching = False
+        if model_config.is_encoder_decoder_model:
+            logger.warning(
+                "BlockManagerV2 have bug in encoder-decoder models. "
+                "Use BlockManagerV1 instead.")
+            self.use_v2_block_manager = False
 
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
