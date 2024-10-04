@@ -151,7 +151,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
-        block_table.allocate(seq.get_token_ids())
+
+        # NOTE: If there are any factors affecting the block besides token_ids,
+        # they should be added as input arguments to contextual_hash.
+        contextual_hash = seq.hash_of_block_v2()
+        block_table.allocate(token_ids=seq.get_token_ids(),
+                             contextual_hash=contextual_hash)
 
         return block_table
 
@@ -239,6 +244,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
+            contextual_hash=seq.hash_of_block_v2(),
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
