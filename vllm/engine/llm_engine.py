@@ -1120,6 +1120,8 @@ class LLMEngine:
                 update_prefill_num_computed_tokens(seq_group, seq_group_meta,
                                                    len(output),
                                                    is_first_step_output)
+            elif not is_async:
+                seq_group.update_num_computed_tokens(1)
 
             if outputs:
                 for o in outputs:
@@ -1143,8 +1145,16 @@ class LLMEngine:
             else:
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
-                    self.output_processor.process_outputs(
+                    output_token_num = self.output_processor.process_outputs(
                         seq_group, output, is_async)
+                    if self.speculative_config:
+                        # We -1 here because we always
+                        # (w/o speculative decoding) add the number of
+                        # computed tokens by one in the decoding phase.
+                        # Therefore, we remove that one token that
+                        # is already added.
+                        seq_group.update_num_computed_tokens(output_token_num -
+                                                             1)
 
             if seq_group.is_finished():
                 finished_now.append(i)
@@ -1261,11 +1271,12 @@ class LLMEngine:
                     # decodes after the very first step. Therefore,
                     # we skip the update to the num_computed_tokens
                     # here.
-                    pass
+                    seq_group.update_num_computed_tokens(1)
                 else:
                     seq_group.update_num_computed_tokens(
                         seq_group_metadata.token_chunk_size)
-
+            else:
+                seq_group.update_num_computed_tokens(1)
             if seq_group_metadata.do_sample:
                 assert len(sequence_group_outputs.samples) == 1, (
                     "Async output processor expects a single sample"
@@ -1276,7 +1287,6 @@ class LLMEngine:
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
                 seq.append_token_id(sample.output_token, sample.logprobs)
-                seq_group.update_num_computed_tokens(1)
 
     def finish_measurements(self):
         self.model_executor.finish_measurements()
