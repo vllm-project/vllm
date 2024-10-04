@@ -14,7 +14,6 @@ import openai
 import pytest
 import requests
 from openai.types.completion import Completion
-from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
 from tests.models.utils import TextTextLogprobs
@@ -24,6 +23,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
                         cuda_device_count_stateless, get_open_port, is_hip)
 
@@ -181,15 +181,26 @@ def compare_two_settings(model: str,
         env2: The second set of environment variables to pass to the API server.
     """
 
-    trust_remote_code = "--trust-remote-code"
-    if trust_remote_code in arg1 or trust_remote_code in arg2:
-        tokenizer = AutoTokenizer.from_pretrained(model,
-                                                  trust_remote_code=True)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model)
+    trust_remote_code = False
+    for args in (arg1, arg2):
+        if "--trust-remote-code" in args:
+            trust_remote_code = True
+            break
+
+    tokenizer_mode = "auto"
+    for args in (arg1, arg2):
+        if "--tokenizer-mode" in args:
+            tokenizer_mode = args[args.index("--tokenizer-mode") + 1]
+            break
+
+    tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=trust_remote_code,
+        tokenizer_mode=tokenizer_mode,
+    )
 
     prompt = "Hello, my name is"
-    token_ids = tokenizer(prompt)["input_ids"]
+    token_ids = tokenizer(prompt).input_ids
     results = []
     for args, env in ((arg1, env1), (arg2, env2)):
         with RemoteOpenAIServer(model,
