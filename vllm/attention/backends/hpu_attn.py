@@ -14,7 +14,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
-                                                  HPUPagedAttentionMetadata)
+                                               HPUPagedAttentionMetadata)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -42,7 +42,7 @@ class HPUAttentionBackend(AttentionBackend):
         head_size: int,
     ) -> Tuple[int, ...]:
         return HPUPagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                       num_kv_heads, head_size)
+                                                    num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -50,8 +50,7 @@ class HPUAttentionBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: Dict[int, int],
     ) -> None:
-        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache,
-                                         src_to_dst)
+        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
