@@ -48,6 +48,8 @@ def support_compile_llama_style(cls: type):
         if not self._use_torch_compile:
             return self.forward(input_ids, positions, kv_caches, attn_metadata,
                                 intermediate_tensors)
+
+        # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
             torch._dynamo.mark_dynamic(input_ids, 0)
             torch._dynamo.mark_dynamic(positions, 0)
@@ -56,13 +58,21 @@ def support_compile_llama_style(cls: type):
                     torch._dynamo.mark_dynamic(tensors, 0)
             return self.compiled_callable(input_ids, positions, kv_caches,
                                           attn_metadata, intermediate_tensors)
+
+        # if we don't use custom dispatcher, we can directly call the
+        # compiled function and let torch.compile handle the dispatching,
+        # with the overhead of guard evaluation and recompilation.
         if not self.use_custom_dispatcher:
-            return self.forward(input_ids, positions, kv_caches, attn_metadata,
-                                intermediate_tensors)
+            return self.compiled_callable(input_ids, positions, kv_caches,
+                                          attn_metadata, intermediate_tensors)
+
+        # usually, capturing the model once is enough, and then we can
+        # dispatch to the compiled code directly, without going through
+        # the Dynamo guard mechanism.
         with self.dispatch_to_code(0):
             model_output = self.forward(input_ids, positions, kv_caches,
                                         attn_metadata, intermediate_tensors)
-        return model_output
+            return model_output
 
     cls.__call__ = __call__
     return cls
