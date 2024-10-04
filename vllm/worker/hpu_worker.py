@@ -25,14 +25,14 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import hpu_backend_string, hpu_device_string, is_fake_hpu
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.habana_model_runner import HabanaModelRunner
+from vllm.worker.hpu_model_runner import HPUModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 logger = init_logger(__name__)
 
 
-class HabanaWorker(LocalOrDistributedWorkerBase):
+class HPUWorker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a HPU.
 
     Each worker is associated with a single HPU. The worker is responsible for
@@ -79,7 +79,7 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner: HabanaModelRunner = HabanaModelRunner(
+        self.model_runner: HPUModelRunner = HPUModelRunner(
             model_config,
             parallel_config,
             scheduler_config,
