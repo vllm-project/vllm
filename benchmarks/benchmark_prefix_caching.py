@@ -194,7 +194,9 @@ if __name__ == "__main__":
                         default='128:256',
                         help='Range of input lengths for sampling prompts,'
                         'specified as "min:max" (e.g., "128:256").')
-    parser.add_argument("--seed", type=int, default=0, 
+    parser.add_argument("--seed",
+                        type=int,
+                        default=0,
                         help='Random seed for reproducibility')
     args = parser.parse_args()
     main(args)
