@@ -27,6 +27,7 @@
 
 #include "core/exception.hpp"
 #include "core/scalar_type.hpp"
+#include "core/registration.h"
 #include "marlin_kernels/marlin_moe_kernel_ku4b8.h"
 #include "marlin_kernels/marlin_moe_kernel_ku8b128.h"
 #include "marlin_kernels/marlin_moe_kernel_ku4.h"
@@ -579,4 +580,8 @@ torch::Tensor marlin_gemm_moe(
       at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms, max_par,
       replicate_input, apply_weights);
   return c;
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("marlin_gemm_moe", &marlin_gemm_moe);
 }
