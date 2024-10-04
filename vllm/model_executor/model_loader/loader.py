@@ -60,7 +60,7 @@ def device_loading_context(module: torch.nn.Module,
 
     # Store original device states and move parameters to GPU if they're on CPU
     for name, p in module.named_parameters():
-        if p.device.type == "cpu" and target_device.type != 'hpu':
+        if p.device.type == "cpu":
             original_device_states[name] = p.device
             p.data = p.data.to(target_device)
         # Parameters already on target device are not touched
@@ -394,13 +394,11 @@ class DefaultModelLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            load_device : torch.device = self.load_config.device if \
-                self.load_config.device is not None else target_device
-            with load_device:
+            with target_device:
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
-            logger.info("Loading weights on %s...", target_device)
+
             model.load_weights(self._get_all_weights(model_config, model))
 
             for _, module in model.named_modules():

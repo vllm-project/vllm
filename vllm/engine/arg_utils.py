@@ -91,7 +91,6 @@ class EngineArgs:
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
-    weights_load_device: Optional[str] = None
     config_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
@@ -268,12 +267,6 @@ class EngineArgs:
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
-        parser.add_argument("--weights-load-device",
-                            type=str,
-                            default=EngineArgs.weights_load_device,
-                            choices=DEVICE_OPTIONS,
-                            help=('Device to which model weights '
-                                  'will be loaded.'))
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -870,14 +863,10 @@ class EngineArgs:
             mm_processor_kwargs=self.mm_processor_kwargs,
         )
 
-    def create_load_config(self, load_device=None) -> LoadConfig:
-        if load_device is None:
-            dummy_device_config = DeviceConfig(device=self.device)
-            load_device = dummy_device_config.device
+    def create_load_config(self) -> LoadConfig:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            device=load_device,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
         )
