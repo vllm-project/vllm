@@ -620,7 +620,7 @@ class AsyncLLMEngine:
         elif engine_config.device_config.device_type == "hpu":
             if distributed_executor_backend == "ray":
                 initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_hpu_executor import RayHPUExecutorAsync  
+                from vllm.executor.ray_hpu_executor import RayHPUExecutorAsync
                 executor_class = RayHPUExecutorAsync
             else:
                 from vllm.executor.hpu_executor import HPUExecutorAsync
