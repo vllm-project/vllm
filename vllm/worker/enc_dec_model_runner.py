@@ -23,7 +23,8 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
-from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
+from vllm.utils import (STR_NOT_IMPL_ENC_DEC_BACKEND, is_hip,
+                        make_tensor_with_pad)
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata,
@@ -120,7 +121,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def _maybe_force_supported_attention_backend(self):
         '''
-        Force vLLM to use the XFormers attention backend,
+        Force vLLM to use the XFormers or ROCM attention backend,
         which is currently the only supported option.
         '''
 
@@ -138,18 +139,21 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # The user has not already specified an attention backend
             # override
             logger.info("EncoderDecoderModelRunner requires "
-                        "XFormers backend; overriding backend "
-                        "auto-selection and forcing XFormers.")
-            global_force_attn_backend(_Backend.XFORMERS)
+                        "XFormers or ROCM backend; overriding backend "
+                        "auto-selection and forcing XFormers or ROCM.")
+            global_force_attn_backend(
+                _Backend.ROCM_FLASH if is_hip() else _Backend.XFORMERS)
         elif is_forced_by_global:
             # Backend override enforced by global variable takes
             # precedence over vLLM backend environment variable.
-            if maybe_global_forced_backend != _Backend.XFORMERS:
+            if maybe_global_forced_backend != _Backend.XFORMERS and \
+                maybe_global_forced_backend != _Backend.ROCM_FLASH:
                 raise_backend_err()
         elif is_forced_by_env_var:
             # Backend override enforced by vLLM backend
             # environment variable
-            if maybe_env_var_forced_backend != _Backend.XFORMERS:
+            if maybe_env_var_forced_backend != _Backend.XFORMERS and \
+                maybe_global_forced_backend != _Backend.ROCM_FLASH:
                 raise_backend_err()
 
     def _list_to_int32_tensor(

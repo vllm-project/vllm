@@ -21,7 +21,8 @@ from vllm.attention.selector import (_Backend,
 from vllm.utils import is_hip
 
 # List of support backends for encoder/decoder models
-LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS]
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS] if not is_hip() \
+                                            else [_Backend.ROCM_FLASH]
 
 HEAD_SIZES = [64, 256]
 
@@ -807,7 +808,6 @@ def test_encoder_only(
         assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
 
-@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)

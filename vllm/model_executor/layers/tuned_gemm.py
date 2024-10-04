@@ -84,8 +84,11 @@ class TunedGemm:
         # uses this for linear units. However, sampler
         # will use torch.matmul with 2 dimensions only
         if inp.dim() == 3:
-            inp_view = inp.view(-1, inp.size(-1))
-            batched = True
+            try:
+                inp_view = inp.view(-1, inp.size(-1))
+                batched = True
+            except RuntimeError:
+                return F.linear(inp, weights, bias)
         else:
             inp_view = inp
             batched = False

@@ -12,8 +12,8 @@ import torch
 from torch._prims_common import TensorLikeType
 
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
-from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
-                        make_tensor_with_pad)
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_ROCM_FLASH_ATTN_VAL,
+                        STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -524,8 +524,13 @@ def make_backend(backend_name: str) -> AttentionBackend:
     if backend_name == STR_XFORMERS_ATTN_VAL:
         # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
         from vllm.attention.backends.xformers import XFormersBackend
-
         return XFormersBackend()
+
+    if backend_name == STR_ROCM_FLASH_ATTN_VAL:
+        from vllm.attention.backends.rocm_flash_attn import (  # noqa: F401
+            ROCmFlashAttentionBackend)
+        return ROCmFlashAttentionBackend
+
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
 
