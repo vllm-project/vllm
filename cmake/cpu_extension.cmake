@@ -86,7 +86,8 @@ message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
 list(APPEND LIBS numa)
 
-if (NOT POWER9_FOUND AND NOT POWER10_FOUND)
+# Appending the dnnl library for the AVX2 and AVX512, as it is not utilized by Power architecture.
+if (AVX2_FOUND OR AVX512_FOUND)
     list(APPEND LIBS dnnl)
 endif()
 
