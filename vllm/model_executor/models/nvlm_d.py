@@ -4,8 +4,7 @@
 # Copyright (c) 2024 NVIDIA
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-import re
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -23,9 +22,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .intern_vit import (InternVisionEmbeddings, InternVisionEncoder,
                          InternVisionEncoderLayer, InternVisionModel)
-from .internvl import (InternVLChatModel, build_input_processor,
-                       dummy_data_for_internvl, get_max_internvl_image_tokens,
-                       input_mapper_for_internvl)
+from .internvl import (InternVLChatModel, InternVLInputPipeline,
+                       get_max_internvl_image_tokens)
 
 try:
     from xformers import ops as xops
@@ -38,29 +36,20 @@ IMG_END = '<|vision_end|>'
 IMG_CONTEXT = '<|vision_pad|>'
 
 
-def _expand_nvlm_image_prompt(
-    prompt: str,
-    image_feature_sizes: List[int],
-    num_patches: int,
-) -> str:
-    new_prompt = prompt
-    image_idx = sorted(map(int, re.findall(r"Image-(\d+): <image>\n", prompt)))
-    for idx, feature_size in enumerate(image_feature_sizes, start=1):
+class NVLMInputPipeline(InternVLInputPipeline):
+
+    def _create_image_prompt(self, feature_size: int, num_patches: int) -> str:
         tile_pos_identifiers = ([f"<tile_{i}>"
                                  for i in range(1, num_patches)] +
                                 ["<tile_global_thumbnail>"])
-        image_prompt = '<Image>' + ''.join(
-            tile_pos_identifier + IMG_CONTEXT * feature_size
+        context_size = feature_size // num_patches
+
+        return '<Image>' + ''.join(
+            tile_pos_identifier + self.img_context_token * context_size
             for tile_pos_identifier in tile_pos_identifiers) + '</Image>'
 
-        if not image_idx:
-            image_prompt = f"Image-{idx}: {image_prompt}"
-        new_prompt = new_prompt.replace('<image>', image_prompt, 1)
 
-    return new_prompt
-
-
-input_processor_for_nvlm = build_input_processor(_expand_nvlm_image_prompt)
+input_pipeline = NVLMInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
 
 
 class NVLMVisionEmbeddings(InternVisionEmbeddings):
@@ -252,10 +241,10 @@ class NVLMVisionModel(InternVisionModel):
             weight_loader(param, loaded_weight)
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_internvl)
+@MULTIMODAL_REGISTRY.register_image_input_mapper(input_pipeline.input_mapper)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_internvl)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_nvlm)
+@INPUT_REGISTRY.register_dummy_data(input_pipeline.dummy_data)
+@INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
 class NVLM_D_Model(InternVLChatModel):
 
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:

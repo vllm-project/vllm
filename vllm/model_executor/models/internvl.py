@@ -6,8 +6,8 @@
 # --------------------------------------------------------
 import re
 from functools import cached_property, partial
-from typing import (Callable, Iterable, List, Literal, Mapping, Optional,
-                    Tuple, TypedDict, Union)
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -237,26 +237,45 @@ def get_max_internvl_image_size(ctx: InputContext,
     return width, height
 
 
-def _expand_internvl_image_prompt(
-    prompt: str,
-    image_feature_sizes: List[int],
-    num_patches: int,
-) -> str:
-    new_prompt = prompt
-    image_idx = sorted(map(int, re.findall(r"Image-(\d+): <image>\n", prompt)))
-    for idx, feature_size in enumerate(image_feature_sizes, start=1):
-        image_prompt = IMG_START + IMG_CONTEXT * feature_size + IMG_END
-        if not image_idx:
-            image_prompt = f"Image-{idx}: {image_prompt}"
-        new_prompt = new_prompt.replace('<image>', image_prompt, 1)
+class InternVLInputPipeline:
 
-    return new_prompt
+    def __init__(
+        self,
+        img_start_token: str,
+        img_end_token: str,
+        img_context_token: str,
+    ) -> None:
+        super().__init__()
 
+        self.img_start_token = img_start_token
+        self.img_end_token = img_end_token
+        self.img_context_token = img_context_token
 
-def build_input_processor(expand_image_prompt: Callable[[str, List[int], int],
-                                                        str]):
+    def _create_image_prompt(self, feature_size: int, num_patches: int) -> str:
+        return (self.img_start_token + self.img_context_token * feature_size +
+                self.img_end_token)
+
+    def _expand_image_prompt(
+        self,
+        prompt: str,
+        feature_sizes: List[int],
+        num_patches: int,
+    ) -> str:
+        image_idx = sorted(
+            map(int, re.findall(r"Image-(\d+): <image>\n", prompt)))
+
+        new_prompt = prompt
+        for idx, feature_size in enumerate(feature_sizes, start=1):
+            image_prompt = self._create_image_prompt(feature_size, num_patches)
+            if not image_idx:
+                image_prompt = f"Image-{idx}: {image_prompt}"
+
+            new_prompt = new_prompt.replace('<image>', image_prompt, 1)
+
+        return new_prompt
 
     def input_processor(
+        self,
         ctx: InputContext,
         llm_inputs: LLMInputs,
         *,
@@ -298,92 +317,93 @@ def build_input_processor(expand_image_prompt: Callable[[str, List[int], int],
         if prompt is None:
             prompt = tokenizer.decode(prompt_token_ids)
 
-        new_prompt = expand_image_prompt(prompt, image_feature_sizes,
-                                         num_patches)
+        new_prompt = self._expand_image_prompt(prompt, image_feature_sizes,
+                                               num_patches)
         new_prompt_token_ids = tokenizer.encode(new_prompt)
 
         return LLMInputs(prompt=prompt,
                          prompt_token_ids=new_prompt_token_ids,
                          multi_modal_data=multi_modal_data)
 
-    return input_processor
+    def input_mapper(
+        self,
+        ctx: InputContext,
+        data: object,
+        *,
+        max_dynamic_patch: Optional[int] = None,
+    ):
+        hf_config = ctx.get_hf_config()
+
+        image_pixel_values_mapper = image_to_pixel_values_wrapper(
+            hf_config, max_dynamic_patch)
+        if isinstance(data, Image.Image):
+            data = image_pixel_values_mapper(data)
+            # Add an N dimension for number of images per prompt (currently 1).
+            data = data.unsqueeze(0)
+        elif is_list_of(data, Image.Image):
+            # we can't stack here because images may have different num_patches
+            data = [image_pixel_values_mapper(img) for img in data]
+        model_config = ctx.model_config
+        tokenizer = cached_get_tokenizer(
+            model_config.tokenizer,
+            trust_remote_code=model_config.trust_remote_code)
+        image_token_id = tokenizer.encode(self.img_context_token,
+                                          add_special_tokens=False,
+                                          return_tensors="pt")[0]
+
+        return MultiModalInputs({
+            "pixel_values": data,
+            "image_token_id": image_token_id
+        })
+
+    def dummy_data(
+        self,
+        ctx: InputContext,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        *,
+        max_dynamic_patch: Optional[int] = None,
+    ):
+        num_images = mm_counts["image"]
+
+        hf_config = ctx.get_hf_config()
+
+        image_feature_size = get_max_internvl_image_tokens(
+            ctx, max_dynamic_patch=max_dynamic_patch)
+        model_config = ctx.model_config
+        tokenizer = cached_get_tokenizer(
+            model_config.tokenizer,
+            trust_remote_code=model_config.trust_remote_code)
+
+        seq_data = dummy_seq_data_for_clip(
+            hf_config.vision_config,
+            seq_len,
+            num_images,
+            image_token_id=tokenizer.encode(self.img_context_token,
+                                            add_special_tokens=False)[0],
+            image_feature_size_override=image_feature_size,
+        )
+
+        max_image_width, max_image_height = get_max_internvl_image_size(
+            ctx, max_dynamic_patch=max_dynamic_patch)
+
+        mm_data = dummy_image_for_clip(
+            hf_config.vision_config,
+            num_images,
+            image_width_override=max_image_width,
+            image_height_override=max_image_height,
+        )
+
+        return seq_data, mm_data
 
 
-input_processor_for_internvl = build_input_processor(
-    _expand_internvl_image_prompt)
+input_pipeline = InternVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
 
 
-def input_mapper_for_internvl(ctx: InputContext,
-                              data: object,
-                              *,
-                              max_dynamic_patch: Optional[int] = None):
-    hf_config = ctx.get_hf_config()
-
-    image_pixel_values_mapper = image_to_pixel_values_wrapper(
-        hf_config, max_dynamic_patch)
-    if isinstance(data, Image.Image):
-        data = image_pixel_values_mapper(data)
-        # Add an N dimension for number of images per prompt (currently 1).
-        data = data.unsqueeze(0)
-    elif is_list_of(data, Image.Image):
-        # we can't stack here because the images may have different num_patches
-        data = [image_pixel_values_mapper(img) for img in data]
-    model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code)
-    image_token_id = tokenizer.encode(IMG_CONTEXT,
-                                      add_special_tokens=False,
-                                      return_tensors="pt")[0]
-
-    return MultiModalInputs({
-        "pixel_values": data,
-        "image_token_id": image_token_id
-    })
-
-
-def dummy_data_for_internvl(ctx: InputContext,
-                            seq_len: int,
-                            mm_counts: Mapping[str, int],
-                            *,
-                            max_dynamic_patch: Optional[int] = None):
-    num_images = mm_counts["image"]
-
-    hf_config = ctx.get_hf_config()
-
-    image_feature_size = get_max_internvl_image_tokens(
-        ctx, max_dynamic_patch=max_dynamic_patch)
-    model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code)
-
-    seq_data = dummy_seq_data_for_clip(
-        hf_config.vision_config,
-        seq_len,
-        num_images,
-        image_token_id=tokenizer.encode(IMG_CONTEXT,
-                                        add_special_tokens=False)[0],
-        image_feature_size_override=image_feature_size,
-    )
-
-    max_image_width, max_image_height = get_max_internvl_image_size(
-        ctx, max_dynamic_patch=max_dynamic_patch)
-
-    mm_data = dummy_image_for_clip(
-        hf_config.vision_config,
-        num_images,
-        image_width_override=max_image_width,
-        image_height_override=max_image_height,
-    )
-
-    return seq_data, mm_data
-
-
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_internvl)
+@MULTIMODAL_REGISTRY.register_image_input_mapper(input_pipeline.input_mapper)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_internvl)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_internvl)
+@INPUT_REGISTRY.register_dummy_data(input_pipeline.dummy_data)
+@INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self,
