@@ -20,7 +20,7 @@ prompts = [
     "The president of the United States is",
     "The capital of France is",
     "The future of AI is",
-]
+] * 100
 
 generating_prompts = [prefix + prompt for prompt in prompts]
 
@@ -43,11 +43,12 @@ duration_regular = time() - start_time_regular
 
 regular_generated_texts = []
 # Print the outputs.
-for output in outputs:
+for i, output in enumerate(outputs):
     prompt = output.prompt
     generated_text = output.outputs[0].text
     regular_generated_texts.append(generated_text)
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    if i < 4:
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 print("-" * 80)
 
@@ -63,11 +64,12 @@ print("Results with `enable_prefix_caching`")
 
 cached_generated_texts = []
 # Print the outputs. You should see the same outputs as before.
-for output in outputs:
+for i, output in enumerate(outputs):
     prompt = output.prompt
     generated_text = output.outputs[0].text
     cached_generated_texts.append(generated_text)
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    if i < 4:
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 print("-" * 80)
 
