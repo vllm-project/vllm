@@ -6,8 +6,8 @@
 # --------------------------------------------------------
 import re
 from functools import cached_property, partial
-from typing import (Callable, Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union)
+from typing import (Callable, Iterable, List, Literal, Mapping, Optional,
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.nn as nn
