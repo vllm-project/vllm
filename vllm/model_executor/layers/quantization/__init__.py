@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.experts_int8 import (
     ExpertsInt8Config)
 from vllm.model_executor.layers.quantization.fbgemm_fp8 import FBGEMMFp8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.fp_eXmY import QuantLLMFPConfig
 from vllm.model_executor.layers.quantization.gguf import GGUFConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
@@ -49,6 +50,11 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "qqq": QQQConfig,
     "experts_int8": ExpertsInt8Config,
     "neuron_quant": NeuronQuantConfig,
+    # Aliases for the different quant_llm default configs
+    "fp4_weights": QuantLLMFPConfig,
+    "fp5_weights": QuantLLMFPConfig,
+    "fp6_weights": QuantLLMFPConfig,
+    "fp7_weights": QuantLLMFPConfig,
 }
 
 

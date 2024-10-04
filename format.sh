@@ -245,6 +245,14 @@ CLANG_FORMAT_EXCLUDES=(
     'csrc/quantization/gguf/vecdotq.cuh'
     'csrc/quantization/gguf/mmq.cuh'
     'csrc/quantization/gguf/mmvq.cuh'
+    'csrc/quantization/fp_eXmY/configs.h'
+    'csrc/quantization/fp_eXmY/cp_async.cuh'
+    'csrc/quantization/fp_eXmY/mma.cuh'
+    'csrc/quantization/fp_eXmY/quant_matmul.cuh'
+    'csrc/quantization/fp_eXmY/quant_reduction.cuh'
+    'csrc/quantization/fp_eXmY/utils/core.cuh'
+    'csrc/quantization/fp_eXmY/gmem.cuh'
+    'csrc/quantization/fp_eXmY/parallel_dequant.cuh'
 )
 
 # Format specified files with clang-format

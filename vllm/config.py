@@ -268,7 +268,8 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8"
+            "compressed-tensors", "experts_int8", "fp4_weights", "fp5_weights",
+            "fp6_weights", "fp7_weights"
         ]
         tpu_supported_quantization = ["tpu_int8"]
         neuron_supported_quantization = ["neuron_quant"]
@@ -299,6 +300,30 @@ class ModelConfig:
                     f"({quant_method}) does not match the quantization "
                     f"method specified in the `quantization` argument "
                     f"({self.quantization}).")
+
+        from vllm.model_executor.layers.quantization.fp_eXmY import (
+            DEFAULT_FP_EXMY_EXP_BITS, VALID_FP_EXMY_METHODS)
+        if self.quantization is not None and self.quantization in \
+            VALID_FP_EXMY_METHODS:
+            fp_bits = int(self.quantization[2])
+            exp_bits = DEFAULT_FP_EXMY_EXP_BITS[fp_bits]
+            self.hf_config.quantization_config = {
+                "bits": fp_bits,
+                "exp_bits": exp_bits,
+                "quant_method": self.quantization
+            }
+            # TODO(alpin): Investigate supporting bfloat16 dtype
+            if self.dtype != torch.float16:
+                logger.info(
+                    "%s data type is not supported for "
+                    "fp%s quantization. Using float16 instead.", self.dtype,
+                    fp_bits)
+                self.dtype = torch.float16
+            # In some cases, CUDA graph execution breaks this quant method
+            logger.warning(
+                "CUDA Graph execution may not work with fp%s "
+                "quantization. You can try disabling it "
+                "with `enforce_eager=True` if you run into issues.", fp_bits)
 
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
