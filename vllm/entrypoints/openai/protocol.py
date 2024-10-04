@@ -671,6 +671,7 @@ class EmbeddingRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
