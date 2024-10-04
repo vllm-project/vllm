@@ -87,6 +87,39 @@ def rms_replacement_static(result: torch.Tensor, result_rms: torch.Tensor, input
     return at[1]
 
 
+@torch.library.custom_op("vllm::fused_rms_norm_residual_quant_static", mutates_args=['result', 'input', 'residual'])
+def fused_rms_norm_residual_quant_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
+                                         weight: torch.Tensor, scale: torch.Tensor, azp: torch.Tensor,
+                                         epsilon: float) -> None:
+    # print("vllm::fused_rms_norm_residual_quant_static")
+    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    torch.ops._C.static_scaled_int8_quant(result, input, scale, azp)
+
+
+@torch.library.register_fake("vllm::fused_rms_norm_residual_quant_static")
+def _(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
+      azp: torch.Tensor, epsilon: float) -> None:
+    return
+
+
+def rms_pattern_residual_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+                                scale: torch.Tensor):
+    at1 = auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=input, residual=residual, weight=weight,
+                              epsilon=1e-5)
+    at2 = auto_functionalized(torch.ops._C.static_scaled_int8_quant.default, result=result, input=at1[1], scale=scale,
+                              azp=None)
+
+    # result, residual
+    return at2[1], at1[2]
+
+
+def rms_replacement_residual_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
+                                    weight: torch.Tensor, scale: torch.Tensor):
+    at = auto_functionalized(torch.ops.vllm.fused_rms_norm_residual_quant_static.default, result=result, input=input,
+                             residual=residual, weight=weight, epsilon=1e-5, scale=scale, azp=None)
+    # result, residual
+    return at[1], at[3]
+
 
 my_patterns = PatternMatcherPass()
 
@@ -106,6 +139,10 @@ def get_patterns():
     register_replacement(rms_pattern, rms_replacement, inputs, fwd_only, my_patterns)
     register_replacement(rms_pattern_static, rms_replacement_static, inputs, fwd_only, my_patterns)
 
+    # with residual
+    inputs = [empty_int8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda")]
+    register_replacement(rms_pattern_residual_static, rms_replacement_residual_static, inputs, fwd_only, my_patterns)
+
     return my_patterns
 
 
@@ -117,11 +154,11 @@ def get_fusion_pass():
         Use the pattern matcher
         """
         # logger.info("Graph before fusion pass:")
-        with open("before.py", "w") as f:
+        with open("before_fusion.py", "w") as f:
             print(graph.python_code(root_module="self", verbose=True).src, file=f)
         count = patterns.apply(graph)
         logger.info(f"Replaced {count} patterns")
-        with open("after.py", "w") as f:
+        with open("after_fusion.py", "w") as f:
             print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
     return fusion_pass
