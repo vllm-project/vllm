@@ -102,6 +102,26 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.cross_attn_bias: Optional[List[torch.Tensor]] = None
 
     @property
+    def is_all_encoder_attn_metadata_set(self):
+        '''
+        All attention metadata required for encoder attention is set.
+        '''
+        return ((self.encoder_seq_lens is not None)
+                and (self.encoder_seq_lens_tensor is not None)
+                and (self.max_encoder_seq_len is not None))
+
+    @property
+    def is_all_cross_attn_metadata_set(self):
+        '''
+        All attention metadata required for enc/dec cross-attention is set.
+
+        Superset of encoder attention required metadata.
+        '''
+        return (self.is_all_encoder_attn_metadata_set
+                and (self.cross_slot_mapping is not None)
+                and (self.cross_block_tables is not None))
+
+    @property
     def prefill_metadata(self) -> Optional["TorchSDPAMetadata"]:
         # Currently chunked prefill is not supported
         if self.num_decode_tokens == 0:
@@ -204,14 +224,42 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache.numel() > 0:
+        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
+            if attn_type == AttentionType.ENCODER_DECODER:
+                # Update cross-attention KV cache (prefill-only)
+                # During cross-attention decode, key & value will be None,
+                # preventing this IF-statement branch from running
+                updated_slot_mapping = attn_metadata.cross_slot_mapping
+            else:
+                # Update self-attention KV cache (prefill/decode)
+                updated_slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
-                                                attn_metadata.slot_mapping,
+                                                updated_slot_mapping,
                                                 self.kv_cache_dtype, k_scale,
                                                 v_scale)
+        
+        if attn_type != AttentionType.ENCODER:
+            # Decoder self-attention supports chunked prefill.
+            # Encoder/decoder cross-attention requires no chunked
+            # prefill (100% prefill or 100% decode tokens, no mix)
+            num_prefill_tokens = attn_metadata.num_prefill_tokens
+            num_decode_tokens = attn_metadata.num_decode_tokens
+        else:
+            # Encoder attention - chunked prefill is not applicable;
+            # derive token-count from query shape & and treat them
+            # as 100% prefill tokens
+            assert attn_metadata.num_encoder_tokens is not None
+            num_prefill_tokens = attn_metadata.num_encoder_tokens
+            num_decode_tokens = 0
+
+        if attn_type == AttentionType.DECODER:
+            # Only enforce this shape-constraint for decoder
+            # self-attention
+            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
         if attn_metadata.is_prompt:
             assert attn_metadata.seq_lens is not None
