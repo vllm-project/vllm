@@ -21,7 +21,7 @@ from vllm.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
-class HabanaExecutor(ExecutorBase):
+class HPUExecutor(ExecutorBase):
 
     uses_ray: bool = False
 
@@ -57,8 +57,8 @@ class HabanaExecutor(ExecutorBase):
                        rank: int = 0,
                        distributed_init_method: Optional[str] = None):
         wrapper = WorkerWrapperBase(
-            worker_module_name="vllm.worker.habana_worker",
-            worker_class_name="HabanaWorker",
+            worker_module_name="vllm.worker.hpu_worker",
+            worker_class_name="HPUWorker",
         )
         wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
                                                       distributed_init_method))
@@ -202,7 +202,7 @@ class HabanaExecutor(ExecutorBase):
         self.driver_worker.shutdown_inc()
 
 
-class HabanaExecutorAsync(HabanaExecutor, ExecutorAsyncBase):
+class HPUExecutorAsync(HPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
         self,

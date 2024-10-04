@@ -489,7 +489,7 @@ class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
         return cls(**tensor_dict)
 
 
-class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
+class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     """
     Helper class for shared methods between GPU model runners.
     """
@@ -1730,8 +1730,8 @@ def unwrap_model(model):
         return modules
 
 
-class HabanaModelRunner(
-        HabanaModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
+class HPUModelRunner(
+        HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
     """
@@ -1872,7 +1872,7 @@ class HabanaModelRunner(
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
-                "num_steps > 1 is not supported in HabanaModelRunner")
+                "num_steps > 1 is not supported in HPUModelRunner")
 
         if self.lora_config:
             assert model_input.lora_requests is not None
