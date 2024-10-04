@@ -284,7 +284,7 @@ mm_impl_template = create_template(IMPL_TEMPLATE)
 prepack_dispatch_template = create_template(PREPACK_TEMPLATE)
 
 
-def create_sources(impl_config: ImplConfig, num_impl_files=2):
+def create_sources(impl_config: ImplConfig, num_impl_files=1):
     sources = []
 
     type_name = generate_type_signature(impl_config.type_config)
