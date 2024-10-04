@@ -21,9 +21,12 @@ class RMSNorm(CustomOp):
         var_hidden_size: Optional[int] = None,
     ) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+
+        self.hidden_size = hidden_size
         self.variance_epsilon = eps
         self.var_hidden_size = var_hidden_size
+
+        self.weight = nn.Parameter(torch.ones(hidden_size))
 
     def forward_native(
         self,
@@ -37,9 +40,19 @@ class RMSNorm(CustomOp):
             x = x + residual.to(torch.float32)
             residual = x.to(orig_dtype)
 
+        hidden_size = x.shape[-1]
+        if hidden_size != self.hidden_size:
+            raise ValueError("Expected hidden_size to be "
+                             f"{self.hidden_size}, but found: {hidden_size}")
+
         if self.var_hidden_size is None:
             x_var = x
         else:
+            if hidden_size < self.var_hidden_size:
+                raise ValueError(
+                    "Expected hidden_size to be at least "
+                    f"{self.var_hidden_size}, but found: {hidden_size}")
+
             x_var = x[:, :, :self.var_hidden_size]
 
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
