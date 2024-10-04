@@ -1,6 +1,7 @@
-from time import time
-
 from vllm import LLM, SamplingParams
+
+# NOTE: This is just a running example. For benchmarking purpose,
+# please see benchmarks/benchmark_prefix_caching.py
 
 # Common prefix.
 prefix = (
@@ -20,7 +21,7 @@ prompts = [
     "The president of the United States is",
     "The capital of France is",
     "The future of AI is",
-] * 100
+]
 
 generating_prompts = [prefix + prompt for prompt in prompts]
 
@@ -37,18 +38,15 @@ print("Results without `enable_prefix_caching`")
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
-start_time_regular = time()
 outputs = regular_llm.generate(generating_prompts, sampling_params)
-duration_regular = time() - start_time_regular
 
 regular_generated_texts = []
 # Print the outputs.
-for i, output in enumerate(outputs):
+for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     regular_generated_texts.append(generated_text)
-    if i < 4:
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 print("-" * 80)
 
@@ -56,20 +54,17 @@ print("-" * 80)
 prefix_cached_llm.generate(generating_prompts[0], sampling_params)
 
 # Generate with prefix caching.
-start_time_cached = time()
 outputs = prefix_cached_llm.generate(generating_prompts, sampling_params)
-duration_cached = time() - start_time_cached
 
 print("Results with `enable_prefix_caching`")
 
 cached_generated_texts = []
 # Print the outputs. You should see the same outputs as before.
-for i, output in enumerate(outputs):
+for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     cached_generated_texts.append(generated_text)
-    if i < 4:
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 print("-" * 80)
 
@@ -79,6 +74,3 @@ generated_same = all([
     for i in range(len(prompts))
 ])
 print(f"Generated answers are the same: {generated_same}")
-
-speedup = round(duration_regular / duration_cached, 2)
-print(f"Speed up of cached generation compared to the regular is: {speedup}")
