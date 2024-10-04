@@ -133,7 +133,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             (input_tokens, input_positions,
              attn_metadata) = self._prepare_decode(
                  self.seq_group_metadata_list)
-            seq_lens = []
+            seq_lens = None
 
         return self.model_input_cls(
             input_tokens=input_tokens,
@@ -434,10 +434,6 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
 
-        if self.model_config.is_encoder_decoder_model:
-            raise NotImplementedError(
-                STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
-
     @property
     def model_is_mrope(self) -> bool:
         """Detect if the model has "mrope" rope_scaling type.
@@ -550,49 +546,3 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             sampling_metadata=model_input.sampling_metadata,
         )
         return [output]
-
-
-class CPUEncoderDecoderModelRunner(CPUModelRunner):
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        kv_cache_dtype: Optional[str] = "auto",
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        is_driver_worker: bool = False,
-        *args,
-        **kwargs,
-    ):
-        super().__init__(model_config, parallel_config, scheduler_config,
-                         device_config, cache_config, load_config, lora_config,
-                         kv_cache_dtype, prompt_adapter_config, is_driver_worker,
-                         *args, **kwargs)
-
-    def load_model(self) -> None:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
-
-    def prepare_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
-    ) -> ModelInputForCPUWithSamplingMetadata:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
-
-    @torch.no_grad()
-    def execute_model(
-        self,
-        model_input: ModelInputForCPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
