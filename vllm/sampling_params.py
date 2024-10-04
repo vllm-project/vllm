@@ -1,5 +1,6 @@
 """Sampling parameters for text generation."""
 import copy
+import os
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -416,6 +417,13 @@ class SamplingParams(
         if self.best_of != self.n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
+
+        if os.environ.get("PD_SEPARATE_STAGE", "").lower() == "prefill":
+            if self.max_tokens is None or self.max_tokens != 1:
+                logger.warning("Prefill run only generates one token. "
+                               "max_tokens is set to 1.")
+
+            self.max_tokens = 1
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:

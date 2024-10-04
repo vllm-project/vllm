@@ -23,6 +23,10 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
+from vllm.distributed.kv_transfer.base import KVCacheTransporterBase
+from vllm.distributed.kv_transfer.infinite import InfiniStoreKVCacheTransporter
+from vllm.distributed.kv_transfer.utils import (is_first_decode_pass,
+                                                is_prefill_run)
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -1588,6 +1592,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
 
+    def get_kv_cache_transporter(
+            self, input_ids,
+            attn_metadata) -> Optional[KVCacheTransporterBase]:
+        if is_prefill_run(input_ids) or is_first_decode_pass(
+                input_ids, attn_metadata):
+            return InfiniStoreKVCacheTransporter(self.model_config.model)
+
+        return None
+
     @torch.inference_mode()
     @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
     def execute_model(
@@ -1649,7 +1662,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             intermediate_tensors=intermediate_tensors,
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                          device=self.device),
-            **seqlen_agnostic_kwargs)
+            **seqlen_agnostic_kwargs,
+            kv_cache_transporter=self.get_kv_cache_transporter(
+                model_input.input_tokens, model_input.attn_metadata))
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
