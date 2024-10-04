@@ -13,7 +13,7 @@ _PARTITION_SIZE = 512
 
 
 @dataclass
-class HabanaPagedAttentionMetadata:
+class HPUPagedAttentionMetadata:
     """Metadata for PagedAttention."""
     block_list: Optional[torch.Tensor]
     block_mapping: Optional[torch.Tensor]
@@ -22,7 +22,7 @@ class HabanaPagedAttentionMetadata:
     block_offsets: Optional[torch.Tensor]
 
 
-class HabanaPagedAttention:
+class HPUPagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -76,7 +76,7 @@ class HabanaPagedAttention:
         sliding_window: Optional[int],
     ) -> torch.Tensor:
         raise NotImplementedError(
-            "forward_prefix is not implemented for HabanaPagedAttention")
+            "forward_prefix is not implemented for HPUPagedAttention")
 
     @staticmethod
     def swap_blocks(

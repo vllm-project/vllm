@@ -22,7 +22,7 @@ class _Backend(enum.Enum):
     TORCH_SDPA = enum.auto()
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
-    HABANA_ATTN = enum.auto()
+    HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
 
@@ -143,11 +143,10 @@ def get_attn_backend(
         logger.info("Using Flashinfer backend.")
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
-    elif backend == _Backend.HABANA_ATTN:
-        logger.info("Using HabanaAttention backend.")
-        from vllm.attention.backends.habana_attn import (  # noqa: F401
-            HabanaAttentionBackend)
-        return HabanaAttentionBackend
+    elif backend == _Backend.HPU_ATTN:
+        logger.info("Using HPUAttention backend.")
+        from vllm.attention.backends.hpu_attn import HPUAttentionBackend
+        return HPUAttentionBackend
     elif backend == _Backend.PALLAS:
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
@@ -217,7 +216,7 @@ def which_attn_to_use(
         return _Backend.ROCM_FLASH
 
     if current_platform.is_hpu():
-        return _Backend.HABANA_ATTN
+        return _Backend.HPU_ATTN
 
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
