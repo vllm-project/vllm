@@ -1730,8 +1730,7 @@ def unwrap_model(model):
         return modules
 
 
-class HPUModelRunner(
-        HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
+class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
     """
