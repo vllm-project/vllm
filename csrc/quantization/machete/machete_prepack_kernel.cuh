@@ -34,10 +34,9 @@ static __global__ void prepack_B_kernel(BInTensor B_in,
 }
 
 template <typename PrepackedLayoutB, typename InLayout>
-static void prepack_B(cudaStream_t stream,
-                      typename PrepackedLayoutB::ElementB const* B_in_ptr,
-                      InLayout B_layout,
-                      typename PrepackedLayoutB::ElementB* B_out_ptr) {
+static void prepack_B_template(
+    cudaStream_t stream, typename PrepackedLayoutB::ElementB const* B_in_ptr,
+    InLayout B_layout, typename PrepackedLayoutB::ElementB* B_out_ptr) {
   using TileShapeNKL =
       decltype(append(typename PrepackedLayoutB::PPBlockShape_NK{}, _1{}));
   auto ilvd_NKbNbKL_to_offset =
