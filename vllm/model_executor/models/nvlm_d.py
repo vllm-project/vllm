@@ -64,6 +64,7 @@ class NVLMParallelAttention(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        num_dummy_heads: int = 7,
     ):
         super().__init__()
         self.config = config
@@ -78,7 +79,7 @@ class NVLMParallelAttention(nn.Module):
 
         # We added additional dummy heads to the original num of heads to make
         # the number of heads divisible by 8.
-        self.num_dummy_heads = 7
+        self.num_dummy_heads = num_dummy_heads
         self.dummy_dim = (self.num_dummy_heads +
                           self.num_heads) * self.head_dim
 
@@ -137,7 +138,7 @@ class NVLMParallelAttention(nn.Module):
 class NVLMSdpaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PretrainedConfig, num_dummy_heads: int = 7):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -151,7 +152,7 @@ class NVLMSdpaAttention(nn.Module):
 
         # We added additional dummy heads to the original num of heads to make
         # the number of heads divisible by 8.
-        self.num_dummy_heads = 7
+        self.num_dummy_heads = num_dummy_heads
         self.dummy_dim = (self.num_dummy_heads +
                           self.num_heads) * self.head_dim
 
@@ -206,11 +207,14 @@ class NVLMVisionEncoderLayer(InternVisionEncoderLayer):
         # fallback to sdpa attention if tp unavailable
         tp_size = get_tensor_model_parallel_world_size()
         num_heads = config.num_attention_heads
+        num_dummy_heads = 7
 
-        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            return NVLMParallelAttention(config, quant_config=quant_config)
+        if USE_XFORMERS_OPS and (num_heads + num_dummy_heads) % tp_size == 0:
+            return NVLMParallelAttention(config,
+                                         quant_config=quant_config,
+                                         num_dummy_heads=num_dummy_heads)
 
-        return NVLMSdpaAttention(config)
+        return NVLMSdpaAttention(config, num_dummy_heads=num_dummy_heads)
 
 
 class NVLMVisionEncoder(InternVisionEncoder):
