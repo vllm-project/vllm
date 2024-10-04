@@ -218,7 +218,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise AttributeError("Encoder/decoder cross-attention "
                                  "requires setting cross-attention "
                                  "metadata attributes.")
-        num_tokens, hidden_size = query.shape[-2:]
+
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
@@ -275,64 +275,23 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             assert key.shape[0] == num_prefill_tokens + num_decode_tokens
             assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
-        if attn_metadata.is_prompt:
+        if prefill_meta := attn_metadata.prefill_metadata:
             assert attn_metadata.seq_lens is not None
             if (kv_cache.numel() == 0
-                    or attn_metadata.block_tables.numel() == 0):
-                if self.num_kv_heads != self.num_heads:
-                    key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
-                    value = value.repeat_interleave(self.num_queries_per_kv,
-                                                    dim=1)
-
-                attn_masks = _get_attn_bias(attn_metadata, attn_type)
-                if attn_masks is None:
-                    if self.alibi_slopes is not None:
-                        attn_masks = _make_alibi_bias(
-                            self.alibi_slopes, query.dtype,
-                            attn_metadata.seq_lens)  # type: ignore
-                    elif self.sliding_window is not None:
-                        attn_masks = _make_sliding_window_bias(
-                            attn_metadata.seq_lens, self.sliding_window,
-                            query.dtype)  # type: ignore
-                    else:
-                        seq_lens = _get_seq_lens(attn_metadata, attn_type)
-                        attn_masks = [None] * len(seq_lens)
-                    _set_attn_bias(attn_metadata, attn_masks, attn_type)
-
-                query = query.movedim(0, query.dim() - 2)
-                key = key.movedim(0, key.dim() - 2)
-                value = value.movedim(0, value.dim() - 2)
-
-                start = 0
-                output = torch.empty(
-                    (num_tokens, self.num_heads, self.head_size),
-                    dtype=query.dtype)
-                for seq_len, mask in zip(attn_metadata.seq_lens,
-                                         attn_masks):
-                    end = start + seq_len
-                    sub_out = scaled_dot_product_attention(
-                        query[None, :, start:end, :],
-                        key[None, :, start:end, :],
-                        value[None, :, start:end, :],
-                        attn_mask=mask,
-                        dropout_p=0.0,
-                        is_causal=not self.need_mask,
-                        scale=self.scale).squeeze(0).movedim(
-                            query.dim() - 2, 0)
-                    output[start:end, :, :] = sub_out
-                    start = end
+                    or prefill_meta.block_tables.numel() == 0):
+                output = self._run_sdpa_forward(query, key, value, prefill_meta, attn_type=attn_type)
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
                     "Torch SDPA backend doesn't support prefix decoding.")
 
-        else:
+        if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             (
                 seq_lens_arg,
                 max_seq_len_arg,
                 block_tables_arg,
-            ) = _get_seq_len_block_table_args(attn_metadata.decode_metadata, False, attn_type)
+            ) = _get_seq_len_block_table_args(decode_meta, False, attn_type)
 
             output = PagedAttention.forward_decode(
                 query,
@@ -351,6 +310,70 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
+    
+    def _run_sdpa_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: TorchSDPAMetadata,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ):
+        num_tokens, hidden_size = query.shape[-2:]
+
+        if self.num_kv_heads != self.num_heads:
+            key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
+            value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
+
+        attn_masks = _get_attn_bias(attn_metadata, attn_type)
+        if attn_masks is None:
+            if self.alibi_slopes is not None:
+                attn_masks = _make_alibi_bias(
+                    self.alibi_slopes, query.dtype,
+                    attn_metadata.seq_lens)  # type: ignore
+            elif self.sliding_window is not None:
+                attn_masks = _make_sliding_window_bias(
+                    attn_metadata.seq_lens, self.sliding_window,
+                    query.dtype)  # type: ignore
+            else:
+                seq_lens = _get_seq_lens(attn_metadata, attn_type)
+                attn_masks = [None] * len(seq_lens)
+            _set_attn_bias(attn_metadata, attn_masks, attn_type)
+
+        query = query.movedim(0, query.dim() - 2)
+        key = key.movedim(0, key.dim() - 2)
+        value = value.movedim(0, value.dim() - 2)
+
+        if self.alibi_slopes is None:
+            output =  scaled_dot_product_attention(
+                query.unsqueeze(0),
+                key.unsqueeze(0),
+                value.unsqueeze(0),
+                attn_mask=attn_masks[0],
+                dropout_p=0.0,
+                is_causal=self.need_mask,
+                scale=self.scale)
+            output = output.squeeze(0).movedim(query.dim() - 2, 0)
+        else:
+            start = 0
+            output = torch.empty(
+                (num_tokens, self.num_heads, self.head_size),
+                dtype=query.dtype)
+            for seq_len, mask in zip(attn_metadata.seq_lens,
+                                    attn_masks):
+                end = start + seq_len
+                sub_out = scaled_dot_product_attention(
+                    query[None, :, start:end, :],
+                    key[None, :, start:end, :],
+                    value[None, :, start:end, :],
+                    attn_mask=mask,
+                    dropout_p=0.0,
+                    is_causal=not self.need_mask,
+                    scale=self.scale).squeeze(0).movedim(
+                        query.dim() - 2, 0)
+                output[start:end, :, :] = sub_out
+                start = end
+        return output
 
 
 def _get_seq_lens(
