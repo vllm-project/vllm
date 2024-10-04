@@ -18,16 +18,17 @@ class RMSNorm(CustomOp):
         self,
         hidden_size: int,
         eps: float = 1e-6,
+        var_hidden_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
+        self.var_hidden_size = var_hidden_size
 
     def forward_native(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-        variance: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
@@ -36,8 +37,12 @@ class RMSNorm(CustomOp):
             x = x + residual.to(torch.float32)
             residual = x.to(orig_dtype)
 
-        if variance is None:
-            variance = x.pow(2).mean(dim=-1, keepdim=True)
+        if self.var_hidden_size is None:
+            x_var = x
+        else:
+            x_var = x[:, :, :self.var_hidden_size]
+
+        variance = x_var.pow(2).mean(dim=-1, keepdim=True)
 
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         x = x.to(orig_dtype) * self.weight
@@ -50,10 +55,9 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-        variance: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if variance is not None:
-            return self.forward_native(x, residual, variance)
+        if self.var_hidden_size is not None:
+            return self.forward_native(x, residual)
 
         from vllm import _custom_ops as ops
 
@@ -78,10 +82,9 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-        variance: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if variance is not None:
-            return self.forward_native(x, residual, variance)
+        if self.var_hidden_size is not None:
+            return self.forward_native(x, residual)
 
         from vllm._ipex_ops import ipex_ops as ops
 

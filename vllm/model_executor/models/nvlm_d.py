@@ -76,8 +76,12 @@ class NVLMParallelAttention(nn.Module):
         self.qk_normalization = config.qk_normalization
 
         if self.qk_normalization:
-            self.q_norm = RMSNorm(self.dummy_dim, eps=config.layer_norm_eps)
-            self.k_norm = RMSNorm(self.dummy_dim, eps=config.layer_norm_eps)
+            self.q_norm = RMSNorm(self.dummy_dim,
+                                  eps=config.layer_norm_eps,
+                                  var_hidden_size=self.embed_dim)
+            self.k_norm = RMSNorm(self.dummy_dim,
+                                  eps=config.layer_norm_eps,
+                                  var_hidden_size=self.embed_dim)
 
         self.proj = RowParallelLinear(
             self.dummy_dim,
@@ -100,18 +104,10 @@ class NVLMParallelAttention(nn.Module):
 
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
-
-            q_var = q.flatten(-2, -1)[:, :, :self.embed_dim].pow(2).mean(
-                -1, keepdim=True)
-            k_var = k.flatten(-2, -1)[:, :, :self.embed_dim].pow(2).mean(
-                -1, keepdim=True)
-
-            q = self.q_norm.forward_native(q.flatten(-2, -1),
-                                           variance=q_var).view(
-                                               B_, N_, H_, D_)
-            k = self.k_norm.forward_native(k.flatten(-2, -1),
-                                           variance=k_var).view(
-                                               B_, N_, H_, D_)
+            q = self.q_norm.forward_native(q.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
+            k = self.k_norm.forward_native(k.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
 
         x = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
         x = x.view(B, N, -1)
@@ -149,8 +145,12 @@ class NVLMSdpaAttention(nn.Module):
         self.qk_normalization = config.qk_normalization
 
         if self.qk_normalization:
-            self.q_norm = RMSNorm(self.dummy_dim, eps=config.layer_norm_eps)
-            self.k_norm = RMSNorm(self.dummy_dim, eps=config.layer_norm_eps)
+            self.q_norm = RMSNorm(self.dummy_dim,
+                                  eps=config.layer_norm_eps,
+                                  var_hidden_size=self.embed_dim)
+            self.k_norm = RMSNorm(self.dummy_dim,
+                                  eps=config.layer_norm_eps,
+                                  var_hidden_size=self.embed_dim)
 
         self.proj = nn.Linear(self.dummy_dim, self.embed_dim)
 
@@ -165,18 +165,10 @@ class NVLMSdpaAttention(nn.Module):
 
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
-
-            q_var = q.flatten(-2, -1)[:, :, :self.embed_dim].pow(2).mean(
-                -1, keepdim=True)
-            k_var = k.flatten(-2, -1)[:, :, :self.embed_dim].pow(2).mean(
-                -1, keepdim=True)
-
-            q = self.q_norm.forward_native(q.flatten(-2, -1),
-                                           variance=q_var).view(
-                                               B_, N_, H_, D_)
-            k = self.k_norm.forward_native(k.flatten(-2, -1),
-                                           variance=k_var).view(
-                                               B_, N_, H_, D_)
+            q = self.q_norm.forward_native(q.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
+            k = self.k_norm.forward_native(k.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
 
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
