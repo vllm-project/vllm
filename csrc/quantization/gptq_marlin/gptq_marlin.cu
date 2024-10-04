@@ -2260,7 +2260,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                 "b_zeros dim 0 = ", b_zeros.size(0),
                 " is not num_groups = ", num_groups);
     TORCH_CHECK(b_zeros.size(1) == size_n / pack_factor,
-                "b_zeros dim 1 = ", b_scales.size(1),
+                "b_zeros dim 1 = ", b_zeros.size(1),
                 " is not size_n / pack_factor = ", size_n / pack_factor);
   }
 
