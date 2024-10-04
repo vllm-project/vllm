@@ -13,7 +13,7 @@ common_pod_spec: &common_pod_spec
 
 common_container_settings: &common_container_settings
   command:
-    - bash .buildkite/nightly-benchmarks/run-nightly-suite.sh
+    - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
   resources:
     limits:
       nvidia.com/gpu: 8
@@ -37,7 +37,10 @@ common_container_settings: &common_container_settings
 
 steps:
   - block: ":rocket: Ready for comparing vllm against alternatives? This will take 4 hours."
-  - label: "A100 trt benchmark"
+
+
+
+  - label: "A100 vllm step 10"
     priority: 100
     agents:
       queue: A100
@@ -46,7 +49,21 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: nvcr.io/nvidia/tritonserver:24.04-trtllm-python-py3
+              - image: vllm/vllm-openai:v0.6.2
+                <<: *common_container_settings
+
+
+
+  - label: "A100 sglang benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: lmsysorg/sglang:v0.3.2-cu121
                 <<: *common_container_settings
 
   - label: "A100 lmdeploy benchmark"
@@ -58,11 +75,13 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: openmmlab/lmdeploy:v0.5.0
+              - image: openmmlab/lmdeploy:v0.6.1-cu12
                 <<: *common_container_settings
-  
 
-  - label: "A100 vllm benchmark"
+
+
+
+  - label: "A100 trt llama-8B"
     priority: 100
     agents:
       queue: A100
@@ -71,10 +90,25 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: vllm/vllm-openai:latest 
+              - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
                 <<: *common_container_settings
+                env:
+                  - name: VLLM_USAGE_SOURCE
+                    value: ci-test
+                  - name: HF_HOME
+                    value: /root/.cache/huggingface
+                  - name: VLLM_SOURCE_CODE_LOC
+                    value: /workspace/build/buildkite/vllm/performance-benchmark
+                  - name: HF_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-token-secret
+                        key: token
+                  - name: TEST_SELECTOR
+                    value: "llama8B"
 
-  - label: "A100 tgi benchmark"
+
+  - label: "A100 trt llama-70B"
     priority: 100
     agents:
       queue: A100
@@ -83,12 +117,54 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: ghcr.io/huggingface/text-generation-inference:2.1 
+              - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
                 <<: *common_container_settings
+                env:
+                  - name: VLLM_USAGE_SOURCE
+                    value: ci-test
+                  - name: HF_HOME
+                    value: /root/.cache/huggingface
+                  - name: VLLM_SOURCE_CODE_LOC
+                    value: /workspace/build/buildkite/vllm/performance-benchmark
+                  - name: HF_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-token-secret
+                        key: token
+                  - name: TEST_SELECTOR
+                    value: "llama70B"
+
+
+  # FIXME(Kuntai): uncomment this after NVIDIA gives us their test docker image 
+  # - label: "A100 trt benchmark"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
+  #               <<: *common_container_settings
+
+
+  # FIXME(Kuntai): uncomment this after TGI supports `--ignore-eos`.
+  # - label: "A100 tgi benchmark"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: ghcr.io/huggingface/text-generation-inference:2.2.0
+  #               <<: *common_container_settings
         
   - wait
 
-  - label: "Plot"
+  - label: "Collect the results"
     priority: 100
     agents:
       queue: A100
@@ -117,4 +193,4 @@ steps:
                     name: hf-token-secret
                     key: token
 
-  - wait
+  - block: ":rocket: check the results!"

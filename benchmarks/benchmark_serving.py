@@ -397,6 +397,7 @@ async def benchmark(
     profile: bool,
     selected_percentile_metrics: List[str],
     selected_percentiles: List[str],
+    ignore_eos: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -420,6 +421,7 @@ async def benchmark(
         best_of=best_of,
         use_beam_search=use_beam_search,
         multi_modal_content=test_mm_content,
+        ignore_eos=ignore_eos,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -685,6 +687,7 @@ def main(args: argparse.Namespace):
             selected_percentiles=[
                 float(p) for p in args.metric_percentiles.split(",")
             ],
+            ignore_eos=args.ignore_eos,
         ))
 
     # Save config and results to json
@@ -863,6 +866,11 @@ if __name__ == "__main__":
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         " format.",
     )
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Set ignore_eos flag when sending the benchmark request."
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
     parser.add_argument(
         "--percentile-metrics",
         type=str,
