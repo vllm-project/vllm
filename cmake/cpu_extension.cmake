@@ -84,7 +84,12 @@ endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
-list(APPEND LIBS dnnl numa)
+list(APPEND LIBS numa)
+
+# Appending the dnnl library for the AVX2 and AVX512, as it is not utilized by Power architecture.
+if (AVX2_FOUND OR AVX512_FOUND)
+    list(APPEND LIBS dnnl)
+endif()
 
 #
 # _C extension
@@ -120,4 +125,3 @@ define_gpu_extension_target(
 )
 
 message(STATUS "Enabling C extension.")
-add_dependencies(default _C)

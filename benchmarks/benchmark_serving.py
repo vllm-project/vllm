@@ -1,4 +1,4 @@
-"""Benchmark online serving throughput.
+r"""Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
     vLLM OpenAI API server
@@ -89,10 +89,8 @@ def sample_sharegpt_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int, None]]:
-    if fixed_output_len is not None and fixed_output_len < 4:
-        raise ValueError("output_len too small")
     # Load the dataset.
-    with open(dataset_path) as f:
+    with open(dataset_path, encoding='utf-8') as f:
         dataset = json.load(f)
     # Filter out the conversations with less than 2 turns.
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
@@ -117,7 +115,7 @@ def sample_sharegpt_requests(
         prompt_len = len(prompt_token_ids)
         output_len = len(completion_token_ids
                          ) if fixed_output_len is None else fixed_output_len
-        if prompt_len < 4 or output_len < 4:
+        if prompt_len < 4 or (fixed_output_len is None and output_len < 4):
             # Prune too short sequences.
             continue
         if prompt_len > 1024 or prompt_len + output_len > 2048:
@@ -141,7 +139,7 @@ def sample_sonnet_requests(
     ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
 
     # Load the dataset.
-    with open(dataset_path) as f:
+    with open(dataset_path, encoding='utf-8') as f:
         poem_lines = f.readlines()
 
     # Tokenize the poem lines.
@@ -228,10 +226,11 @@ def sample_hf_requests(
         prompt_len = len(prompt_token_ids)
         output_len = len(completion_token_ids
                          ) if fixed_output_len is None else fixed_output_len
-        if prompt_len < 4 or output_len < 4:
+        if fixed_output_len is None and (prompt_len < 4 or output_len < 4):
             # Prune too short sequences.
             continue
-        if prompt_len > 1024 or prompt_len + output_len > 2048:
+        if fixed_output_len is None and \
+            (prompt_len > 1024 or prompt_len + output_len > 2048):
             # Prune too long sequences.
             continue
 
@@ -398,6 +397,7 @@ async def benchmark(
     profile: bool,
     selected_percentile_metrics: List[str],
     selected_percentiles: List[str],
+    ignore_eos: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -421,6 +421,7 @@ async def benchmark(
         best_of=best_of,
         use_beam_search=use_beam_search,
         multi_modal_content=test_mm_content,
+        ignore_eos=ignore_eos,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -626,9 +627,9 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
             )
-            input_requests = [(prompt, prompt_len, output_len)
+            input_requests = [(prompt, prompt_len, output_len, None)
                               for prompt, prompt_formatted, prompt_len,
-                              output_len in input_requests]
+                              output_len, _ in input_requests]
         else:
             assert (
                 tokenizer.chat_template or tokenizer.default_chat_template
@@ -641,9 +642,9 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
             )
-            input_requests = [(prompt_formatted, prompt_len, output_len)
+            input_requests = [(prompt_formatted, prompt_len, output_len, None)
                               for prompt, prompt_formatted, prompt_len,
-                              output_len in input_requests]
+                              output_len, _ in input_requests]
 
     elif args.dataset_name == "hf":
         input_requests = sample_hf_requests(
@@ -686,6 +687,7 @@ def main(args: argparse.Namespace):
             selected_percentiles=[
                 float(p) for p in args.metric_percentiles.split(",")
             ],
+            ignore_eos=args.ignore_eos,
         ))
 
     # Save config and results to json
@@ -727,7 +729,7 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w") as outfile:
+        with open(file_name, "w", encoding='utf-8') as outfile:
             json.dump(result_json, outfile)
 
 
@@ -864,6 +866,11 @@ if __name__ == "__main__":
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         " format.",
     )
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Set ignore_eos flag when sending the benchmark request."
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
     parser.add_argument(
         "--percentile-metrics",
         type=str,

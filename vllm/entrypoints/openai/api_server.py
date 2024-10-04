@@ -50,8 +50,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.serving_engine import BaseModelPath
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
+from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
@@ -476,13 +478,18 @@ def init_app_state(
     else:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model)
+        for name in served_model_names
+    ]
+
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
 
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
-        served_model_names,
+        base_model_paths,
         args.response_role,
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
@@ -494,7 +501,7 @@ def init_app_state(
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
-        served_model_names,
+        base_model_paths,
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
@@ -503,13 +510,13 @@ def init_app_state(
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
-        served_model_names,
+        base_model_paths,
         request_logger=request_logger,
     )
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
-        served_model_names,
+        base_model_paths,
         lora_modules=args.lora_modules,
         request_logger=request_logger,
         chat_template=args.chat_template,
@@ -519,6 +526,15 @@ def init_app_state(
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
+
+    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
+        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    valide_tool_parses = ToolParserManager.tool_parsers.keys()
+    if args.enable_auto_tool_choice \
+        and args.tool_call_parser not in valide_tool_parses:
+        raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
+                       f"(chose from {{ {','.join(valide_tool_parses)} }})")
 
     temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     temp_socket.bind(("", args.port))

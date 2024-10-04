@@ -4,6 +4,8 @@ import contextlib
 import datetime
 import enum
 import gc
+import inspect
+import ipaddress
 import os
 import random
 import socket
@@ -116,6 +118,9 @@ STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+GB_bytes = 1_000_000_000
+"""The number of bytes in one gigabyte (GB)."""
 
 GiB_bytes = 1 << 30
 """The number of bytes in one gibibyte (GiB)."""
@@ -532,6 +537,14 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
+def is_valid_ipv6_address(address: str) -> bool:
+    try:
+        ipaddress.IPv6Address(address)
+        return True
+    except ValueError:
+        return False
+
+
 def get_distributed_init_method(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
@@ -734,7 +747,8 @@ def create_kv_caches_with_random(
 
 @lru_cache
 def print_warning_once(msg: str) -> None:
-    logger.warning(msg)
+    # Set the stacklevel to 2 to print the caller's line info
+    logger.warning(msg, stacklevel=2)
 
 
 @lru_cache(maxsize=None)
@@ -757,7 +771,7 @@ def is_pin_memory_available() -> bool:
     return True
 
 
-class CudaMemoryProfiler:
+class DeviceMemoryProfiler:
 
     def __init__(self, device: Optional[torch.types.Device] = None):
         self.device = device
@@ -1080,6 +1094,13 @@ def cuda_device_count_stateless() -> int:
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
+def cuda_is_initialized() -> bool:
+    """Check if CUDA is initialized."""
+    if not torch.cuda._is_compiled():
+        return False
+    return torch.cuda.is_initialized()
+
+
 def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     """Make an instance method that weakly references
     its associated instance and no-ops once that
@@ -1237,12 +1258,65 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+def get_allowed_kwarg_only_overrides(
+    callable: Callable[..., object],
+    overrides: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Given a callable which has one or more keyword only params and a dict
+    mapping param names to values, drop values that can be not be kwarg
+    expanded to overwrite one or more keyword-only args. This is used in a
+    few places to handle custom processor overrides for multimodal models,
+    e.g., for profiling when processor options provided by the user
+    may affect the number of mm tokens per instance.
+
+    Args:
+        callable: Callable which takes 0 or more keyword only arguments.
+        overrides: Potential overrides to be used when invoking the callable.
+
+    Returns:
+        Dictionary containing the kwargs to be leveraged which may be used
+        to overwrite one or more keyword only arguments when invoking the
+        callable.
+    """
+    if not overrides:
+        return {}
+
+    allowed_override_names = [
+        name for name, param in inspect.signature(callable).parameters.items()
+        if param.kind == inspect.Parameter.KEYWORD_ONLY
+    ]
+
+    # Drop any mm_processor_kwargs provided by the user that are
+    # not kwarg names accepted by the provided input processor.
+    filtered_overrides = {
+        kwarg_name: val
+        for kwarg_name, val in overrides.items()
+        if kwarg_name in allowed_override_names
+    }
+
+    # If anything is dropped, log a warning
+    dropped_keys = overrides.keys() - filtered_overrides.keys()
+    if dropped_keys:
+        logger.warning(
+            "The following intended overrides are not keyword-only args "
+            "and and will be dropped: %s", dropped_keys)
+
+    return filtered_overrides
+
+
 # Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
 # In particular, the FakeScalarType is not supported for earlier versions of
 # PyTorch which breaks dynamo for any ops registered using ScalarType.
 def supports_dynamo() -> bool:
     base_torch_version = Version(Version(torch.__version__).base_version)
     return base_torch_version >= Version("2.4.0")
+
+
+# Some backends use pytorch version < 2.4.0 which doesn't
+# support `torch.library.custom_op`.
+def supports_custom_op() -> bool:
+    return hasattr(torch.library, "custom_op")
 
 
 class AtomicCounter:

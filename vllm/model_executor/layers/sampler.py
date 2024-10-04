@@ -15,7 +15,8 @@ from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
-from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
+                           CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
@@ -433,12 +434,9 @@ def _apply_top_k_top_p(
     logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
     # Re-sort the probabilities.
-    src = torch.arange(logits_idx.shape[-1],
-                       device=logits_idx.device).expand_as(logits_idx)
-    logits_idx_inv = torch.empty_like(logits_idx).scatter_(dim=-1,
-                                                           index=logits_idx,
-                                                           src=src)
-    logits = torch.gather(logits_sort, dim=-1, index=logits_idx_inv)
+    logits = torch.empty_like(logits_sort).scatter_(dim=-1,
+                                                    index=logits_idx,
+                                                    src=logits_sort)
     return logits
 
 
@@ -762,10 +760,10 @@ def _sample_with_torch(
 
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
-        sampled_token_ids_tensor = torch.empty(logprobs.shape[0],
-                                               1,
-                                               dtype=torch.long,
-                                               device=logprobs.device)
+        sampled_token_ids_tensor = torch.full((logprobs.shape[0], 1),
+                                              VLLM_INVALID_TOKEN_ID,
+                                              dtype=torch.long,
+                                              device=logprobs.device)
     else:
         sampled_token_ids_tensor = None
 
@@ -914,7 +912,7 @@ def get_logprobs(
     sampling_metadata: SamplingMetadata,
     sample_results: SampleResultType,
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
-    """Return sample lobprobs and prompt logprobs.
+    """Return sample logprobs and prompt logprobs.
 
     The logic consists of 3 parts.
     - Select indices to compute logprob from, ranks of token ids, and

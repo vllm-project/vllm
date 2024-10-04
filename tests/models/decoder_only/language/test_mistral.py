@@ -4,7 +4,7 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
-from vllm import SamplingParams
+from vllm import LLM, SamplingParams
 
 from ...utils import check_logprobs_close
 
@@ -16,6 +16,10 @@ MODELS = [
 ]
 
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
+SYMBOLIC_LANG_PROMPTS = [
+    "勇敢な船乗りについての詩を書く",  # japanese
+    "寫一首關於勇敢的水手的詩",  # chinese
+]
 
 # for function calling
 TOOLS = [{
@@ -129,6 +133,26 @@ def test_mistral_format(
         name_0="hf",
         name_1="mistral",
     )
+
+
+@pytest.mark.parametrize("model", MODELS[1:])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("prompt", SYMBOLIC_LANG_PROMPTS)
+def test_mistral_symbolic_languages(
+    model: str,
+    dtype: str,
+    prompt: str,
+) -> None:
+    prompt = "hi"
+    msg = {"role": "user", "content": prompt}
+    llm = LLM(model=model,
+              dtype=dtype,
+              max_model_len=8192,
+              tokenizer_mode="mistral",
+              config_format="mistral",
+              load_format="mistral")
+    outputs = llm.chat([msg], sampling_params=SAMPLING_PARAMS)
+    assert "�" not in outputs[0].outputs[0].text.strip()
 
 
 @pytest.mark.parametrize("dtype", ["bfloat16"])

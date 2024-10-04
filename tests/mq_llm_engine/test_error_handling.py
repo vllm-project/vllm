@@ -61,7 +61,7 @@ async def test_evil_forward(tmp_socket):
 
         # Throws an error in first forward pass.
         with pytest.raises(RAISED_ERROR):
-            async for _ in client.generate(inputs="Hello my name is",
+            async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
@@ -69,7 +69,7 @@ async def test_evil_forward(tmp_socket):
 
         # Engine is errored, should get ENGINE_DEAD_ERROR.
         with pytest.raises(MQEngineDeadError):
-            async for _ in client.generate(inputs="Hello my name is",
+            async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
@@ -118,7 +118,7 @@ async def test_failed_health_check(tmp_socket):
 
         # Generate call should throw ENGINE_DEAD_ERROR
         with pytest.raises(MQEngineDeadError):
-            async for _ in client.generate(inputs="Hello my name is",
+            async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
@@ -153,26 +153,19 @@ async def test_failed_abort(tmp_socket):
         await client.check_health()
 
         # Trigger an abort on the client side.
-        async def bad_abort_after_2s():
-            await asyncio.sleep(2.0)
-            await client.abort(request_id="foo")
+        # This request ID does not exist, and will cause the engine to error
+        await client.abort(request_id="foo")
 
-        # Trigger an abort in 2s from now.
-        abort_task = asyncio.create_task(bad_abort_after_2s())
-
-        # Exception in abort() will happen during this generation.
-        # This will kill the engine and should return ENGINE_DEAD_ERROR
+        # Future generation requests will now fail
         # with reference to the original KeyError("foo")
         with pytest.raises(MQEngineDeadError) as execinfo:
             async for _ in client.generate(
-                    inputs="Hello my name is",
-                    sampling_params=SamplingParams(max_tokens=2000),
+                    prompt="Hello my name is",
+                    sampling_params=SamplingParams(max_tokens=10),
                     request_id=uuid.uuid4()):
                 pass
         assert "KeyError" in repr(execinfo.value)
         assert client.errored
-
-        await abort_task
 
         # This should raise the original error.
         with pytest.raises(RAISED_ERROR):
@@ -190,7 +183,7 @@ async def test_bad_request(tmp_socket):
 
         # Invalid request should fail, but not crash the server.
         with pytest.raises(ValueError):
-            async for _ in client.generate(inputs="Hello my name is",
+            async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id="abcd-1",
                                            lora_request=LoRARequest(
@@ -199,7 +192,7 @@ async def test_bad_request(tmp_socket):
                 pass
 
         # This request should be okay.
-        async for _ in client.generate(inputs="Hello my name is",
+        async for _ in client.generate(prompt="Hello my name is",
                                        sampling_params=SamplingParams(),
                                        request_id="abcd-2"):
             pass

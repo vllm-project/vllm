@@ -15,7 +15,7 @@
 # limitations under the License.
 import itertools
 import re
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
                     Tuple, TypedDict, Union)
 
@@ -29,13 +29,11 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
-from vllm.model_executor.models.llama import LlamaModel
+from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
@@ -43,8 +41,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
-from .interfaces import SupportsMultiModal
-from .utils import flatten_bn, merge_multimodal_embeddings
+from .interfaces import SupportsMultiModal, SupportsPP
+from .utils import (flatten_bn, group_weights_with_prefix,
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -295,6 +294,37 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             dim=2).reshape(num_images, -1, hid_dim)
         return image_features_hd_newline
 
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        # prepare weight iterators for components
+        weights_group = group_weights_with_prefix(weights)
+
+        # load vision encoder
+        self.img_processor.load_weights(weights_group["img_processor"])
+
+        # load glb_GN
+        for name, loaded_weight in weights_group["glb_GN"]:
+            assert name == ""
+            param = self.glb_GN
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+
+        # load sub_GN
+        for name, loaded_weight in weights_group["sub_GN"]:
+            assert name == ""
+            param = self.sub_GN
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+
+        # load mlp projector
+        mlp_params_dict = dict(self.img_projection.named_parameters())
+        for name, loaded_weight in weights_group["img_projection"]:
+            param = mlp_params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
 def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
@@ -307,7 +337,7 @@ def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
 
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L90
-def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
+def _calc_hd_transform_size(*, width: int, height: int, hd_num: int):
     transposed = False
     if width < height:
         width, height = height, width
@@ -337,8 +367,10 @@ def get_phi3v_image_feature_size(
     *,
     input_height: int,
     input_width: int,
+    num_crops: int,
 ) -> int:
-    num_crops = hf_config.get("num_crops", 16)
+    if num_crops is None:
+        num_crops = hf_config.get("num_crops", 16)
     new_width, new_height = _calc_hd_transform_size(width=input_width,
                                                     height=input_height,
                                                     hd_num=num_crops)
@@ -347,20 +379,26 @@ def get_phi3v_image_feature_size(
         + (new_height // 336 + 1) * 12
 
 
-def get_max_phi3v_image_tokens(ctx: InputContext):
+def get_max_phi3v_image_tokens(ctx: InputContext,
+                               *,
+                               num_crops: Optional[int] = None):
 
     return get_phi3v_image_feature_size(
         ctx.get_hf_image_processor_config(),
         input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
+        num_crops=num_crops,
     )
 
 
-def dummy_data_for_phi3v(ctx: InputContext, seq_len: int,
-                         mm_counts: Mapping[str, int]):
+def dummy_data_for_phi3v(ctx: InputContext,
+                         seq_len: int,
+                         mm_counts: Mapping[str, int],
+                         *,
+                         num_crops: Optional[int] = None):
     num_images = mm_counts["image"]
 
-    image_feature_size = get_max_phi3v_image_tokens(ctx)
+    image_feature_size = get_max_phi3v_image_tokens(ctx, num_crops=num_crops)
 
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
@@ -398,7 +436,10 @@ def _get_image_placeholder_token_ids(model_config: ModelConfig,
     return image_placeholder_token_ids
 
 
-def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_phi3v(ctx: InputContext,
+                              llm_inputs: LLMInputs,
+                              *,
+                              num_crops: Optional[int] = None):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
@@ -412,7 +453,8 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = [
             get_phi3v_image_feature_size(hf_config,
                                          input_width=w,
-                                         input_height=h)
+                                         input_height=h,
+                                         num_crops=num_crops)
         ]
         image_data = [image_data]
     elif is_list_of(image_data, Image.Image):
@@ -422,7 +464,8 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
             image_feature_size.append(
                 get_phi3v_image_feature_size(hf_config,
                                              input_width=w,
-                                             input_height=h))
+                                             input_height=h,
+                                             num_crops=num_crops))
     elif isinstance(image_data, torch.Tensor):
         num_images, image_feature_size, hidden_size = image_data.shape
     elif is_list_of(image_data, torch.Tensor):
@@ -495,7 +538,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
-class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
+class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -508,17 +551,21 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
         self.multimodal_config = multimodal_config
         self.image_token_id = _IMAGE_TOKEN_ID
 
-        self.model = LlamaModel(config, cache_config, quant_config)
-
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_embed_tokens = Phi3HDImageEmbedding(config)
-        self.lm_head = ParallelLMHead(config.vocab_size,
-                                      config.hidden_size,
-                                      quant_config=quant_config)
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+
+        self.language_model = LlamaForCausalLM(config, cache_config,
+                                               quant_config)
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
+
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return Sampler()
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )
@@ -618,24 +665,29 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs: object):
-        image_input = self._parse_and_validate_image_input(**kwargs)
-
-        if image_input is not None:
-            vision_embeddings = self._process_image_input(image_input)
-            inputs_embeds = self.model.get_input_embeddings(input_ids)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
-                self.image_token_id)
+        if intermediate_tensors is not None:
             input_ids = None
-        else:
             inputs_embeds = None
+        else:
+            image_input = self._parse_and_validate_image_input(**kwargs)
 
-        hidden_states = self.model(input_ids,
-                                   positions,
-                                   kv_caches,
-                                   attn_metadata,
-                                   intermediate_tensors,
-                                   inputs_embeds=inputs_embeds)
+            if image_input is not None:
+                vision_embeddings = self._process_image_input(image_input)
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, vision_embeddings,
+                    self.image_token_id)
+                input_ids = None
+            else:
+                inputs_embeds = None
+
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  kv_caches,
+                                                  attn_metadata,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
 
         return hidden_states
 
@@ -644,66 +696,38 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-        return logits
+        return self.language_model.compute_logits(hidden_states,
+                                                  sampling_metadata)
 
     def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
+        hf_to_vllm_mapping = {
+            "model.vision_embed_tokens.": "vision_embed_tokens.",
+            "lm_head.": "language_model.lm_head.",
+            "model.": "language_model.model.",
+        }
 
-        # TODO(ChristopherCho): This is a temporary fix to load
-        #     the vision weights with CLIPVisionModel.load_weights()
-        vision_weights = []
-        params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            # Skip loading the img_processor weights since they are
-            # loaded separately.
-            if "vision_embed_tokens.img_processor" in name:
-                vision_weights.append((name, loaded_weight))
-                continue
+        def hf_to_vllm_name(key: str) -> str:
+            for hf_name, vllm_name in hf_to_vllm_mapping.items():
+                if key.startswith(hf_name):
+                    return key.replace(hf_name, vllm_name, 1)
 
-            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
-                if key_to_modify in name:
-                    name = name.replace(key_to_modify, new_key)
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
+            return key
 
-                param = params_dict[name.replace(weight_name, param_name)]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name in params_dict:
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
+        vllm_weights = {hf_to_vllm_name(k): v for k, v in weights}
 
-        # We use regex to extract the sub-module name
-        # from "model.vision_embed_tokens.img_processor.*"
-        vision_weights = [
-            (re.search(r"vision_embed_tokens\.img_processor\.(.*)",
-                       n).group(1), w) for n, w in vision_weights
-        ]
-        self.vision_embed_tokens.img_processor.load_weights(vision_weights)
+        # prepare weight iterators for components
+        weights_group = group_weights_with_prefix(vllm_weights.items())
+
+        # load vision embeddings and encoder
+        self.vision_embed_tokens.load_weights(
+            weights_group["vision_embed_tokens"])
+
+        # load llm backbone
+        self.language_model.load_weights(weights_group["language_model"])

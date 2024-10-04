@@ -1,5 +1,5 @@
-from array import array
 from dataclasses import dataclass, fields
+from functools import cached_property
 from itertools import tee
 from typing import Iterable, List, Mapping, Optional, Tuple, Union
 
@@ -17,17 +17,16 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceData
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import init_vllm_registered_model
 
 
@@ -63,13 +62,11 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     image_feature_size = (size**2) // (patch_size**2)
 
     num_image_tokens = image_feature_size * num_images
+    seq_data = SequenceData.from_token_counts(
+        (image_token_id, num_image_tokens),
+        (0, seq_len - num_image_tokens),
+    )
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * num_image_tokens
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - num_image_tokens)
-
-    seq_data = SequenceData(token_ids)
     mm_data = {"image": num_images * [image]}
     return seq_data, mm_data
 
@@ -130,7 +127,8 @@ def input_processor_for_pixtral(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_pixtral_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_pixtral)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_pixtral)
-class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal):
+class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                      SupportsPP):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -159,6 +157,16 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.vision_language_adapter = VisionLanguageAdapter(
             self.vision_args, dim=config.text_config.hidden_size)
 
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
+
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return Sampler()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -167,32 +175,36 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for pixtral.
 
         TODO
 
         """
-        image_input = self._parse_and_validate_image_input(**kwargs)
-
-        if image_input is not None:
-            vision_embeddings = self._process_image_input(image_input)
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
-                self.vision_args.image_token_id)
-
+        if intermediate_tensors is not None:
             input_ids = None
-        else:
             inputs_embeds = None
+        else:
+            image_input = self._parse_and_validate_image_input(**kwargs)
+
+            if image_input is not None:
+                vision_embeddings = self._process_image_input(image_input)
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, vision_embeddings,
+                    self.vision_args.image_token_id)
+
+                input_ids = None
+            else:
+                inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   kv_caches,
                                                   attn_metadata,
-                                                  None,
+                                                  intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
         return hidden_states
