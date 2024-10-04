@@ -36,7 +36,7 @@ image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
 
 @fork_new_process_for_each_test
-def test_oot_mutlimodal_registration(dummy_llava_path):
+def test_oot_multimodal_registration(dummy_llava_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = [{
         "prompt": "What's in the image?<image>",
