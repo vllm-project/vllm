@@ -6,8 +6,8 @@
 # --------------------------------------------------------
 import re
 from functools import partial
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
-                    Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
+                    Optional, Tuple, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -238,57 +238,80 @@ def get_max_internvl_image_size(ctx: InputContext,
     return width, height
 
 
-def input_processor_for_internvl(ctx: InputContext,
-                                 llm_inputs: LLMInputs,
-                                 *,
-                                 max_dynamic_patch: Optional[int] = None):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
-
-    model_config = ctx.model_config
-    hf_config = ctx.get_hf_config()
-
-    image_data = multi_modal_data["image"]
-    num_patches = get_internvl_num_patches(hf_config)
-    num_blocks_calculator = calculate_num_blocks_wrapper(
-        hf_config, max_dynamic_patch)
-    if isinstance(image_data, Image.Image):
-        width, height = image_data.size
-        num_blocks, _, _ = num_blocks_calculator(width, height)
-        image_feature_size = [num_blocks * num_patches]
-    elif is_list_of(image_data, Image.Image):
-        image_feature_size = []
-        for image in image_data:
-            width, height = image.size
-            num_blocks, _, _ = num_blocks_calculator(width, height)
-            image_feature_size.append(num_blocks * num_patches)
-    elif isinstance(image_data, torch.Tensor):
-        num_images, image_feature_size, hidden_size = image_data.shape
-    else:
-        raise TypeError(f"Invalid image type: {type(image_data)}")
-
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code)
-
-    prompt = llm_inputs.get("prompt")
-    prompt_token_ids = llm_inputs["prompt_token_ids"]
-    if prompt is None:
-        prompt = tokenizer.decode(prompt_token_ids)
-
+def _expand_internvl_image_prompt(
+    prompt: str,
+    image_feature_sizes: List[int],
+    num_patches: int,
+) -> str:
     new_prompt = prompt
     image_idx = sorted(map(int, re.findall(r"Image-(\d+): <image>\n", prompt)))
-    for idx, feature_size in enumerate(image_feature_size, start=1):
+    for idx, feature_size in enumerate(image_feature_sizes, start=1):
         image_prompt = IMG_START + IMG_CONTEXT * feature_size + IMG_END
         if not image_idx:
             image_prompt = f"Image-{idx}: {image_prompt}"
         new_prompt = new_prompt.replace('<image>', image_prompt, 1)
-    new_prompt_token_ids = tokenizer.encode(new_prompt)
 
-    return LLMInputs(prompt=prompt,
-                     prompt_token_ids=new_prompt_token_ids,
-                     multi_modal_data=multi_modal_data)
+    return new_prompt
+
+
+def build_input_processor(expand_image_prompt: Callable[[str, List[int], int],
+                                                        str]):
+
+    def input_processor(
+        ctx: InputContext,
+        llm_inputs: LLMInputs,
+        *,
+        max_dynamic_patch: Optional[int] = None,
+    ) -> LLMInputs:
+        multi_modal_data = llm_inputs.get("multi_modal_data")
+        if multi_modal_data is None or "image" not in multi_modal_data:
+            return llm_inputs
+
+        model_config = ctx.model_config
+        hf_config = ctx.get_hf_config()
+
+        image_data = multi_modal_data["image"]
+        num_patches = get_internvl_num_patches(hf_config)
+        num_blocks_calculator = calculate_num_blocks_wrapper(
+            hf_config, max_dynamic_patch)
+        if isinstance(image_data, Image.Image):
+            width, height = image_data.size
+            num_blocks, _, _ = num_blocks_calculator(width, height)
+            image_feature_sizes = [num_blocks * num_patches]
+        elif is_list_of(image_data, Image.Image):
+            image_feature_sizes = []
+            for image in image_data:
+                width, height = image.size
+                num_blocks, _, _ = num_blocks_calculator(width, height)
+                image_feature_sizes.append(num_blocks * num_patches)
+        elif isinstance(image_data, torch.Tensor):
+            num_images, image_feature_size, hidden_size = image_data.shape
+            image_feature_sizes = [image_feature_size]
+        else:
+            raise TypeError(f"Invalid image type: {type(image_data)}")
+
+        tokenizer = cached_get_tokenizer(
+            model_config.tokenizer,
+            trust_remote_code=model_config.trust_remote_code)
+
+        prompt = llm_inputs.get("prompt")
+        prompt_token_ids = llm_inputs["prompt_token_ids"]
+        if prompt is None:
+            prompt = tokenizer.decode(prompt_token_ids)
+
+        new_prompt = expand_image_prompt(prompt, image_feature_sizes,
+                                         num_patches)
+        new_prompt_token_ids = tokenizer.encode(new_prompt)
+
+        return LLMInputs(prompt=prompt,
+                         prompt_token_ids=new_prompt_token_ids,
+                         multi_modal_data=multi_modal_data)
+
+    return input_processor
+
+
+input_processor_for_internvl = build_input_processor(
+    _expand_internvl_image_prompt)
 
 
 def input_mapper_for_internvl(ctx: InputContext,
