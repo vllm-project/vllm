@@ -20,6 +20,10 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
 
+import sys
+import os
+import time
+
 logger = init_logger(__name__)
 
 
@@ -131,6 +135,10 @@ class WorkerInput:
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
+    
+    allocated_block_counts : Optional[Dict[int, int]] = None    # new add for vmm
+    free_buffer_ids: Optional[List[int]] = None
+    
     num_steps: int = 1
 
     @classmethod
@@ -148,6 +156,8 @@ class WorkerInput:
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
+            allocated_block_counts=tensor_dict.pop("allocated_block_counts"),   # new add for dattn
+            free_buffer_ids=tensor_dict.pop("free_buffer_ids"),
             num_steps=tensor_dict.pop("num_steps"),
         )
 
@@ -162,6 +172,9 @@ class WorkerInput:
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
+            # new add for dattn
+            "allocated_block_counts": self.allocated_block_counts,  
+            "free_buffer_ids": self.free_buffer_ids,
             "num_steps": self.num_steps,
         }
 

@@ -34,7 +34,6 @@ class GPUExecutor(ExecutorBase):
         """
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
-
         self.driver_worker = self._create_worker()
         self.driver_worker.init_device()
         self.driver_worker.load_model()
@@ -121,7 +120,6 @@ class GPUExecutor(ExecutorBase):
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
-
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(

@@ -97,7 +97,6 @@ def paged_attention_v1(
         blocksparse_vert_stride, blocksparse_block_size,
         blocksparse_head_sliding_step)
 
-
 def paged_attention_v2(
     out: torch.Tensor,
     exp_sum: torch.Tensor,
@@ -129,6 +128,48 @@ def paged_attention_v2(
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
 
+# page attention ops for dAttention
+def dattention(
+    output: torch.Tensor,
+    exp_sum: torch.Tensor,
+    max_logits: torch.Tensor,
+    tmp_out: torch.Tensor,
+    query: torch.Tensor,
+    layer_idx: int,
+    num_layers: int,
+    block_size: int,
+    max_seq_len: int, 
+    seq_lens: torch.Tensor,
+    cache_row_mapping: torch.Tensor, 
+    cache_col_mapping: torch.Tensor,  
+    kv_cache_dtype: str,
+    num_kv_heads: int,
+    scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+    k_scale: float,
+    v_scale: float, 
+) -> None:
+    #print(f"before calling torch.ops._C.dattention, scale:{scale}, kv_scale:{kv_scale}\n")
+    torch.ops._C.dattention(
+            output,
+            exp_sum, 
+            max_logits, 
+            tmp_out,
+            query,
+            layer_idx,
+            num_layers,
+            block_size,
+            max_seq_len, 
+            seq_lens,
+            cache_row_mapping, 
+            cache_col_mapping,  
+            kv_cache_dtype,
+            num_kv_heads,
+            scale,
+            alibi_slopes,
+            k_scale,
+            v_scale,    
+        )
 
 def paged_attention_rocm(
     out: torch.Tensor,
@@ -841,6 +882,24 @@ def reshape_and_cache_flash(
                                                    kv_cache_dtype, k_scale,
                                                    v_scale)
 
+
+# new add for dAttention
+def reshape_and_cache_dattn(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_idx: int,
+    num_layers: int, 
+    block_size: int,
+    cache_row_mapping: torch.Tensor,
+    cache_col_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+) -> None:
+    torch.ops._C_cache_ops.reshape_and_cache_dattn(key, value, layer_idx, 
+                                                num_layers,
+                                                block_size,
+                                                cache_row_mapping,
+                                                cache_col_mapping, kv_cache_dtype)
+    
 
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],

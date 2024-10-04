@@ -229,14 +229,32 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # The CUTLASS kernels for Hopper require sm90a to be enabled.
   # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
   # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
-    set_source_files_properties(
-          "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
-          PROPERTIES
-          COMPILE_FLAGS
-          "-gencode arch=compute_90a,code=sm_90a")
-  endif()
+  #if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
+  #  set_source_files_properties(
+  #        "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
+  #        PROPERTIES
+  #        COMPILE_FLAGS
+  #        "-gencode arch=compute_90a,code=sm_90a")
+  #endif()
 
+  #
+  # dattn extension (DATTN)
+  #
+
+  set(VLLM_DATTN_EXT_SRC
+      "csrc/dattn/torch_bindings.cpp"
+      "csrc/dattn/dattn.cu"
+  )
+
+  define_gpu_extension_target(
+    _dattn_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_DATTN_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
 
   #
   # Machete kernels
@@ -350,6 +368,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
 
+  message(STATUS "Enabling dAttention extension.")
+  add_dependencies(default _dattn_C)
+  
   message(STATUS "Enabling moe extension.")
   add_dependencies(default _moe_C)
 endif()

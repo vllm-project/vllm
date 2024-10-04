@@ -53,6 +53,8 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
+import os
+import sys
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -219,6 +221,9 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+
+        # support for dattn
+        use_dattn: bool = False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -273,6 +278,7 @@ class LLMEngine:
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
+        self.use_dattn = use_dattn
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -409,6 +415,15 @@ class LLMEngine:
             for v_id in range(parallel_config.pipeline_parallel_size)
         ]
 
+        self.profile = os.getenv("PROFILE", "False") == "True"
+        if self.profile == True:
+            self.sched_time = 0
+            self.infer_time = 0
+            self.proc_time = 0
+            self.other_time = 0
+            self.total_time = 0
+            self.steps = 0
+
         # Metric Logging.
         if self.log_stats:
             if stat_loggers is not None:
@@ -433,6 +448,7 @@ class LLMEngine:
                 }
                 self.stat_loggers["prometheus"].info("cache_config",
                                                      self.cache_config)
+        
 
         self.tracer = None
         if self.observability_config.otlp_traces_endpoint:
@@ -463,7 +479,7 @@ class LLMEngine:
         """
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
-
+        print(f"num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks:{num_cpu_blocks}", file=sys.stderr)
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
             logger.info(
@@ -558,6 +574,7 @@ class LLMEngine:
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
+            use_dattn = engine_args.use_dattn,   
         )
 
         return engine
@@ -1154,6 +1171,10 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
+        
+        if self.profile == True:
+            T1 = time.time()
+            self.steps += 1
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
@@ -1198,6 +1219,9 @@ class LLMEngine:
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
+        if self.profile == True:
+            T2 = time.time()
+
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
                 virtual_engine].get_and_reset_finished_requests_ids()
@@ -1225,8 +1249,18 @@ class LLMEngine:
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
 
+            if self.use_dattn:
+                execute_model_req.allocated_block_counts = scheduler_outputs.allocated_block_counts
+                execute_model_req.free_buffer_ids = scheduler_outputs.free_buffer_ids
+                
+            if self.profile == True:
+                T2 = time.time()
+        
             outputs = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
+
+            if self.profile == True:
+                T2 = time.time()
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
@@ -1239,6 +1273,9 @@ class LLMEngine:
                 self._process_model_outputs(ctx=ctx)
             # No outputs in this case
             outputs = []
+
+        if self.profile == True:
+            T3 = time.time()
 
         # Finish the current step for all the sequence groups.
         if self.scheduler_config.is_multi_step:
@@ -1274,9 +1311,13 @@ class LLMEngine:
 
                 # Tracing
                 self.do_tracing(scheduler_outputs)
+
         else:
             # Multi-step case
             return ctx.request_outputs
+            
+        if self.profile == True:
+            T4 = time.time()
 
         if not self.has_unfinished_requests():
             # Drain async postprocessor (if exists)
@@ -1291,6 +1332,22 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
+        
+        if self.profile == True:
+            T5 = time.time()
+            self.sched_time += T2 - T1
+            self.infer_time += T3 - T2
+            self.proc_time += T4 - T3
+            self.other_time += T5 - T4
+            self.total_time += T5 - T1
+
+            if self.steps % 512 == 0:
+                print(f"STEP-{self.steps}: sched-{self.sched_time}, inference-{self.infer_time}, proc-{self.proc_time}, other-{self.other_time}, total-{self.total_time}", file=sys.stderr)
+                self.sched_time = 0
+                self.infer_time = 0
+                self.proc_time = 0
+                self.other_time = 0
+                self.total_time = 0 
 
         return ctx.request_outputs
 

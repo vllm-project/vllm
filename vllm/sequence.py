@@ -166,6 +166,9 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
+    # support dattn
+    cache_buffer_id: int = -1
+    
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
 
@@ -324,6 +327,7 @@ class SequenceData(msgspec.Struct,
                 f"prompt_token_ids={self._prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
+                f"cache_buffer_id={self.cache_buffer_id}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()}")
 
 
@@ -417,6 +421,9 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+
+        # support dattn
+        self.cache_buffer_id = -1
 
     @property
     def n_blocks(self) -> int:
@@ -988,6 +995,20 @@ class SequenceGroupMetadata(
         assert self.state.current_step < self.state.num_steps
         self.state.current_step += 1
 
+    def __repr__(self) -> str:
+        return (f"SequenceGroupMetadata(\n"
+                f"-- request_id={self.request_id}, \n"
+                f"-- is_prompt={self.is_prompt}, \n"
+                f"-- seq_data={self.seq_data}, \n"
+                f"-- sampling_params={self.sampling_params}, \n"
+                f"-- block_tables={self.block_tables}, \n"
+                f"-- do_sample={self.do_sample}, \n"
+                f"-- token_chunk_size={self.token_chunk_size}, \n"
+                f"-- lora_request={self.lora_request}, \n"
+                f"-- computed_block_nums={self.computed_block_nums}, \n"
+                f"-- multi_modal_data={self.multi_modal_data}, \n"
+                f"-- encoder_seq_data={self.encoder_seq_data}, \n"
+                f"-- cross_block_table={self.cross_block_table})")
 
 class SequenceOutput(
         msgspec.Struct,
@@ -1267,6 +1288,9 @@ class ExecuteModelRequest(
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback
     async_callback: Optional[Callable] = None
+    # new add for dattn
+    allocated_block_counts: Dict[int, int]= msgspec.field(default_factory=dict),
+    free_buffer_ids: List[int] = msgspec.field(default_factory=list)
 
     @property
     def is_first_multi_step(self) -> bool:

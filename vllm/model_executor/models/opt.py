@@ -19,6 +19,9 @@
 """Inference-only OPT model compatible with HuggingFace weights."""
 from typing import Iterable, List, Optional, Tuple
 
+import sys
+import time
+import os
 import torch
 from torch import nn
 from transformers import OPTConfig
@@ -93,6 +96,13 @@ class OPTAttention(nn.Module):
                               scale=self.scaling,
                               cache_config=cache_config,
                               quant_config=quant_config)
+        self.profile = os.getenv("PROFILE", "False") == "True"
+        if self.profile == True:
+            self.attn_time = 0
+            self.attn_prev = 0
+            self.attn_next = 0
+            self.total=0
+            self.step = 0
 
     def forward(
         self,
@@ -100,10 +110,36 @@ class OPTAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        if self.profile == True:
+            self.step += 1
+            T1 = time.time()
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
+
+        if self.profile == True:
+            T2 = time.time()
+        #print(f"OPT step-{self.step}, before attn", file=sys.stderr)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        
+        if self.profile == True:
+            T3 = time.time()
+        
+        #print(f"OPT step-{self.step}, after attn: time - {T3-T2}!", file=sys.stderr)
         output, _ = self.out_proj(attn_output)
+
+        if self.profile == True:
+            T4 = time.time()
+            self.attn_prev += T2 - T1
+            self.attn_time += T3 - T2
+            self.attn_next += T4 - T3
+            self.total += T4 - T1
+            if self.step % 512 == 0:
+                torch.set_printoptions(precision=2, sci_mode=False)
+                #print(f"OPTAttention: prev:{self.attn_prev*32}, attn:{self.attn_time*32}, next:{self.attn_next*32}. OPTAttention total:{self.total*32}", file=sys.stderr)
+                self.attn_prev = 0
+                self.attn_time = 0
+                self.attn_next = 0
+                self.total = 0
         return output
 
 
@@ -147,6 +183,9 @@ class OPTDecoderLayer(nn.Module):
         self.final_layer_norm = nn.LayerNorm(
             self.embed_dim,
             elementwise_affine=config.layer_norm_elementwise_affine)
+        self.step = 0
+        
+        
 
     def forward(
         self,
@@ -156,6 +195,8 @@ class OPTDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
+        #if hidden_states != None and kv_cache != None:
+        #    print(f"IN forward of layer, hidden_states:{hidden_states.shape}, kv_cache:{kv_cache.shape}, self.do_layer_norm_before:{self.do_layer_norm_before}")
         # 125m, 1.7B, ..., 175B applies layer norm BEFORE attention
         if self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -236,6 +277,14 @@ class OPTDecoder(nn.Module):
             OPTDecoderLayer(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
+        self.profile = os.getenv("PROFILE", "False") == "True"
+        if self.profile == True:
+            self.embed = 0
+            self.layer = 0
+            self.output = 0
+            self.outside = 0
+            self.step = 0
+            self.last = 0
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

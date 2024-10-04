@@ -16,9 +16,10 @@ from vllm.attention.backends.utils import (CommonAttentionState,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
-
+import time
 logger = init_logger(__name__)
-
+import sys
+import os
 
 class XFormersBackend(AttentionBackend):
 
@@ -144,6 +145,14 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     cross_slot_mapping: Optional[torch.Tensor] = None
     cross_block_tables: Optional[torch.Tensor] = None
 
+    # Added for dAttention
+    use_dattn: bool = False
+    num_layers: int = 0
+    block_size: int = 0
+    cache_batch_idx: Optional[torch.Tensor] = None # (batch_size, ) the index of batch in cache
+    cache_row_mapping: Optional[torch.Tensor] = None  # (num_tokens,)  record key/value write to which seq row in cache
+    cache_col_mapping: Optional[torch.Tensor] = None  # (num_tokens,)  record key/value write to which token col in cache
+
     def __post_init__(self):
         # Set during the execution of the first attention op.
         # It is a list because it is needed to set per prompt
@@ -192,16 +201,21 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         # Compute some attn_metadata fields which default to None
         query_start_loc = (None if self.query_start_loc is None else
                            self.query_start_loc[:self.num_prefills + 1])
-        slot_mapping = (None if self.slot_mapping is None else
-                        self.slot_mapping[:self.num_prefill_tokens])
         seq_lens = (None if self.seq_lens is None else
                     self.seq_lens[:self.num_prefills])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[:self.num_prefills])
         context_lens_tensor = (None if self.context_lens_tensor is None else
                                self.context_lens_tensor[:self.num_prefills])
-        block_tables = (None if self.block_tables is None else
-                        self.block_tables[:self.num_prefills])
+
+        #print(f"self.use_dattn:{self.use_dattn}, cache_batch_idx:{self.cache_batch_idx}", file=sys.stderr)
+        if not self.use_dattn:
+            assert self.block_tables is not None
+            block_tables=self.block_tables[:self.num_prefills]
+            slot_mapping=self.slot_mapping[:self.num_prefill_tokens]
+        else: 
+            block_tables = None
+            slot_mapping = None 
 
         # Construct & cache prefill-phase attention metadata structure
         self._cached_prefill_metadata = XFormersMetadata(
@@ -218,6 +232,13 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
+            # Support dattn
+            use_dattn=self.use_dattn,
+            num_layers=self.num_layers,
+            block_size=self.block_size,
+            cache_batch_idx=self.cache_batch_idx,
+            cache_row_mapping=self.cache_row_mapping,
+            cache_col_mapping=self.cache_col_mapping,            
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -239,12 +260,16 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 or (self.encoder_seq_lens_tensor is not None))
 
         # Compute some attn_metadata fields which default to None
-        slot_mapping = (None if self.slot_mapping is None else
-                        self.slot_mapping[self.num_prefill_tokens:])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[self.num_prefills:])
-        block_tables = (None if self.block_tables is None else
-                        self.block_tables[self.num_prefills:])
+
+        if not self.use_dattn:
+            assert self.block_tables is not None
+            block_tables=self.block_tables[:self.num_prefills]
+            slot_mapping=self.slot_mapping[:self.num_prefill_tokens]
+        else: 
+            block_tables = None
+            slot_mapping = None 
 
         # Construct & cache decode-phase attention metadata structure
         self._cached_decode_metadata = XFormersMetadata(
@@ -257,6 +282,13 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             max_decode_seq_len=self.max_decode_seq_len,
             block_tables=block_tables,
             use_cuda_graph=self.use_cuda_graph,
+            # Support dattn
+            use_dattn=self.use_dattn,
+            num_layers=self.num_layers,
+            block_size=self.block_size, 
+            cache_batch_idx=self.cache_batch_idx,
+            cache_row_mapping=self.cache_row_mapping,
+            cache_col_mapping=self.seq_lens_tensor[self.num_prefills:],   
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -433,7 +465,15 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.profile = os.getenv("PROFILE", "False") == "True"
+        if self.profile == True:
+            self.step = 0
+            self.cache_time = 0.0
+            self.attent_time = 0.0
+            self.schedule_time = 0.0
+            self.stop_time = 0.0
 
+        #print(f"XFormersImplXFormersImplXFormersImplXFormersImplXFormersImpl")
         suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
@@ -518,41 +558,71 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         else:
             assert value is None
 
+        if self.profile == True: 
+            self.step += 1
+            start_time = time.time()
+            if self.stop_time != 0:
+                self.schedule_time += (start_time - self.stop_time)
+                self.stop_time = 0
+
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
 
         if (attn_type != AttentionType.ENCODER and kv_cache is not None):
-            # KV-cache during decoder-self- or
-            # encoder-decoder-cross-attention, but not
-            # during encoder attention.
-            #
-            # Even if there are no new key/value pairs to cache,
-            # we still need to break out key_cache and value_cache
-            # i.e. for later use by paged attention
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
+            if attn_metadata.use_dattn != True:
+                # KV-cache during decoder-self- or
+                # encoder-decoder-cross-attention, but not
+                # during encoder attention.
+                #
+                # Even if there are no new key/value pairs to cache,
+                # we still need to break out key_cache and value_cache
+                # i.e. for later use by paged attention
+                key_cache, value_cache = PagedAttention.split_kv_cache(
+                    kv_cache, self.num_kv_heads, self.head_size)
 
-            if (key is not None) and (value is not None):
+                if (key is not None) and (value is not None):
 
-                if attn_type == AttentionType.ENCODER_DECODER:
-                    # Update cross-attention KV cache (prefill-only)
-                    # During cross-attention decode, key & value will be None,
-                    # preventing this IF-statement branch from running
-                    updated_slot_mapping = attn_metadata.cross_slot_mapping
-                else:
-                    # Update self-attention KV cache (prefill/decode)
-                    updated_slot_mapping = attn_metadata.slot_mapping
+                    if attn_type == AttentionType.ENCODER_DECODER:
+                        # Update cross-attention KV cache (prefill-only)
+                        # During cross-attention decode, key & value will be None,
+                        # preventing this IF-statement branch from running
+                        updated_slot_mapping = attn_metadata.cross_slot_mapping
+                    else:
+                        # Update self-attention KV cache (prefill/decode)
+                        updated_slot_mapping = attn_metadata.slot_mapping
 
-                # Reshape the input keys and values and store them in the cache.
-                # If kv_cache is not provided, the new key and value tensors are
-                # not cached. This happens during the initial memory
-                # profiling run.
-                PagedAttention.write_to_paged_cache(key, value, key_cache,
+                    # Reshape the input keys and values and store them in the cache.
+                    # If kv_cache is not provided, the new key and value tensors are
+                    # not cached. This happens during the initial memory
+                    # profiling run.
+                    PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                     value_cache,
                                                     updated_slot_mapping,
                                                     self.kv_cache_dtype,
                                                     k_scale, v_scale)
+            else: # use_dattn is True
+                # Reshape the input keys and values and store them in the cache.
+                # If kv_cache is not provided, the new key and value tensors are
+                # not cached. This happens during the initial memory profiling run.
+                layer_idx = kv_cache.item()
+                #torch.set_printoptions(precision=2, sci_mode=False)
+                #print(f"key.shape:{key.shape}, type:{key.dtype} \n{key[:2,:1,]}") 
+                #print(f"value.shape:{value.shape}, type:{key.dtype} \n{value[:3,:1,]}") 
+                #if layer_idx == 0:
+                #    print(f"attn_metadata:{attn_metadata}")
+                #    print(f"attn_metadata.cache_row_mapping:{attn_metadata.cache_row_mapping}")
+                #    print(f"attn_metadata.cache_col_mapping:{attn_metadata.cache_col_mapping}")
+                PagedAttention.write_to_paged_cache_dattn(key, value, layer_idx,
+                                                          attn_metadata.num_layers,
+                                                          attn_metadata.block_size,  
+                                                          attn_metadata.cache_row_mapping, 
+                                                          attn_metadata.cache_col_mapping,
+                                                          self.kv_cache_dtype)  
+
+            if self.profile == True:
+                self.cache_time += time.time() - start_time
+              
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -585,10 +655,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
+        layer_idx = 0
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+            if kv_cache is None or prefill_meta.use_dattn or prefill_meta.block_tables.numel() == 0:
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
@@ -626,27 +697,67 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
-
+            if self.profile == True:
+                start_time = time.time()
+            
             (
                 seq_lens_arg,
                 max_seq_len_arg,
                 block_tables_arg,
             ) = _get_seq_len_block_table_args(decode_meta, False, attn_type)
 
-            output[num_prefill_tokens:] = PagedAttention.forward_decode(
-                decode_query,
-                key_cache,
-                value_cache,
-                block_tables_arg,
-                seq_lens_arg,
-                max_seq_len_arg,
-                self.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                k_scale,
-                v_scale,
-            )
+            if not attn_metadata.use_dattn: 
+                output[num_prefill_tokens:] = PagedAttention.forward_decode(
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    block_tables_arg,
+                    seq_lens_arg,
+                    max_seq_len_arg,
+                    self.kv_cache_dtype,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                    k_scale,
+                    v_scale,
+                )
+            else: 
+                assert attn_metadata.use_dattn == True
+                layer_idx = kv_cache.item()
+
+                #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}, decode_meta.block_size:{decode_meta.block_size}, decode_meta.cache_row_mapping:{decode_meta.cache_row_mapping.shape}, decode_meta.cache_col_mapping:{decode_meta.cache_col_mapping}")
+                #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}")
+                #print(f"decoding: layer_idx:{layer_idx}, cache_row_mapping:{decode_meta.cache_row_mapping.shape}, cache_col_mapping:{decode_meta.cache_col_mapping}")
+                #print(f"decode_meta.seq_lens_tensor:{decode_meta.seq_lens_tensor}, decode_meta.max_decode_seq_len:{decode_meta.max_decode_seq_len}") 
+                output[num_prefill_tokens:] = PagedAttention.forward_decode_dattn(
+                    decode_query,
+                    layer_idx,
+                    decode_meta.num_layers,
+                    decode_meta.block_size,
+                    decode_meta.max_decode_seq_len, 
+                    decode_meta.seq_lens_tensor, 
+                    decode_meta.cache_row_mapping, 
+                    decode_meta.cache_col_mapping,
+                    self.kv_cache_dtype,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                    k_scale,
+                    v_scale,
+                )
+
+            if self.profile == True:
+                self.attent_time += time.time() - start_time
+            
+        if self.profile == True:
+            if self.step % 512 == 0:
+                if layer_idx % 16 == 1: 
+                    print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}, portion: 1-{self.attent_time/self.cache_time}", file=sys.stderr)
+                #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}. Portion: 1-{self.attent_time/self.cache_time}-{self.schedule_time/(self.cache_time*32)}", file=sys.stderr)
+                self.cache_time = 0
+                self.attent_time = 0
+                self.schedule_time = 0
+            self.stop_time = time.time()
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)

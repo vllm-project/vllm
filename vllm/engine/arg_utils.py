@@ -17,11 +17,11 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser
-
+from vllm.utils import FlexibleArgumentParser, STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
+_MB = 1 << 20
 logger = init_logger(__name__)
 
 ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
@@ -105,6 +105,11 @@ class EngineArgs:
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
+
+    # new add for dattn
+    block_bytes_size: int = 2 * _MB # 2MB
+    use_dattn: bool = False
+
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
@@ -867,6 +872,14 @@ class EngineArgs:
                     "supported for multimodal models and has been disabled.")
             self.enable_prefix_caching = False
 
+        if self.use_dattn:
+            logger.info(f"DATTN: use {self.block_bytes_size} as a page, block size: {self.block_size}")
+            # TODO: support swap preemption mode for dattn
+            self.preemption_mode = "recompute"
+            logger.warning("Preemption only support recompute for dattn now.")
+        else:
+            logger.info(f"use normal block size: {self.block_size}")
+
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
             self.max_model_len,  # neuron needs block_size = max_model_len
@@ -877,7 +890,10 @@ class EngineArgs:
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
+            use_dattn=self.use_dattn,  
+            block_bytes_size=self.block_bytes_size,
         )
+        
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -892,6 +908,7 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend)
 
+        
         max_model_len = model_config.max_model_len
         use_long_context = max_model_len > 32768
         if self.enable_chunked_prefill is None:

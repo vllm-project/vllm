@@ -47,7 +47,8 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 def _split_tensor_dict(
-    tensor_dict: Dict[str, Union[torch.Tensor, Any]]
+    tensor_dict: Dict[str, Union[torch.Tensor, Any]],
+    prefix: str = ""
 ) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
@@ -66,6 +67,17 @@ def _split_tensor_dict(
             metadata_list.append(
                 (key, TensorMetadata(device, value.dtype, value.size())))
             tensor_list.append(value)
+        elif isinstance(value, dict):
+            if key == "allocated_block_counts" or key == "free_buffer_ids":
+                # if allocated_block_counts, no need to split_tensor_dict its values
+                metadata_list.append((prefix + key, value))
+            else:
+                if len(value) == 0:
+                    metadata_list.append((prefix + key, value))
+                inner_metadata_list, inner_tensor_list = _split_tensor_dict(
+                    value, prefix + key + "%")
+                metadata_list.extend(inner_metadata_list)
+                tensor_list.extend(inner_tensor_list)
         else:
             metadata_list.append((key, value))
     return metadata_list, tensor_list

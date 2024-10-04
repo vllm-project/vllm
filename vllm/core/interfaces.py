@@ -1,3 +1,4 @@
+
 import enum
 from abc import ABC, abstractmethod
 from typing import List
@@ -41,6 +42,11 @@ class BlockSpaceManager(ABC):
                 EmbeddingModelBlockSpaceManager)
             return EmbeddingModelBlockSpaceManager
 
+        if version == "dattn":        # new add for dattn
+            from vllm.core.block_manager_dattn import BlockSpaceManagerDAttn
+            return BlockSpaceManagerDAttn
+
+        
         raise ValueError(f"Unknown version {version=}")
 
     @abstractmethod

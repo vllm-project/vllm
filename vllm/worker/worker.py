@@ -1,6 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
+import sys
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -24,6 +25,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
+from vllm.worker.cache_engine_dattn import CacheEngineDAttn
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -69,6 +71,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.load_config = load_config
+        self.use_dattn = cache_config.use_dattn
         self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
         if parallel_config and is_driver_worker:
@@ -112,7 +115,7 @@ class Worker(LocalOrDistributedWorkerBase):
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
+        self.cache_engine: List[Union[CacheEngine, CacheEngineDAttn]]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
@@ -218,10 +221,13 @@ class Worker(LocalOrDistributedWorkerBase):
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
 
+        print(f"Before profiling run", file=sys.stderr)
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
 
+        print(f"in the end of profiling run", file=sys.stderr)
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         torch.cuda.synchronize()
@@ -267,11 +273,25 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = [
-            CacheEngine(self.cache_config, self.model_config,
+        if self.use_dattn:   # Using DAttn
+            #print(f"NOOOOOW, before initialization of CacheEngineDAttn!")
+            self.cache_engine = [
+                CacheEngineDAttn(self.cache_config, self.model_config,
+                            self.parallel_config, self.scheduler_config,
+                            self.device_config)
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
+
+            # Initialize kv_cache_ptrs immediately
+            for ve in range(self.parallel_config.pipeline_parallel_size):
+                self.model_runner.init_kv_cache_attribute(self.cache_engine[ve].kv_cache_ptrs, self.cache_engine[ve].block_size, self.cache_engine[ve].num_layers)
+        else: 
+            self.cache_engine = [
+                CacheEngine(self.cache_config, self.model_config,
                         self.parallel_config, self.device_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
-        ]
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
+
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
@@ -313,12 +333,21 @@ class Worker(LocalOrDistributedWorkerBase):
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
 
+        if self.use_dattn:
+            allocated_block_counts = execute_model_req.allocated_block_counts
+            free_buffer_ids = execute_model_req.free_buffer_ids
+        else:
+            allocated_block_counts = None
+            free_buffer_ids = None
+
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
+            allocated_block_counts=allocated_block_counts,
+            free_buffer_ids=free_buffer_ids,
             num_steps=num_steps,
         )
 
@@ -338,6 +367,13 @@ class Worker(LocalOrDistributedWorkerBase):
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
 
+        if self.use_dattn and (worker_input.free_buffer_ids is not None) and len(worker_input.free_buffer_ids) > 0:
+            self.cache_engine[virtual_engine].free_seqs(
+                worker_input.free_buffer_ids)
+
+        if self.use_dattn and (worker_input.allocated_block_counts is not None):           
+            self.cache_engine[virtual_engine].alloc_seqs(worker_input.allocated_block_counts)
+    
     def _get_cached_seq_group_metadata(
             self,
             seq_group_metadata_list: List[Union[SequenceGroupMetadata,
@@ -431,7 +467,12 @@ class Worker(LocalOrDistributedWorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(self.cache_config,
+        if self.use_dattn:
+            return CacheEngineDAttn.get_cache_block_size(self.cache_config,
+                                                       self.model_config,
+                                                       self.parallel_config)
+        else:
+            return CacheEngine.get_cache_block_size(self.cache_config,
                                                 self.model_config,
                                                 self.parallel_config)
 

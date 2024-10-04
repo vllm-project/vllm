@@ -31,3 +31,14 @@ void reshape_and_cache_flash(torch::Tensor& key, torch::Tensor& value,
 // Just for unittest
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
                  const double scale, const std::string& kv_cache_dtype);
+
+// new add for dAttention
+void reshape_and_cache_dattn(
+    torch::Tensor& key,    // [num_tokens, num_heads, head_size]
+    torch::Tensor& value,  // [num_tokens, num_heads, head_size]
+    int64_t layer_idx,     // which layer to reshape
+    int64_t num_layers,    // number of layers
+    int64_t block_size,    // size for each layer's cache block (including kv cache)
+    torch::Tensor& cache_row_mapping,  // [num_tokens]  record key/value write to which batch row in cache
+    torch::Tensor& cache_col_mapping,  // [num_tokens]  record key/value write to which token col in cache
+    const std::string& kv_cache_dtype);

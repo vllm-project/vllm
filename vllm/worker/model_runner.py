@@ -13,6 +13,8 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import time
+import sys
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
@@ -197,6 +199,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.lora_requests.clear()  # type: ignore
             self.prompt_adapter_index_mapping.clear()  # type: ignore
             self.prompt_adapter_prompt_mapping.clear()  # type: ignore
+            self.cache_batch_idx = 0
+            
 
         def __init__(
             self,
@@ -358,7 +362,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.prompt_adapter_request = prompt_adapter_request
             self.multi_modal_inputs = multi_modal_inputs
             self.prefix_cache_hit = prefix_cache_hit
-
+            
             self.n_seqs = len(self.seq_ids)
 
             if not reinit:
@@ -438,7 +442,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.finished_requests_ids = finished_requests_ids
         self.decode_only = True
-
+        self.use_dattn = self.runner.use_dattn
         # Intermediate data (data in CPU before going to GPU) for
         # the current sequence group.
         self.inter_data_list: List[
@@ -458,6 +462,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
 
+        # new add for vmm/dAttention:  we don't need to prepare block_tables & slot_mapping, 
+        # but need to prepare cache_batch_idx, cache_row_mapping, cache_col_mapping
+        self.cache_batch_idx: List[int] = []
+        self.cache_row_mapping : List[int] = []
+        self.cache_col_mapping : List[int] = []
+ 
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
         """Compute context length, sequence length and tokens
@@ -694,7 +704,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 inter_data.mrope_input_positions[
                     seq_idx] = mrope_input_positions
 
-    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
+    def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata, kv_ptr: int):
         """Add a sequence group to the builder."""
         seq_ids = seq_group_metadata.seq_data.keys()
         n_seqs = len(seq_ids)
@@ -721,11 +731,24 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         self.inter_data_list.append(inter_data)
 
+
         for seq_idx in range(n_seqs):
             for per_seq_fn in self.per_seq_compute_fns:
                 per_seq_fn(inter_data, seq_idx, seq_group_metadata)
+
         for per_seq_group_fn in self.per_seq_group_compute_fns:
             per_seq_group_fn(inter_data, seq_group_metadata)
+
+        if self.use_dattn:
+            req_id = int(seq_group_metadata.request_id)
+            #print(f"req_id:{req_id}, inter_data.query_lens:{len(inter_data.query_lens)},inter_data.context_lens:{len(inter_data.context_lens)}, ")
+            cache_batch_id = req_id
+            self.cache_batch_idx.append(cache_batch_id)
+            query_len=inter_data.query_lens[0]
+            context_len=inter_data.context_lens[0]
+            #print(f"req_id:{req_id}, query_len:{query_len}, context_len:{context_len}", file=sys.stderr)
+            self.cache_row_mapping.extend([kv_ptr] * query_len)
+            self.cache_col_mapping.extend(list(range(context_len, context_len + query_len)))
 
     def _use_captured_graph(self,
                             batch_size: int,
@@ -838,7 +861,25 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
-            seq_lens, query_lens, cuda_graph_pad_size, batch_size)
+            seq_lens, query_lens, cuda_graph_pad_size, batch_size, self.use_dattn)
+
+        # support for dAttention
+        if self.use_dattn:
+            cache_batch_idx_tensor = torch.tensor(self.cache_batch_idx,
+                                           dtype=torch.int32,
+                                           device=self.runner.device)
+            cache_row_mapping_tensor = torch.tensor(self.cache_row_mapping, 
+                                             dtype=torch.int64, 
+                                             device=self.runner.device)
+            cache_col_mapping_tensor = torch.tensor(self. cache_col_mapping, 
+                                             dtype=torch.int64, 
+                                             device=self.runner.device)
+            attn_metadata.cache_batch_idx = cache_batch_idx_tensor
+            attn_metadata.cache_row_mapping = cache_row_mapping_tensor
+            attn_metadata.cache_col_mapping = cache_col_mapping_tensor
+            attn_metadata.use_dattn = True
+            attn_metadata.block_size = self.runner.block_size
+            attn_metadata.num_layers = self.runner.num_layers  
 
         # LoRA data.
         lora_requests = set()
@@ -996,6 +1037,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             .create_input_mapper(model_config)
         self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
+        # support dattn
+        self.use_dattn = cache_config.use_dattn
+        if self.use_dattn:
+            if self.lora_config:
+                #TODO:
+                raise NotImplementedError("DATTN is not supported with LoRA ")
+            if self.sliding_window:
+                #TODO:
+                raise NotImplementedError("DATTN is not supported with sliding window")
+            
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
         # Set after load_model.
@@ -1010,6 +1061,22 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.sampling_metadata_cache: SamplingMetadataCache = \
             SamplingMetadataCache()
 
+        # Add dAttention support
+        self.kv_cache_ptrs: Optional[List[int]] = None
+        self.num_layers: int = 0
+
+    # Initialize kv_cache_ptrs when dAttention is used
+    def init_kv_cache_attribute(self, kv_cache_ptrs: List[int], block_size: int, num_layers: int) -> None:
+        self.kv_cache_ptrs = kv_cache_ptrs
+        self.block_size = block_size
+        self.num_layers = num_layers
+
+    def _get_kv_ptr(self, index: int) -> int:
+        if self.kv_cache_ptrs is not None:
+            return self.kv_cache_ptrs[index]
+        else: 
+            return 0
+    
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with CudaMemoryProfiler() as m:
@@ -1120,7 +1187,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -1137,8 +1204,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         If cuda graph is required, this API automatically pads inputs.
         """
         builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
+        i = 0
+        #print(f"in _prepare_model_input_tensors: size:{len(seq_group_metadata_list)}", file=sys.stderr)
         for seq_group_metadata in seq_group_metadata_list:
-            builder.add_seq_group(seq_group_metadata)
+            #print(f"in handling group {i},requestid:{seq_group_metadata.request_id}", file=sys.stderr)
+            #i +=1
+            builder.add_seq_group(seq_group_metadata, self._get_kv_ptr(int(seq_group_metadata.request_id)) if self.use_dattn else 0)
 
         builder.reset_cached_inter_data()
 
@@ -1546,6 +1617,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
 
+        #print(f"execute_model now!!!", file=sys.stderr)
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
@@ -1622,7 +1694,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
-
         if not self.is_driver_worker:
             return []
 

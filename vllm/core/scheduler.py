@@ -1,4 +1,5 @@
 import enum
+import sys
 import os
 import random
 import time
@@ -133,6 +134,9 @@ class SchedulerOutputs:
     # The number of requests in the running queue
     running_queue_size: int
     preempted: int
+    # new add for dattention
+    allocated_block_counts: Dict[int, int] = field(default_factory=dict)
+    free_buffer_ids: List[int] = field(default_factory=list)
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -310,12 +314,15 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
+        self.use_dattn = cache_config.use_dattn
 
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
         if self.scheduler_config.embedding_mode:
             version = "embedding"
+        if self.use_dattn:
+            version = "dattn"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
@@ -329,13 +336,21 @@ class Scheduler:
             num_cpu_blocks //= pipeline_parallel_size
 
         # Create the block space manager.
-        self.block_manager = BlockSpaceManagerImpl(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=num_cpu_blocks,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
-
+        if not cache_config.use_dattn:
+            self.block_manager = BlockSpaceManagerImpl(
+                block_size=self.cache_config.block_size,
+                num_gpu_blocks=num_gpu_blocks,
+                num_cpu_blocks=num_cpu_blocks,
+                sliding_window=self.cache_config.sliding_window,
+                enable_caching=self.cache_config.enable_prefix_caching)
+        else: # use_dattn
+            self.block_manager = BlockSpaceManagerImpl(
+                block_size=self.cache_config.block_size,
+                num_gpu_blocks=num_gpu_blocks,
+                num_cpu_blocks=num_cpu_blocks,
+                sliding_window=self.cache_config.sliding_window,
+                enable_caching=self.cache_config.enable_prefix_caching,
+                num_cache_buffers=self.scheduler_config.max_num_seqs)
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -795,6 +810,9 @@ class Scheduler:
         Returns:
             SchedulerPrefillOutputs.
         """
+        #print(f"inside _schedule_prefills {self.prefillcount}", file=sys.stderr)
+        #self.prefillcount +=1
+
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
 
@@ -1072,7 +1090,10 @@ class Scheduler:
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
         if self.scheduler_config.chunked_prefill_enabled:
-            return self._schedule_chunked_prefill()
+            if self.use_dattn:
+                raise NotImplementedError("Chunked prefill is not supported with DATTN yet.")
+            else:
+                return self._schedule_chunked_prefill()
         else:
             return self._schedule_default()
 
@@ -1112,6 +1133,10 @@ class Scheduler:
         scheduler_outputs = self._schedule()
         now = time.time()
 
+        if self.use_dattn:
+            scheduler_outputs.allocated_block_counts, \
+                scheduler_outputs.free_buffer_ids = self.block_manager.step()
+            
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
 
@@ -1151,8 +1176,14 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                block_tables[seq_id] = self.block_manager.get_block_table(seq)
-                self.block_manager.access_all_blocks_in_seq(seq, now)
+
+                if not self.use_dattn:
+                    block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                    self.block_manager.access_all_blocks_in_seq(seq, now)
+                else:
+                    cache_buffer_id = seq.cache_buffer_id
+                    assert cache_buffer_id >= 0  # allocated seq.cache_buffer_id should be >= 0
+                    scheduler_outputs.allocated_block_counts[cache_buffer_id] = self.block_manager.get_allocated_block_count(seq.seq_id)
 
             if self.cache_config.enable_prefix_caching:
                 common_computed_block_nums = (

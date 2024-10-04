@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_MB = 1 << 20
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 4096
 
@@ -589,6 +590,8 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        block_bytes_size: int = 2 * _MB,
+        use_dattn: bool = False,
         cpu_offload_gb: float = 0,
     ) -> None:
         self.block_size = block_size
@@ -606,6 +609,9 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
+
+        self.block_bytes_size = block_bytes_size
+        self.use_dattn = use_dattn
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus

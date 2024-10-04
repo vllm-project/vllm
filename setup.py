@@ -68,7 +68,7 @@ if not sys.platform.startswith("linux"):
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
 
-MAIN_CUDA_VERSION = "12.1"
+MAIN_CUDA_VERSION = "12.4"
 
 
 def is_sccache_available() -> bool:
@@ -152,10 +152,17 @@ class cmake_build_ext(build_ext):
         default_cfg = "Debug" if self.debug else "RelWithDebInfo"
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
+        
         # where .so files will be written, should be the same for all extensions
         # that use the same CMakeLists.txt.
         outdir = os.path.abspath(
             os.path.dirname(self.get_ext_fullpath(ext.name)))
+       
+        if not self.build_temp:
+            # Define the path you want to use as the temporary build directory
+            self.build_temp = os.path.join(os.path.abspath("build"), "temp")
+
+        logger.info("NOOOOOOOOO: self.build_temp %s", self.build_temp)
 
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
@@ -221,7 +228,7 @@ class cmake_build_ext(build_ext):
 
         # Create build directory if it does not exist.
         if not os.path.exists(self.build_temp):
-            os.makedirs(self.build_temp)
+            os.makedirs(self.build_temp, exist_ok=True)
 
         targets = []
         # Build all the extensions
@@ -461,8 +468,11 @@ ext_modules = []
 if _build_core_ext():
     ext_modules.append(CMakeExtension(name="vllm._core_C"))
 
-if _is_cuda() or _is_hip():
-    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+if _is_cuda():
+    ext_modules.append(CMakeExtension(name="vllm._dattn_C"))
+
+#if _is_cuda() or _is_hip():
+#    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -506,7 +516,7 @@ setup(
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
                                     "tests*")),
     python_requires=">=3.8",
-    install_requires=get_requirements(),
+   # install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],

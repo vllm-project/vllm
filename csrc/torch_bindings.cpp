@@ -47,6 +47,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
+  ops.def(
+      "dattention("
+      "    Tensor! output, Tensor exp_sums, Tensor max_logits,"
+      "    Tensor tmp_out, Tensor query,"
+      "    int layer_idx, int num_layers, int block_size, int max_seq_len,"
+      "    Tensor seq_lens, Tensor row_mapping, Tensor col_mapping,"
+      "    str kv_cache_dtype, int num_kv_heads, float scale,"
+      "    Tensor? alibi_slopes, float kscale, float v_scale) -> ()"
+    );
+  ops.impl("dattention", torch::kCUDA, &dattention);
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
@@ -347,6 +357,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
+
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -381,6 +392,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        float k_scale, float v_scale) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
+
+  // new add for dAttention
+  cache_ops.def(
+      "reshape_and_cache_dattn(Tensor key, Tensor value,"
+      "                        int layer_idx,"
+      "                        int num_layers,"
+      "                        int block_size,"
+      "                        Tensor cache_row_mapping,"
+      "                        Tensor cache_col_mapping,"
+      "                        str kv_cache_dtype) -> ()");
+  cache_ops.impl("reshape_and_cache_dattn", torch::kCUDA, &reshape_and_cache_dattn); 
 
   // Convert the key and value cache to fp8 data type.
   cache_ops.def(

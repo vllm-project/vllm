@@ -84,6 +84,28 @@ class PagedAttention:
         )
 
     @staticmethod
+    def write_to_paged_cache_dattn(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer_idx: int,
+        num_layers: int, 
+        block_size: int, 
+        cache_row_mapping: torch.Tensor, 
+        cache_col_mapping: torch.Tensor,  
+        kv_cache_dtype: str,
+    ) -> None:
+        ops.reshape_and_cache_dattn(
+            key,
+            value,
+            layer_idx,
+            num_layers, 
+            block_size, 
+            cache_row_mapping, 
+            cache_col_mapping, 
+            kv_cache_dtype
+        )
+
+    @staticmethod
     def forward_decode(
         query: torch.Tensor,
         key_cache: torch.Tensor,
@@ -125,6 +147,9 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_seq_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
+
+        #if use_v1 == False:
+        #    print(f"DDDD: use_v1:{use_v1}, max_seq_len:{max_seq_len}, max_num_partitions:{max_num_partitions}, num_seqs:{num_seqs}")
 
         if use_v1:
             # Run PagedAttention V1.
@@ -189,6 +214,70 @@ class PagedAttention:
             )
         return output
 
+    @staticmethod
+    
+    def forward_decode_dattn(
+        query: torch.Tensor,
+        layer_idx: int,
+        num_layers: int,
+        block_size: int,
+        max_seq_len: int, 
+        seq_lens: torch.Tensor,
+        cache_row_mapping: torch.Tensor, 
+        cache_col_mapping: torch.Tensor,  
+        kv_cache_dtype: str,
+        num_kv_heads: int,
+        scale: float,
+        alibi_slopes: Optional[torch.Tensor],
+        k_scale: float,
+        v_scale: float,
+    ) -> torch.Tensor:
+        output = torch.empty_like(query)
+        num_seqs, num_heads, head_size = query.shape
+        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
+                              _PARTITION_SIZE)
+        if max_num_partitions > 1: 
+            tmp_output = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions, head_size),
+                dtype=output.dtype,
+                device=output.device,
+            )
+            exp_sums = torch.empty(
+                size=(num_seqs, num_heads, max_num_partitions),
+                dtype=torch.float32,
+                device=output.device,
+            )
+            max_logits = torch.empty_like(exp_sums)
+            #import sys
+            #print(f"forward_decode_dattn on long sequence: Query shape: {output.shape}", file=sys.stderr)
+        else:
+            tmp_output = None
+            exp_sums = None
+            max_logits = None
+        #print(f"forward_decode_dattn: Query shape: {output.shape}")
+        ops.dattention(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            layer_idx,
+            num_layers,
+            block_size,
+            max_seq_len, 
+            seq_lens,
+            cache_row_mapping, 
+            cache_col_mapping,  
+            kv_cache_dtype,
+            num_kv_heads,
+            scale,
+            alibi_slopes,
+            k_scale,
+            v_scale,     
+        ) 
+
+        return output
+    
     @staticmethod
     def forward_prefix(
         query: torch.Tensor,

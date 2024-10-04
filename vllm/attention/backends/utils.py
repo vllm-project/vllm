@@ -143,7 +143,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+            chunked_prefill_enabled: bool, use_dattn: bool):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
         computed_block_nums = inter_data.computed_block_nums
@@ -171,24 +171,26 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # only allowing multiple of block_size chunk size.
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
-            if inter_data.prefix_cache_hit:
-                block_table = computed_block_nums
-            elif ((chunked_prefill_enabled or not is_prompt)
-                  and block_tables is not None):
-                block_table = block_tables[seq_id][-curr_sliding_window_block:]
-            self.block_tables.append(block_table)
+            if not use_dattn:
+                if inter_data.prefix_cache_hit:
+                    block_table = computed_block_nums
+                elif ((chunked_prefill_enabled or not is_prompt)
+                    and block_tables is not None):
+                    block_table = block_tables[seq_id][-curr_sliding_window_block:]
+                self.block_tables.append(block_table)
+                
 
-            # Compute slot mapping.
-            is_profile_run = is_block_tables_empty(block_tables)
-            start_idx = compute_slot_mapping_start_idx(
-                is_prompt, query_len, context_len, self.sliding_window,
-                self.use_v2_block_manager)
-            compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
+                # Compute slot mapping.
+                is_profile_run = is_block_tables_empty(block_tables)
+                start_idx = compute_slot_mapping_start_idx(
+                    is_prompt, query_len, context_len, self.sliding_window,
+                    self.use_v2_block_manager)
+                compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
+              cuda_graph_pad_size: int, batch_size: int, use_dattn: bool):
         """Build attention metadata with on-device tensors.
 
         Args:
@@ -200,17 +202,17 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         """
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
-                                self.input_builder.chunked_prefill_enabled)
+                                self.input_builder.chunked_prefill_enabled, use_dattn)
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
-
+        
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
 
-        if use_captured_graph:
+        if not use_dattn and use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size
@@ -223,13 +225,20 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                     input_block_tables[i, :len(block_table)] = block_table
             block_tables = torch.from_numpy(input_block_tables).to(
                 device, non_blocking=True)
-        else:
+            slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
+        elif not use_dattn:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
                 pad=0,
                 dtype=torch.int,
                 device=device,
             )
+            slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
+        else:
+            slot_mapping_tensor = None
+            block_tables = None
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
         assert device is not None
@@ -239,8 +248,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                            self.runner.pin_memory)
         query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
                                              self.runner.pin_memory)
-        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
-                                               device, self.runner.pin_memory)
+        
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
