@@ -55,7 +55,7 @@ async def generate(request: Request) -> Response:
 
     assert engine is not None
         if use_beam_search:
-            beam_width = request_dict.pop("n", 2)
+            beam_width = request_dict.pop("best_of", 2)
             max_tokens = request_dict.pop("max_tokens", 1)
             ignore_eos = request_dict.pop("ignore_eos", False)
             results_generator = engine.beam_search(prompt, beam_width, max_tokens, ignore_eos)
