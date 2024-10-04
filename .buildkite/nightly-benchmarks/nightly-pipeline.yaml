@@ -49,7 +49,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: vllm/vllm-openai:v0.6.1.post2
+              - image: vllm/vllm-openai:v0.6.2
                 <<: *common_container_settings
 
 
@@ -63,7 +63,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: lmsysorg/sglang:v0.2.14.post2-cu118
+              - image: lmsysorg/sglang:v0.3.2-cu121
                 <<: *common_container_settings
 
   - label: "A100 lmdeploy benchmark"
@@ -75,7 +75,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: openmmlab/lmdeploy:v0.6.0a0-cu11
+              - image: openmmlab/lmdeploy:v0.6.1-cu12
                 <<: *common_container_settings
 
 

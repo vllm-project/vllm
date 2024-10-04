@@ -13,9 +13,9 @@ Latest reproduction guilde: [github issue link](https://github.com/vllm-project/
 ## Setup
 
 - Docker images:
-  - vLLM: `vllm/vllm-openai:v0.6.1.post2`
-  - SGLang: `lmsysorg/sglang:v0.2.14.post2-cu118`
-  - LMDeploy: `openmmlab/lmdeploy:v0.6.0a0-cu11`
+  - vLLM: `vllm/vllm-openai:v0.6.2`
+  - SGLang: `lmsysorg/sglang:v0.3.2-cu121`
+  - LMDeploy: `openmmlab/lmdeploy:v0.6.1-cu12`
   - TensorRT-LLM: `nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3`
     - *NOTE: we uses r24.07 as the current implementation only works for this version. We are going to bump this up.*
   - Check [nightly-pipeline.yaml](nightly-pipeline.yaml) for the concrete docker images, specs and commands we use for the benchmark.
