@@ -190,7 +190,7 @@ class GPTJModel(nn.Module):
             config.vocab_size,
             self.embed_dim,
         )
-        self.start_layer, self.end_layer, self.layers = make_layers(
+        self.start_layer, self.end_layer, self.h = make_layers(
             config.n_layer,
             lambda prefix: GPTJBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.h",
