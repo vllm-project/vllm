@@ -6,7 +6,7 @@ namespace marlin_moe {
 
 // We return bool so we can create these different kernel calls as a sequence
 // of if-elseif's.
-bool call_marlin_moe_kernel_ku4b8(
+bool call_marlin_moe_kernel_ku4(
     vllm::ScalarType const& q_type, int thread_n_blocks, int thread_k_blocks,
     bool has_act_order, int group_blocks, int num_threads, int blocks,
     int max_shared_mem, cudaStream_t stream, const int4* A_ptr,
