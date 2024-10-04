@@ -905,8 +905,8 @@ class EngineArgs:
             self.enable_prefix_caching = False
         if model_config.is_encoder_decoder_model:
             logger.warning(
-                "BlockManagerV2 have bug in encoder-decoder models. "
-                "Use BlockManagerV1 instead.")
+                "Block Manager v2 does not support encoder-decoder models"
+                " currently. Using Block Manager v1 as fallback.")
             self.use_v2_block_manager = False
 
         cache_config = CacheConfig(
