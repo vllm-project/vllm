@@ -90,7 +90,7 @@ def sample_sharegpt_requests(
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int, None]]:
     # Load the dataset.
-    with open(dataset_path) as f:
+    with open(dataset_path, encoding='utf-8') as f:
         dataset = json.load(f)
     # Filter out the conversations with less than 2 turns.
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
@@ -139,7 +139,7 @@ def sample_sonnet_requests(
     ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
 
     # Load the dataset.
-    with open(dataset_path) as f:
+    with open(dataset_path, encoding='utf-8') as f:
         poem_lines = f.readlines()
 
     # Tokenize the poem lines.
@@ -726,7 +726,7 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w") as outfile:
+        with open(file_name, "w", encoding='utf-8') as outfile:
             json.dump(result_json, outfile)
 
 
