@@ -6,8 +6,6 @@ import contextlib
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from vllm_hpu_extension.profiler import HabanaMemoryProfiler
-
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -86,7 +84,7 @@ class HPUExecutor(ExecutorBase):
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# HPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
-
+        from vllm_hpu_extension.profiler import HabanaMemoryProfiler
         with HabanaMemoryProfiler() as cache_init_m:
             self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
         msg = f"init_cache_engine took {cache_init_m.get_summary_string()}"
