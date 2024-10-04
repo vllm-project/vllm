@@ -1,4 +1,4 @@
-## Global Args #################################################################
+## Global Args ##################################################################
 ARG BASE_UBI_IMAGE_TAG=9.4
 ARG PYTHON_VERSION=3.12
 # Default ROCm ARCHes to build vLLM for.
