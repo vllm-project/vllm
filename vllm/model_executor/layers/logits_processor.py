@@ -109,7 +109,7 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    # NOTE(kzawora): The if guard is needed for Gaudi - in some scenarios 
+    # NOTE(kzawora): The if guard is needed for Gaudi - in some scenarios
     # (warmup, profile_run) we might not have selected_token_indices,
     # so we skip pruning.
     if sampling_metadata.selected_token_indices is not None:
