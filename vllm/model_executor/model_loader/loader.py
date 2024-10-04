@@ -41,9 +41,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names, get_quant_config, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
-from vllm.model_executor.models.interfaces import (has_inner_state,
-                                                   supports_lora,
-                                                   supports_multimodal)
+from vllm.model_executor.models import (has_inner_state, supports_lora,
+                                        supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available

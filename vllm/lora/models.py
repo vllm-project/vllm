@@ -24,8 +24,7 @@ from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica import PunicaWrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
-from vllm.model_executor.models.interfaces import (SupportsLoRA,
-                                                   supports_multimodal)
+from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.utils import is_pin_memory_available

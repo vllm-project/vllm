@@ -3,13 +3,13 @@ import warnings
 import pytest
 import torch.cuda
 
-from vllm.model_executor.models import _MODELS, ModelRegistry
+from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 
 from ..utils import fork_new_process_for_each_test
 
 
-@pytest.mark.parametrize("model_arch", _MODELS)
+@pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
 def test_registry_imports(model_arch):
     # Ensure all model classes can be imported successfully
     ModelRegistry.resolve_model_cls(model_arch)
