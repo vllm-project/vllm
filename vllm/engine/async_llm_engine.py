@@ -16,6 +16,7 @@ from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
+from vllm.executor.habana_executor import HabanaExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -1204,7 +1205,8 @@ class AsyncLLMEngine:
     async def start_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes
-        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
+        if type(self.engine.model_executor) == GPUExecutorAsync or \
+            type(self.engine.model_executor) == HabanaExecutorAsync:  # noqa: E721
             self.engine.model_executor.start_profile()
         else:
             self.engine.model_executor._run_workers("start_profile")
@@ -1212,7 +1214,8 @@ class AsyncLLMEngine:
     async def stop_profile(self) -> None:
         # using type instead of isinstance to check to avoid capturing
         # inherited classes
-        if type(self.engine.model_executor) == GPUExecutorAsync:  # noqa: E721
+        if type(self.engine.model_executor) == GPUExecutorAsync or \
+            type(self.engine.model_executor) == HabanaExecutorAsync:  # noqa: E721
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")

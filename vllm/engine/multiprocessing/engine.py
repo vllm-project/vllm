@@ -23,6 +23,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.executor.gpu_executor import GPUExecutor
+from vllm.executor.habana_executor import HabanaExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -364,13 +365,15 @@ class MQLLMEngine:
         self._last_alive_time = time.time()
 
     def start_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
+        if type(self.engine.model_executor) is GPUExecutor or \
+                type(self.engine.model_executor) is HabanaExecutor:
             self.engine.model_executor.start_profile()
         else:
             self.engine.model_executor._run_workers("start_profile")
 
     def stop_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
+        if type(self.engine.model_executor) is GPUExecutor or \
+                type(self.engine.model_executor) is HabanaExecutor:
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
