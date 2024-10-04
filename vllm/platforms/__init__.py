@@ -46,7 +46,15 @@ is_hpu = False
 try:
     from importlib import util
     is_hpu = util.find_spec('habana_frameworks') is not None
+except Exception:
+    pass
 
+is_xpu = False
+
+try:
+    import torch
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        is_xpu = True
 except Exception:
     pass
 
@@ -71,6 +79,9 @@ elif is_rocm:
 elif is_hpu:
     from .hpu import HpuPlatform
     current_platform = HpuPlatform()
+elif is_xpu:
+    from .xpu import XPUPlatform
+    current_platform = XPUPlatform()
 elif is_cpu:
     from .cpu import CpuPlatform
     current_platform = CpuPlatform()

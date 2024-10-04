@@ -27,7 +27,7 @@ The :class:`~vllm.LLM` class can be instantiated in much the same way as languag
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
     the above snippet. Specifically, ``image_feature_size`` can no longer be specified as we now calculate that internally for each model.
 
-To pass an image to the model, note the following in :class:`vllm.inputs.PromptInputs`:
+To pass an image to the model, note the following in :class:`vllm.inputs.PromptType`:
 
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
@@ -60,7 +60,24 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptI
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+
+    # Inference with image embeddings as input with additional parameters
+    # Specifically, we are conducting a trial run of Qwen2VL with the new input format, as the model utilizes additional parameters for calculating positional encoding.
+    image_embeds = torch.load(...) # torch.Tensor of shape (1, image_feature_size, hidden_size of LM)
+    image_grid_thw = torch.load(...) # torch.Tensor of shape (1, 3)
+    mm_data['image'] = {
+        "image_embeds": image_embeds,
+        "image_grid_thw":  image_grid_thw,
+    }
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": mm_data,
+    })
     
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+
     # Batch inference
     image_1 = PIL.Image.open(...)
     image_2 = PIL.Image.open(...)

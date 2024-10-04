@@ -11,6 +11,7 @@ import torch
 import torch.distributed
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
@@ -23,14 +24,14 @@ from vllm.model_executor import set_random_seed
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.habana_model_runner import HabanaModelRunner
+from vllm.worker.hpu_model_runner import HPUModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 logger = init_logger(__name__)
 
 
-class HabanaWorker(LocalOrDistributedWorkerBase):
+class HPUWorker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a HPU.
 
     Each worker is associated with a single HPU. The worker is responsible for
@@ -77,7 +78,7 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner: HabanaModelRunner = HabanaModelRunner(
+        self.model_runner: HPUModelRunner = HPUModelRunner(
             model_config,
             parallel_config,
             scheduler_config,
@@ -94,6 +95,32 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
         self.cache_engine: List[CacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.hpu_cache: Optional[List[List[torch.tensor]]] = None
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.HPU,
+                ],
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir, use_gzip=True))
+        else:
+            self.profiler = None
+
+    def start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.start()
+
+    def stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.stop()
 
     def _set_env_vars(self):
         local_rank = self.local_rank
@@ -312,9 +339,6 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
 
     def shutdown_inc(self):
         self.model_runner.shutdown_inc()
-
-    def __del__(self):
-        self.shutdown_inc()
 
     @property
     def max_model_len(self) -> int:

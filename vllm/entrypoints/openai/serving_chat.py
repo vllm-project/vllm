@@ -22,15 +22,14 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, ToolCall, UsageInfo)
+    DeltaToolCall, ErrorResponse, FunctionCall, RequestResponseMetadata,
+    ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath,
                                                     TextTokensPrompt)
-from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
-                                                  MistralToolParser,
-                                                  ToolParser)
+from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -80,13 +79,13 @@ class OpenAIServingChat(OpenAIServing):
 
         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
-            if tool_parser == "mistral":
-                self.tool_parser = MistralToolParser
-            elif tool_parser == "hermes":
-                self.tool_parser = Hermes2ProToolParser
-            else:
+            try:
+                self.tool_parser = ToolParserManager.get_tool_parser(
+                    tool_parser)
+            except Exception as e:
                 raise TypeError("Error: --enable-auto-tool-choice requires "
-                                "--tool-call-parser")
+                                f"tool_parser:'{tool_parser}' which has not "
+                                "been registered") from e
 
     async def create_chat_completion(
         self,
@@ -136,6 +135,7 @@ class OpenAIServingChat(OpenAIServing):
                     messages=request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                     tools=tool_dicts,
                     documents=request.documents,
                     **(request.chat_template_kwargs or {}),
@@ -146,18 +146,19 @@ class OpenAIServingChat(OpenAIServing):
                     conversation=conversation,
                     chat_template=request.chat_template or self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                     tools=tool_dicts,
                     documents=request.documents,
                     **(request.chat_template_kwargs or {}),
                 )
         except Exception as e:
-            logger.error("Error in applying chat template from request: %s", e)
+            logger.exception("Error in applying chat template from request")
             return self.create_error_response(str(e))
 
         try:
             mm_data = await mm_data_future
         except Exception as e:
-            logger.error("Error in loading multi-modal data: %s", e)
+            logger.exception("Error in loading multi-modal data")
             return self.create_error_response(str(e))
 
         # validation for OpenAI tools
@@ -175,9 +176,15 @@ class OpenAIServingChat(OpenAIServing):
                 "--enable-auto-tool-choice and --tool-call-parser to be set")
 
         request_id = f"chat-{random_uuid()}"
+
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         try:
-            guided_decode_logits_processor = (
-                await self._guided_decode_logits_processor(request, tokenizer))
+            if self.enable_auto_tools and self.tool_parser:
+                request = self.tool_parser(tokenizer).adjust_request(
+                    request=request)
 
             if isinstance(prompt, str):
                 prompt_inputs = self._tokenize_prompt_input(
@@ -197,8 +204,6 @@ class OpenAIServingChat(OpenAIServing):
             assert prompt_inputs is not None
 
             sampling_params = request.to_sampling_params(
-                tokenizer,
-                guided_decode_logits_processor,
                 default_max_tokens=self.max_model_len -
                 len(prompt_inputs["prompt_token_ids"]))
 
@@ -229,6 +234,7 @@ class OpenAIServingChat(OpenAIServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
+                priority=request.priority,
             )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -241,11 +247,13 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation, tokenizer)
+                request, result_generator, request_id, conversation, tokenizer,
+                request_metadata)
 
         try:
             return await self.chat_completion_full_generator(
-                request, result_generator, request_id, conversation, tokenizer)
+                request, result_generator, request_id, conversation, tokenizer,
+                request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -262,6 +270,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         model_name = self.base_model_paths[0].name
         created_time = int(time.time())
@@ -272,11 +281,11 @@ class OpenAIServingChat(OpenAIServing):
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
-
         num_prompt_tokens = 0
 
-        tool_parser: Optional[ToolParser] = self.tool_parser(
-            tokenizer) if self.tool_parser else None
+        tool_parsers: List[Optional[ToolParser]] = [
+            self.tool_parser(tokenizer) if self.tool_parser else None
+        ] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -300,6 +309,8 @@ class OpenAIServingChat(OpenAIServing):
             async for res in result_generator:
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
+                    if res.encoder_prompt_token_ids is not None:
+                        num_prompt_tokens += len(res.encoder_prompt_token_ids)
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -312,7 +323,7 @@ class OpenAIServingChat(OpenAIServing):
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
                     for i in range(num_choices):
-
+                        tool_parser = tool_parsers[i]
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=DeltaMessage(
@@ -347,7 +358,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # Send response to echo the input portion of the
                     # last message
-                    if request.echo:
+                    if request.echo or request.continue_final_message:
                         last_msg_content: str = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
@@ -387,6 +398,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index
+                    tool_parser = tool_parsers[i]
 
                     if finish_reason_sent[i]:
                         continue
@@ -434,7 +446,8 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_text=delta_text,
                                 previous_token_ids=previous_token_ids,
                                 current_token_ids=current_token_ids,
-                                delta_token_ids=output.token_ids))
+                                delta_token_ids=output.token_ids,
+                                request=request))
 
                         # update the previous values for the next iteration
                         previous_texts[i] = current_text
@@ -580,6 +593,13 @@ class OpenAIServingChat(OpenAIServing):
                     exclude_unset=True, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
+            # report to FastAPI middleware aggregate usage across all choices
+            num_completion_tokens = sum(previous_num_tokens)
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=num_completion_tokens,
+                total_tokens=num_prompt_tokens + num_completion_tokens)
+
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             logger.error("error in chat completion stream generator: %s", e)
@@ -595,6 +615,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = self.base_model_paths[0].name
@@ -665,7 +686,8 @@ class OpenAIServingChat(OpenAIServing):
                     and self.tool_parser:
 
                 tool_parser = self.tool_parser(tokenizer)
-                tool_call_info = tool_parser.extract_tool_calls(output.text)
+                tool_call_info = tool_parser.extract_tool_calls(
+                    output.text, request=request)
                 tools_called = tool_call_info.tools_called
                 if tool_call_info.tools_called:
                     message = ChatMessage(role=role,
@@ -694,7 +716,7 @@ class OpenAIServingChat(OpenAIServing):
                 stop_reason=output.stop_reason)
             choices.append(choice_data)
 
-        if request.echo:
+        if request.echo or request.continue_final_message:
             last_msg_content = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
@@ -707,6 +729,8 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
+        if final_res.encoder_prompt_token_ids is not None:
+            num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
         usage = UsageInfo(
@@ -714,6 +738,9 @@ class OpenAIServingChat(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
+
+        request_metadata.final_usage_info = usage
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,

@@ -41,9 +41,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names, get_quant_config, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
-from vllm.model_executor.models.interfaces import (has_inner_state,
-                                                   supports_lora,
-                                                   supports_multimodal)
+from vllm.model_executor.models import (has_inner_state, supports_lora,
+                                        supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
@@ -443,6 +442,18 @@ class DummyModelLoader(BaseModelLoader):
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
+
+            for _, module in model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                if quant_method is not None:
+                    # When quant methods need to process weights after loading
+                    # (for repacking, quantizing, etc), they expect parameters
+                    # to be on the global target device. This scope is for the
+                    # case where cpu offloading is used, where we will move the
+                    # parameters onto device for processing and back off after.
+                    with device_loading_context(
+                            module, torch.device(device_config.device)):
+                        quant_method.process_weights_after_loading(module)
         return model.eval()
 
 
@@ -853,12 +864,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # only load the bitsandbytes module when needed
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.42.0":
+            if bitsandbytes.__version__ < "0.44.0":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.42.0.")
+                                  "install bitsandbytes>=0.44.0.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.42.0 via "
-                              "`pip install bitsandbytes>=0.42.0` to use "
+            raise ImportError("Please install bitsandbytes>=0.44.0 via "
+                              "`pip install bitsandbytes>=0.44.0` to use "
                               "bitsandbytes quantizer.") from err
 
         hf_weights_files, use_safetensors = self._prepare_weights(

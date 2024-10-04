@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class RayHabanaExecutor(DistributedGPUExecutor):
+class RayHPUExecutor(DistributedGPUExecutor):
 
     uses_ray: bool = True
 
@@ -90,8 +90,8 @@ class RayHabanaExecutor(DistributedGPUExecutor):
             raise NotImplementedError(
                 "Speculative decoding is not implemented for HPU")
         else:
-            worker_module_name = "vllm.worker.habana_worker"
-            worker_class_name = "HabanaWorker"
+            worker_module_name = "vllm.worker.hpu_worker"
+            worker_class_name = "HPUWorker"
         return (worker_module_name, worker_class_name, worker_class_fn)
 
     def _get_worker_wrapper_args(self) -> Dict[str, Any]:
@@ -477,7 +477,7 @@ class RayHabanaExecutor(DistributedGPUExecutor):
         self.shutdown()
 
 
-class RayHabanaExecutorAsync(RayHabanaExecutor, DistributedGPUExecutorAsync):
+class RayHPUExecutorAsync(RayHPUExecutor, DistributedGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

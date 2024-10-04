@@ -6,4 +6,6 @@ ray == 2.32.0
 triton
 pandas
 tabulate
-vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@0a7adab
+setuptools>=61
+setuptools-scm>=8
+vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@bb56d3b

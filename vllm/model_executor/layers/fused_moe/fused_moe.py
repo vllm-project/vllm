@@ -13,6 +13,10 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+if current_platform.is_hpu():
+    from vllm_hpu_extension.ops import scaled_fp8_quant
+    ops.scaled_fp8_quant = scaled_fp8_quant
+
 logger = init_logger(__name__)
 
 
@@ -320,6 +324,9 @@ def get_moe_configs(E: int, N: int,
 
     # If no optimized configuration is available, we will use the default
     # configuration
+    logger.warning(
+        ("Using default MoE config. Performance might be sub-optimal! "
+         "Config file not found at %s"), config_file_path)
     return None
 
 

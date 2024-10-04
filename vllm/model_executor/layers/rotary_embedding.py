@@ -31,7 +31,8 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
 if current_platform.is_hpu():
-    from vllm_hpu_extension.rotary_embed import HpuRotaryEmbedding
+    from vllm_hpu_extension.rotary_embed import (HpuLlama3RotaryEmbedding,
+                                                 HpuRotaryEmbedding)
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -943,12 +944,23 @@ def get_rope(
             high_freq_factor = rope_scaling["high_freq_factor"]
             original_max_position = rope_scaling[
                 "original_max_position_embeddings"]
-            rotary_emb = Llama3RotaryEmbedding(head_size, rotary_dim,
-                                               max_position, base,
-                                               is_neox_style, dtype,
-                                               scaling_factor, low_freq_factor,
-                                               high_freq_factor,
-                                               original_max_position)
+            if current_platform.is_hpu():
+                rotary_emb = HpuLlama3RotaryEmbedding(
+                    head_size,
+                    rotary_dim,
+                    max_position,
+                    base,
+                    is_neox_style,
+                    scaling_factor,
+                    low_freq_factor,
+                    high_freq_factor,
+                    original_max_position,
+                    RoPEFallback=Llama3RotaryEmbedding)
+            else:
+                rotary_emb = Llama3RotaryEmbedding(
+                    head_size, rotary_dim, max_position, base, is_neox_style,
+                    dtype, scaling_factor, low_freq_factor, high_freq_factor,
+                    original_max_position)
         elif scaling_type == "linear":
             rotary_emb = LinearScalingRotaryEmbedding(head_size, rotary_dim,
                                                       max_position, base,

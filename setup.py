@@ -390,12 +390,15 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version()
+    version = get_version(
+        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+    )
+
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
-            version += "+empty"
+            version += f"{sep}empty"
     elif _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
@@ -415,7 +418,6 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"{sep}neuron{neuron_version_str}"
-            version += f"+neuron{neuron_version_str}"
     elif _is_hpu():
         # Get the Intel Gaudi Software Suite version
         gaudi_sw_version = str(get_gaudi_sw_version())
@@ -455,6 +457,8 @@ def get_requirements() -> List[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
+            elif line.startswith("--"):
+                continue
             else:
                 resolved_requirements.append(line)
         return resolved_requirements
@@ -552,7 +556,6 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
-        "video": ["opencv-python"],  # Required for video processing
         "audio": ["librosa", "soundfile"]  # Required for audio processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
