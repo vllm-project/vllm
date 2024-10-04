@@ -187,9 +187,6 @@ class OpenAIServingChat(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         try:
-            guided_decode_logits_processor = (
-                await self._guided_decode_logits_processor(request, tokenizer))
-
             if isinstance(prompt, str):
                 prompt_inputs = self._tokenize_prompt_input(
                     request,
@@ -208,8 +205,6 @@ class OpenAIServingChat(OpenAIServing):
             assert prompt_inputs is not None
 
             sampling_params = request.to_sampling_params(
-                tokenizer,
-                guided_decode_logits_processor,
                 default_max_tokens=self.max_model_len -
                 len(prompt_inputs["prompt_token_ids"]))
 
@@ -240,6 +235,7 @@ class OpenAIServingChat(OpenAIServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
+                priority=request.priority,
             )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
