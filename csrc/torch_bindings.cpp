@@ -94,7 +94,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) -> "
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
       "()");
   ops.impl("rms_norm", torch::kCUDA, &rms_norm);
 
@@ -345,13 +345,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
-      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
+      "static_scaled_int8_quant(Tensor! result, Tensor input, Tensor scale,"
       "Tensor? azp) -> ()");
   ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
-      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
+      "dynamic_scaled_int8_quant(Tensor! result, Tensor input, Tensor! scale, "
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);

@@ -47,8 +47,8 @@ def fix_functionalization(graph: fx.Graph):
                         # Remove the getitem node
                         for getitem_user in list(user.users):
                             if (getitem_user.op == 'call_function'
-                                    and getitem_user.target
-                                    == torch.ops.aten.slice_scatter.default):
+                                and getitem_user.target
+                                == torch.ops.aten.slice_scatter.default):
                                 # Replace the uses of slice_scatter node
                                 # with mm_node
                                 getitem_user.replace_all_uses_with(mm_node)
@@ -147,10 +147,16 @@ def fix_functionalization(graph: fx.Graph):
     # with open("after.py", "w") as f:
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
+from vllm.compilation.fusion import get_fusion_pass
+fusion_pass = get_fusion_pass()
+
+def post_grad_post_passes(graph: fx.Graph):
+    fusion_pass(graph)
+    fix_functionalization(graph)
 
 def vllm_backend(graph, example_inputs):
     from torch._inductor import config
     current_config = config.shallow_copy_dict()
     from torch._inductor.compile_fx import compile_fx
-    current_config['post_grad_custom_post_pass'] = fix_functionalization
+    current_config['post_grad_custom_post_pass'] = post_grad_post_passes
     return compile_fx(graph, example_inputs, config_patches=current_config)
