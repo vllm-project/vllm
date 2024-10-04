@@ -55,7 +55,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalInputs)
@@ -68,6 +67,7 @@ from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
 from vllm.transformers_utils.processor import get_processor
 from vllm.utils import is_cpu
 
+from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
 
@@ -883,7 +883,8 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     "video", get_max_qwen2_vl_video_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen2_vl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen2_vl)
-class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                      SupportsPP):
 
     def __init__(self,
                  config: Qwen2VLConfig,
@@ -1027,7 +1028,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for Qwen2-VL.
 
         Args:
@@ -1047,41 +1048,43 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
                 `None` if no videos are passed.
         """
-
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        video_input = self._parse_and_validate_video_input(**kwargs)
-
-        if (image_input is None
-                and video_input is None) or not get_pp_group().is_first_rank:
+        if intermediate_tensors is not None:
+            input_ids = None
             inputs_embeds = None
         else:
-            if getattr(self.config, "rope_scaling", {}).get("type",
-                                                            None) == "mrope":
-                assert positions.ndim == 2 and positions.size(0) == 3, (
-                    "multimodal section rotary embedding requires "
-                    f"(3, seq_len) positions, but got {positions.size()}")
+            image_input = self._parse_and_validate_image_input(**kwargs)
+            video_input = self._parse_and_validate_video_input(**kwargs)
 
-            inputs_embeds = self.model.embed_tokens(input_ids)
+            if image_input is None and video_input is None:
+                inputs_embeds = None
+            else:
+                rope_scaling = getattr(self.config, "rope_scaling", {})
+                if rope_scaling.get("type", None) == "mrope":
+                    assert positions.ndim == 2 and positions.size(0) == 3, (
+                        "multimodal section rotary embedding requires "
+                        f"(3, seq_len) positions, but got {positions.size()}")
 
-            if image_input is not None:
-                image_embeds = self._process_image_input(image_input)
-                inputs_embeds = self._merge_multimodal_embeddings(
-                    input_ids,
-                    inputs_embeds,
-                    image_embeds,
-                    placeholder_token_id=self.config.image_token_id,
-                )
+                inputs_embeds = self.model.embed_tokens(input_ids)
 
-            if video_input is not None:
-                video_embeds = self._process_video_input(video_input)
-                inputs_embeds = self._merge_multimodal_embeddings(
-                    input_ids,
-                    inputs_embeds,
-                    video_embeds,
-                    placeholder_token_id=self.config.video_token_id,
-                )
+                if image_input is not None:
+                    image_embeds = self._process_image_input(image_input)
+                    inputs_embeds = self._merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        image_embeds,
+                        placeholder_token_id=self.config.image_token_id,
+                    )
 
-            input_ids = None
+                if video_input is not None:
+                    video_embeds = self._process_video_input(video_input)
+                    inputs_embeds = self._merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        video_embeds,
+                        placeholder_token_id=self.config.video_token_id,
+                    )
+
+                input_ids = None
 
         hidden_states = self.model(
             input_ids=input_ids,
