@@ -85,7 +85,7 @@ class NVLMParallelAttention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.qkv = QKVParallelLinear(
             self.embed_dim,
-            self.dummy_dim,
+            self.head_dim,
             self.num_dummy_heads + self.num_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
