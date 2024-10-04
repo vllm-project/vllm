@@ -324,12 +324,15 @@ class InternVisionModel(nn.Module):
         super().__init__()
         self.config = config
 
-        self.embeddings = InternVisionEmbeddings(config)
+        self.embeddings = self._init_embeddings(config)
         self.encoder = self._init_encoder(
             config,
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
+
+    def _init_embeddings(self, config: PretrainedConfig):
+        return InternVisionEmbeddings(config)
 
     def _init_encoder(self, config: PretrainedConfig,
                       quant_config: Optional[QuantizationConfig],

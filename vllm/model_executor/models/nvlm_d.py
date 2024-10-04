@@ -4,7 +4,7 @@
 # Copyright (c) 2024 NVIDIA
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Iterable, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .intern_vit import (InternVisionEmbeddings, InternVisionEncoder,
@@ -223,6 +222,9 @@ class NVLMVisionEncoder(InternVisionEncoder):
 
 class NVLMVisionModel(InternVisionModel):
 
+    def _init_embeddings(self, config: PretrainedConfig):
+        return NVLMVisionEmbeddings(config)
+
     def _init_encoder(self, config: PretrainedConfig,
                       quant_config: Optional[QuantizationConfig],
                       num_hidden_layers_override: Optional[int]):
@@ -231,14 +233,6 @@ class NVLMVisionModel(InternVisionModel):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_pipeline.input_mapper)
