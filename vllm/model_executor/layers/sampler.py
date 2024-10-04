@@ -912,7 +912,7 @@ def get_logprobs(
     sampling_metadata: SamplingMetadata,
     sample_results: SampleResultType,
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
-    """Return sample lobprobs and prompt logprobs.
+    """Return sample logprobs and prompt logprobs.
 
     The logic consists of 3 parts.
     - Select indices to compute logprob from, ranks of token ids, and
