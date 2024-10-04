@@ -17,11 +17,11 @@ from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput, CompletionOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -29,6 +29,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import deprecate_kwargs, weak_bind
+from vllm.entrypoints.llm import BeamSearchSequence, BeamSearchOutput
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -963,6 +964,81 @@ class AsyncLLMEngine:
                 prompt_adapter_request=prompt_adapter_request,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
+
+    async def beam_search(
+        self,
+        prompt: PromptType,
+        request_id: str,
+        beam_width: int,
+        max_tokens: int,
+        ignore_eos: bool = False,
+    ) -> AsyncGenerator[RequestOutput, None]:
+
+        tokenizer = await self.get_tokenizer()
+        tokenizedPrompt = prompt if isinstance(prompt, list) else tokenizer.encode(prompt)
+        
+        beam_search_params = SamplingParams(logprobs=2 * beam_width,
+                                            max_tokens=1,
+                                            temperature=0.0)
+        all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
+        completed = []
+
+        for i in range(max_tokens):
+            prompts_batch = [
+                TokensPrompt(prompt_token_ids=beam.tokens)
+                for beam in all_beams
+            ]
+
+            request_id_item = f"{request_id}-{i}"
+
+            output = await self.generate(
+                prompts_batch,
+                beam_search_params,
+                request_id_item
+            )
+
+            new_beams = []
+            for j, current_beam in enumerate(all_beams):
+                result = output[j]
+
+                if result.outputs[0].logprobs is not None:
+                    logprobs = result.outputs[0].logprobs[0]
+                    for token_id, logprob_obj in logprobs.items():
+                        new_beam = BeamSearchSequence(
+                            tokens=current_beam.tokens + [token_id],
+                            cum_logprob=current_beam.cum_logprob + logprob_obj.logprob
+                        )
+
+                        if token_id == tokenizer.eos_token_id and not ignore_eos:
+                            completed.append(new_beam)
+                        else:
+                            new_beams.append(new_beam)
+
+            sorted_beams = sorted(new_beams, key=lambda x: x.cum_logprob, reverse=True)
+            all_beams = sorted_beams[:beam_width]
+
+        completed.extend(all_beams)
+        sorted_completed = sorted(completed, key=lambda x: x.cum_logprob, reverse=True)
+        best_beams = sorted_completed[:beam_width]
+
+        for beam in best_beams:
+            beam.text = tokenizer.decode(beam.tokens)
+
+        beam_search_output = RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            outputs=[
+                CompletionOutput(
+                    text=beam.text,
+                    cumulative_logprob=beam.cum_logprob,
+                    token_ids=beam.tokens
+                )
+                for beam in best_beams
+            ],
+            finished=True
+        )
+
+        yield LLMEngine.validate_output(beam_search_output, RequestOutput)
 
     async def encode(
         self,
