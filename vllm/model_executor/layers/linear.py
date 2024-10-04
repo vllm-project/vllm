@@ -285,7 +285,6 @@ class ColumnParallelLinear(LinearBase):
                          quant_config, prefix)
 
         self.gather_output = gather_output
-        self.collective_func = tensor_model_parallel_all_gather
 
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size()
@@ -368,7 +367,7 @@ class ColumnParallelLinear(LinearBase):
         output_parallel = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
-            output = self.collective_func(output_parallel)
+            output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
@@ -974,7 +973,6 @@ class RowParallelLinear(LinearBase):
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
-        self.collective_func = tensor_model_parallel_all_reduce
 
         # Divide the weight matrix along the last dimension.
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -1053,7 +1051,7 @@ class RowParallelLinear(LinearBase):
 
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
-    def resolve_input(self, input_):
+    def forward(self, input_):
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1061,10 +1059,6 @@ class RowParallelLinear(LinearBase):
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[tp_rank].contiguous()
-        return input_parallel
-
-    def forward(self, input_):
-        input_parallel = self.resolve_input(input_)
 
         # Matrix multiply.
         assert self.quant_method is not None
