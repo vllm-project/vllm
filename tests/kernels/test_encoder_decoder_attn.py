@@ -22,7 +22,13 @@ from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
 
 # List of support backends for encoder/decoder models
+<<<<<<< HEAD
 LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
+=======
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS] if not is_hip() \
+                                            else [_Backend.ROCM_FLASH]
+
+>>>>>>> 2550f14a (llama3.2 + cross attn test (#220))
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
@@ -870,8 +876,6 @@ def test_encoder_only(
                                     attn_backend.name)
 
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
