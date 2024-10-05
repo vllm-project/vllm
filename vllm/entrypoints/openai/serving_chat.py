@@ -227,7 +227,7 @@ class OpenAIServingChat(OpenAIServing):
             if (not is_tracing_enabled and raw_request
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
-            
+
             if isinstance(self.engine_client, AsyncLLMEngine) and \
                                     sampling_params.use_beam_search:
                 beam_width = sampling_params.best_of \
@@ -235,11 +235,7 @@ class OpenAIServingChat(OpenAIServing):
                 max_tokens = sampling_params.max_tokens \
                     if sampling_params.max_tokens else 1
                 result_generator = self.engine_client.beam_search(
-                    engine_inputs,
-                    request_id,
-                    beam_width,
-                    max_tokens
-                )
+                    engine_inputs, request_id, beam_width, max_tokens)
             else:
                 result_generator = self.engine_client.generate(
                     engine_inputs,

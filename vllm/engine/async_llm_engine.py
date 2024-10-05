@@ -1055,9 +1055,9 @@ class AsyncLLMEngine:
 
         tokenizer = await self.get_tokenizer()
         tokenizedPrompt = prompt if isinstance(
-            prompt, list)else tokenizer.encode(prompt)
+            prompt, list) else tokenizer.encode(prompt)
         tokenizedLength = len(tokenizedPrompt)
-        
+
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,
                                             temperature=0.0)
@@ -1076,14 +1076,11 @@ class AsyncLLMEngine:
             for i, individual_prompt in enumerate(prompts_batch):
                 request_id_item = f"{request_id}-{i}"
                 task = asyncio.create_task(
-                    collect_results(self.generate(
-                        individual_prompt,
-                        beam_search_params,
-                        request_id_item
-                    ))
-                )
+                    collect_results(
+                        self.generate(individual_prompt, beam_search_params,
+                                      request_id_item)))
                 tasks.append(task)
-            
+
             output = await asyncio.gather(*tasks)
 
             output = [x[0] for x in output]
@@ -1109,8 +1106,8 @@ class AsyncLLMEngine:
                             new_beams.append(new_beam)
 
             sorted_beams = sorted(new_beams,
-                                key=lambda x: x.cum_logprob,
-                                reverse=True)
+                                  key=lambda x: x.cum_logprob,
+                                  reverse=True)
             all_beams = sorted_beams[:beam_width]
 
         completed.extend(all_beams)
@@ -1132,13 +1129,11 @@ class AsyncLLMEngine:
                     token_ids=beam.tokens,
                     index=i,
                     logprobs=beam.cum_logprob,
-                )
-                for (i, beam) in enumerate(best_beams)
+                ) for (i, beam) in enumerate(best_beams)
             ],
             finished=True,
             prompt_token_ids=tokenizedPrompt,
-            prompt_logprobs=None
-        )
+            prompt_logprobs=None)
 
         yield LLMEngine.validate_output(beam_search_output, RequestOutput)
 
