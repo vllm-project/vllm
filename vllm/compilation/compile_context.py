@@ -3,9 +3,11 @@ from typing import Any
 
 _compile_context: Any = None
 
+
 def get_compile_context() -> Any:
     """Get the current compile context."""
     return _compile_context
+
 
 @contextmanager
 def set_compile_context(context: Any):
