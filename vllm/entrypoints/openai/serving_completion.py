@@ -9,6 +9,7 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -141,7 +142,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         raw_request.headers):
                     log_tracing_disabled_warning()
                 
-                if (sampling_params.use_beam_search):
+                if isinstance(self.engine_client, AsyncLLMEngine) and sampling_params.use_beam_search:
                     generator = self.engine_client.beam_search(
                         prompt_inputs["prompt_token_ids"],
                         request_id_item,

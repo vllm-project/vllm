@@ -10,6 +10,7 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
@@ -227,7 +228,7 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
             
-            if (sampling_params.use_beam_search):
+            if isinstance(self.engine_client, AsyncLLMEngine) and sampling_params.use_beam_search:
                 result_generator = self.engine_client.beam_search(
                     engine_inputs,
                     request_id,
