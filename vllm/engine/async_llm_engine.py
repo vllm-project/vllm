@@ -32,7 +32,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import deprecate_kwargs, random_uuid, weak_bind
+from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
+                        random_uuid, weak_bind)
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -1047,12 +1048,6 @@ class AsyncLLMEngine:
         ignore_eos: bool = False,
     ) -> AsyncGenerator[RequestOutput, None]:
 
-        async def collect_results(gen):
-            results = []
-            async for value in gen:
-                results.append(value)
-            return results
-
         tokenizer = await self.get_tokenizer()
         tokenizedPrompt = prompt if isinstance(
             prompt, list) else tokenizer.encode(prompt)
@@ -1076,7 +1071,7 @@ class AsyncLLMEngine:
             for i, individual_prompt in enumerate(prompts_batch):
                 request_id_item = f"{request_id}-{i}"
                 task = asyncio.create_task(
-                    collect_results(
+                    collect_from_async_generator(
                         self.generate(individual_prompt, beam_search_params,
                                       request_id_item)))
                 tasks.append(task)
