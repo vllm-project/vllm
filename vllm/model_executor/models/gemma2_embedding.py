@@ -5,10 +5,10 @@ from torch import nn
 
 from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
-from vllm.model_executor.models.gemma2 import Gemma2Model
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
+from .gemma2 import Gemma2Model
 from .interfaces import SupportsPP
 
 

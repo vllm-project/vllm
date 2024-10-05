@@ -7,6 +7,7 @@
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
+from qwen2 import Qwen2Model
 from torch import nn
 from transformers import Qwen2Config
 
@@ -17,7 +18,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
