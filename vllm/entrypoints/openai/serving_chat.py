@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
@@ -204,9 +205,15 @@ class OpenAIServingChat(OpenAIServing):
 
             assert prompt_inputs is not None
 
-            sampling_params = request.to_sampling_params(
-                default_max_tokens=self.max_model_len -
-                len(prompt_inputs["prompt_token_ids"]))
+            sampling_params: Union[SamplingParams, BeamSearchParams]
+            default_max_tokens = self.max_model_len - len(
+                prompt_inputs["prompt_token_ids"])
+            if request.use_beam_search:
+                sampling_params = request.to_beam_search_params(
+                    default_max_tokens)
+            else:
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens)
 
             self._log_inputs(request_id,
                              prompt_inputs,
@@ -228,14 +235,13 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
 
-            if isinstance(self.engine_client, AsyncLLMEngine) and \
-                                    sampling_params.use_beam_search:
-                beam_width = sampling_params.best_of \
-                    if sampling_params.best_of else 2
-                max_tokens = sampling_params.max_tokens \
-                    if sampling_params.max_tokens else 1
+            if isinstance(sampling_params, BeamSearchParams):
+                assert isinstance(self.engine_client, AsyncLLMEngine), \
+                ("Beam search in the API server is only supported with"
+                " AsyncLLMEngine. please add "
+                "`--disable-frontend-multiprocessing` to use beam search.")
                 result_generator = self.engine_client.beam_search(
-                    engine_inputs, request_id, beam_width, max_tokens)
+                    engine_inputs, request_id, sampling_params)
             else:
                 result_generator = self.engine_client.generate(
                     engine_inputs,

@@ -529,3 +529,15 @@ class SamplingParams(
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}), "
             f"guided_decoding={self.guided_decoding}")
+
+
+class BeamSearchParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):  # type: ignore[call-arg]
+    """Beam search parameters for text generation."""
+    beam_width: int
+    max_tokens: int
+    ignore_eos: bool = False
+    temperature: float = 0.0

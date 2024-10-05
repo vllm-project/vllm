@@ -28,7 +28,7 @@ from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
                           RequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
@@ -1043,10 +1043,13 @@ class AsyncLLMEngine:
         self,
         prompt: Union[PromptType, List[int]],
         request_id: str,
-        beam_width: int,
-        max_tokens: int,
-        ignore_eos: bool = False,
+        params: BeamSearchParams,
     ) -> AsyncGenerator[RequestOutput, None]:
+
+        beam_width = params.beam_width
+        max_tokens = params.max_tokens
+        ignore_eos = params.ignore_eos
+        temperature = params.temperature
 
         tokenizer = await self.get_tokenizer()
         tokenizedPrompt = prompt if isinstance(
@@ -1055,7 +1058,7 @@ class AsyncLLMEngine:
 
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,
-                                            temperature=0.0)
+                                            temperature=temperature)
         all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
         completed = []
 
