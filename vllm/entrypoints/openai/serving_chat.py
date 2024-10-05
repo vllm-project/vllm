@@ -230,15 +230,27 @@ class OpenAIServingChat(OpenAIServing):
             if (not is_tracing_enabled and raw_request
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
+            
+            if (sampling_params.use_beam_search):
+                logger.info("Running bam search in chat!")
+                beam_width = sampling_params.best_of if sampling_params.best_of else 2
+                max_tokens = sampling_params.max_tokens
 
-            result_generator = self.engine_client.generate(
-                engine_inputs,
-                sampling_params,
-                request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-            )
+                result_generator = self.engine_client.beam_search(
+                    engine_inputs,
+                    request_id,
+                    beam_width,
+                    max_tokens
+                )
+            else:
+                result_generator = self.engine_client.generate(
+                    engine_inputs,
+                    sampling_params,
+                    request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request,
+                )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

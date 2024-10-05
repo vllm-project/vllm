@@ -28,7 +28,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import deprecate_kwargs, weak_bind
+from vllm.utils import deprecate_kwargs, weak_bind, random_uuid
 from vllm.entrypoints.llm import BeamSearchSequence, BeamSearchOutput
 
 logger = init_logger(__name__)
@@ -893,7 +893,7 @@ class AsyncLLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
-
+here
         Generate outputs for a request. This method is a coroutine. It adds the
         request into the waiting queue of the LLMEngine and streams the outputs
         from the LLMEngine to the caller.
@@ -974,6 +974,12 @@ class AsyncLLMEngine:
         ignore_eos: bool = False,
     ) -> AsyncGenerator[RequestOutput, None]:
 
+        async def collect_results(gen):
+            results = []
+            async for value in gen:
+                results.append(value)
+            return results
+
         tokenizer = await self.get_tokenizer()
         tokenizedPrompt = prompt if isinstance(prompt, list) else tokenizer.encode(prompt)
         
@@ -989,13 +995,25 @@ class AsyncLLMEngine:
                 for beam in all_beams
             ]
 
-            request_id_item = f"{request_id}-{i}"
+            tasks = []
 
-            output = await self.generate(
-                prompts_batch,
-                beam_search_params,
-                request_id_item
-            )
+            request_id = f"beam_search-{random_uuid()}"
+            for j, individual_prompt in enumerate(prompts_batch):
+                request_id_item = f"{request_id}-{j}"
+                task = asyncio.create_task(
+                    collect_results(self.generate(
+                        individual_prompt,
+                        beam_search_params,
+                        request_id_item
+                    ))
+                )
+                tasks.append(task)
+            
+            output = await asyncio.gather(*tasks)
+
+            output = [x[0] for x in output]
+
+            logger.info(output)
 
             new_beams = []
             for j, current_beam in enumerate(all_beams):
@@ -1031,11 +1049,15 @@ class AsyncLLMEngine:
                 CompletionOutput(
                     text=beam.text,
                     cumulative_logprob=beam.cum_logprob,
-                    token_ids=beam.tokens
+                    token_ids=beam.tokens,
+                    index=j,
+                    logprobs=None,
                 )
-                for beam in best_beams
+                for (j, beam) in enumerate(best_beams)
             ],
-            finished=True
+            finished=True,
+            prompt_token_ids=tokenizedPrompt,
+            prompt_logprobs=None
         )
 
         yield LLMEngine.validate_output(beam_search_output, RequestOutput)
