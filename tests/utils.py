@@ -196,15 +196,26 @@ def compare_all_settings(model: str,
         all_envs: A list of environment dictionaries to pass to the API server.
     """
 
-    trust_remote_code = "--trust-remote-code"
-    if any(trust_remote_code in args for args in all_args):
-        tokenizer = AutoTokenizer.from_pretrained(model,
-                                                  trust_remote_code=True)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model)
+    trust_remote_code = False
+    for args in all_args:
+        if "--trust-remote-code" in args:
+            trust_remote_code = True
+            break
+
+    tokenizer_mode = "auto"
+    for args in all_args:
+        if "--tokenizer-mode" in args:
+            tokenizer_mode = args[args.index("--tokenizer-mode") + 1]
+            break
+
+    tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=trust_remote_code,
+        tokenizer_mode=tokenizer_mode,
+    )
 
     prompt = "Hello, my name is"
-    token_ids = tokenizer(prompt)["input_ids"]
+    token_ids = tokenizer(prompt).input_ids
     ref_results: List = []
     for i, (args, env) in enumerate(zip(all_args, all_envs)):
         compare_results: List = []
