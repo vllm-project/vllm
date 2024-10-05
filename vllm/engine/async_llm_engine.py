@@ -31,7 +31,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import deprecate_kwargs, weak_bind, random_uuid
-from vllm.entrypoints.llm import BeamSearchSequence, BeamSearchOutput
+from vllm.entrypoints.llm import BeamSearchSequence
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -1053,7 +1053,8 @@ class AsyncLLMEngine:
             return results
 
         tokenizer = await self.get_tokenizer()
-        tokenizedPrompt = prompt if isinstance(prompt, list) else tokenizer.encode(prompt)
+        tokenizedPrompt = prompt if isinstance(
+            prompt, list)else tokenizer.encode(prompt)
         tokenizedLength = len(tokenizedPrompt)
         
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
@@ -1097,19 +1098,24 @@ class AsyncLLMEngine:
                     for token_id, logprob_obj in logprobs.items():
                         new_beam = BeamSearchSequence(
                             tokens=current_beam.tokens + [token_id],
-                            cum_logprob=current_beam.cum_logprob + logprob_obj.logprob
-                        )
+                            cum_logprob=current_beam.cum_logprob +
+                            logprob_obj.logprob)
 
-                        if token_id == tokenizer.eos_token_id and not ignore_eos:
+                        if token_id == tokenizer.eos_token_id and \
+                            not ignore_eos:
                             completed.append(new_beam)
                         else:
                             new_beams.append(new_beam)
 
-            sorted_beams = sorted(new_beams, key=lambda x: x.cum_logprob, reverse=True)
+            sorted_beams = sorted(new_beams,
+                                key=lambda x: x.cum_logprob,
+                                reverse=True)
             all_beams = sorted_beams[:beam_width]
 
         completed.extend(all_beams)
-        sorted_completed = sorted(completed, key=lambda x: x.cum_logprob, reverse=True)
+        sorted_completed = sorted(completed,
+                                  key=lambda x: x.cum_logprob,
+                                  reverse=True)
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:

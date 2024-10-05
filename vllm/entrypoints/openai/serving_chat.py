@@ -228,9 +228,12 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
             
-            if isinstance(self.engine_client, AsyncLLMEngine) and sampling_params.use_beam_search:
-                beam_width = sampling_params.best_of if sampling_params.best_of else 2
-                max_tokens = sampling_params.max_tokens if sampling_params.max_tokens else 1
+            if isinstance(self.engine_client, AsyncLLMEngine) and \
+                                    sampling_params.use_beam_search:
+                beam_width = sampling_params.best_of \
+                    if sampling_params.best_of else 2
+                max_tokens = sampling_params.max_tokens \
+                    if sampling_params.max_tokens else 1
                 result_generator = self.engine_client.beam_search(
                     engine_inputs,
                     request_id,
