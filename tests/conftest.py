@@ -277,6 +277,7 @@ class HfRunner:
                 SentenceTransformer(
                     model_name,
                     device="cpu",
+                    trust_remote_code=True,
                 ).to(dtype=torch_dtype))
         else:
             model_kwargs = model_kwargs if model_kwargs is not None else {}

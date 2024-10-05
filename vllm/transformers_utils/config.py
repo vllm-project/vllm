@@ -1,4 +1,3 @@
-import contextlib
 import enum
 import json
 from pathlib import Path
@@ -60,13 +59,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "qwen2_vl": Qwen2VLConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
-
-for name, cls in _CONFIG_REGISTRY.items():
-    with contextlib.suppress(ValueError):
-        if name in _CONFIG_REGISTRY_OVERRIDE_HF:
-            AutoConfig.register(name, cls, exist_ok=True)
-        else:
-            AutoConfig.register(name, cls)
 
 
 class ConfigFormat(str, enum.Enum):
