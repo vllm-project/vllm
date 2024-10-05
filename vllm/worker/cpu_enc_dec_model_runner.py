@@ -1,32 +1,19 @@
 import dataclasses
-import weakref
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, cast
 
 import torch
-from torch import nn
 
-from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, PromptAdapterConfig,
-                         SchedulerConfig)
-from vllm.logger import init_logger
-from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
-from vllm.sequence import (IntermediateTensors, SequenceData,
-                           SequenceGroupMetadata)
-from vllm.utils import STR_NOT_IMPL_ENC_DEC_ERR_STRS, make_tensor_with_pad
-from vllm.worker.cpu_model_runner import CPUModelRunner, ModelInputForCPUWithSamplingMetadata, ModelInputForCPUBuilder
+from vllm.multimodal import MultiModalInputs
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.utils import make_tensor_with_pad
+from vllm.worker.cpu_model_runner import (CPUModelRunner,
+                                          ModelInputForCPUBuilder,
+                                          ModelInputForCPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
-    ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict,
-    _init_attn_metadata_from_tensor_dict,
-    _init_sampling_metadata_from_tensor_dict)
+    _add_sampling_metadata_broadcastable_dict)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -103,6 +90,7 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
         model_input = super().prepare_model_input(seq_group_metadata_list,
                                                   virtual_engine,
                                                   finished_requests_ids)
+        model_input = cast(EncoderDecoderModelInputForCPU, model_input)
         (
             attn_metadata,
             encoder_input_tokens_tensor,
@@ -276,7 +264,7 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
     @torch.no_grad()
     def execute_model(
         self,
-        model_input: ModelInputForCPUWithSamplingMetadata,
+        model_input: EncoderDecoderModelInputForCPU,
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,

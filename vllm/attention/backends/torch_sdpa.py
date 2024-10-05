@@ -348,10 +348,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         key = key.movedim(0, key.dim() - 2)
         value = value.movedim(0, value.dim() - 2)
 
-        if attn_type == AttentionType.DECODER:
-            causal_attn = True
-        else:
-            causal_attn = False
+        causal_attn = (attn_type == AttentionType.DECODER)
 
         seq_lens_q, seq_lens_kv = _get_seq_lens(attn_metadata, attn_type)
         start_q, start_kv = 0, 0
@@ -359,14 +356,13 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                                                attn_masks):
             end_q = start_q + seq_len_q
             end_kv = start_kv + seq_len_kv
-            is_causal = causal_attn
             sub_out = scaled_dot_product_attention(
                 query[None, :, start_q:end_q, :],
                 key[None, :, start_kv:end_kv, :],
                 value[None, :, start_kv:end_kv, :],
                 attn_mask=mask,
                 dropout_p=0.0,
-                is_causal=is_causal,
+                is_causal=causal_attn and not self.need_mask,
                 scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
             output[start_q:end_q, :, :] = sub_out
             start_q, start_kv = end_q, end_kv
@@ -490,7 +486,7 @@ def _get_seq_len_block_table_args(
     '''
 
     if attn_type == AttentionType.DECODER:
-        assert is_prompt == False
+        assert not is_prompt
         # Decoder self-attention
         # Choose max_seq_len based on whether we are in prompt_run
         max_seq_len = attn_metadata.max_decode_seq_len
