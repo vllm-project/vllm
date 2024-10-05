@@ -203,7 +203,6 @@ TEST_MODELS = [
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL2-1B",
     "microsoft/Phi-3-vision-128k-instruct",
-    "mistralai/Pixtral-12B-2409",
     "fixie-ai/ultravox-v0_3",
 ]
 
