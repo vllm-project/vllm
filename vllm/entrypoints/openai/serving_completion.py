@@ -8,8 +8,8 @@ from typing import Tuple, Union, cast
 from fastapi import Request
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import EngineClient
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
