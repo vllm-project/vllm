@@ -150,10 +150,12 @@ class OpenAIServingCompletion(OpenAIServing):
                     log_tracing_disabled_warning()
 
                 if isinstance(sampling_params, BeamSearchParams):
-                    assert isinstance(self.engine_client, AsyncLLMEngine), \
-                    ("Beam search in the API server is only supported with"
-                    " AsyncLLMEngine. please add "
-                    "`--disable-frontend-multiprocessing` to use beam search.")
+                    if not isinstance(self.engine_client, AsyncLLMEngine):
+                        raise ValueError(
+                            "Beam search in the API server is only supported"
+                            " with AsyncLLMEngine. please add "
+                            "`--disable-frontend-multiprocessing` to "
+                            "use beam search.")
                     generator = self.engine_client.beam_search(
                         prompt_inputs["prompt_token_ids"], request_id_item,
                         sampling_params)
