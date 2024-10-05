@@ -3,6 +3,7 @@ import functools
 from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.library
 
 import vllm.envs as envs
 from vllm._core_ext import ScalarType
@@ -25,11 +26,11 @@ with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
     supports_moe_ops = True
 
-import torch.library
 try:
     import torch.library.register_fake
 except ImportError:
     from torch.library import impl_abstract as register_fake
+
 
 def hint_on_error(fn):
 
