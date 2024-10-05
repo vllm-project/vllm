@@ -7,7 +7,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 """
 import os
 from dataclasses import dataclass
-from typing import List, NamedTuple, Optional
+from typing import List, Literal, NamedTuple, Optional
 
 import pytest
 
@@ -161,8 +161,8 @@ GENERATION_MODEL_SETTINGS = {
 
 EMBEDDING_MODEL_SETTINGS = {  # type: ignore[var-annotated]
     # [FAST TESTS]
-    # Uses Llama
-    # "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
+    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
+    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
 }
 
 MULTIMODAL_MODEL_SETTINGS = {
@@ -192,16 +192,15 @@ CONDITIONAL_GENERATION_MODEL_SETTINGS = {  # type: ignore[var-annotated]
 }
 # yapf: enable
 
-MODEL_SETTINGS = {
-    **GENERATION_MODEL_SETTINGS,
-    **EMBEDDING_MODEL_SETTINGS,
-    **MULTIMODAL_MODEL_SETTINGS,
-}
-
 # You can update this on your local machine to run specific tests
 TEST_MODELS = [
+    # [LANGUAGE GENERATION]
     "meta-llama/Meta-Llama-3-8B",
-    "facebook/chameleon-7b",
+    "ibm/PowerLM-3b",
+    # [LANGUAGE EMBEDDING]
+    "intfloat/e5-mistral-7b-instruct",
+    "BAAI/bge-multilingual-gemma2",
+    # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL2-1B",
     "microsoft/Phi-3-vision-128k-instruct",
     "mistralai/Pixtral-12B-2409",
@@ -209,19 +208,16 @@ TEST_MODELS = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend",
-     "trust_remote_code", "tokenizer_mode"),
-    [
-        params for model_name, settings in MODEL_SETTINGS.items()
-        for params in settings.iter_params(model_name)
-        if model_name in TEST_MODELS
-    ],
-)
-@fork_new_process_for_each_test
-def test_compare_tp(model_name: str, parallel_setup: ParallelSetup,
-                    distributed_backend: str, trust_remote_code: bool,
-                    tokenizer_mode: Optional[str], num_gpus_available):
+def _compare_tp(
+    model_name: str,
+    parallel_setup: ParallelSetup,
+    distributed_backend: str,
+    trust_remote_code: bool,
+    tokenizer_mode: Optional[str],
+    num_gpus_available: int,
+    *,
+    method: Literal["generate", "encode"] = "encode",
+):
     tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
 
     if num_gpus_available < tp_size:
@@ -286,10 +282,95 @@ def test_compare_tp(model_name: str, parallel_setup: ParallelSetup,
     ]
 
     try:
-        compare_two_settings(model_name, pp_args, tp_args, pp_env)
+        compare_two_settings(model_name,
+                             pp_args,
+                             tp_args,
+                             pp_env,
+                             method=method)
     except Exception:
         if pp_env is None:
             raise
         else:
             # Ray ADAG tests are flaky, so we don't want to fail the test
             logger.exception("Ray ADAG tests failed")
+
+
+@pytest.mark.parametrize(
+    ("model_name", "parallel_setup", "distributed_backend",
+     "trust_remote_code", "tokenizer_mode"),
+    [
+        params for model_name, settings in GENERATION_MODEL_SETTINGS.items()
+        for params in settings.iter_params(model_name)
+        if model_name in TEST_MODELS
+    ],
+)
+@fork_new_process_for_each_test
+def test_tp_language_generation(
+    model_name: str,
+    parallel_setup: ParallelSetup,
+    distributed_backend: str,
+    trust_remote_code: bool,
+    tokenizer_mode: Optional[str],
+    num_gpus_available,
+):
+    _compare_tp(model_name,
+                parallel_setup,
+                distributed_backend,
+                trust_remote_code,
+                tokenizer_mode,
+                num_gpus_available,
+                method="generate")
+
+
+@pytest.mark.parametrize(
+    ("model_name", "parallel_setup", "distributed_backend",
+     "trust_remote_code", "tokenizer_mode"),
+    [
+        params for model_name, settings in EMBEDDING_MODEL_SETTINGS.items()
+        for params in settings.iter_params(model_name)
+        if model_name in TEST_MODELS
+    ],
+)
+@fork_new_process_for_each_test
+def test_tp_language_embedding(
+    model_name: str,
+    parallel_setup: ParallelSetup,
+    distributed_backend: str,
+    trust_remote_code: bool,
+    tokenizer_mode: Optional[str],
+    num_gpus_available,
+):
+    _compare_tp(model_name,
+                parallel_setup,
+                distributed_backend,
+                trust_remote_code,
+                tokenizer_mode,
+                num_gpus_available,
+                method="encode")
+
+
+@pytest.mark.parametrize(
+    ("model_name", "parallel_setup", "distributed_backend",
+     "trust_remote_code", "tokenizer_mode"),
+    [
+        params for model_name, settings in MULTIMODAL_MODEL_SETTINGS.items()
+        for params in settings.iter_params(model_name)
+        if model_name in TEST_MODELS
+    ],
+)
+@fork_new_process_for_each_test
+def test_tp_multimodal_generation(
+    model_name: str,
+    parallel_setup: ParallelSetup,
+    distributed_backend: str,
+    trust_remote_code: bool,
+    tokenizer_mode: Optional[str],
+    num_gpus_available,
+):
+    _compare_tp(model_name,
+                parallel_setup,
+                distributed_backend,
+                trust_remote_code,
+                tokenizer_mode,
+                num_gpus_available,
+                method="generate")
