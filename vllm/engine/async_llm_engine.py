@@ -982,6 +982,7 @@ here
 
         tokenizer = await self.get_tokenizer()
         tokenizedPrompt = prompt if isinstance(prompt, list) else tokenizer.encode(prompt)
+        tokenizedLength = len(tokenizedPrompt)
         
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,
@@ -1040,7 +1041,7 @@ here
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            beam.text = tokenizer.decode(beam.tokens)
+            beam.text = tokenizer.decode(beam.tokens[:tokenizedLength])
 
         beam_search_output = RequestOutput(
             request_id=request_id,

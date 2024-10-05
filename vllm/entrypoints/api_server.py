@@ -49,22 +49,13 @@ async def generate(request: Request) -> Response:
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
-    use_beam_search = request_dict.pop("use_beam_search", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
     assert engine is not None
-        if use_beam_search:
-            beam_width = request_dict.pop("best_of", 2)
-            max_tokens = request_dict.pop("max_tokens", 1)
-            ignore_eos = request_dict.pop("ignore_eos", False)
-            results_generator = engine.beam_search(prompt, beam_width, max_tokens, ignore_eos)
-            results_generator = iterate_with_cancellation(
-                results_generator, is_cancelled=request.is_disconnected)
-        else:
-            results_generator = engine.generate(prompt, sampling_params, request_id)
-            results_generator = iterate_with_cancellation(
-                results_generator, is_cancelled=request.is_disconnected)
+    results_generator = engine.generate(prompt, sampling_params, request_id)
+    results_generator = iterate_with_cancellation(
+        results_generator, is_cancelled=request.is_disconnected)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:

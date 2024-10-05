@@ -232,8 +232,7 @@ class OpenAIServingChat(OpenAIServing):
                 log_tracing_disabled_warning()
             
             if (sampling_params.use_beam_search):
-                logger.info("Running bam search in chat!")
-                beam_width = sampling_params.best_of if sampling_params.best_of else 2
+                beam_width = sampling_params.best_of
                 max_tokens = sampling_params.max_tokens
 
                 result_generator = self.engine_client.beam_search(
