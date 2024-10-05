@@ -442,6 +442,9 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if not self.config.tie_word_embeddings:
             lm_head_dict = dict(self.lm_head.named_parameters())
             for name, loaded_weight in weights_group["lm_head"]:
+                if is_pp_missing_parameter(name, self):
+                    continue
+
                 param = lm_head_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
