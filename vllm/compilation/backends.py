@@ -1,5 +1,6 @@
+import copy
 import operator
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 from weakref import ReferenceType
 
 import torch
@@ -7,6 +8,7 @@ import torch.fx as fx
 
 from vllm.logger import init_logger
 
+from .compile_context import get_compile_context
 from .wrapper import TorchCompileWrapperWithCustomDispatcher
 
 logger = init_logger(__name__)
@@ -178,6 +180,8 @@ def vllm_backend(
             ReferenceType[TorchCompileWrapperWithCustomDispatcher]] = None,
         additional_inductor_config: Optional[Dict] = None) -> Callable:
 
+    sizes_to_specialize: List[int] = copy.deepcopy(get_compile_context())
+
     # flags for all the seen shapes, whether we need to specialize
     runtime_shapes_to_compile_flags: Dict[Tuple[int, ...], bool] = {}
 
@@ -214,18 +218,14 @@ def vllm_backend(
             first_run = False
             return graph_for_symbolic_shape(*args)
 
-        if model_ref is None:
-            # no information about the model, we cannot specialize
-            return graph_for_symbolic_shape(*args)
-
-        model: TorchCompileWrapperWithCustomDispatcher = model_ref()
-        assert model is not None, "model is garbage collected"
-
         if runtime_shapes not in runtime_shapes_to_compile_flags:
             # we haven't seen this shape before
-            # query the model if we need to specialize for this shape
-            runtime_shapes_to_compile_flags[
-                runtime_shapes] = model.need_to_specialize(runtime_shapes)
+            # query if we need to specialize for this shape
+            # we only specialize for the first dimension.
+            # TODO: investigate if any model needs to specialize
+            # beyond the first dimension
+            runtime_shapes_to_compile_flags[runtime_shapes] = runtime_shapes[
+                0] in sizes_to_specialize
 
         if not runtime_shapes_to_compile_flags[runtime_shapes]:
             # we don't need to specialize for this shape

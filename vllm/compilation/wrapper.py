@@ -4,7 +4,7 @@ import weakref
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional
 
 import torch
 
@@ -59,8 +59,6 @@ class TorchCompileWrapperWithCustomDispatcher:
         self.use_custom_dispatcher: bool = \
             envs.VLLM_DYNAMO_USE_CUSTOM_DISPATCHER
 
-        self.sizes_to_specialize = []
-
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
         NOTE: this function can have additional arguments beyond the forward
@@ -105,17 +103,3 @@ class TorchCompileWrapperWithCustomDispatcher:
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object
-
-    def set_sizes_to_specialize(self, sizes: List[Any]):
-        """Set the sizes to specialize for the compiled code."""
-        self.sizes_to_specialize = sizes
-
-    def need_to_specialize(self, runtime_shapes: Tuple[int, ...]) -> bool:
-        """Check if the current runtime shapes need to be specialized.
-        If not, we can use the graph for general shapes.
-        If yes, we will compile the graph for the current shapes.
-        The argument `runtime_shapes` is a tuple of integers, representing
-        the runtime shapes of the dimensions marked as dynamic during graph
-        capture.
-        """
-        return False

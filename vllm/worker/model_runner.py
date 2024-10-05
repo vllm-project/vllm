@@ -17,7 +17,7 @@ import torch.nn as nn
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.compile_context import set_compile_context
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -1277,7 +1277,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 batch_size=batch_size,
                 dtype=self.model_config.dtype,
                 device=self.device)
-        self.execute_model(model_input, kv_caches, intermediate_tensors)
+
+        graph_batch_size = self.max_batchsize_to_capture
+        batch_size_capture_list = [
+            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
+        ]
+        if self.model_config.enforce_eager:
+            batch_size_capture_list = []
+        with set_compile_context(batch_size_capture_list):
+            self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
         return
 
@@ -1415,8 +1423,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         batch_size_capture_list = [
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
-        if isinstance(self.model, TorchCompileWrapperWithCustomDispatcher):
-            self.model.set_sizes_to_specialize(batch_size_capture_list)
+
         with self.attn_state.graph_capture(
                 max_batch_size), graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the

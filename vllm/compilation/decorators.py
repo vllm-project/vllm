@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
 import torch
 
@@ -29,13 +29,6 @@ def support_compile_llama_style(cls: type):
             TorchCompileWrapperWithCustomDispatcher.__init__(self)
 
     cls.__init__ = __init__
-
-    def need_to_specialize(self, runtime_shapes: Tuple[int, ...]) -> bool:
-        if len(self.sizes_to_specialize) == 0:
-            return False
-        return runtime_shapes[0] in self.sizes_to_specialize
-
-    cls.need_to_specialize = need_to_specialize
 
     def __call__(
         self,
