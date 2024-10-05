@@ -296,7 +296,7 @@ def compare_two_settings(model: str,
                          env1: Optional[Dict[str, str]] = None,
                          env2: Optional[Dict[str, str]] = None,
                          *,
-                         method: Literal["generate", "encode"] = "encode",
+                         method: Literal["generate", "encode"] = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with two different sets of arguments/environments
