@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import os
 import signal
@@ -7,13 +8,12 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import openai
 import pytest
 import requests
 from openai.types.completion import Completion
-from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
 from tests.models.utils import TextTextLogprobs
@@ -23,8 +23,9 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.utils import (FlexibleArgumentParser, cuda_device_count_stateless,
-                        get_open_port, is_hip)
+from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils import (FlexibleArgumentParser, GB_bytes,
+                        cuda_device_count_stateless, get_open_port, is_hip)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -180,15 +181,26 @@ def compare_two_settings(model: str,
         env2: The second set of environment variables to pass to the API server.
     """
 
-    trust_remote_code = "--trust-remote-code"
-    if trust_remote_code in arg1 or trust_remote_code in arg2:
-        tokenizer = AutoTokenizer.from_pretrained(model,
-                                                  trust_remote_code=True)
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model)
+    trust_remote_code = False
+    for args in (arg1, arg2):
+        if "--trust-remote-code" in args:
+            trust_remote_code = True
+            break
+
+    tokenizer_mode = "auto"
+    for args in (arg1, arg2):
+        if "--tokenizer-mode" in args:
+            tokenizer_mode = args[args.index("--tokenizer-mode") + 1]
+            break
+
+    tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=trust_remote_code,
+        tokenizer_mode=tokenizer_mode,
+    )
 
     prompt = "Hello, my name is"
-    token_ids = tokenizer(prompt)["input_ids"]
+    token_ids = tokenizer(prompt).input_ids
     results = []
     for args, env in ((arg1, env1), (arg2, env2)):
         with RemoteOpenAIServer(model,
@@ -454,6 +466,37 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
+def large_gpu_test(*, min_gb: int):
+    """
+    Decorate a test to be skipped if no GPU is available or it does not have
+    sufficient memory.
+
+    Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
+    """
+    try:
+        if current_platform.is_cpu():
+            memory_gb = 0
+        else:
+            memory_gb = current_platform.get_device_total_memory() / GB_bytes
+    except Exception as e:
+        warnings.warn(
+            f"An error occurred when finding the available memory: {e}",
+            stacklevel=2,
+        )
+
+        memory_gb = 0
+
+    test_skipif = pytest.mark.skipif(
+        memory_gb < min_gb,
+        reason=f"Need at least {memory_gb}GB GPU memory to run the test.",
+    )
+
+    def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
+        return test_skipif(fork_new_process_for_each_test(f))
+
+    return wrapper
+
+
 def multi_gpu_test(*, num_gpus: int):
     """
     Decorate a test to be run only when multiple GPUs are available.
@@ -476,7 +519,8 @@ async def completions_with_server_args(
     server_cli_args: List[str],
     num_logprobs: Optional[int],
     max_wait_seconds: int = 240,
-) -> Completion:
+    max_tokens: Union[int, list] = 5,
+) -> List[Completion]:
     '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
 
@@ -487,10 +531,18 @@ async def completions_with_server_args(
       num_logprobs: Number of logprobs to report (or `None`)
       max_wait_seconds: timeout interval for bringing up server.
                         Default: 240sec
+      max_tokens: max_tokens value for each of the given input prompts.
+        if only one max_token value is given, the same value is used
+        for all the prompts.
 
     Returns:
       OpenAI Completion instance
     '''
+
+    if isinstance(max_tokens, int):
+        max_tokens = [max_tokens] * len(prompts)
+
+    assert len(max_tokens) == len(prompts)
 
     outputs = None
     max_wait_seconds = 240 * 3  # 240 is default
@@ -498,26 +550,30 @@ async def completions_with_server_args(
                             server_cli_args,
                             max_wait_seconds=max_wait_seconds) as server:
         client = server.get_async_client()
-        outputs = await client.completions.create(model=model_name,
-                                                  prompt=prompts,
-                                                  temperature=0,
-                                                  stream=False,
-                                                  max_tokens=5,
-                                                  logprobs=num_logprobs)
+        outputs = [ client.completions.create(model=model_name,
+                                              prompt=[p],
+                                              temperature=0,
+                                              stream=False,
+                                              max_tokens=max_tok,
+                                              logprobs=num_logprobs) \
+                    for p, max_tok in zip(prompts, max_tokens) ]
+        outputs = await asyncio.gather(*outputs)
+
     assert outputs is not None, "Completion API call failed."
 
     return outputs
 
 
-def get_client_text_generations(completions: Completion) -> List[str]:
+def get_client_text_generations(completions: List[Completion]) -> List[str]:
     '''Extract generated tokens from the output of a
     request made to an Open-AI-protocol completions endpoint.
     '''
-    return [x.text for x in completions.choices]
+    assert all([len(x.choices) == 1 for x in completions])
+    return [x.choices[0].text for x in completions]
 
 
 def get_client_text_logprob_generations(
-        completions: Completion) -> List[TextTextLogprobs]:
+        completions: List[Completion]) -> List[TextTextLogprobs]:
     '''Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
     each :class:`SequenceGroup`
@@ -526,4 +582,4 @@ def get_client_text_logprob_generations(
     text = ''.join(text_generations)
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
-            for x in completions.choices]
+            for completion in completions for x in completion.choices]

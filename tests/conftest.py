@@ -246,17 +246,14 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 class HfRunner:
 
-    def wrap_device(self, input: _T) -> _T:
-        if not is_cpu():
-            # Check if the input is already on the GPU
-            if hasattr(input, 'device') and input.device.type == "cuda":
-                return input  # Already on GPU, no need to move
-            return input.to("cuda")
-        else:
-            # Check if the input is already on the CPU
-            if hasattr(input, 'device') and input.device.type == "cpu":
-                return input  # Already on CPU, no need to move
-            return input.to("cpu")
+    def wrap_device(self, input: _T, device: Optional[str] = None) -> _T:
+        if device is None:
+            return self.wrap_device(input, "cpu" if is_cpu() else "cuda")
+
+        if hasattr(input, "device") and input.device.type == device:
+            return input
+
+        return input.to(device)
 
     def __init__(
         self,
@@ -333,7 +330,7 @@ class HfRunner:
             inputs = self.postprocess_inputs(inputs)
 
             output_ids = self.model.generate(
-                **self.wrap_device(inputs),
+                **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
                 **kwargs,
             )
@@ -406,7 +403,7 @@ class HfRunner:
             inputs = self.postprocess_inputs(inputs)
 
             output = self.model.generate(
-                **self.wrap_device(inputs),
+                **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -414,39 +411,38 @@ class HfRunner:
                 return_dict_in_generate=True,
                 **kwargs,
             )
-            seq_logprobs: List[torch.Tensor] = []
-            for hidden_states in output.hidden_states:
-                last_hidden_states = hidden_states[-1][0]
-                logits = torch.matmul(
-                    last_hidden_states,
-                    self.model.get_output_embeddings().weight.t(),
-                )
-                if self.model.get_output_embeddings().bias is not None:
-                    logits += self.model.get_output_embeddings(
-                    ).bias.unsqueeze(0)
-                logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
-                seq_logprobs.append(logprobs)
+            seq_logprobs = self._hidden_states_to_seq_logprobs(
+                output.hidden_states)
             all_logprobs.append(seq_logprobs)
         return all_logprobs
 
-    def _hidden_states_to_logprobs(
+    def _hidden_states_to_seq_logprobs(
         self,
-        hidden_states,
-        num_logprobs,
-    ) -> Tuple[List[Dict[int, float]], int]:
+        hidden_states: Tuple[Tuple[torch.Tensor, ...], ...],
+    ) -> List[torch.Tensor]:
+        output_embeddings = self.model.get_output_embeddings()
+
         seq_logprobs: List[torch.Tensor] = []
-        output_len = len(hidden_states)
         for _, hidden_state in enumerate(hidden_states):
             last_hidden_states = hidden_state[-1][0]
             logits = torch.matmul(
-                last_hidden_states,
-                self.model.get_output_embeddings().weight.t(),
+                last_hidden_states.to(output_embeddings.weight.device),
+                output_embeddings.weight.t(),
             )
-            if getattr(self.model.get_output_embeddings(), "bias",
-                       None) is not None:
-                logits += self.model.get_output_embeddings().bias.unsqueeze(0)
+            if getattr(output_embeddings, "bias", None) is not None:
+                logits += output_embeddings.bias.unsqueeze(0)
             logprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
             seq_logprobs.append(logprobs)
+
+        return seq_logprobs
+
+    def _hidden_states_to_logprobs(
+        self,
+        hidden_states: Tuple[Tuple[torch.Tensor, ...], ...],
+        num_logprobs: int,
+    ) -> Tuple[List[Dict[int, float]], int]:
+        seq_logprobs = self._hidden_states_to_seq_logprobs(hidden_states)
+        output_len = len(hidden_states)
 
         # convert to dict
         seq_logprobs_lst: List[Dict[int, float]] = []
@@ -500,7 +496,7 @@ class HfRunner:
             inputs = self.postprocess_inputs(inputs)
 
             output = self.model.generate(
-                **self.wrap_device(inputs),
+                **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -543,12 +539,20 @@ class HfRunner:
 
         for (encoder_prompt,
              decoder_prompt) in to_enc_dec_tuple_list(encoder_decoder_prompts):
+
             encoder_input_ids = self.wrap_device(
-                self.tokenizer(encoder_prompt, return_tensors="pt").input_ids)
-            decoder_input_ids = (
-                None if decoder_prompt is None else self.wrap_device(
+                self.tokenizer(encoder_prompt, return_tensors="pt").input_ids,
+                device=self.model.device.type,
+            )
+
+            if decoder_prompt is None:
+                decoder_input_ids = None
+            else:
+                decoder_input_ids = self.wrap_device(
                     self.tokenizer(decoder_prompt,
-                                   return_tensors="pt").input_ids))
+                                   return_tensors="pt").input_ids,
+                    device=self.model.device.type,
+                )
 
             output = self.model.generate(
                 encoder_input_ids,
@@ -875,15 +879,16 @@ def num_gpus_available():
 
 
 temp_dir = tempfile.gettempdir()
-_dummy_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
 
 
 @pytest.fixture
 def dummy_opt_path():
-    json_path = os.path.join(_dummy_path, "config.json")
-    if not os.path.exists(_dummy_path):
+    json_path = os.path.join(_dummy_opt_path, "config.json")
+    if not os.path.exists(_dummy_opt_path):
         snapshot_download(repo_id="facebook/opt-125m",
-                          local_dir=_dummy_path,
+                          local_dir=_dummy_opt_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
                               "*.msgpack"
@@ -894,4 +899,23 @@ def dummy_opt_path():
         config["architectures"] = ["MyOPTForCausalLM"]
         with open(json_path, "w") as f:
             json.dump(config, f)
-    return _dummy_path
+    return _dummy_opt_path
+
+
+@pytest.fixture
+def dummy_llava_path():
+    json_path = os.path.join(_dummy_llava_path, "config.json")
+    if not os.path.exists(_dummy_llava_path):
+        snapshot_download(repo_id="llava-hf/llava-1.5-7b-hf",
+                          local_dir=_dummy_llava_path,
+                          ignore_patterns=[
+                              "*.bin", "*.bin.index.json", "*.pt", "*.h5",
+                              "*.msgpack"
+                          ])
+        assert os.path.exists(json_path)
+        with open(json_path, "r") as f:
+            config = json.load(f)
+        config["architectures"] = ["MyLlava"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_llava_path
