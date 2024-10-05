@@ -280,6 +280,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             if (kv_cache.numel() == 0
                     or prefill_meta.block_tables.numel() == 0):
                 output = self._run_sdpa_forward(query, key, value, prefill_meta, attn_type=attn_type)
+                # print("output", attn_type, output.mean().item(), output.std().item())
+                # print("output", attn_type, self.need_mask)
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
@@ -345,13 +347,17 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         value = value.movedim(0, value.dim() - 2)
 
         if self.alibi_slopes is None:
+            if attn_type == AttentionType.DECODER:
+                is_causal = True
+            else:
+                is_causal = False
             output =  scaled_dot_product_attention(
                 query.unsqueeze(0),
                 key.unsqueeze(0),
                 value.unsqueeze(0),
                 attn_mask=attn_masks[0],
                 dropout_p=0.0,
-                is_causal=self.need_mask,
+                is_causal=is_causal,
                 scale=self.scale)
             output = output.squeeze(0).movedim(query.dim() - 2, 0)
         else:
