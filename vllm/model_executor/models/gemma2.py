@@ -282,8 +282,7 @@ class Gemma2Model(nn.Module):
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = get_inputs_embeds(input_ids,
-                                              self.embed_tokens,
+            hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
                                               inputs_embeds,
                                               inputs_embeds_masks)
             hidden_states *= self.normalizer

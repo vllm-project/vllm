@@ -1697,8 +1697,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                 kv_caches=kv_caches,
                                 attn_metadata=model_input.attn_metadata,
                                 intermediate_tensors=intermediate_tensors,
-                                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                                             device=self.device),
+                                **MultiModalInputs.as_kwargs(
+                                    multi_modal_kwargs, device=self.device),
                                 **seqlen_agnostic_kwargs)
             if self.model_supports_input_embeds:
                 model_params.update(

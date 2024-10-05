@@ -374,8 +374,7 @@ class FalconModel(nn.Module):
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = get_inputs_embeds(input_ids,
-                                              self.word_embeddings,
+            hidden_states = get_inputs_embeds(input_ids, self.word_embeddings,
                                               inputs_embeds,
                                               inputs_embeds_masks)
         else:

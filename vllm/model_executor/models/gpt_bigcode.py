@@ -230,8 +230,7 @@ class GPTBigCodeModel(nn.Module):
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = get_inputs_embeds(input_ids,
-                                              self.wte,
+            hidden_states = get_inputs_embeds(input_ids, self.wte,
                                               inputs_embeds,
                                               inputs_embeds_masks)
             position_embeds = self.wpe(position_ids)
