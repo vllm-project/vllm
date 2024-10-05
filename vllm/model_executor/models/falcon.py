@@ -28,7 +28,7 @@ from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import get_act_fn
@@ -36,8 +36,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -47,7 +46,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import RWConfig
 
-from .utils import get_inputs_embeds
+from .interfaces import SupportsPP
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 FalconConfig = Union[HF_FalconConfig, RWConfig]
 
@@ -335,6 +336,7 @@ class FalconModel(nn.Module):
         config: FalconConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -349,38 +351,50 @@ class FalconModel(nn.Module):
         )
 
         # Transformer blocks
-        self.h = nn.ModuleList([
-            FalconDecoderLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.start_layer, self.end_layer, self.h = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: FalconDecoderLayer(config, cache_config,
+                                              quant_config),
+            prefix=f"{prefix}.h")
 
         # Final Layer Norm
         self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.word_embeddings,
-                                          inputs_embeds, inputs_embeds_masks)
-        for i in range(len(self.h)):
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            hidden_states = get_inputs_embeds(input_ids,
+                                              self.word_embeddings,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
+        else:
+            hidden_states = intermediate_tensors["hidden_states"]
+        for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
             hidden_states = layer(
                 positions,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
 
-class FalconForCausalLM(nn.Module):
+class FalconForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
@@ -408,6 +422,8 @@ class FalconForCausalLM(nn.Module):
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -418,15 +434,10 @@ class FalconForCausalLM(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = self.transformer(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            inputs_embeds,
-            inputs_embeds_masks,
-        )
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         attn_metadata, intermediate_tensors,
+                                         inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(
@@ -462,6 +473,8 @@ class FalconForCausalLM(nn.Module):
                 continue
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
             if "query_key_value" in name:

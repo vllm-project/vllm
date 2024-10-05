@@ -21,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only DeepseekV2 model."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -40,8 +40,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -50,8 +49,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsPP
 from .utils import (PPMissingLayer, get_inputs_embeds, is_pp_missing_parameter,
-                    make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class DeepseekV2MLP(nn.Module):
@@ -440,6 +440,9 @@ class DeepseekV2Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def forward(
         self,
@@ -450,7 +453,7 @@ class DeepseekV2Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
                                               inputs_embeds,
@@ -477,7 +480,7 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
 
-class DeepseekV2ForCausalLM(nn.Module):
+class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
@@ -497,6 +500,8 @@ class DeepseekV2ForCausalLM(nn.Module):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -507,7 +512,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds, inputs_embeds_masks)

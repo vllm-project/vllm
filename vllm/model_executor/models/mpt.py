@@ -1,22 +1,21 @@
 # coding=utf-8
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -25,7 +24,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
-from .utils import get_inputs_embeds
+from .interfaces import SupportsPP
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 def _get_alibi_slopes(
@@ -210,6 +211,7 @@ class MPTModel(nn.Module):
         config: MPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         assert config.embedding_fraction == 1.0
@@ -219,10 +221,10 @@ class MPTModel(nn.Module):
             config.vocab_size,
             config.d_model,
         )
-        self.blocks = nn.ModuleList([
-            MPTBlock(config, cache_config, quant_config)
-            for _ in range(config.n_layers)
-        ])
+        self.start_layer, self.end_layer, self.blocks = make_layers(
+            config.n_layers,
+            lambda prefix: MPTBlock(config, cache_config, quant_config),
+            prefix=f"{prefix}.blocks")
         self.norm_f = nn.LayerNorm(config.d_model)
         if config.no_bias:
             for module in self.modules():
@@ -230,6 +232,9 @@ class MPTModel(nn.Module):
                         module.bias, nn.Parameter):
                     # Remove the bias term in Linear and LayerNorm.
                     module.register_parameter("bias", None)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.d_model))
 
     def forward(
         self,
@@ -237,24 +242,34 @@ class MPTModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.wte, inputs_embeds,
-                                          inputs_embeds_masks)
-        for i in range(len(self.blocks)):
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            hidden_states = get_inputs_embeds(input_ids,
+                                              self.wte,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+
+        for i in range(self.start_layer, self.end_layer):
             block = self.blocks[i]
             hidden_states = block(
                 position_ids,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.norm_f(hidden_states)
         return hidden_states
 
 
-class MPTForCausalLM(nn.Module):
+class MPTForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
@@ -271,6 +286,8 @@ class MPTForCausalLM(nn.Module):
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -281,10 +298,10 @@ class MPTForCausalLM(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, inputs_embeds,
-                                         inputs_embeds_masks)
+                                         attn_metadata, intermediate_tensors,
+                                         inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(
@@ -309,6 +326,8 @@ class MPTForCausalLM(nn.Module):
         for name, loaded_weight in weights:
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",

@@ -146,7 +146,9 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/test_regression
-  command: pytest -v -s test_regression.py
+  commands:
+  - pip install modelscope
+  - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 10min
@@ -208,7 +210,7 @@ steps:
   - tests/spec_decode
   commands:
     - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
-    - pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
+    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amd]

@@ -21,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -36,8 +36,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -47,8 +46,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA
-from .utils import get_inputs_embeds, is_pp_missing_parameter, make_layers
+from .interfaces import SupportsLoRA, SupportsPP
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class MixtralMoE(nn.Module):
@@ -276,6 +276,9 @@ class MixtralModel(nn.Module):
             prefix=f"{prefix}.layers")
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def forward(
         self,
@@ -286,9 +289,10 @@ class MixtralModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+            hidden_states = get_inputs_embeds(input_ids,
+                                              self.embed_tokens,
                                               inputs_embeds,
                                               inputs_embeds_masks)
             residual = None
@@ -310,7 +314,7 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module, SupportsLoRA):
+class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -323,10 +327,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
 
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "embed_tokens",
-        "lm_head",
+        "qkv_proj", "o_proj", "embed_tokens", "lm_head", "w1", "w2", "w3",
+        "gate"
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -369,6 +371,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -379,7 +383,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds, inputs_embeds_masks)
@@ -393,20 +397,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
 
     def sample(
         self,

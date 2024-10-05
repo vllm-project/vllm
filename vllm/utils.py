@@ -20,8 +20,8 @@ from asyncio import FIRST_COMPLETED, ensure_future
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Literal, Optional, OrderedDict, Protocol,
-                    Set, Tuple, Type, TypeVar, Union, overload)
+                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
+                    Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np
@@ -31,7 +31,7 @@ import torch
 import torch.types
 import yaml
 from packaging.version import Version
-from typing_extensions import ParamSpec, Self, TypeIs, assert_never
+from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -934,30 +934,6 @@ def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
 def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
-
-
-class _SequenceLike(Protocol):
-
-    def __len__(self) -> int:
-        ...
-
-    def __getitem__(self, __idx: slice) -> Self:
-        ...
-
-
-_S = TypeVar("_S", bound=_SequenceLike)
-
-
-def maybe_slice(seq: _S, start: int, stop: int) -> _S:
-    """
-    Slice a sequence, returning the original one where possible.
-
-    This avoids unnecessary copying of the sequence.
-    """
-    if start != 0 or stop < len(seq):
-        return seq[start:stop]
-
-    return seq
 
 
 def init_cached_hf_modules() -> None:

@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-J model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -24,14 +24,13 @@ from transformers import GPTJConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -40,7 +39,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .utils import get_inputs_embeds
+from .interfaces import SupportsPP
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class GPTJAttention(nn.Module):
@@ -180,6 +181,7 @@ class GPTJModel(nn.Module):
         config: GPTJConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -188,11 +190,15 @@ class GPTJModel(nn.Module):
             config.vocab_size,
             self.embed_dim,
         )
-        self.h = nn.ModuleList([
-            GPTJBlock(config, cache_config, quant_config)
-            for _ in range(config.n_layer)
-        ])
+        self.start_layer, self.end_layer, self.h = make_layers(
+            config.n_layer,
+            lambda prefix: GPTJBlock(config, cache_config, quant_config),
+            prefix=f"{prefix}.h",
+        )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.n_embd))
 
     def forward(
         self,
@@ -200,24 +206,32 @@ class GPTJModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.wte, inputs_embeds,
-                                          inputs_embeds_masks)
-        for i in range(len(self.h)):
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            hidden_states = get_inputs_embeds(input_ids,
+                                              self.wte,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
+        else:
+            hidden_states = intermediate_tensors["hidden_states"]
+        for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
             hidden_states = layer(
                 position_ids,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
 
-class GPTJForCausalLM(nn.Module):
+class GPTJForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
@@ -238,6 +252,8 @@ class GPTJForCausalLM(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -248,10 +264,10 @@ class GPTJForCausalLM(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, inputs_embeds,
-                                         inputs_embeds_masks)
+                                         attn_metadata, intermediate_tensors,
+                                         inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(
@@ -291,6 +307,8 @@ class GPTJForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -298,6 +316,8 @@ class GPTJForCausalLM(nn.Module):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

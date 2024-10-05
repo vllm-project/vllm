@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-NeoX model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -24,14 +24,13 @@ from transformers import GPTNeoXConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -40,7 +39,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .utils import get_inputs_embeds
+from .interfaces import SupportsPP
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class GPTNeoXAttention(nn.Module):
@@ -193,6 +194,7 @@ class GPTNeoXModel(nn.Module):
         config: GPTNeoXConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -201,12 +203,16 @@ class GPTNeoXModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.layers = nn.ModuleList([
-            GPTNeoXLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: GPTNeoXLayer(config, cache_config, quant_config),
+            prefix=f"{prefix}.layers",
+        )
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
                                              eps=config.layer_norm_eps)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def forward(
         self,
@@ -214,24 +220,32 @@ class GPTNeoXModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.embed_in,
-                                          inputs_embeds, inputs_embeds_masks)
-        for i in range(len(self.layers)):
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            hidden_states = get_inputs_embeds(input_ids,
+                                              self.embed_in,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
+        else:
+            hidden_states = intermediate_tensors["hidden_states"]
+        for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states = layer(
                 position_ids,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
 
 
-class GPTNeoXForCausalLM(nn.Module):
+class GPTNeoXForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
@@ -252,6 +266,8 @@ class GPTNeoXForCausalLM(nn.Module):
             self.embed_out.weight = self.gpt_neox.embed_in.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            self.gpt_neox.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -262,10 +278,10 @@ class GPTNeoXForCausalLM(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.gpt_neox(input_ids, positions, kv_caches,
-                                      attn_metadata, inputs_embeds,
-                                      inputs_embeds_masks)
+                                      attn_metadata, intermediate_tensors,
+                                      inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(
@@ -295,6 +311,8 @@ class GPTNeoXForCausalLM(nn.Module):
                     or "rotary_emb.sin_cached" in name):
                 # Models trained using OpenRLHF may include
                 # these tensors in the checkpoint. Skip them.
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
 
