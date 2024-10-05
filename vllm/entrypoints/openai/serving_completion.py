@@ -154,7 +154,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     ("Beam search in the API server is only supported with"
                     " AsyncLLMEngine. please add "
                     "`--disable-frontend-multiprocessing` to use beam search.")
-                    result_generator = self.engine_client.beam_search(
+                    generator = self.engine_client.beam_search(
                         prompt_inputs["prompt_token_ids"], request_id_item,
                         sampling_params)
                 else:
