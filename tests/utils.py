@@ -14,7 +14,6 @@ import openai
 import pytest
 import requests
 from openai.types.completion import Completion
-from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
 from tests.models.utils import TextTextLogprobs
@@ -24,6 +23,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
                         cuda_device_count_stateless, get_open_port, is_hip)
 

@@ -148,7 +148,9 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/test_regression
-  command: pytest -v -s test_regression.py
+  commands:
+  - pip install modelscope
+  - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 10min

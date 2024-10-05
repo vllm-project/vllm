@@ -5,9 +5,9 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 import re
-from functools import partial
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
-                    Tuple, TypedDict, Union)
+from functools import cached_property, partial
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,6 @@ from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -32,7 +31,7 @@ from vllm.utils import is_list_of
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, group_weights_with_prefix,
                     init_vllm_registered_model, merge_multimodal_embeddings)
 
@@ -123,7 +122,7 @@ def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
     return blocks, target_width, target_height
 
 
-def calculate_num_blocks_wrapper(hf_config: Dict[str, Any],
+def calculate_num_blocks_wrapper(hf_config: PretrainedConfig,
                                  max_dynamic_patch: Optional[int] = None):
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
@@ -183,7 +182,7 @@ def image_to_pixel_values(image: Image.Image, input_size: int, min_num: int,
     return pixel_values
 
 
-def image_to_pixel_values_wrapper(hf_config: Dict[str, Any],
+def image_to_pixel_values_wrapper(hf_config: PretrainedConfig,
                                   max_dynamic_patch: Optional[int] = None):
     image_size = hf_config.vision_config.image_size
     min_num = hf_config.min_dynamic_patch
@@ -197,7 +196,7 @@ def image_to_pixel_values_wrapper(hf_config: Dict[str, Any],
                    use_thumbnail=use_thumbnail)
 
 
-def get_internvl_num_patches(hf_config: Dict[str, Any]):
+def get_internvl_num_patches(hf_config: PretrainedConfig):
     vision_config = hf_config.vision_config
     downsample_ratio = hf_config.downsample_ratio
     image_size = vision_config.image_size
@@ -362,7 +361,7 @@ def dummy_data_for_internvl(ctx: InputContext,
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_internvl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_internvl)
-class InternVLChatModel(nn.Module, SupportsMultiModal):
+class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -408,10 +407,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
+    @cached_property
+    def sampler(self):
         if hasattr(self.language_model, "sampler"):
-            self.sampler = self.language_model.sampler
-        else:
-            self.sampler = Sampler()
+            return self.language_model.sampler
+
+        return Sampler()
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
@@ -515,18 +516,22 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        if image_input is not None and get_pp_group().is_first_rank:
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
-            vision_embeddings = self._process_image_input(image_input)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
-                self.img_context_token_id)
+    ) -> Union[SamplerOutput, IntermediateTensors]:
+        if intermediate_tensors is not None:
             input_ids = None
-        else:
             inputs_embeds = None
+        else:
+            image_input = self._parse_and_validate_image_input(**kwargs)
+            if image_input is not None:
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+                vision_embeddings = self._process_image_input(image_input)
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, vision_embeddings,
+                    self.img_context_token_id)
+                input_ids = None
+            else:
+                inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

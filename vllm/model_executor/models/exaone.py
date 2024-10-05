@@ -38,8 +38,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -53,8 +52,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
 from vllm.utils import is_hip
 
-from .interfaces import SupportsLoRA
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from .interfaces import SupportsLoRA, SupportsPP
+from .utils import (PPMissingLayer, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class ExaoneGatedMLP(nn.Module):
@@ -354,6 +354,10 @@ class ExaoneModel(nn.Module):
         else:
             self.ln_f = PPMissingLayer()
 
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
 
@@ -397,7 +401,7 @@ class ExaoneModel(nn.Module):
         return hidden_states
 
 
-class ExaoneForCausalLM(nn.Module, SupportsLoRA):
+class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -477,6 +481,9 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA):
         else:
             self.lm_head = PPMissingLayer()
 
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -505,24 +512,6 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA):
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
-
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros(
-                (batch_size, self.config.hidden_size),
-                dtype=dtype,
-                device=device,
-            ),
-            "residual":
-            torch.zeros(
-                (batch_size, self.config.hidden_size),
-                dtype=dtype,
-                device=device,
-            ),
-        })
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
