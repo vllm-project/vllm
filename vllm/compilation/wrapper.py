@@ -1,6 +1,5 @@
 import os
 import sys
-import weakref
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
@@ -39,9 +38,6 @@ class TorchCompileWrapperWithCustomDispatcher:
                 from vllm.compilation.backends import select_default_backend
                 backend = select_default_backend(
                     envs.VLLM_TEST_TORCH_COMPILE_LEVEL)
-                if not isinstance(backend, str):
-                    from functools import partial
-                    backend = partial(backend, model_ref=weakref.ref(self))
 
             compiled_callable = torch.compile(
                 self.forward,

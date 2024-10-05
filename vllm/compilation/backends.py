@@ -1,7 +1,6 @@
 import copy
 import operator
 from typing import Callable, Dict, List, Optional, Tuple, Union
-from weakref import ReferenceType
 
 import torch
 import torch.fx as fx
@@ -9,7 +8,6 @@ import torch.fx as fx
 from vllm.logger import init_logger
 
 from .compile_context import get_compile_context
-from .wrapper import TorchCompileWrapperWithCustomDispatcher
 
 logger = init_logger(__name__)
 
@@ -176,8 +174,6 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
 def vllm_backend(
         graph,
         example_inputs,
-        model_ref: Optional[
-            ReferenceType[TorchCompileWrapperWithCustomDispatcher]] = None,
         additional_inductor_config: Optional[Dict] = None) -> Callable:
 
     sizes_to_specialize: List[int] = copy.deepcopy(get_compile_context())
