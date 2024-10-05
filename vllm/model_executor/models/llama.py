@@ -21,7 +21,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from functools import partial
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -56,12 +55,31 @@ from .utils import (PPMissingLayer, group_weights_with_prefix,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
+# Mistral/Llama models can also be loaded with --load-format mistral
+# from consolidated.safetensors checkpoints
+MISTRAL_MAPPING = {
+    "layers": "model.layers",
+    "attention": "self_attn",
+    "wq": "q_proj",
+    "wk": "k_proj",
+    "wv": "v_proj",
+    "wo": "o_proj",
+    "attention_norm": "input_layernorm",
+    "feed_forward": "mlp",
+    "w1": "gate_proj",
+    "w2": "down_proj",
+    "w3": "up_proj",
+    "ffn_norm": "post_attention_layernorm",
+    "tok_embeddings": "model.embed_tokens",
+    "output": "lm_head",
+    "norm": "model.norm"
+}
+
 
 # This function is used to remap the mistral format as
 # used by Mistral and Llama <=2
 def maybe_remap_mistral(
     config: LlamaConfig,
-    mistral_mapping: Dict[str, str],
     name: str,
     loaded_weight: torch.Tensor,
 ) -> Tuple[str, torch.Tensor]:
@@ -73,7 +91,7 @@ def maybe_remap_mistral(
         return w.view(n_heads, attn_in // n_heads // 2, 2,
                       attn_out).transpose(1, 2).reshape(attn_in, attn_out)
 
-    mapping = mistral_mapping
+    mapping = MISTRAL_MAPPING
     modules = name.split(".")
 
     # rotary embeds should be sliced
@@ -301,22 +319,6 @@ class LlamaDecoderLayer(nn.Module):
 
 class LlamaModel(nn.Module):
 
-    # Mistral/Llama models can also be loaded with --load-format mistral
-    # from consolidated.safetensors checkpoints
-    mistral_mapping = {
-        "attention": "self_attn",
-        "wq": "q_proj",
-        "wk": "k_proj",
-        "wv": "v_proj",
-        "wo": "o_proj",
-        "attention_norm": "input_layernorm",
-        "feed_forward": "mlp",
-        "w1": "gate_proj",
-        "w2": "down_proj",
-        "w3": "up_proj",
-        "ffn_norm": "post_attention_layernorm",
-    }
-
     def __init__(
         self,
         config: LlamaConfig,
@@ -398,15 +400,6 @@ class LlamaModel(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        map_weights = partial(
-            maybe_remap_mistral,
-            self.config,
-            self.mistral_mapping,
-        )
-        weights = [
-            map_weights(name, loaded_weight) for name, loaded_weight in weights
-        ]
-
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -521,15 +514,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    # Mistral/Llama models can also be loaded with --load-format mistral
-    # from consolidated.safetensors checkpoints
-    mistral_mapping = {
-        "layers": "model.layers",
-        "tok_embeddings": "model.embed_tokens",
-        "output": "lm_head",
-        "norm": "model.norm"
-    }
-
     def __init__(
         self,
         config: LlamaConfig,
@@ -603,13 +587,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        map_weights = partial(
-            maybe_remap_mistral,
-            self.config,
-            self.mistral_mapping,
-        )
         weights = [
-            map_weights(name, loaded_weight) for name, loaded_weight in weights
+            maybe_remap_mistral(self.config, name, loaded_weight)
+            for name, loaded_weight in weights
         ]
 
         weights_group = group_weights_with_prefix(weights)
