@@ -31,6 +31,7 @@ from vllm.worker.model_runner_base import (
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
+
 @dataclasses.dataclass(frozen=True)
 class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
     """
@@ -84,9 +85,10 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
 
     def _empty_long_tensor(self) -> torch.Tensor:
         return self._list_to_long_tensor([])
-    
+
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> EncoderDecoderModelInputForCPU:
+            self, tensor_dict: Dict[str,
+                                    Any]) -> EncoderDecoderModelInputForCPU:
         return EncoderDecoderModelInputForCPU.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
@@ -98,8 +100,9 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> EncoderDecoderModelInputForCPU:
-        model_input = super().prepare_model_input(
-            seq_group_metadata_list, virtual_engine, finished_requests_ids)
+        model_input = super().prepare_model_input(seq_group_metadata_list,
+                                                  virtual_engine,
+                                                  finished_requests_ids)
         (
             attn_metadata,
             encoder_input_tokens_tensor,
@@ -112,7 +115,7 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
             encoder_input_tokens=encoder_input_tokens_tensor,
             encoder_input_positions=encoder_input_positions_tensor,
         )
-    
+
     def _prepare_encoder_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -288,8 +291,10 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
             model_input.input_tokens,
             "positions":
             model_input.input_positions,
-            "encoder_input_ids": model_input.encoder_input_tokens,
-            "encoder_positions": model_input.encoder_input_positions,
+            "encoder_input_ids":
+            model_input.encoder_input_tokens,
+            "encoder_positions":
+            model_input.encoder_input_positions,
             "kv_caches":
             kv_caches,
             "attn_metadata":
@@ -316,4 +321,3 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
             sampling_metadata=model_input.sampling_metadata,
         )
         return [output]
-

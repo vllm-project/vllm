@@ -252,9 +252,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                     value_cache,
                                                     updated_slot_mapping,
-                                                    self.kv_cache_dtype, k_scale,
-                                                    v_scale)
-        
+                                                    self.kv_cache_dtype,
+                                                    k_scale, v_scale)
+
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
             # Encoder/decoder cross-attention requires no chunked
@@ -279,7 +279,11 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             assert attn_metadata.seq_lens is not None
             if (kv_cache.numel() == 0
                     or prefill_meta.block_tables.numel() == 0):
-                output = self._run_sdpa_forward(query, key, value, prefill_meta, attn_type=attn_type)
+                output = self._run_sdpa_forward(query,
+                                                key,
+                                                value,
+                                                prefill_meta,
+                                                attn_type=attn_type)
                 # print("output", attn_type, output.mean().item(), output.std().item())
                 # print("output", attn_type, self.need_mask)
             else:
@@ -312,7 +316,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
-    
+
     def _run_sdpa_forward(
         self,
         query: torch.Tensor,
@@ -321,8 +325,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         attn_metadata: TorchSDPAMetadata,
         attn_type: AttentionType = AttentionType.DECODER,
     ):
-        num_tokens, hidden_size = query.shape[-2:]
-
         if self.num_kv_heads != self.num_heads:
             key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
             value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
@@ -334,51 +336,43 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     self.alibi_slopes, query.dtype,
                     attn_metadata.seq_lens)  # type: ignore
             elif self.sliding_window is not None:
+                assert attn_metadata.seq_lens is not None
                 attn_masks = _make_sliding_window_bias(
                     attn_metadata.seq_lens, self.sliding_window,
                     query.dtype)  # type: ignore
             else:
-                seq_lens = _get_seq_lens(attn_metadata, attn_type)
+                seq_lens, _ = _get_seq_lens(attn_metadata, attn_type)
                 attn_masks = [None] * len(seq_lens)
             _set_attn_bias(attn_metadata, attn_masks, attn_type)
 
+        output = torch.empty_like(query)
         query = query.movedim(0, query.dim() - 2)
         key = key.movedim(0, key.dim() - 2)
         value = value.movedim(0, value.dim() - 2)
 
-        if self.alibi_slopes is None:
-            if attn_type == AttentionType.DECODER:
-                is_causal = True
-            else:
-                is_causal = False
-            output =  scaled_dot_product_attention(
-                query.unsqueeze(0),
-                key.unsqueeze(0),
-                value.unsqueeze(0),
-                attn_mask=attn_masks[0],
+        if attn_type == AttentionType.DECODER:
+            causal_attn = True
+        else:
+            causal_attn = False
+
+        seq_lens_q, seq_lens_kv = _get_seq_lens(attn_metadata, attn_type)
+        start_q, start_kv = 0, 0
+        for seq_len_q, seq_len_kv, mask in zip(seq_lens_q, seq_lens_kv,
+                                               attn_masks):
+            end_q = start_q + seq_len_q
+            end_kv = start_kv + seq_len_kv
+            is_causal = causal_attn
+            sub_out = scaled_dot_product_attention(
+                query[None, :, start_q:end_q, :],
+                key[None, :, start_kv:end_kv, :],
+                value[None, :, start_kv:end_kv, :],
+                attn_mask=mask,
                 dropout_p=0.0,
                 is_causal=is_causal,
-                scale=self.scale)
-            output = output.squeeze(0).movedim(query.dim() - 2, 0)
-        else:
-            start = 0
-            output = torch.empty(
-                (num_tokens, self.num_heads, self.head_size),
-                dtype=query.dtype)
-            for seq_len, mask in zip(attn_metadata.seq_lens,
-                                    attn_masks):
-                end = start + seq_len
-                sub_out = scaled_dot_product_attention(
-                    query[None, :, start:end, :],
-                    key[None, :, start:end, :],
-                    value[None, :, start:end, :],
-                    attn_mask=mask,
-                    dropout_p=0.0,
-                    is_causal=not self.need_mask,
-                    scale=self.scale).squeeze(0).movedim(
-                        query.dim() - 2, 0)
-                output[start:end, :, :] = sub_out
-                start = end
+                scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
+            output[start_q:end_q, :, :] = sub_out
+            start_q, start_kv = end_q, end_kv
+            # print("output", attn_type, output.mean().item(), output.shape)
         return output
 
 
@@ -401,13 +395,17 @@ def _get_seq_lens(
     '''
 
     if attn_type == AttentionType.DECODER:
-        return attn_metadata.seq_lens
+        seq_lens_q = attn_metadata.seq_lens
+        seq_lens_kv = attn_metadata.seq_lens
     elif attn_type == AttentionType.ENCODER:
-        return attn_metadata.encoder_seq_lens
+        seq_lens_q = attn_metadata.encoder_seq_lens
+        seq_lens_kv = attn_metadata.encoder_seq_lens
     elif attn_type == AttentionType.ENCODER_DECODER:
-        return attn_metadata.encoder_seq_lens
+        seq_lens_q = attn_metadata.seq_lens
+        seq_lens_kv = attn_metadata.encoder_seq_lens
     else:
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
+    return seq_lens_q, seq_lens_kv
 
 
 def _get_attn_bias(
