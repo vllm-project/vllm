@@ -433,6 +433,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4b8.cu"
         "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.h"
         "csrc/moe/marlin_kernels/marlin_moe_kernel_ku8b128.cu"
+        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4.h"
+        "csrc/moe/marlin_kernels/marlin_moe_kernel_ku4.cu"
         "csrc/moe/marlin_moe_ops.cu")
 
     set_gencode_flags_for_srcs(
@@ -481,6 +483,17 @@ endif()
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda")
   return()
 endif ()
+
+# vLLM flash attention requires VLLM_GPU_ARCHES to contain the set of target  
+# arches in the CMake syntax (75-real, 89-virtual, etc), since we clear the 
+# arches in the CUDA case (and instead set the gencodes on a per file basis) 
+# we need to manually set VLLM_GPU_ARCHES here.
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  foreach(_ARCH ${CUDA_ARCHS})
+    string(REPLACE "." "" _ARCH "${_ARCH}")
+    list(APPEND VLLM_GPU_ARCHES "${_ARCH}-real")
+  endforeach()
+endif()
 
 #
 # Build vLLM flash attention from source

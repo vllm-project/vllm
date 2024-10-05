@@ -970,6 +970,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                            image_grid_thw=image_grid_thw)
 
         if image_embeds is not None:
+            image_embeds = self._validate_and_reshape_mm_tensor(
+                image_embeds, "image embeds")
+
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
