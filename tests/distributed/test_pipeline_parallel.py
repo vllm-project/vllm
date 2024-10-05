@@ -104,15 +104,13 @@ GENERATION_MODEL_SETTINGS = {
     # [FAST TESTS]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
-    # TODO: Test on larger GPU
-    # "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(tp_base=4, trust_remote_code=True),  # noqa: E501
     "baichuan-inc/Baichuan-7B": PPTestSettings.fast(trust_remote_code=True),
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "THUDM/chatglm3-6b": PPTestSettings.fast(trust_remote_code=True),
     "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(tp_base=2, trust_remote_code=True),  # noqa: E501
-    # TODO: Test on larger GPU
-    # "databricks/dbrx-instruct": PPTestSettings.fast(),
+    "databricks/dbrx-instruct": PPTestSettings.fast(tp_base=4),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(trust_remote_code=True),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
     "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
@@ -163,6 +161,7 @@ EMBEDDING_MODEL_SETTINGS = {  # type: ignore[var-annotated]
     # [FAST TESTS]
     "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
+    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(tp_base=4, trust_remote_code=True),  # noqa: E501
 }
 
 MULTIMODAL_MODEL_SETTINGS = {
