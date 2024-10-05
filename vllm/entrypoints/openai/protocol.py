@@ -583,6 +583,22 @@ class CompletionRequest(OpenAIBaseModel):
 
     # doc: end-completion-extra-params
 
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+        )
+
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
