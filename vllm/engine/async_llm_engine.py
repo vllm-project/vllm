@@ -990,7 +990,7 @@ here
         all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
         completed = []
 
-        for i in range(max_tokens):
+        for _ in range(max_tokens):
             prompts_batch = [
                 TokensPrompt(prompt_token_ids=beam.tokens)
                 for beam in all_beams
@@ -999,8 +999,8 @@ here
             tasks = []
 
             request_id = f"beam_search-{random_uuid()}"
-            for j, individual_prompt in enumerate(prompts_batch):
-                request_id_item = f"{request_id}-{j}"
+            for i, individual_prompt in enumerate(prompts_batch):
+                request_id_item = f"{request_id}-{i}"
                 task = asyncio.create_task(
                     collect_results(self.generate(
                         individual_prompt,
@@ -1017,8 +1017,8 @@ here
             logger.info(output)
 
             new_beams = []
-            for j, current_beam in enumerate(all_beams):
-                result = output[j]
+            for i, current_beam in enumerate(all_beams):
+                result = output[i]
 
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
@@ -1041,7 +1041,7 @@ here
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            beam.text = tokenizer.decode(beam.tokens[:tokenizedLength])
+            beam.text = tokenizer.decode(beam.tokens[tokenizedLength:])
 
         beam_search_output = RequestOutput(
             request_id=request_id,
@@ -1051,10 +1051,10 @@ here
                     text=beam.text,
                     cumulative_logprob=beam.cum_logprob,
                     token_ids=beam.tokens,
-                    index=j,
-                    logprobs=None,
+                    index=i,
+                    logprobs=beam.cum_logprob,
                 )
-                for (j, beam) in enumerate(best_beams)
+                for (i, beam) in enumerate(best_beams)
             ],
             finished=True,
             prompt_token_ids=tokenizedPrompt,

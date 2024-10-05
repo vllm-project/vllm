@@ -232,14 +232,11 @@ class OpenAIServingChat(OpenAIServing):
                 log_tracing_disabled_warning()
             
             if (sampling_params.use_beam_search):
-                beam_width = sampling_params.best_of
-                max_tokens = sampling_params.max_tokens
-
                 result_generator = self.engine_client.beam_search(
                     engine_inputs,
                     request_id,
-                    beam_width,
-                    max_tokens
+                    beam_width = sampling_params.best_of,
+                    max_tokens = sampling_params.max_tokens
                 )
             else:
                 result_generator = self.engine_client.generate(
