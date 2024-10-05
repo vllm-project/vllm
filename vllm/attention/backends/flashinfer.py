@@ -798,7 +798,7 @@ def unified_flash_infer(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-):
+) -> torch.Tensor:
 
     current_metadata = get_forward_context()
     assert current_metadata is not None
@@ -889,5 +889,5 @@ def _(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-):
+) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
