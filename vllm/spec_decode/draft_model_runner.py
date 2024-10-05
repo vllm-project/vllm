@@ -2,6 +2,7 @@ from typing import List, Optional
 
 import torch
 
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
 
 try:
@@ -291,16 +292,17 @@ class TP1DraftModelRunner(ModelRunner):
                 if previous_hidden_states is not None else {}
 
             # Run model
-            hidden_states = model_executable(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
-                intermediate_tensors=intermediate_tensors,
-                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device),
-                **kwargs,
-            )
+            with set_forward_context(model_input.attn_metadata):
+                hidden_states = model_executable(
+                    input_ids=model_input.input_tokens,
+                    positions=model_input.input_positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=model_input.attn_metadata,
+                    intermediate_tensors=intermediate_tensors,
+                    **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                                 device=self.device),
+                    **kwargs,
+                )
 
             # Compute the logits.
             logits = self.model.compute_logits(hidden_states,
