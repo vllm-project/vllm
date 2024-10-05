@@ -1201,11 +1201,21 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = FlexibleArgumentParser._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
+        # followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+        if args[0] == "serve":
+            if index == 1:
+                raise ValueError(
+                    "No model_tag specified! Please check your command-line"
+                    " arguments.")
+            args = [args[0]] + [
+                args[1]
+            ] + config_args + args[2:index] + args[index + 2:]
+        else:
+            args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
         return args
 
