@@ -38,6 +38,7 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
 
@@ -119,6 +120,10 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
     if not isinstance(data, list):
         data = [data]
 
+    # If the audio inputs are embeddings, no need for preprocessing
+    if is_list_of(data, torch.Tensor, check="all"):
+        return MultiModalInputs({"audio_embeds": data})
+
     audio_features = []
     for audio_input in data:
         if not isinstance(audio_input, tuple):
@@ -165,25 +170,30 @@ def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
         audios = [audios]
 
     audio_token_counts = []
-    for audio_data, sample_rate in audios:
-        audio_length = audio_data.shape[0]
-        if sample_rate != feature_extractor.sampling_rate:
-            # Account for resampling.
-            adjustment = feature_extractor.sampling_rate / sample_rate
-            audio_length = math.ceil(adjustment * audio_length)
+    for audio in audios:
+        if isinstance(audio, torch.Tensor):
+            audio_num_tokens = audio.shape[1]
+            audio_token_counts.append(audio_num_tokens)
+        else:
+            audio_data, sample_rate = audio
+            audio_length = audio_data.shape[0]
+            if sample_rate != feature_extractor.sampling_rate:
+                # Account for resampling.
+                adjustment = feature_extractor.sampling_rate / sample_rate
+                audio_length = math.ceil(adjustment * audio_length)
 
-        feature_extractor_output_length = math.ceil(
-            (audio_length - (feature_extractor.hop_length - 1)) /
-            feature_extractor.hop_length)
+            feature_extractor_output_length = math.ceil(
+                (audio_length - (feature_extractor.hop_length - 1)) /
+                feature_extractor.hop_length)
 
-        uv_config = ctx.get_hf_config(UltravoxConfig)
-        audio_num_tokens = min(
-            max(
-                1,
-                math.ceil(feature_extractor_output_length /
-                          (uv_config.stack_factor * 2))),
-            get_ultravox_max_audio_tokens(ctx))
-        audio_token_counts.append(audio_num_tokens)
+            uv_config = ctx.get_hf_config(UltravoxConfig)
+            audio_num_tokens = min(
+                max(
+                    1,
+                    math.ceil(feature_extractor_output_length /
+                              (uv_config.stack_factor * 2))),
+                get_ultravox_max_audio_tokens(ctx))
+            audio_token_counts.append(audio_num_tokens)
 
     tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
 
