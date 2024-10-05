@@ -9,7 +9,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsPP
-from .llama import LlamaModel, maybe_remap_mistral
+from .llama import LlamaModel
 
 
 class LlamaEmbeddingModel(nn.Module, SupportsPP):
@@ -53,9 +53,7 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights = [
-            maybe_remap_mistral(self.model.config, name, loaded_weight)
-            for name, loaded_weight in weights
-        ]
-
         self.model.load_weights(weights)
+
+    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
+        self.model.load_kv_cache_scales(quantization_param_path)

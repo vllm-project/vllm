@@ -55,57 +55,6 @@ from .utils import (PPMissingLayer, group_weights_with_prefix,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
-# Mistral/Llama models can also be loaded with --load-format mistral
-# from consolidated.safetensors checkpoints
-MISTRAL_MAPPING = {
-    "layers": "model.layers",
-    "attention": "self_attn",
-    "wq": "q_proj",
-    "wk": "k_proj",
-    "wv": "v_proj",
-    "wo": "o_proj",
-    "attention_norm": "input_layernorm",
-    "feed_forward": "mlp",
-    "w1": "gate_proj",
-    "w2": "down_proj",
-    "w3": "up_proj",
-    "ffn_norm": "post_attention_layernorm",
-    "tok_embeddings": "model.embed_tokens",
-    "output": "lm_head",
-    "norm": "model.norm"
-}
-
-
-# This function is used to remap the mistral format as
-# used by Mistral and Llama <=2
-def maybe_remap_mistral(
-    config: LlamaConfig,
-    name: str,
-    loaded_weight: torch.Tensor,
-) -> Tuple[str, torch.Tensor]:
-
-    def permute(w: torch.Tensor, n_heads: int):
-        attn_in = config.head_dim * n_heads
-        attn_out = config.hidden_size
-
-        return w.view(n_heads, attn_in // n_heads // 2, 2,
-                      attn_out).transpose(1, 2).reshape(attn_in, attn_out)
-
-    mapping = MISTRAL_MAPPING
-    modules = name.split(".")
-
-    # rotary embeds should be sliced
-    if "wk" in modules:
-        loaded_weight = permute(loaded_weight, config.num_key_value_heads)
-    elif "wq" in modules:
-        loaded_weight = permute(loaded_weight, config.num_attention_heads)
-
-    for item in modules:
-        if item in mapping and mapping[item] not in name:
-            name = name.replace(item, mapping[item])
-
-    return name, loaded_weight
-
 
 class LlamaMLP(nn.Module):
 
@@ -417,11 +366,6 @@ class LlamaModel(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            # With tie_word_embeddings, we can skip lm_head.weight
-            # The weight might appear unnecessarily in the files if the model is
-            # processed with quantization, LoRA, fine-tuning, etc.
-            if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                continue
             if scale_name := get_compressed_tensors_cache_scale(name):
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
@@ -514,6 +458,26 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "up_proj": ("gate_up_proj", 1),
     }
 
+    # Mistral/Llama models can also be loaded with --load-format mistral
+    # from consolidated.safetensors checkpoints
+    mistral_mapping = {
+        "layers": "model.layers",
+        "attention": "self_attn",
+        "wq": "q_proj",
+        "wk": "k_proj",
+        "wv": "v_proj",
+        "wo": "o_proj",
+        "attention_norm": "input_layernorm",
+        "feed_forward": "mlp",
+        "w1": "gate_proj",
+        "w2": "down_proj",
+        "w3": "up_proj",
+        "ffn_norm": "post_attention_layernorm",
+        "tok_embeddings": "model.embed_tokens",
+        "output": "lm_head",
+        "norm": "model.norm"
+    }
+
     def __init__(
         self,
         config: LlamaConfig,
@@ -588,7 +552,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         weights = [
-            maybe_remap_mistral(self.config, name, loaded_weight)
+            self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights
         ]
 
@@ -609,3 +573,35 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         self.model.load_kv_cache_scales(quantization_param_path)
+
+    # This function is used to remap the mistral format as
+    # used by Mistral and Llama <=2
+    def maybe_remap_mistral(
+        self,
+        name: str,
+        loaded_weight: torch.Tensor,
+    ) -> Tuple[str, torch.Tensor]:
+
+        def permute(w: torch.Tensor, n_heads: int):
+            attn_in = self.config.head_dim * n_heads
+            attn_out = self.config.hidden_size
+
+            return w.view(n_heads, attn_in // n_heads // 2, 2,
+                          attn_out).transpose(1, 2).reshape(attn_in, attn_out)
+
+        mapping = self.mistral_mapping
+        modules = name.split(".")
+
+        # rotary embeds should be sliced
+        if "wk" in modules:
+            loaded_weight = permute(loaded_weight,
+                                    self.config.num_key_value_heads)
+        elif "wq" in modules:
+            loaded_weight = permute(loaded_weight,
+                                    self.config.num_attention_heads)
+
+        for item in modules:
+            if item in mapping and mapping[item] not in name:
+                name = name.replace(item, mapping[item])
+
+        return name, loaded_weight
