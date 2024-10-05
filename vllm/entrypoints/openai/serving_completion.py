@@ -143,11 +143,13 @@ class OpenAIServingCompletion(OpenAIServing):
                     log_tracing_disabled_warning()
                 
                 if isinstance(self.engine_client, AsyncLLMEngine) and sampling_params.use_beam_search:
+                    beam_width = sampling_params.best_of if sampling_params.best_of else 2
+                    max_tokens = sampling_params.max_tokens if sampling_params.max_tokens else 1
                     generator = self.engine_client.beam_search(
                         prompt_inputs["prompt_token_ids"],
                         request_id_item,
-                        sampling_params.best_of,
-                        sampling_params.max_tokens
+                        beam_width,
+                        max_tokens
                     )
                 else:
                     generator = self.engine_client.generate(

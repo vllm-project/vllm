@@ -1039,7 +1039,7 @@ class AsyncLLMEngine:
 
     async def beam_search(
         self,
-        prompt: PromptType,
+        prompt: Union[PromptType, List[int]],
         request_id: str,
         beam_width: int,
         max_tokens: int,
