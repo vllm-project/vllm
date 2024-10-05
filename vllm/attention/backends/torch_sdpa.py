@@ -284,8 +284,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                                                 value,
                                                 prefill_meta,
                                                 attn_type=attn_type)
-                # print("output", attn_type, output.mean().item(), output.std().item())
-                # print("output", attn_type, self.need_mask)
             else:
                 # prefix-enabled attention
                 raise RuntimeError(
@@ -372,7 +370,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
             output[start_q:end_q, :, :] = sub_out
             start_q, start_kv = end_q, end_kv
-            # print("output", attn_type, output.mean().item(), output.shape)
         return output
 
 
