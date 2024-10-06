@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from tests.conftest import VllmRunner
@@ -20,6 +22,14 @@ def test_num_computed_tokens_update(num_scheduler_steps: int,
                                     enable_chunked_prefill: bool,
                                     enforce_eager: bool):
 
+    is_multi_step = num_scheduler_steps > 1
+    is_multi_step_chunked_prefill = is_multi_step and enable_chunked_prefill
+
+    attention_backend = os.getenv("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
+    if is_multi_step_chunked_prefill and attention_backend != "FLASH_ATTN":
+        pytest.skip("Multi-step with Chunked-Prefill only supports"
+                    " FLASH_ATTN backend")
+
     # Make a vllm engine
     runner = VllmRunner(model_name=MODEL,
                         gpu_memory_utilization=0.7,
@@ -29,8 +39,6 @@ def test_num_computed_tokens_update(num_scheduler_steps: int,
                         enforce_eager=enforce_eager)
     engine: LLMEngine = runner.model.llm_engine
 
-    is_multi_step = num_scheduler_steps > 1
-    is_multi_step_chunked_prefill = is_multi_step and enable_chunked_prefill
     # In multi-step + chunked-prefill there is no separate single prompt step.
     # What is scheduled will run for num_scheduler_steps always.
     num_prompt_steps = num_scheduler_steps \
