@@ -13,10 +13,10 @@ if TYPE_CHECKING:
                                                ModelRunnerInputBuilderBase)
 
 
-class AttentionType(Enum):
-    DECODER = auto()  # Decoder attention between previous layer Q/K/V
-    ENCODER = auto()  # Encoder attention between previous layer Q/K/V
-    ENCODER_DECODER = auto()  # Attention between dec. Q and enc. K/V
+class AttentionType:
+    DECODER = 0  # Decoder attention between previous layer Q/K/V
+    ENCODER = 1  # Encoder attention between previous layer Q/K/V
+    ENCODER_DECODER = 2  # Attention between dec. Q and enc. K/V
 
 
 class AttentionBackend(ABC):
