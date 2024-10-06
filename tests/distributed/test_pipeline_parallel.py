@@ -97,6 +97,9 @@ class PPTestSettings:
                        self.trust_remote_code, self.tokenizer_mode)
 
 
+# NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
+# The values displayed here are only a rough indicator of the size of the model
+
 # yapf: disable
 GENERATION_MODEL_SETTINGS = {
     # [DETAILED TESTS]
