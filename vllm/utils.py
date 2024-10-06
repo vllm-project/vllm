@@ -504,6 +504,15 @@ async def merge_async_iterators(
                 await it.aclose()
 
 
+async def collect_from_async_generator(
+        iterator: AsyncGenerator[T, None]) -> List[T]:
+    """Collect all items from an async generator into a list."""
+    items = []
+    async for item in iterator:
+        items.append(item)
+    return items
+
+
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
     if host_ip:
