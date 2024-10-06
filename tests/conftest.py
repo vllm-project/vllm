@@ -793,7 +793,7 @@ class VllmRunner:
         return self.generate_encoder_decoder_w_logprobs(
             encoder_decoder_prompts, greedy_logprobs_params)
 
-    def generate_beam_search_new(
+    def generate_beam_search(
         self,
         prompts: Union[List[str], List[List[int]]],
         beam_width: int,
