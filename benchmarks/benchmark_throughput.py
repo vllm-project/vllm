@@ -15,6 +15,7 @@ from vllm.engine.arg_utils import DEVICE_OPTIONS, AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
 
@@ -145,10 +146,13 @@ def run_vllm(
         for prompt, input_len, _output_len in requests:
             assert _output_len == output_len
         start = time.perf_counter()
-        llm.beam_search(prompts,
-                        beam_width=n,
-                        max_tokens=output_len,
-                        ignore_eos=True)
+        llm.beam_search(
+            prompts,
+            BeamSearchParams(
+                beam_width=n,
+                max_tokens=output_len,
+                ignore_eos=True,
+            ))
         end = time.perf_counter()
     return end - start
 

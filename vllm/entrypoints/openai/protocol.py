@@ -11,8 +11,8 @@ from typing_extensions import Annotated, Required, TypedDict
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import (GuidedDecodingParams, RequestOutputKind,
-                                  SamplingParams)
+from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
+                                  RequestOutputKind, SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
 
@@ -287,6 +287,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."))
 
     # doc: end-chat-completion-extra-params
+
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+        )
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
@@ -566,6 +582,22 @@ class CompletionRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."))
 
     # doc: end-completion-extra-params
+
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+        )
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
