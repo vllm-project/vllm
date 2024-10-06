@@ -289,8 +289,8 @@ Text Embedding
     - 
     - ✅︎
 
-Reward Modelling
-----------------
+Reward Modeling
+---------------
 
 .. list-table::
   :widths: 25 25 50 5 5
