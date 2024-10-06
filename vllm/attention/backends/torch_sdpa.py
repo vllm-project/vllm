@@ -138,8 +138,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
             return None
 
         return self
-    
-    def get_seq_lens(     
+
+    def get_seq_lens(
         self,
         attn_type: AttentionType,
     ):
@@ -170,7 +170,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         else:
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
         return seq_lens_q, seq_lens_kv
-    
+
     def get_attn_bias(
         self,
         attn_type: AttentionType,
@@ -197,7 +197,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
             return self.cross_attn_bias
         else:
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
-    
+
     def set_attn_bias(
         self,
         attn_bias: List[torch.Tensor],
@@ -223,7 +223,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
             self.cross_attn_bias = attn_bias
         else:
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
-    
+
     def get_seq_len_block_table_args(
         self,
         attn_type: AttentionType,
@@ -240,7 +240,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         
         Arguments:
 
-        * attn_metadata: Attention metadata structure associated with attention op
+        * attn_metadata: Attention metadata structure associated with attention
         * is_prompt: True if prefill, False otherwise
         * attn_type: encoder attention, decoder self-attention,
                     encoder/decoder cross-attention
@@ -255,19 +255,17 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         if attn_type == AttentionType.DECODER:
             # Decoder self-attention
             # Choose max_seq_len based on whether we are in prompt_run
-            return (self.seq_lens_tensor,
-                    self.max_decode_seq_len,
+            return (self.seq_lens_tensor, self.max_decode_seq_len,
                     self.block_tables)
         elif attn_type == AttentionType.ENCODER_DECODER:
             # Enc/dec cross-attention KVs match encoder sequence length;
             # cross-attention utilizes special "cross" block tables
-            return (self.encoder_seq_lens_tensor,
-                    self.max_encoder_seq_len,
+            return (self.encoder_seq_lens_tensor, self.max_encoder_seq_len,
                     self.cross_block_tables)
         elif attn_type == AttentionType.ENCODER:
             # No block tables associated with encoder attention
-            return (self.encoder_seq_lens_tensor,
-                    self.max_encoder_seq_len, None)
+            return (self.encoder_seq_lens_tensor, self.max_encoder_seq_len,
+                    None)
         else:
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
