@@ -42,7 +42,7 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 
 from .interfaces import SupportsMultiModal
-from .utils import merge_multimodal_embeddings
+from .utils import flatten_bn, merge_multimodal_embeddings
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -165,7 +165,7 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
             model_config.model)
 
         model_image_input = _fuyu_image_preprocess(image_processor, image_data)
-        image_patches = torch.stack([
+        image_patches = torch.cat([
             image_patch[0]
             for image_patch in model_image_input["image_patches"]
         ])
@@ -210,7 +210,7 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
         ])
 
     # image has been processed with prompt in input processor
-    return MultiModalInputs({"image_patches": data})
+    return MultiModalInputs({"pixel_values": data})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)
@@ -237,28 +237,48 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
             self.image_feature_size,
             config.hidden_size,
             quant_config=quant_config,
+            gather_output=True,
         )
-        self.language_model = PersimmonForCausalLM(config,
+        self.language_model = PersimmonForCausalLM(config.text_config,
                                                    cache_config=cache_config,
                                                    quant_config=quant_config)
 
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+
+        h = w = self.config.patch_size
+        num_channels = self.config.num_channels
+        expected_dims = num_channels * h * w
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = d.size(-1)
+
+            if actual_dims != expected_dims:
+                expected_expr = str(expected_dims)
+                raise ValueError(
+                    "The expected shape of pixel values per image per batch "
+                    f" per patch is {expected_expr}. "
+                    f"You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
+
+        return data.to(self.vision_embed_tokens.weight.dtype)
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[FuyuImagePixelInputs]:
-        image_patches = kwargs.pop("image_patches", None)
+        pixel_values = kwargs.pop("pixel_values", None)
 
-        if isinstance(image_patches, torch.Tensor):
-            # Remove the N dimension until multiple images are supported.
-            image_patches = image_patches.squeeze(1)
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image patches. "
+                                 f"Got type: {type(pixel_values)}")
 
-            expected_feature_size = self.image_feature_size
-            if image_patches.size(-1) != expected_feature_size:
-                raise ValueError(
-                    f"Expected image patches to have the last dimension of "
-                    f"{expected_feature_size}, got {image_patches.size(-1)}")
-            image_patches = image_patches.to(
-                self.vision_embed_tokens.weight.dtype)
-            return FuyuImagePixelInputs(type="pixel_values",
-                                        data=image_patches)
+            return FuyuImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True)),
+            )
+
         return None
 
     def _process_image_input(

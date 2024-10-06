@@ -2,6 +2,7 @@ from functools import lru_cache
 
 import torch
 from PIL import Image
+from transformers.image_processing_base import BatchFeature
 
 from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
@@ -39,6 +40,10 @@ class ImagePlugin(MultiModalPlugin):
     ) -> MultiModalInputs:
         model_config = ctx.model_config
 
+        # Processed by input processor
+        if isinstance(data, BatchFeature):
+            return MultiModalInputs(data.data)
+
         # PIL image
         if isinstance(data, Image.Image) or is_list_of(data, Image.Image):
             image_processor = self._get_hf_image_processor(model_config)
@@ -51,7 +56,12 @@ class ImagePlugin(MultiModalPlugin):
                     .preprocess(data, return_tensors="pt") \
                     .data
             except Exception:
-                logger.error("Failed to process image (%s)", data)
+                logger.error(
+                    "Failed to process image (%s) with the default mapper. "
+                    "This is most likely an edge-case with this model's image "
+                    "processor in transformers (type: %s), and not vLLM.",
+                    data,
+                    type(image_processor).__name__)
                 raise
 
             return MultiModalInputs(batch_data)
