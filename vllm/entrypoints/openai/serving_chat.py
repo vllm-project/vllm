@@ -324,7 +324,7 @@ class OpenAIServingChat(OpenAIServing):
         try:
             if tool_choice_auto and self.tool_parser:
                 tool_parsers: List[Optional[ToolParser]] = [
-                    self.tool_parser(tokenizer) if self.tool_parser else None
+                    self.tool_parser(tokenizer)
                 ] * num_choices
             else:
                 tool_parsers = [None] * num_choices
