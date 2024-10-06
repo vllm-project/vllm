@@ -92,7 +92,7 @@ class Attention(nn.Module):
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: int = AttentionType.DECODER,
     ) -> torch.Tensor:
 
         return self.impl.forward(query,

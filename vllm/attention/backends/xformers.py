@@ -274,7 +274,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
 def _get_attn_bias(
     attn_metadata: XFormersMetadata,
-    attn_type: AttentionType,
+    attn_type: int,
 ) -> Optional[AttentionBias]:
     '''
     Extract appropriate attention bias from attention metadata
@@ -302,7 +302,7 @@ def _get_attn_bias(
 def _set_attn_bias(
     attn_metadata: XFormersMetadata,
     attn_bias: List[Optional[AttentionBias]],
-    attn_type: AttentionType,
+    attn_type: int,
 ) -> None:
     '''
     Update appropriate attention bias field of attention metadata,
@@ -329,7 +329,7 @@ def _set_attn_bias(
 def _get_seq_len_block_table_args(
     attn_metadata: XFormersMetadata,
     is_prompt: bool,
-    attn_type: AttentionType,
+    attn_type: int,
 ) -> tuple:
     '''
     The particular choice of sequence-length- and block-table-related
@@ -455,7 +455,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         attn_metadata: "XFormersMetadata",
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: int = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -665,7 +665,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: XFormersMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: int = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Attention for 1D query of multiple prompts. Multiple prompt
         tokens are flattened in to `query` input.

@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from enum import Enum, auto
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
                     Tuple, Type, TypeVar)
 
@@ -227,6 +226,6 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: int = AttentionType.DECODER,
     ) -> torch.Tensor:
         raise NotImplementedError

@@ -559,46 +559,24 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: int = AttentionType.DECODER,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
-
-        Args:
-            query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
-                NOTE: kv_cache will be an empty tensor with shape [0]
-                for profiling run.
-            attn_metadata: Metadata for attention.
-        Returns:
-            shape = [num_tokens, num_heads * head_size]
-        """
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "FlashAttentionImpl")
-
-        # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
-            "key/v_scale is not supported in FlashAttention.")
-
         output = torch.ops.vllm.unified_flash_attention(
-            query,
-            key,
-            value,
-            self.num_heads,
-            self.head_size,
-            self.num_kv_heads,
-            kv_cache,
-            self.kv_cache_dtype,
-            k_scale,
-            v_scale,
-            self.scale,
-            self.sliding_window,
-            self.alibi_slopes,
-            self.logits_soft_cap,
+            query=query,
+            key=key,
+            value=value,
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            num_kv_heads=self.num_kv_heads,
+            kv_cache=kv_cache,
+            kv_cache_dtype=self.kv_cache_dtype,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            softmax_scale=self.scale,
+            window_size=self.sliding_window,
+            alibi_slopes=self.alibi_slopes,
+            logits_soft_cap=self.logits_soft_cap,
+            attn_type=attn_type,
         )
 
         return output
@@ -621,12 +599,35 @@ def unified_flash_attention(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
+    attn_type: int = AttentionType.DECODER,
 ) -> torch.Tensor:
+    """Forward pass with FlashAttention.
 
+    Args:
+        query: shape = [num_tokens, num_heads * head_size]
+        key: shape = [num_tokens, num_kv_heads * head_size]
+        value: shape = [num_tokens, num_kv_heads * head_size]
+        kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            NOTE: kv_cache will be an empty tensor with shape [0]
+            for profiling run.
+        attn_metadata: Metadata for attention.
+    Returns:
+        shape = [num_tokens, num_heads * head_size]
+    """
     current_metadata = get_forward_context()
     assert current_metadata is not None
     assert isinstance(current_metadata, FlashAttentionMetadata)
     attn_metadata: FlashAttentionMetadata = current_metadata
+
+    if attn_type != AttentionType.DECODER:
+        raise NotImplementedError("Encoder self-attention and "
+                                  "encoder/decoder cross-attention "
+                                  "are not implemented for "
+                                  "FlashAttentionImpl")
+
+    # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
+    assert k_scale == 1.0 and v_scale == 1.0, (
+        "key/v_scale is not supported in FlashAttention.")
 
     num_tokens, hidden_size = query.shape
     # Reshape the query, key, and value tensors.
