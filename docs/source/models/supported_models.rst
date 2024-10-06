@@ -8,7 +8,7 @@ The following is the list of model architectures that are currently supported by
 Alongside each architecture, we include some popular models that use it.
 
 Text-only Language Models
-^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Text Generation
 ---------------
