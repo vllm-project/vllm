@@ -16,6 +16,8 @@ def create_dummy_prompt(
     use_beam_search: bool = False,
     best_of: int = 1,
     prompt_tokens: Optional[List[int]] = None,
+    min_tokens: int = 0,
+    max_tokens: int = 16,
 ) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
@@ -36,7 +38,9 @@ def create_dummy_prompt(
                               arrival_time=time.time(),
                               sampling_params=SamplingParams(
                                   use_beam_search=use_beam_search,
-                                  best_of=best_of),
+                                  best_of=best_of,
+                                  max_tokens=max_tokens,
+                                  min_tokens=min_tokens),
                               lora_request=lora_request)
 
     return prompt, seq_group
