@@ -7,7 +7,7 @@ vLLM supports a variety of generative Transformer models in `HuggingFace Transfo
 The following is the list of model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
-Language-only Models
+Text-only Language Models
 ^^^^^^^^^^^^^^^^^^^^
 
 Text Generation
