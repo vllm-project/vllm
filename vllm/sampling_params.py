@@ -132,8 +132,6 @@ class SamplingParams(
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
         seed: Random seed to use for the generation.
-        length_penalty: Float that penalizes sequences based on their length.
-            Used in beam search.
         early_stopping: Controls the stopping condition for beam search. It
             accepts the following values: `True`, where the generation stops as
             soon as there are `best_of` complete candidates; `False`, where an
@@ -190,7 +188,6 @@ class SamplingParams(
     top_k: int = -1
     min_p: float = 0.0
     seed: Optional[int] = None
-    length_penalty: float = 1.0
     early_stopping: Union[bool, str] = False
     stop: Optional[Union[str, List[str]]] = None
     stop_token_ids: Optional[List[int]] = None
@@ -234,7 +231,6 @@ class SamplingParams(
         top_k: int = -1,
         min_p: float = 0.0,
         seed: Optional[int] = None,
-        length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
         stop: Optional[Union[str, List[str]]] = None,
         stop_token_ids: Optional[List[int]] = None,
@@ -275,7 +271,6 @@ class SamplingParams(
             top_k=top_k,
             min_p=min_p,
             seed=seed,
-            length_penalty=length_penalty,
             early_stopping=early_stopping,
             stop=stop,
             stop_token_ids=stop_token_ids,
@@ -409,11 +404,6 @@ class SamplingParams(
         if self.early_stopping is not False:
             raise ValueError("early_stopping is not effective and must be "
                              "False when not using beam search.")
-        if (self.length_penalty < 1.0 - _SAMPLING_EPS
-                or self.length_penalty > 1.0 + _SAMPLING_EPS):
-            raise ValueError(
-                "length_penalty is not effective and must be the "
-                "default value of 1.0 when not using beam search.")
 
     def _verify_greedy_sampling(self) -> None:
         assert isinstance(self.best_of, int)
@@ -485,7 +475,6 @@ class SamplingParams(
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
             f"seed={self.seed}, "
-            f"length_penalty={self.length_penalty}, "
             f"early_stopping={self.early_stopping}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
