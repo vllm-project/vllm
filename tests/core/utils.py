@@ -15,6 +15,8 @@ def create_dummy_prompt(
     lora_request: Optional[LoRARequest] = None,
     best_of: int = 1,
     prompt_tokens: Optional[List[int]] = None,
+    min_tokens: int = 0,
+    max_tokens: int = 16,
 ) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
@@ -33,7 +35,10 @@ def create_dummy_prompt(
     seq_group = SequenceGroup(request_id=request_id,
                               seqs=[prompt],
                               arrival_time=time.time(),
-                              sampling_params=SamplingParams(best_of=best_of),
+                              sampling_params=SamplingParams(
+                                  best_of=best_of,
+                                  max_tokens=max_tokens,
+                                  min_tokens=min_tokens),
                               lora_request=lora_request)
 
     return prompt, seq_group
