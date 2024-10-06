@@ -194,7 +194,7 @@ CONDITIONAL_GENERATION_MODEL_SETTINGS = {  # type: ignore[var-annotated]
 }
 # yapf: enable
 
-# You can update this on your local machine to run specific tests
+# NOTE: You can update this on your local machine to run specific tests
 TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "meta-llama/Meta-Llama-3-8B",
