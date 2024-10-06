@@ -140,11 +140,16 @@ def test_processor_with_sad_kwarg_overrides(use_processor_mock,
                                             mm_processor_kwargs):
     """Ensure that input processors filter out invalid mm_processor_kwargs"""
     dummy_registry = InputRegistry()
+    # Should filter out the init time kwargs
     ctx = build_model_context(DUMMY_MODEL_ID,
                               mm_processor_kwargs=mm_processor_kwargs)
 
     processor = dummy_registry.create_input_processor(ctx.model_config)
-    num_crops_val = processor(LLMInputs(prompt_token_ids=[], prompt=""))
+    # Should filter out the inference time kwargs
+    num_crops_val = processor(
+        LLMInputs(prompt_token_ids=[],
+                  prompt="",
+                  mm_processor_kwargs=mm_processor_kwargs))
     assert num_crops_val == DEFAULT_NUM_CROPS
 
 
@@ -345,6 +350,7 @@ def test_custom_mapper_kwarg_overrides(image_assets, init_num_crops,
 def test_custom_mapper_with_sad_kwarg_overrides(image_assets,
                                                 mm_processor_kwargs):
     """Ensure that custom mappers filters out invalid mm_processor_kwargs"""
+    # Should filter out the init time kwargs
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
                               trust_remote_code=True,
                               mm_processor_kwargs=mm_processor_kwargs,
@@ -360,6 +366,8 @@ def test_custom_mapper_with_sad_kwarg_overrides(image_assets,
     # our num_crops value back from the mm_processor_kwargs.
     mm_registry._get_plugin("image").register_input_mapper(custom_mapper)(
         mm_model_cls())
-    mapped_inputs = mm_registry.map_input(ctx.model_config, mm_inputs)
+    # Should filter out the inference time kwargs
+    mapped_inputs = mm_registry.map_input(
+        ctx.model_config, mm_inputs, mm_processor_kwargs=mm_processor_kwargs)
 
     assert mapped_inputs["pixel_values"].shape[1] == DEFAULT_NUM_CROPS + 1
