@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -7,11 +8,13 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
-from vllm.attention.ops.blocksparse_attention.interface import (
-    LocalStridedBlockSparseAttn, get_head_sliding_step)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
+from vllm.forward_context import get_forward_context
+from vllm.platforms import current_platform
+
+IS_COMPUTE_8_OR_ABOVE = current_platform.has_device_capability(80)
 
 
 @dataclass
@@ -68,6 +71,7 @@ class BlocksparseParams:
         total_heads = tp_size * self.num_heads
         total_kv_heads = tp_size * self.num_kv_heads
 
+        from ..ops.blocksparse_attention.utils import get_head_sliding_step
         if self.homo_head:
             self.head_sliding_step = 0
         elif self.homo_head_group:
@@ -266,6 +270,59 @@ class BlocksparseFlashAttentionMetadataBuilder(
     _metadata_cls = BlocksparseFlashAttentionMetadata
 
 
+def transpose_and_pad(x, cu_seqlens, maxlen, head_repeats=1):
+    """
+    :param x: (total_tokens, n_heads, head_size)
+    :return: (batch, n_heads, length, head_size)
+    """
+    x_padded = x.new_empty(
+        len(cu_seqlens) - 1, x.size(1), head_repeats, maxlen, x.size(2))
+    cu_seqlens = cu_seqlens.cpu()
+    for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        x_padded[i, :, :, :e - s].copy_(x[s:e].transpose(0, 1).unsqueeze(1))
+    return x_padded.flatten(1, 2)
+
+
+def transpose_and_unpad(x_padded, cu_seqlens):
+    """
+    :param x_padded: (batch, n_heads, length, head_size)
+    :return: (total_tokens, n_heads, head_size)
+    """
+    cu_seqlens = cu_seqlens.cpu()
+    total_n_tokens = cu_seqlens[-1]
+    x = x_padded.new_empty(total_n_tokens, x_padded.size(1), x_padded.size(3))
+    for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        x[s:e].copy_(x_padded[i, :, :e - s].transpose(0, 1))
+    return x
+
+
+def get_attn_pattern(n_heads, max_seqlen, block_size, local_blocks,
+                     vert_stride, homo_head, use_spda, active_head_range,
+                     dtype, device):
+    from ..ops.blocksparse_attention.utils import get_sparse_attn_mask
+    sparse_layout, sparse_pattern, dense_attn_mask = get_sparse_attn_mask(
+        n_heads,
+        max_seqlen,
+        max_seqlen,
+        dtype,
+        device,
+        block_size=block_size,
+        local_blocks=local_blocks,
+        vert_stride=vert_stride,
+        homo_head=homo_head,
+        return_dense=use_spda,
+        dense_mask_type="bias",
+    )
+    if (not homo_head) and (active_head_range is not None):
+        assert isinstance(active_head_range, tuple)
+        assert (len(active_head_range) == 2)
+        h_start, h_end = active_head_range
+        sparse_layout = tuple(x[h_start:h_end] for x in sparse_layout)
+        if use_spda:
+            dense_attn_mask = dense_attn_mask[h_start:h_end]
+    return sparse_layout, sparse_pattern, dense_attn_mask
+
+
 class BlocksparseFlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
@@ -335,15 +392,68 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         self.tp_rank = get_tensor_model_parallel_rank()
 
         total_num_heads = num_heads * self.tp_size
-        self.bs_attn = LocalStridedBlockSparseAttn(
-            total_num_heads,
-            self.blocksparse_params.max_seqlen,
-            self.blocksparse_params.local_blocks,
-            self.blocksparse_params.vert_stride,
-            self.blocksparse_params.block_size,
-            homo_head=self.blocksparse_params.homo_head,
-            active_head_range=self.blocksparse_params.active_head_range,
-        )
+
+        n_heads = total_num_heads
+        max_seqlen = self.blocksparse_params.max_seqlen
+        local_blocks = self.blocksparse_params.local_blocks
+        vert_stride = self.blocksparse_params.vert_stride
+        block_size = self.blocksparse_params.block_size
+        device = None
+        dtype = None
+        homo_head = self.blocksparse_params.homo_head
+        active_head_range = self.blocksparse_params.active_head_range
+        q_block_size = None
+        use_spda = None
+
+        if use_spda is None:
+            use_spda = current_platform.is_rocm() or \
+                        current_platform.is_cpu() or not \
+                            IS_COMPUTE_8_OR_ABOVE
+        device = device or (torch.cuda.current_device()
+                            if current_platform.is_cuda_alike() else "cpu")
+        device = torch.device(device)
+        # NOTE: vllm CPU backend support BF16 instead of FP16.
+        dtype = dtype or (torch.bfloat16 if IS_COMPUTE_8_OR_ABOVE
+                          or device.type == "cpu" else torch.half)
+
+        self.n_heads = n_heads
+        self.max_seqlen = max_seqlen
+        self.local_blocks = local_blocks
+        self.vert_stride = vert_stride
+        self.use_spda = use_spda
+        self.dtype = dtype
+        self.device = device
+        self.block_size = block_size
+        self.q_block_size = q_block_size
+        self.homo_head = homo_head
+        self.active_head_range = active_head_range
+
+        from ..ops.blocksparse_attention.utils import get_head_sliding_step
+        self.head_sliding_step = get_head_sliding_step(n_heads, vert_stride,
+                                                       homo_head)
+
+        sparse_layout, sparse_pattern, self.dense_attn_mask = get_attn_pattern(
+            self.n_heads, self.max_seqlen, self.block_size, self.local_blocks,
+            self.vert_stride, self.homo_head, self.use_spda,
+            self.active_head_range, dtype, device)
+
+        if q_block_size is not None and q_block_size != block_size:
+            if q_block_size > block_size:
+                assert q_block_size % block_size == 0
+                blocks_to_merge = q_block_size // block_size
+                shape = sparse_pattern.shape
+                sparse_pattern = sparse_pattern.view(shape[0], -1,
+                                                     blocks_to_merge,
+                                                     shape[-1])
+                sparse_pattern = sparse_pattern.sum(2)
+                from ..ops.blocksparse_attention.utils import dense_to_crow_col
+                sparse_layout = dense_to_crow_col(sparse_pattern)
+            else:
+                raise ValueError(
+                    "Does not support smaller q_block_size. It will be slower."
+                )
+
+        self.sparse_layout = sparse_layout
 
     def forward(
         self,
@@ -356,92 +466,285 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         v_scale: float = 1.0,
         attn_type: int = AttentionType.DECODER,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention and PagedAttention.
 
-        Args:
-            query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
-                NOTE: kv_cache will be an empty tensor with shape [0]
-                for profiling run.
-            attn_metadata: Metadata for attention.
-        Returns:
-            shape = [num_tokens, num_heads * head_size]
+        output = torch.ops.vllm.unified_blocksparse_attention(
+            query=query,
+            key=key,
+            value=value,
+            n_heads=self.n_heads,
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            num_kv_heads=self.num_kv_heads,
+            block_size=self.block_size,
+            q_block_size=self.q_block_size,
+            kv_cache=kv_cache,
+            kv_cache_dtype=self.kv_cache_dtype,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            softmax_scale=self.scale,
+            alibi_slopes=self.alibi_slopes,
+            max_seqlen=self.blocksparse_params.max_seqlen,
+            tp_rank=self.tp_rank,
+            blocksparse_local_blocks=self.local_blocks,
+            blocksparse_vert_stride=self.vert_stride,
+            blocksparse_block_size=self.sparse_block_size,
+            blocksparse_head_sliding_step=self.head_sliding_step,
+            homo_head=self.homo_head,
+            active_head_range=list(self.active_head_range),
+            use_spda=self.use_spda,
+            dense_attn_mask=self.dense_attn_mask,
+            sparse_layout=self.sparse_layout,
+            attn_type=attn_type,
+        )
+
+        return output
+
+
+@torch.library.custom_op("vllm::unified_blocksparse_attention",
+                         mutates_args=["kv_cache"])
+def unified_blocksparse_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    n_heads: int,  # total number of heads
+    num_heads: int,  # heads in this rank
+    head_size: int,
+    num_kv_heads: int,
+    block_size: int,
+    q_block_size: int,
+    kv_cache: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+    softmax_scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+    max_seqlen: int,
+    tp_rank: int,
+    blocksparse_local_blocks: int,
+    blocksparse_vert_stride: int,
+    blocksparse_block_size: int,
+    blocksparse_head_sliding_step: int,
+    homo_head: int,
+    active_head_range: List[int],
+    use_spda: bool,
+    dense_attn_mask: torch.Tensor,
+    sparse_layout: Tuple[torch.Tensor, torch.Tensor],
+    attn_type: int = AttentionType.DECODER,
+) -> torch.Tensor:
+    """Forward pass with FlashAttention and PagedAttention.
+
+    Args:
+        query: shape = [num_tokens, num_heads * head_size]
+        key: shape = [num_tokens, num_kv_heads * head_size]
+        value: shape = [num_tokens, num_kv_heads * head_size]
+        kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+            NOTE: kv_cache will be an empty tensor with shape [0]
+            for profiling run.
+        attn_metadata: Metadata for attention.
+    Returns:
+        shape = [num_tokens, num_heads * head_size]
+    """
+
+    current_metadata = get_forward_context()
+    assert current_metadata is not None
+    assert isinstance(current_metadata, BlocksparseFlashAttentionMetadata)
+    attn_metadata: BlocksparseFlashAttentionMetadata = current_metadata
+
+    if attn_type != AttentionType.DECODER:
+        raise NotImplementedError("Encoder self-attention and "
+                                  "encoder/decoder cross-attention "
+                                  "are not implemented for "
+                                  "BlocksparseFlashAttentionImpl")
+
+    num_tokens, hidden_size = query.shape
+    # Reshape the query, key, and value tensors.
+    query = query.view(-1, num_heads, head_size)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
+
+    if kv_cache.numel() > 0:
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+            kv_cache, num_kv_heads, head_size)
+
+        # Reshape the input keys and values and store them in the cache.
+        # If kv_cache is not provided, the new key and value tensors are
+        # not cached. This happens during the initial memory profiling run.
+
+        PagedAttention.write_to_paged_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+
+    if prefill_meta := attn_metadata.prefill_metadata:
+
+        # Prompt run.
+        # normal attention
+        # When block_tables are not filled, it means q and k are the
+        # prompt, and they have the same length.
+
+        assert kv_cache.numel() == 0 \
+                or prefill_meta.block_tables is None \
+                or prefill_meta.block_tables.numel() == 0, \
+            "Does not support prefix-enabled attention."
+        """Dispatch to `varlen_attn` (Ampere or newer) or 
+        `self.spda`(cpu, Volta, Turing or older)based on 
+        the type of device used and cuda compute capability.
+
+        q, k, v: shape = (num_tokens, num_heads_q/kv, head_size).
+                Support grouped attention, with `q[:, i*r:(i*r + r)]`
+                is correspondent to `k[:, i]`, where `r` is the q/k ratio.
+        cu_seqlens_k: shape=(batch_size + 1,), indicating segment of samples,
+                    e.g., `k[cu_seqlen[i]:cu_seqlne[i+1]]` is q of sample i
+        cu_seqlens_q: shape=(batch_size + 1, ).
+                    Default None: same as cu_seqlens_k for prefilling or
+                    [0, 1, .., batch_size] for decoding.
+                    The only case you need to specify 
+                    is when q is a mix of prefilling 
+                    and decoding.
+        sm_scale: softmax scale, default to 1/sqrt(head_size).
+
+        return: tensor of shape as q.
         """
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "BlocksparseFlashAttentionImpl")
+        q = query
+        k = key
+        v = value
+        cu_seqlens_q = prefill_meta.seq_start_loc
+        cu_seqlens_k = prefill_meta.seq_start_loc
+        sm_scale = softmax_scale
 
-        num_tokens, hidden_size = query.shape
-        # Reshape the query, key, and value tensors.
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
+        assert k.dim() == 3
+        if use_spda:
+            """For CPU, V100 or other older GPUs.
+            NOTE: torch SPDA supports nested tensor, 
+            but seems extremely slow. Choose to pad instead.
+            """
+            assert (cu_seqlens_q is None
+                    or (cu_seqlens_q == cu_seqlens_k).all()
+                    ), "Can only handle prompt with SPDA."
+            assert q.size(0) == k.size(0), "can only handle prompt with SPDA."
 
-        if kv_cache.numel() > 0:
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
+            assert q.size(1) % k.size(1) == 0
+            q_k_ratio = q.size(1) // k.size(1)
+            sm_scale = sm_scale or 1.0 / math.sqrt(q.size(-1))
+            assert cu_seqlens_k is not None
+            cu_seqlens = cu_seqlens_k.cpu()
+            maxlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
-            # Reshape the input keys and values and store them in the cache.
-            # If kv_cache is not provided, the new key and value tensors are
-            # not cached. This happens during the initial memory profiling run.
+            if (dense_attn_mask.dtype != q.dtype
+                    or dense_attn_mask.device != q.device):
+                _, _, dense_attn_mask = get_attn_pattern(
+                    n_heads, max_seqlen, block_size, blocksparse_local_blocks,
+                    blocksparse_vert_stride, homo_head, use_spda,
+                    tuple(active_head_range), q.dtype, q.device)
+            attn_mask = dense_attn_mask[None, :, :maxlen, :maxlen]
 
-            PagedAttention.write_to_paged_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                k_scale,
-                v_scale,
-            )
+            q2 = transpose_and_pad(q, cu_seqlens, maxlen, 1)
+            k2, v2 = [
+                transpose_and_pad(x, cu_seqlens, maxlen, q_k_ratio)
+                for x in [k, v]
+            ]
+            spda_output = torch.nn.functional.scaled_dot_product_attention(
+                q2, k2, v2, attn_mask=attn_mask, scale=sm_scale)
+            return transpose_and_unpad(spda_output, cu_seqlens)
+        """
+        q, k, v: shape = (num_tokens, num_heads_q/kv, head_size).
+        Support grouped attention, with `q[:, i*r:(i*r + r)]`
+        is correspondent to `k[:, i]`, where `r` is the q/k ratio.
+        cu_seqlens_k: shape=(batch_size + 1,), 
+        indicating segment of samples, 
+        e.g., `k[cu_seqlen[i]:cu_seqlne[i+1]]` is q of sample i
+        cu_seqlens_q: shape=(batch_size + 1, ).
+        Default None: same as cu_seqlens_k for prefilling or
+        [0, 1, .., batch_size] for decoding.
+        The only case you need to specify is when q is a mix of 
+        prefilling and decoding.
+        sm_scale: softmax scale, default to 1/sqrt(head_size).
 
-        if prefill_meta := attn_metadata.prefill_metadata:
+        return: tensor of shape as q.
+        """
+        assert (
+            IS_COMPUTE_8_OR_ABOVE
+        ), "Requires compute capability of 8 or above (Ampere or newer) to use \
+            Triton kernel."
 
-            # Prompt run.
-            # normal attention
-            # When block_tables are not filled, it means q and k are the
-            # prompt, and they have the same length.
+        sm_scale = sm_scale or 1.0 / math.sqrt(q.size(-1))
 
-            assert kv_cache.numel() == 0 \
-                    or prefill_meta.block_tables is None \
-                    or prefill_meta.block_tables.numel() == 0, \
-                "Does not support prefix-enabled attention."
+        from ..ops.blocksparse_attention.blocksparse_attention_kernel import (  # noqa
+            blocksparse_flash_attn_varlen_fwd)
 
-            output = self.bs_attn(
-                q=query,
-                k=key,
-                v=value,
-                cu_seqlens_q=prefill_meta.seq_start_loc,
-                cu_seqlens_k=prefill_meta.seq_start_loc,
-                sm_scale=self.scale,
-            )
+        return blocksparse_flash_attn_varlen_fwd(
+            q,
+            k,
+            v,
+            cu_seqlens_k,
+            cu_seqlens_q,
+            sm_scale,
+            sparse_layout,
+            block_size=block_size,
+            q_block_size=q_block_size,
+            max_seqlen=max_seqlen,
+        )
 
-        if decode_meta := attn_metadata.decode_metadata:
-            # Decoding run.
-            output = PagedAttention.forward_decode(
-                query,
-                key_cache,
-                value_cache,
-                decode_meta.block_tables,
-                decode_meta.seq_lens_tensor,
-                self.blocksparse_params.max_seqlen,
-                self.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                k_scale,
-                v_scale,
-                tp_rank=self.tp_rank,
-                blocksparse_local_blocks=self.local_blocks,
-                blocksparse_vert_stride=self.vert_stride,
-                blocksparse_block_size=self.sparse_block_size,
-                blocksparse_head_sliding_step=self.head_sliding_step,
-            )
+    if decode_meta := attn_metadata.decode_metadata:
+        # Decoding run.
+        output = PagedAttention.forward_decode(
+            query,
+            key_cache,
+            value_cache,
+            decode_meta.block_tables,
+            decode_meta.seq_lens_tensor,
+            max_seqlen,
+            kv_cache_dtype,
+            num_kv_heads,
+            softmax_scale,
+            alibi_slopes,
+            k_scale,
+            v_scale,
+            tp_rank=tp_rank,
+            blocksparse_local_blocks=blocksparse_local_blocks,
+            blocksparse_vert_stride=blocksparse_vert_stride,
+            blocksparse_block_size=blocksparse_block_size,
+            blocksparse_head_sliding_step=blocksparse_head_sliding_step,
+        )
 
-        # Reshape the output tensor.
-        return output.view(num_tokens, hidden_size)
+    # Reshape the output tensor.
+    return output.view(num_tokens, hidden_size)
+
+
+@unified_blocksparse_attention.register_fake
+def _(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    n_heads: int,  # total number of heads
+    num_heads: int,  # heads in this rank
+    head_size: int,
+    num_kv_heads: int,
+    block_size: int,
+    q_block_size: int,
+    kv_cache: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+    softmax_scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+    max_seqlen: int,
+    tp_rank: int,
+    blocksparse_local_blocks: int,
+    blocksparse_vert_stride: int,
+    blocksparse_block_size: int,
+    blocksparse_head_sliding_step: int,
+    homo_head: int,
+    active_head_range: List[int],
+    use_spda: bool,
+    dense_attn_mask: torch.Tensor,
+    sparse_layout: Tuple[torch.Tensor, torch.Tensor],
+    attn_type: int = AttentionType.DECODER,
+) -> torch.Tensor:
+    return torch.empty_like(query)
