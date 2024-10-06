@@ -40,7 +40,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (group_weights_with_prefix, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 logger = init_logger(__name__)
@@ -273,7 +273,7 @@ class Gemma2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
@@ -307,6 +307,49 @@ class Gemma2Model(nn.Module):
             })
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            for (param_name, shard_name, shard_id) in stacked_params_mapping:
+                if shard_name not in name:
+                    continue
+                name = name.replace(shard_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+
+        unloaded_params = params_dict.keys() - loaded_params
+        if unloaded_params:
+            logger.warning(
+                "Some weights are not initialized from checkpoints: %s",
+                unloaded_params)
 
 
 class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -391,48 +434,19 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            for (param_name, shard_name, shard_id) in stacked_params_mapping:
-                if shard_name not in name:
+        weights_group = group_weights_with_prefix(weights)
+
+        self.model.load_weights(weights_group["model"])
+
+        if not self.config.tie_word_embeddings:
+            # NOTE: For now self.lm_head is not defined because
+            # tie_word_embeddings is assumed to the False
+            lm_head_dict = dict(self.lm_head.named_parameters())
+            for name, loaded_weight in weights_group["lm_head"]:
+                if is_pp_missing_parameter(name, self.lm_head):
                     continue
-                name = name.replace(shard_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # lm_head is not used in vllm as it is tied with embed_token.
-                # To prevent errors, skip loading lm_head.weight.
-                if "lm_head.weight" in name:
-                    continue
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
+
+                param = lm_head_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        unloaded_params = params_dict.keys() - loaded_params
-        if unloaded_params:
-            logger.warning(
-                "Some weights are not initialized from checkpoints: %s",
-                unloaded_params)
