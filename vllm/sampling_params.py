@@ -132,13 +132,6 @@ class SamplingParams(
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
         seed: Random seed to use for the generation.
-        early_stopping: Controls the stopping condition for beam search. It
-            accepts the following values: `True`, where the generation stops as
-            soon as there are `best_of` complete candidates; `False`, where an
-            heuristic is applied and the generation stops when is it very
-            unlikely to find better candidates; `"never"`, where the beam search
-            procedure only stops when there cannot be better candidates
-            (canonical beam search algorithm).
         stop: List of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
         stop_token_ids: List of tokens that stop the generation when they are
@@ -188,7 +181,6 @@ class SamplingParams(
     top_k: int = -1
     min_p: float = 0.0
     seed: Optional[int] = None
-    early_stopping: Union[bool, str] = False
     stop: Optional[Union[str, List[str]]] = None
     stop_token_ids: Optional[List[int]] = None
     ignore_eos: bool = False
@@ -231,7 +223,6 @@ class SamplingParams(
         top_k: int = -1,
         min_p: float = 0.0,
         seed: Optional[int] = None,
-        early_stopping: Union[bool, str] = False,
         stop: Optional[Union[str, List[str]]] = None,
         stop_token_ids: Optional[List[int]] = None,
         include_stop_str_in_output: bool = False,
@@ -271,7 +262,6 @@ class SamplingParams(
             top_k=top_k,
             min_p=min_p,
             seed=seed,
-            early_stopping=early_stopping,
             stop=stop,
             stop_token_ids=stop_token_ids,
             include_stop_str_in_output=include_stop_str_in_output,
@@ -324,7 +314,6 @@ class SamplingParams(
 
         self._verify_args()
 
-        self._verify_non_beam_search()
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
@@ -400,11 +389,6 @@ class SamplingParams(
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
 
-    def _verify_non_beam_search(self) -> None:
-        if self.early_stopping is not False:
-            raise ValueError("early_stopping is not effective and must be "
-                             "False when not using beam search.")
-
     def _verify_greedy_sampling(self) -> None:
         assert isinstance(self.best_of, int)
         if self.best_of > 1:
@@ -475,7 +459,6 @@ class SamplingParams(
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
             f"seed={self.seed}, "
-            f"early_stopping={self.early_stopping}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "

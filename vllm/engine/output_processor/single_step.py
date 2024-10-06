@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -6,7 +6,6 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -214,47 +213,3 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 for scheduler in self.scheduler:
                     scheduler.free_seq(seq)
         return
-
-    def _check_beam_search_early_stopping(
-        self,
-        early_stopping: Union[bool, str],
-        sampling_params: SamplingParams,
-        best_running_seq: Sequence,
-        current_worst_seq: Sequence,
-    ) -> bool:
-        # TODO: add the logic into `LLM.beam_search`
-        length_penalty = sampling_params.length_penalty
-        if early_stopping is True:
-            return True
-
-        current_worst_score = current_worst_seq.get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=current_worst_seq.eos_token_id)
-        if early_stopping is False:
-            highest_attainable_score = best_running_seq.get_beam_search_score(
-                length_penalty=length_penalty,
-                eos_token_id=best_running_seq.eos_token_id)
-        else:
-            assert early_stopping == "never"
-            if length_penalty > 0.0:
-                # If length_penalty > 0.0, beam search will prefer longer
-                # sequences. The highest attainable score calculation is
-                # based on the longest possible sequence length in this case.
-                max_possible_length = max(
-                    best_running_seq.get_prompt_len() +
-                    sampling_params.max_tokens,
-                    self.scheduler_config.max_model_len)
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=best_running_seq.eos_token_id,
-                        seq_len=max_possible_length))
-            else:
-                # Otherwise, beam search will prefer shorter sequences. The
-                # highest attainable score calculation is based on the current
-                # sequence length.
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=best_running_seq.eos_token_id))
-        return current_worst_score >= highest_attainable_score

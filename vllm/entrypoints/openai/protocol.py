@@ -184,7 +184,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -346,7 +345,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
-            early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -517,7 +515,6 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -641,7 +638,6 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
-            early_stopping=self.early_stopping,
             prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
