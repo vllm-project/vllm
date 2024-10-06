@@ -15,7 +15,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
 from vllm.utils import (JSONTree, get_allowed_kwarg_only_overrides, is_list_of,
-                        json_map_leaves)
+                        json_map_leaves, resolve_mm_processor_kwargs)
 
 logger = init_logger(__name__)
 
@@ -200,6 +200,7 @@ class MultiModalPlugin(ABC):
         self,
         ctx: InputContext,
         data: MultiModalData[object],
+        **mm_processor_kwargs,
     ) -> MultiModalInputs:
         """
         Return a dictionary to be passed as keyword arguments to
@@ -265,28 +266,25 @@ class MultiModalPlugin(ABC):
 
         mapper = self._input_mappers.get(model_cls)
 
-        # There's a nasty edge-case here if the default mapper is being used
-        # and the underlying huggingface resource has init time kwargs that
-        # do not line up with its inference time kwargs - we probably need to
-        # warn with a fallback that rebuilds a mapper based on the model_cls
-        # to reinitialize the HF resource, otherwise things are pretty likely
-        # to crash with cryptic errors, like placeholder mismatches, from
-        # correctly handing it in the input processor and not in the input
-        # mapper.
-        if mm_processor_kwargs is not None:
-            raise NotImplementedError(
-                "TODO - need to implement runtime processor kwarg merging")
-
-        if mapper is not None and mapper != self._default_input_mapper:
-            mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                mapper, overrides=model_config.mm_processor_kwargs)
-        else:
-            mm_processor_kwargs = {}
-
         if mapper is None:
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
 
+        # In the case of the default mapper, we have to get resource
+        # processor through its HuggingFace autoclass; since this goes
+        # through **kwargs, we can't inspect it the same way, so we allow
+        # drop mm_processor_kwargs based on signature inspection
+        # if we're using the default mapper.
+        #
+        # NOTE: In the future, adding retry logic of some kind might be a
+        # good idea, especially if this interface is exposed through
+        # the server somehow.
+        uses_default_mapper = mapper == self._default_input_mapper
+        mm_processor_kwargs = resolve_mm_processor_kwargs(
+            model_config.mm_processor_kwargs,
+            mm_processor_kwargs,
+            callable=None if uses_default_mapper else mapper,
+        )
         return mapper(InputContext(model_config), data, **mm_processor_kwargs)
 
     @abstractmethod

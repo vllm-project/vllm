@@ -298,7 +298,10 @@ class InputRegistry:
         #     Inference kwargs -> Init kwargs -> {}
         # If it's empty, it'll fall back to the default kwarg values
         mm_processor_kwargs = resolve_mm_processor_kwargs(
-            inputs, processor, model_config)
+            model_config.mm_processor_kwargs,
+            inputs.get("mm_processor_kwargs"),
+            processor,
+        )
 
         return processor(InputContext(model_config), inputs,
                          **mm_processor_kwargs)

@@ -1286,16 +1286,15 @@ def supports_kw(callable: Callable[..., object], kw_name: str) -> bool:
                for param in params.values())
 
 
-def resolve_mm_processor_kwargs(inputs, processor,
-                                model_config) -> Dict[str, Any]:
-
+def resolve_mm_processor_kwargs(init_kwargs, inference_kwargs,
+                                callable) -> Dict[str, Any]:
     # Filter inference time multimodal processor kwargs provided
     runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
-        processor, overrides=inputs.get("mm_processor_kwargs"))
+        callable, overrides=inference_kwargs)
 
     # Filter init time multimodal processor kwargs provided
-    init_mm_kwargs = get_allowed_kwarg_only_overrides(
-        processor, overrides=model_config.mm_processor_kwargs)
+    init_mm_kwargs = get_allowed_kwarg_only_overrides(callable,
+                                                      overrides=init_kwargs)
 
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
@@ -1304,7 +1303,7 @@ def resolve_mm_processor_kwargs(inputs, processor,
 
 
 def get_allowed_kwarg_only_overrides(
-    callable: Callable[..., object],
+    callable: Optional[Callable[..., object]],
     overrides: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
@@ -1317,6 +1316,7 @@ def get_allowed_kwarg_only_overrides(
 
     Args:
         callable: Callable which takes 0 or more keyword only arguments.
+                  If None is provided, all overrides names are allowed.
         overrides: Potential overrides to be used when invoking the callable.
 
     Returns:
@@ -1326,6 +1326,11 @@ def get_allowed_kwarg_only_overrides(
     """
     if not overrides:
         return {}
+
+    # In some situations, the real callable might be wrapped, e.g., the init of
+    # a class received through a HF auto class. In such cases, allow anything.
+    if callable is None:
+        return overrides
 
     allowed_override_names = [
         name for name, param in inspect.signature(callable).parameters.items()
