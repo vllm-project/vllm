@@ -20,8 +20,10 @@ if not current_platform.is_tpu():
 if current_platform.is_rocm():
     import vllm._rocm_C  # noqa: F401
 
+supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
+    supports_moe_ops = True
 
 
 def hint_on_error(fn):
@@ -30,6 +32,15 @@ def hint_on_error(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+
+        except NotImplementedError as e:
+            msg = (
+                "Error in calling custom op %s: %s\n"
+                "Not implemented or built, mostly likely because the current current device "
+                "does not support this kernel (less likely TORCH_CUDA_ARCH_LIST was set "
+                "incorrectly while building)")
+            logger.error(msg, fn.__name__, e)
+            raise NotImplementedError(msg % (fn.__name__, e)) from e
         except AttributeError as e:
             msg = (
                 "Error in calling custom op %s: %s\n"
@@ -253,9 +264,7 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                   b_g_idx, use_exllama, bit)
 
 
-# TODO: has to be a better way to do this
-try:
-    torch.ops._C.gptq_gemm  # noqa B018
+if hasattr(torch.ops._C, "gptq_gemm"):
 
     @torch.library.register_fake("_C::gptq_gemm")
     def _gptq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -265,8 +274,6 @@ try:
         return torch.empty((a.size(0), b_q_weight.size(1)),
                            dtype=a.dtype,
                            device=a.device)
-except Exception:
-    pass
 
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
@@ -292,9 +299,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
-# TODO: has to be a better way to do this
-try:
-    torch.ops._C.gptq_marlin_24_gemm  # noqa B018
+if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @torch.library.register_fake("_C::gptq_marlin_24_gemm")
     def _gptq_marlin_24_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -420,8 +425,8 @@ try:
     @torch.library.register_fake("_C::machete_gemm")
     def machete_gemm_fake(
         a: torch.Tensor,
-        b_q: torch.
-        Tensor,  # Should be the tensor returned by machete_prepack_B
+        # Should be the tensor returned by machete_prepack_B
+        b_q: torch.Tensor,
         b_type: ScalarType,
         b_scales: Optional[torch.Tensor] = None,
         b_zeros: Optional[torch.Tensor] = None,
@@ -438,46 +443,39 @@ try:
     @torch.library.register_fake("_C::machete_prepack_B")
     def machete_prepack_B_fake(b_q_weight: torch.Tensor,
                                b_type: ScalarType) -> torch.Tensor:
-        return torch.empty_like(b_q_weight)
+        return torch.empty_like(b_q_weight,
+                                memory_format=torch.contiguous_format)
 
     @torch.library.register_fake("_C::causal_conv1d_fwd")
     def causal_conv1d_fwd_fake(x: torch.Tensor, weight: torch.Tensor,
                                bias_: Optional[torch.Tensor],
-                               seq_idx_: Optional[torch.Tensor],
-                               initial_states_: Optional[torch.Tensor],
-                               final_states_out_: Optional[torch.Tensor],
+                               conv_states: Optional[torch.Tensor],
+                               cu_seq_len: Optional[torch.Tensor],
+                               cache_indices: Optional[torch.Tensor],
+                               has_initial_state: Optional[torch.Tensor],
                                silu_activation: bool) -> torch.Tensor:
         return torch.empty_like(x)
 
     @torch.library.register_fake("_C::causal_conv1d_update")
-    def causal_conv1d_update_fake(x: torch.Tensor, conv_state: torch.Tensor,
-                                  weight: torch.Tensor,
-                                  bias_: Optional[torch.Tensor],
-                                  silu_activation: bool) -> torch.Tensor:
+    def causal_conv1d_update_fake(
+            x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
+            bias_: Optional[torch.Tensor], silu_activation: bool,
+            cache_seqlens: Optional[torch.Tensor],
+            conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
         return torch.empty_like(x)
 
     @torch.library.register_fake("_C::selective_scan_fwd")
-    def selective_scan_fwd_fake(
-            u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
-            B: torch.Tensor, C: torch.Tensor, D_: Optional[torch.Tensor],
-            z_: Optional[torch.Tensor], delta_bias_: Optional[torch.Tensor],
-            delta_softplus: bool, index_: Optional[torch.Tensor],
-            x: Optional[torch.Tensor]) -> List[torch.Tensor]:
-        a = torch.empty_like(u)
-        if x is not None:
-            b = x
-        else:
-            b = torch.empty((u.size(0), u.size(1), A.size(1)),
-                            dtype=u.dtype,
-                            device=u.device)
-        if z_ is not None:
-            c = torch.empty_like(z_)
-            return [a, b, c]
-        else:
-            return [a, b]
-
-except Exception:
-    pass
+    def selective_scan_fwd_fake(u: torch.Tensor, delta: torch.Tensor,
+                                A: torch.Tensor, B: torch.Tensor,
+                                C: torch.Tensor, D_: Optional[torch.Tensor],
+                                z_: Optional[torch.Tensor],
+                                delta_bias_: Optional[torch.Tensor],
+                                delta_softplus: bool,
+                                cu_seq_len: Optional[torch.Tensor],
+                                cache_indices: Optional[torch.Tensor],
+                                has_initial_state: Optional[torch.Tensor],
+                                ssm_states: Optional[torch.Tensor]) -> None:
+        return None
 
 
 # cutlass
@@ -570,6 +568,20 @@ def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
     return output
 
 
+def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                          size_k: int, size_n: int,
+                          num_bits: int) -> torch.Tensor:
+    num_experts = b_q_weight.shape[0]
+    assert size_k % 16 == 0
+    output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
+                         device=b_q_weight.device,
+                         dtype=b_q_weight.dtype)
+    for e in range(num_experts):
+        output[e] = torch.ops._C.awq_marlin_repack(b_q_weight[e], size_k,
+                                                   size_n, num_bits)
+    return output
+
+
 def gptq_marlin_gemm(a: torch.Tensor,
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
@@ -623,6 +635,18 @@ def machete_gemm(
 def machete_prepack_B(b_q_weight: torch.Tensor,
                       b_type: ScalarType) -> torch.Tensor:
     return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
+
+
+if hasattr(torch.ops._C, "permute_cols"):
+
+    @torch.library.register_fake("_C::permute_cols")
+    def _permute_cols_fake(a: torch.Tensor,
+                           perm: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(a)
+
+
+def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.permute_cols(a, perm)
 
 
 # fp8
@@ -761,37 +785,37 @@ def ggml_mul_mat_a8(
 # mamba
 def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       bias_: Optional[torch.Tensor],
-                      seq_idx_: Optional[torch.Tensor],
-                      initial_states_: Optional[torch.Tensor],
-                      final_states_out_: Optional[torch.Tensor],
+                      conv_states: Optional[torch.Tensor],
+                      query_start_loc: Optional[torch.Tensor],
+                      cache_indices: Optional[torch.Tensor],
+                      has_initial_state: Optional[torch.Tensor],
                       silu_activation: bool) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
-                                          initial_states_, final_states_out_,
-                                          silu_activation)
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
+                                          query_start_loc, cache_indices,
+                                          has_initial_state, silu_activation)
 
 
 def causal_conv1d_update(
-    x: torch.Tensor,
-    conv_state: torch.Tensor,
-    weight: torch.Tensor,
-    bias_: Optional[torch.Tensor],
-    silu_activation: bool,
-    conv_state_indices: Optional[torch.Tensor],
-) -> torch.Tensor:
+        x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
+        bias_: Optional[torch.Tensor], silu_activation: bool,
+        cache_seqlens: Optional[torch.Tensor],
+        conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                             silu_activation,
+                                             silu_activation, cache_seqlens,
                                              conv_state_indices)
 
 
-def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
-                       B: torch.Tensor, C: torch.Tensor,
-                       D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
-                       delta_bias_: Optional[torch.Tensor],
-                       delta_softplus: bool, index_: Optional[torch.Tensor],
-                       x: Optional[torch.Tensor]) -> List[torch.Tensor]:
-    return torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_,
-                                           delta_bias_, delta_softplus, index_,
-                                           x)
+def selective_scan_fwd(
+        u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor, B: torch.Tensor,
+        C: torch.Tensor, D_: Optional[torch.Tensor],
+        z_: Optional[torch.Tensor], delta_bias_: Optional[torch.Tensor],
+        delta_softplus: bool, query_start_loc: Optional[torch.Tensor],
+        cache_indices: Optional[torch.Tensor],
+        has_initial_state: Optional[torch.Tensor], ssm_states: torch.Tensor):
+    torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_, delta_bias_,
+                                    delta_softplus, query_start_loc,
+                                    cache_indices, has_initial_state,
+                                    ssm_states)
 
 
 # moe
@@ -809,6 +833,25 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  gating_output: float) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
                                   token_expert_indicies, gating_output)
+
+
+if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
+
+    @torch.library.register_fake("_moe_C::marlin_gemm_moe")
+    def marlin_gemm_moe_fake(a: torch.Tensor, b_q_weights: torch.Tensor,
+                             sorted_ids: torch.Tensor,
+                             topk_weights: torch.Tensor,
+                             topk_ids: torch.Tensor, b_scales: torch.Tensor,
+                             b_zero_points: torch.Tensor, g_idx: torch.Tensor,
+                             perm: torch.Tensor, workspace: torch.Tensor,
+                             b_q_type: ScalarType, size_m: int, size_n: int,
+                             size_k: int, is_k_full: bool, num_experts: int,
+                             topk: int, moe_block_size: int,
+                             replicate_input: bool,
+                             apply_weights: bool) -> torch.Tensor:
+        return torch.empty((size_m, topk, size_n),
+                           dtype=a.dtype,
+                           device=a.device)
 
 
 def reshape_and_cache(

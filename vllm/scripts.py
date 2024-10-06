@@ -12,7 +12,10 @@ from openai.types.chat import ChatCompletionMessageParam
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
+
+logger = init_logger(__name__)
 
 
 def register_signal_handlers():
@@ -114,7 +117,30 @@ def _add_query_options(
     return parser
 
 
+def env_setup():
+    # The safest multiprocessing method is `spawn`, as the default `fork` method
+    # is not compatible with some accelerators. The default method will be
+    # changing in future versions of Python, so we should use it explicitly when
+    # possible.
+    #
+    # We only set it here in the CLI entrypoint, because changing to `spawn`
+    # could break some existing code using vLLM as a library. `spawn` will cause
+    # unexpected behavior if the code is not protected by
+    # `if __name__ == "__main__":`.
+    #
+    # References:
+    # - https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
+    # - https://pytorch.org/docs/stable/notes/multiprocessing.html#cuda-in-multiprocessing
+    # - https://pytorch.org/docs/stable/multiprocessing.html#sharing-cuda-tensors
+    # - https://docs.habana.ai/en/latest/PyTorch/Getting_Started_with_PyTorch_and_Gaudi/Getting_Started_with_PyTorch.html?highlight=multiprocessing#torch-multiprocessing-for-dataloaders
+    if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
+        logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
 def main():
+    env_setup()
+
     parser = FlexibleArgumentParser(description="vLLM CLI")
     subparsers = parser.add_subparsers(required=True)
 

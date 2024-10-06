@@ -38,7 +38,7 @@ chat_completion_from_url = client.chat.completions.create(
         "content": [
             {
                 "type": "text",
-                "text": "What’s in this image?"
+                "text": "What's in this image?"
             },
             {
                 "type": "image_url",
@@ -75,7 +75,7 @@ chat_completion_from_base64 = client.chat.completions.create(
         "content": [
             {
                 "type": "text",
-                "text": "What’s in this image?"
+                "text": "What's in this image?"
             },
             {
                 "type": "image_url",

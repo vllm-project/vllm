@@ -1,4 +1,5 @@
-from typing import Dict, List
+from copy import deepcopy
+from typing import Any, Dict, List, Optional
 
 from openai.types.chat import (ChatCompletionMessageParam,
                                ChatCompletionToolParam)
@@ -7,9 +8,30 @@ from typing_extensions import TypedDict
 from tests.utils import VLLM_PATH
 
 
-class ServerConfig(TypedDict):
+class ServerConfig(TypedDict, total=False):
     model: str
     arguments: List[str]
+    system_prompt: Optional[str]
+    supports_parallel: Optional[bool]
+
+
+def patch_system_prompt(messages: List[Dict[str, Any]],
+                        system_prompt: str) -> List[Dict[str, Any]]:
+    new_messages = deepcopy(messages)
+    if new_messages[0]["role"] == "system":
+        new_messages[0]["content"] = system_prompt
+    else:
+        new_messages.insert(0, {"role": "system", "content": system_prompt})
+    return new_messages
+
+
+def ensure_system_prompt(messages: List[Dict[str, Any]],
+                         config: ServerConfig) -> List[Dict[str, Any]]:
+    prompt = config.get("system_prompt")
+    if prompt:
+        return patch_system_prompt(messages, prompt)
+    else:
+        return messages
 
 
 # universal args for all models go here. also good if you need to test locally
@@ -23,7 +45,33 @@ CONFIGS: Dict[str, ServerConfig] = {
         "arguments": [
             "--tool-call-parser", "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
-        ]
+        ],
+        "system_prompt":
+        "You are a helpful assistant with access to tools. If a tool"
+        " that you have would be helpful to answer a user query, "
+        "call the tool. Otherwise, answer the user's query directly "
+        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
+        "to the user's question - just respond to it normally."
+    },
+    "llama": {
+        "model":
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "arguments": [
+            "--tool-call-parser", "llama3_json", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama3.1_json.jinja")
+        ],
+        "supports_parallel":
+        False,
+    },
+    "llama3.2": {
+        "model":
+        "meta-llama/Llama-3.2-3B-Instruct",
+        "arguments": [
+            "--tool-call-parser", "llama3_json", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama3.2_json.jinja")
+        ],
+        "supports_parallel":
+        False,
     },
     "mistral": {
         "model":
@@ -32,7 +80,25 @@ CONFIGS: Dict[str, ServerConfig] = {
             "--tool-call-parser", "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
             "--ignore-patterns=\"consolidated.safetensors\""
-        ]
+        ],
+        "system_prompt":
+        "You are a helpful assistant with access to tools. If a tool"
+        " that you have would be helpful to answer a user query, "
+        "call the tool. Otherwise, answer the user's query directly "
+        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
+        "to the user's question - just respond to it normally."
+    },
+    "internlm": {
+        "model":
+        "internlm/internlm2_5-7b-chat",
+        "arguments": [
+            "--tool-call-parser", "internlm", "--chat-template",
+            str(VLLM_PATH /
+                "examples/tool_chat_template_internlm2_tool.jinja"),
+            "--trust_remote_code"
+        ],
+        "supports_parallel":
+        False,
     }
 }
 
@@ -55,7 +121,7 @@ WEATHER_TOOL: ChatCompletionToolParam = {
                     "type":
                     "string",
                     "description":
-                    "the two-letter abbreviation for the state "
+                    "must the two-letter abbreviation for the state "
                     "that the city is in, e.g. 'CA' which would "
                     "mean 'California'"
                 },
@@ -97,15 +163,6 @@ SEARCH_TOOL: ChatCompletionToolParam = {
 }
 
 MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
-    "role":
-    "system",
-    "content":
-    "You are a helpful assistant with access to tools. If a tool"
-    " that you have would be helpful to answer a user query, "
-    "call the tool. Otherwise, answer the user's query directly "
-    "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
-    "to the user's question - just respond to it normally."
-}, {
     "role":
     "user",
     "content":
