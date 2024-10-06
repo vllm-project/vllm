@@ -104,13 +104,13 @@ GENERATION_MODEL_SETTINGS = {
     # [FAST TESTS]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
-    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(tp_base=4, trust_remote_code=True),  # noqa: E501
+    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(tp_base=8, trust_remote_code=True),  # noqa: E501
     "baichuan-inc/Baichuan-7B": PPTestSettings.fast(trust_remote_code=True),
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "THUDM/chatglm3-6b": PPTestSettings.fast(trust_remote_code=True),
     "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(tp_base=2, trust_remote_code=True),  # noqa: E501
-    "databricks/dbrx-instruct": PPTestSettings.fast(tp_base=4),
+    "databricks/dbrx-instruct": PPTestSettings.fast(tp_base=8),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(trust_remote_code=True),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
     "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
@@ -218,8 +218,8 @@ def _compare_tp(
 ):
     tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
 
-    if num_gpus_available < tp_size:
-        pytest.skip(f"Need at least {tp_size} GPUs to run the test")
+    if num_gpus_available < tp_size * pp_size:
+        pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
