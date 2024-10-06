@@ -7,7 +7,7 @@ vLLM provides experimental support for Vision Language Models (VLMs). See the :r
 This document shows you how to run and serve these models using vLLM.
 
 .. important::
-    We are actively iterating on VLM support. Expect breaking changes to VLM usage and development in upcoming releases without prior deprecation.
+    We are actively iterating on VLM support. See `this RFC <https://github.com/vllm-project/vllm/issues/4194>`_ for upcoming changes.
 
     We are continuously improving user & developer experience for VLMs. Please `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
 

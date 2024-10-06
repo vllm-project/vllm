@@ -7,10 +7,12 @@ vLLM supports a variety of generative Transformer models in `HuggingFace Transfo
 The following is the list of model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
-----
+Language-only Models
+^^^^^^^^^^^^^^^^^^^^
 
-Decoder-only Language Models
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Text Generation
+---------------
+
 .. list-table::
   :widths: 25 25 50 5 5
   :header-rows: 1
@@ -40,6 +42,11 @@ Decoder-only Language Models
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
     -
     - ✅︎
+  * - :code:`BartForConditionalGeneration`
+    - ChatGLM
+    - :code:`facebook/bart-base`, :code:`facebook/bart-large-cnn`, etc.
+    - 
+    - 
   * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
@@ -259,10 +266,57 @@ Decoder-only Language Models
 .. note::
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
-.. _supported_vlms:
+Text Embedding
+--------------
+
+.. list-table::
+  :widths: 25 25 50 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Example HuggingFace Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`Gemma2Model`
+    - Gemma2-based
+    - :code:`BAAI/bge-multilingual-gemma2`, etc.
+    - 
+    - ✅︎
+  * - :code:`MistralModel`
+    - Mistral-based
+    - :code:`e5-mistral-7b-instruct`, etc.
+    - 
+    - ✅︎
+
+Reward Modelling
+----------------
+
+.. list-table::
+  :widths: 25 25 50 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Example HuggingFace Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`Qwen2ForRewardModel`
+    - Qwen2-based
+    - :code:`Qwen/Qwen2.5-Math-RM-72B`, etc.
+    - 
+    - ✅︎
+
+.. note::
+    As an interim measure, these models are supported via Embeddings API. See `this RFC <https://github.com/vllm-project/vllm/issues/8967>`_ for upcoming changes.
 
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. _supported_vlms:
+
+Vision-to-Text Generation
+-------------------------
 
 .. list-table::
   :widths: 25 25 25 25 5 5
@@ -364,6 +418,27 @@ Multimodal Language Models
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
     - ✅︎
+
+| :sup:`E` Pre-computed embeddings can be inputted for this modality.
+| :sup:`+` Multiple items can be inputted per text prompt for this modality.
+
+.. note::
+  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
+  For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+
+Audio-to-Text Generation
+------------------------
+
+.. list-table::
+  :widths: 25 25 25 25 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Modalities
+    - Example HuggingFace Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
   * - :code:`UltravoxModel`
     - Ultravox
     - Audio\ :sup:`E+`
@@ -373,11 +448,6 @@ Multimodal Language Models
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
-
-.. note::
-  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
-  For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
-
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
