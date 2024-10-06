@@ -315,9 +315,6 @@ Multimodal Language Models
 
 .. _supported_vlms:
 
-Vision-to-Text Generation
--------------------------
-
 .. list-table::
   :widths: 25 25 25 25 5 5
   :header-rows: 1
@@ -418,27 +415,6 @@ Vision-to-Text Generation
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
     - ✅︎
-
-| :sup:`E` Pre-computed embeddings can be inputted for this modality.
-| :sup:`+` Multiple items can be inputted per text prompt for this modality.
-
-.. note::
-  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
-  For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
-
-Audio-to-Text Generation
-------------------------
-
-.. list-table::
-  :widths: 25 25 25 25 5 5
-  :header-rows: 1
-
-  * - Architecture
-    - Models
-    - Modalities
-    - Example HuggingFace Models
-    - :ref:`LoRA <lora>`
-    - :ref:`PP <distributed_serving>`
   * - :code:`UltravoxModel`
     - Ultravox
     - Audio\ :sup:`E+`
@@ -448,6 +424,12 @@ Audio-to-Text Generation
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
+
+.. note::
+  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
+  For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+
+----
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
