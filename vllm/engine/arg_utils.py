@@ -183,6 +183,8 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -901,6 +903,11 @@ class EngineArgs:
                     "--enable-prefix-caching is currently not "
                     "supported for multimodal models and has been disabled.")
             self.enable_prefix_caching = False
+        if model_config.is_encoder_decoder_model:
+            logger.warning(
+                "Block Manager v2 does not support encoder-decoder models"
+                " currently. Using Block Manager v1 as fallback.")
+            self.use_v2_block_manager = False
 
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else

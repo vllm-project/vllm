@@ -277,6 +277,7 @@ class HfRunner:
                 SentenceTransformer(
                     model_name,
                     device="cpu",
+                    trust_remote_code=True,
                 ).to(dtype=torch_dtype))
         else:
             model_kwargs = model_kwargs if model_kwargs is not None else {}
@@ -879,15 +880,16 @@ def num_gpus_available():
 
 
 temp_dir = tempfile.gettempdir()
-_dummy_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
 
 
 @pytest.fixture
 def dummy_opt_path():
-    json_path = os.path.join(_dummy_path, "config.json")
-    if not os.path.exists(_dummy_path):
+    json_path = os.path.join(_dummy_opt_path, "config.json")
+    if not os.path.exists(_dummy_opt_path):
         snapshot_download(repo_id="facebook/opt-125m",
-                          local_dir=_dummy_path,
+                          local_dir=_dummy_opt_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
                               "*.msgpack"
@@ -898,4 +900,23 @@ def dummy_opt_path():
         config["architectures"] = ["MyOPTForCausalLM"]
         with open(json_path, "w") as f:
             json.dump(config, f)
-    return _dummy_path
+    return _dummy_opt_path
+
+
+@pytest.fixture
+def dummy_llava_path():
+    json_path = os.path.join(_dummy_llava_path, "config.json")
+    if not os.path.exists(_dummy_llava_path):
+        snapshot_download(repo_id="llava-hf/llava-1.5-7b-hf",
+                          local_dir=_dummy_llava_path,
+                          ignore_patterns=[
+                              "*.bin", "*.bin.index.json", "*.pt", "*.h5",
+                              "*.msgpack"
+                          ])
+        assert os.path.exists(json_path)
+        with open(json_path, "r") as f:
+            config = json.load(f)
+        config["architectures"] = ["MyLlava"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_llava_path
