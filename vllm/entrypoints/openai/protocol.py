@@ -302,6 +302,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            length_penalty=self.length_penalty,
         )
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
@@ -345,7 +346,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
@@ -597,6 +597,7 @@ class CompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            length_penalty=self.length_penalty,
         )
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
@@ -641,7 +642,6 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
             prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,

@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -113,7 +113,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                                         outputs: SequenceGroupOutput,
                                         is_async: bool) -> None:
         sampling_params = seq_group.sampling_params
-        if sampling_params.best_of == 1 and not sampling_params.use_beam_search:
+        if sampling_params.best_of == 1:
             # only have one output sample
             sample = outputs.samples[0]
             # only have one sequence
@@ -142,7 +142,6 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-        existing_finished_seqs = seq_group.get_finished_seqs()
         parent_child_dict: Dict[int, List[SequenceOutput]] = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
@@ -197,106 +196,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 lora_req=seq_group.lora_request,
             )
 
-        # Non-beam search case
-        if not sampling_params.use_beam_search:
-            # For newly created child sequences, add them to the sequence group
-            # and fork them in block manager if they are not finished.
-            for seq, parent in child_seqs:
-                if seq is not parent:
-                    seq_group.add(seq)
-                    if not seq.is_finished():
-                        for scheduler in self.scheduler:
-                            scheduler.fork_seq(parent, seq)
-
-            # Free the finished and selected parent sequences' memory in block
-            # manager. Keep them in the sequence group as candidate output.
-            # NOTE: we need to fork the new sequences before freeing the
-            # old sequences.
-            for seq, parent in child_seqs:
-                if seq is parent and seq.is_finished():
-                    for scheduler in self.scheduler:
-                        scheduler.free_seq(seq)
-            return
-
-        # Beam search case
-        # Select the child sequences to keep in the sequence group.
-        selected_child_seqs: List[Tuple[Sequence, Optional[Sequence]]] = []
-        unselected_child_seqs: List[Tuple[Sequence, Optional[Sequence]]] = []
-        beam_width = sampling_params.best_of
-        length_penalty = sampling_params.length_penalty
-
-        # Select the newly finished sequences with the highest scores
-        # to replace existing finished sequences.
-        # Tuple of (seq, parent, is_new)
-        existing_finished_seqs = [(seq, None, False)
-                                  for seq in existing_finished_seqs]
-        new_finished_seqs = [(seq, parent, True) for seq, parent in child_seqs
-                             if seq.is_finished()]
-        all_finished_seqs = existing_finished_seqs + new_finished_seqs
-        # Sort the finished sequences by their scores.
-        all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
-                               reverse=True)
-        for seq, parent, is_new in all_finished_seqs[:beam_width]:
-            if is_new:
-                # A newly generated child sequence finishes and has a high
-                # score, so we will add it into the sequence group.
-                selected_child_seqs.append((seq, parent))
-        for seq, parent, is_new in all_finished_seqs[beam_width:]:
-            if is_new:
-                # A newly generated child sequence finishes but has a low
-                # score, so we will not add it into the sequence group.
-                # Additionally, if this sequence is a continuation of a
-                # parent sequence, we will need remove the parent sequence
-                # from the sequence group.
-                unselected_child_seqs.append((seq, parent))
-            else:
-                # An existing finished sequence has a low score, so we will
-                # remove it from the sequence group.
-                seq_group.remove(seq.seq_id)
-
-        # select the top beam_width sequences from the running
-        # sequences for the next iteration to continue the beam
-        # search.
-        running_child_seqs = [(seq, parent) for seq, parent in child_seqs
-                              if not seq.is_finished()]
-        # Sort the running sequences by their scores.
-        running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
-                                reverse=True)
-
-        # Check if we can stop the beam search.
-        if len(running_child_seqs) == 0:
-            # No running sequences, stop the beam search.
-            stop_beam_search = True
-        elif len(all_finished_seqs) < beam_width:
-            # Not enough finished sequences, continue the beam search.
-            stop_beam_search = False
-        else:
-            # Check the early stopping criteria
-            best_running_seq = running_child_seqs[0][0]
-            current_worst_seq = all_finished_seqs[beam_width - 1][0]
-            stop_beam_search = self._check_beam_search_early_stopping(
-                sampling_params.early_stopping, sampling_params,
-                best_running_seq, current_worst_seq)
-
-        if stop_beam_search:
-            # Stop the beam search and remove all the running sequences from
-            # the sequence group.
-            unselected_child_seqs.extend(running_child_seqs)
-        else:
-            # Continue the beam search and select the top beam_width sequences
-            # to continue the beam search.
-            selected_child_seqs.extend(running_child_seqs[:beam_width])
-            # The remaining running sequences will not be used in the next
-            # iteration. Again, if these sequences are continuations of
-            # parent sequences, we will need to remove the parent sequences
-            # from the sequence group.
-            unselected_child_seqs.extend(running_child_seqs[beam_width:])
-
         # For newly created child sequences, add them to the sequence group
         # and fork them in block manager if they are not finished.
-        for seq, parent in selected_child_seqs:
+        for seq, parent in child_seqs:
             if seq is not parent:
                 seq_group.add(seq)
                 if not seq.is_finished():
@@ -305,20 +207,13 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Free the finished and selected parent sequences' memory in block
         # manager. Keep them in the sequence group as candidate output.
-        for seq, parent in selected_child_seqs:
+        # NOTE: we need to fork the new sequences before freeing the
+        # old sequences.
+        for seq, parent in child_seqs:
             if seq is parent and seq.is_finished():
                 for scheduler in self.scheduler:
                     scheduler.free_seq(seq)
-
-        # Remove the unselected parent sequences from the sequence group and
-        # free their memory in block manager.
-        for seq, parent in unselected_child_seqs:
-            if seq is parent:
-                # Remove the parent sequence if it is not selected for next
-                # iteration
-                seq_group.remove(seq.seq_id)
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(seq)
+        return
 
     def _check_beam_search_early_stopping(
         self,
@@ -327,7 +222,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         best_running_seq: Sequence,
         current_worst_seq: Sequence,
     ) -> bool:
-        assert sampling_params.use_beam_search
+        # TODO: add the logic into `LLM.beam_search`
         length_penalty = sampling_params.length_penalty
         if early_stopping is True:
             return True

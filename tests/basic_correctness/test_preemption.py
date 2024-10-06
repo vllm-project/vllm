@@ -200,54 +200,6 @@ def test_swap(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
-@pytest.mark.parametrize("beam_width", [4])
-@pytest.mark.parametrize("use_v2_block_manager", [True, False])
-def test_swap_infeasible(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    beam_width: int,
-    worker_use_ray: bool,
-    use_v2_block_manager: bool,
-) -> None:
-    """Verify infeasible swap request will be ignored."""
-    BLOCK_SIZE = 16
-    prefill_blocks = 2
-    decode_blocks = max_tokens // BLOCK_SIZE
-    example_prompts = example_prompts[:1]
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            swap_space=10,
-            block_size=BLOCK_SIZE,
-            # Since beam search have more than 1 sequence, prefill +
-            # decode blocks are not enough to finish.
-            num_gpu_blocks_override=prefill_blocks + decode_blocks,
-            max_model_len=(prefill_blocks + decode_blocks) * BLOCK_SIZE,
-            worker_use_ray=worker_use_ray,
-            use_v2_block_manager=use_v2_block_manager,
-    ) as vllm_model:
-        sampling_params = SamplingParams(n=beam_width,
-                                         use_beam_search=True,
-                                         temperature=0.0,
-                                         max_tokens=max_tokens,
-                                         ignore_eos=True)
-        req_outputs = vllm_model.model.generate(
-            example_prompts,
-            sampling_params=sampling_params,
-        )
-        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
-                < ARTIFICIAL_PREEMPTION_MAX_CNT)
-
-    # Verify the request is ignored and not hang.
-    assert req_outputs[0].outputs[0].finish_reason == "length"
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
 def test_preemption_infeasible(
     vllm_runner,
     example_prompts,
