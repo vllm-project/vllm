@@ -151,7 +151,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
-        block_table.allocate(seq.get_token_ids())
+        if (len(seq.get_token_ids()) > 0):
+            block_table.allocate(seq.get_token_ids())
 
         return block_table
 
