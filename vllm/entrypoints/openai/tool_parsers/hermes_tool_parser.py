@@ -50,10 +50,10 @@ class Hermes2ProToolParser(ToolParser):
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction.")
-        self.tool_call_start_token_id: int = self.model_tokenizer.vocab[
-            self.tool_call_start_token]
-        self.tool_call_end_token_id: int = self.model_tokenizer.vocab[
-            self.tool_call_end_token]
+        self.tool_call_start_token_id: int = self.model_tokenizer.vocab.get(
+            self.tool_call_start_token, None)
+        self.tool_call_end_token_id: int = self.model_tokenizer.vocab.get(
+            self.tool_call_end_token, None)
         if not self.tool_call_start_token_id or not self.tool_call_end_token_id:
             raise RuntimeError(
                 "Hermes 2 Pro Tool parser could not locate tool call start/end "

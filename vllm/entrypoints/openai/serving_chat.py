@@ -302,10 +302,6 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
 
-        tool_parsers: List[Optional[ToolParser]] = [
-            self.tool_parser(tokenizer) if self.tool_parser else None
-        ] * num_choices
-
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
         else:
@@ -323,6 +319,21 @@ class OpenAIServingChat(OpenAIServing):
             all_previous_token_ids = [[]] * num_choices
         else:
             previous_texts, all_previous_token_ids = None, None
+
+        # Prepare the tool parser if it's needed
+        try:
+            if tool_choice_auto and self.tool_parser:
+                tool_parsers: List[Optional[ToolParser]] = [
+                    self.tool_parser(tokenizer)
+                ] * num_choices
+            else:
+                tool_parsers = [None] * num_choices
+        except RuntimeError as e:
+            logger.error("Error in tool parser creation: %s", e)
+            data = self.create_streaming_error_response(str(e))
+            yield f"data: {data}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
         try:
             async for res in result_generator:
@@ -704,7 +715,12 @@ class OpenAIServingChat(OpenAIServing):
                     or request.tool_choice is None) and self.enable_auto_tools \
                     and self.tool_parser:
 
-                tool_parser = self.tool_parser(tokenizer)
+                try:
+                    tool_parser = self.tool_parser(tokenizer)
+                except RuntimeError as e:
+                    logger.error("Error in tool parser creation: %s", e)
+                    return self.create_error_response(str(e))
+
                 tool_call_info = tool_parser.extract_tool_calls(
                     output.text, request=request)
                 tools_called = tool_call_info.tools_called
