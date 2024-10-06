@@ -49,9 +49,6 @@ def test_models(
             model_name,
             dtype=dtype,
             disable_sliding_window=True,
-            enforce_eager=True,
-            # NOTE: Uncomment this line if runs out of GPU memory.
-            # gpu_memory_utilization=0.95,
             max_model_len=max_model_len,
     ) as vllm_model:
         prompt_inputs = build_decoder_prompts(

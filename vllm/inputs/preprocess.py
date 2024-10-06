@@ -551,4 +551,5 @@ class InputPreprocessor:
         )
 
     def is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
+        return self.model_config.is_encoder_decoder_model \
+            or self.model_config.is_encoder_model

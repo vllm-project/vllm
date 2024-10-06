@@ -59,7 +59,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
-_DEFAULT_BOS_TOKEN_ID = 1
 
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
@@ -349,7 +348,8 @@ class LLMEngine:
             observability_config=self.observability_config,
         )
 
-        self._initialize_kv_caches()
+        if not self.model_config.embedding_mode:
+            self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -1878,9 +1878,6 @@ class LLMEngine:
 
     def is_encoder_decoder_model(self):
         return self.input_preprocessor.is_encoder_decoder_model()
-
-    def is_encoder_model(self):
-        return self.model_config.is_encoder_model
 
     def is_embedding_model(self):
         return self.model_config.is_embedding_model

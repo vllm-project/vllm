@@ -328,10 +328,12 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
                     cross_slot_mapping.extend([PAD_SLOT_ID] * seq_len)
                 else:
                     for i in range(0, seq_len):
-                        block_number = seq_group_metadata.cross_block_table[
-                            i // self.block_size]
-                        block_offset = i % self.block_size
-                        slot = block_number * self.block_size + block_offset
+                        slot = PAD_SLOT_ID
+                        if seq_group_metadata.cross_block_table is not None:
+                            block_number = seq_group_metadata.cross_block_table[
+                                i // self.block_size]
+                            block_offset = i % self.block_size
+                            slot = block_number * self.block_size + block_offset
                         cross_slot_mapping.append(slot)
 
                 # Build encoder input tokens
