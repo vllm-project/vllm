@@ -243,8 +243,7 @@ class OpenAIServingChat(OpenAIServing):
                         "`--disable-frontend-multiprocessing` to "
                         "use beam search.")
                 result_generator = self.engine_client.beam_search(
-                    engine_inputs['prompt_token_ids'], 
-                    request_id,
+                    engine_inputs['prompt_token_ids'], request_id,
                     sampling_params)
             else:
                 result_generator = self.engine_client.generate(
