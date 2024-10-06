@@ -7,7 +7,6 @@
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
-from qwen2 import Qwen2Model
 from torch import nn
 from transformers import Qwen2Config
 
@@ -22,6 +21,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsPP
+from .qwen2 import Qwen2Model
 from .utils import group_weights_with_prefix
 
 
