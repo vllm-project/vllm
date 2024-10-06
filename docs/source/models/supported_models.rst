@@ -285,7 +285,7 @@ Text Embedding
     - ✅︎
   * - :code:`MistralModel`
     - Mistral-based
-    - :code:`e5-mistral-7b-instruct`, etc.
+    - :code:`intfloat/e5-mistral-7b-instruct`, etc.
     - 
     - ✅︎
 
