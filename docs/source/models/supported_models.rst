@@ -43,7 +43,7 @@ Text Generation
     -
     - ✅︎
   * - :code:`BartForConditionalGeneration`
-    - ChatGLM
+    - BART
     - :code:`facebook/bart-base`, :code:`facebook/bart-large-cnn`, etc.
     - 
     - 
