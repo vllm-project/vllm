@@ -11,4 +11,5 @@ class MyGemma2Embedding(Gemma2EmbeddingModel):
         # We assume PP isn't used in the test
         assert isinstance(hidden_states, torch.Tensor)
 
+        # Return all-zero embeddings
         return torch.zeros_like(hidden_states)

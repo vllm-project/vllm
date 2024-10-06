@@ -15,7 +15,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 # NOTE: Unlike those in `interfaces.py`, we don't define `ClassVar` tags
-# for the base interfaces to avoid breaking OOT registration
+# for the base interfaces to avoid breaking OOT registration for existing models
+# that don't inherit from the base interface classes
 
 # The type of hidden states
 # Currently, T = torch.Tensor for all models except for Medusa
