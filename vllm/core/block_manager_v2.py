@@ -152,6 +152,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             max_block_sliding_window=self.max_block_sliding_window,
         )
         if (len(seq.get_token_ids()) > 0):
+            # Add blocks to the block table only if the encoder sequence
+            # is non empty.
             block_table.allocate(seq.get_token_ids())
 
         return block_table
