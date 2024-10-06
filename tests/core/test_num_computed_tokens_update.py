@@ -1,10 +1,9 @@
-import os
-
 import pytest
 
 from tests.conftest import VllmRunner
 from tests.core.utils import create_dummy_prompt
 from vllm.engine.llm_engine import LLMEngine
+from vllm.platforms import current_platform
 from vllm.sequence import SequenceGroup
 
 MODEL = "JackFram/llama-160m"
@@ -25,10 +24,9 @@ def test_num_computed_tokens_update(num_scheduler_steps: int,
     is_multi_step = num_scheduler_steps > 1
     is_multi_step_chunked_prefill = is_multi_step and enable_chunked_prefill
 
-    attention_backend = os.getenv("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
-    if is_multi_step_chunked_prefill and attention_backend != "FLASH_ATTN":
-        pytest.skip("Multi-step with Chunked-Prefill only supports"
-                    " FLASH_ATTN backend")
+    if is_multi_step_chunked_prefill and current_platform.is_rocm():
+        pytest.skip("Multi-step with Chunked-Prefill does not support "
+                    "rocm_flash_attn backend")
 
     # Make a vllm engine
     runner = VllmRunner(model_name=MODEL,
