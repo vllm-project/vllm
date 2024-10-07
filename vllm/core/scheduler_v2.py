@@ -8,7 +8,8 @@ from typing import (Callable, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
-from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.core.kv_cache_manager import KVCacheManager
+from vllm.outputs_v2 import ModelRunnerOutput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -35,23 +36,14 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        version = "v1"
-        if self.scheduler_config.use_v2_block_manager:
-            version = "v2"
-        if self.scheduler_config.embedding_mode:
-            version = "embedding"
-        BlockSpaceManagerImpl = \
-            BlockSpaceManager.get_block_space_manager_class(version)
         num_gpu_blocks = cache_config.num_gpu_blocks
-        num_cpu_blocks = cache_config.num_cpu_blocks
-
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         # Create the block space manager.
-        self.block_manager = BlockSpaceManagerImpl(
+        self.kv_cache_manager = KVCacheManager(
             block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            enable_caching=True)
         self.block_size = self.cache_config.block_size
 
         # Scheduling constraints.
@@ -67,10 +59,10 @@ class Scheduler:
         self.finished_req_ids: Set[str] = set()
         self.aborted_req_ids: Set[str] = set()
 
-    def schedule(self) -> "SchedulerOutput":
-        # Finish the requests that have reached the maximum length.
-        self._check_stop_by_len()
+        self.cum = 0
 
+    def schedule(self) -> "SchedulerOutput":
+        start = time.time()
         scheduled_new_reqs: List[Request] = []
         scheduled_resumed_reqs: List[Request] = []
         scheduled_running_reqs: List[Request] = []
@@ -81,6 +73,7 @@ class Scheduler:
         token_budget = self.max_num_scheduled_tokens
 
         # First, schedule the RUNNING requests.
+        new_running: Deque[Request] = deque()
         while self.running:
             if token_budget == 0:
                 break
@@ -88,33 +81,36 @@ class Scheduler:
             request = self.running[0]
             num_tokens = request.num_tokens - request.num_computed_tokens
             num_tokens = min(num_tokens, token_budget)
+            assert num_tokens > 0
 
-            new_block_ids: List[int] = []
-            while not self.block_manager.can_append_slots(request, num_tokens):
-                new_block_ids = self.block_manager.append_slots(
+            while True:
+                new_block_ids = self.kv_cache_manager.append_slots(
                     request, num_tokens)
-                if not new_block_ids:
+                if new_block_ids is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
-                    self.block_manager.free(preempted_req)
+                    self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
-
                     if preempted_req == request:
+                        # No more request to preempt.
                         break
-            else:
-                # The request can be scheduled.
-                self.running.popleft()
-                scheduled_running_reqs.append(request)
+                else:
+                    # The request can be scheduled.
+                    self.running.popleft()
+                    new_running.append(request)
+                    scheduled_running_reqs.append(request)
 
-                req_to_new_block_ids[request.request_id] = new_block_ids
-                num_scheduled_tokens[request.request_id] = num_tokens
-                token_budget -= num_tokens
-                request.status = RequestStatus.RUNNING
+                    req_to_new_block_ids[request.request_id] = new_block_ids
+                    num_scheduled_tokens[request.request_id] = num_tokens
+                    token_budget -= num_tokens
+                    request.status = RequestStatus.RUNNING
+                    break
+        self.running = new_running
 
         # Next, schedule the WAITING requests.
         while self.waiting:
@@ -126,21 +122,25 @@ class Scheduler:
                 break
 
             request = self.waiting[0]
-            allocated = self.block_manager.allocate(request)
-            if allocated is None:
-                # The request cannot be scheduled.
-                break
-
-            # The request can be scheduled.
-            computed_block_ids, new_block_ids = allocated
-
-            # Get cached tokens.
-            num_computed_blocks = len(computed_block_ids)
-            num_computed_tokens = num_computed_blocks * self.block_size
-
+            # Get already-cached tokens.
+            computed_block_ids = self.kv_cache_manager.get_computed_blocks(
+                request)
+            # NOTE(woosuk): Since incomplete blocks are not eligible for
+            # sharing, `num_computed_tokens` is always a multiple of
+            # `block_size`.
+            num_computed_tokens = len(computed_block_ids) * self.block_size
             # Number of tokens to be scheduled.
+            # We use `request.num_tokens` instead of `request.num_prompt_tokens`
+            # to consider the resumed requests, which have output tokens.
             num_tokens = request.num_tokens - num_computed_tokens
             num_tokens = min(num_tokens, token_budget)
+            assert num_tokens > 0
+            new_block_ids = self.kv_cache_manager.allocate_slots(
+                request, num_tokens, computed_block_ids)
+            if new_block_ids is None:
+                # The request cannot be scheduled.
+                break
+            request.num_computed_tokens = num_computed_tokens
 
             self.waiting.popleft()
             self.running.append(request)
@@ -169,18 +169,18 @@ class Scheduler:
         new_reqs_data = [
             NewRequestData.from_request(req,
                                         req_to_new_block_ids[req.request_id],
-                                        num_computed_tokens)
+                                        req.num_computed_tokens)
             for req in scheduled_new_reqs
         ]
         resumed_reqs_data = [
             ResumedRequestData.from_request(
-                req, req_to_new_block_ids[req.request_id], num_computed_tokens)
-            for req in scheduled_resumed_reqs
+                req, req_to_new_block_ids[req.request_id],
+                req.num_computed_tokens) for req in scheduled_resumed_reqs
         ]
         running_reqs_data = [
             RunningRequestData.from_request(
-                req, req_to_new_block_ids[req.request_id], num_computed_tokens)
-            for req in scheduled_running_reqs
+                req, req_to_new_block_ids[req.request_id],
+                req.num_computed_tokens) for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
         scheduler_output = SchedulerOutput(
@@ -193,16 +193,44 @@ class Scheduler:
             finished_req_ids=self.finished_req_ids,
             aborted_req_ids=self.aborted_req_ids,
         )
+        end = time.time()
+        self.cum += (end - start)
+        print(f"Scheduler time: {(end - start) * 1000:.3f} ms")
+        print(f"Cumulative scheduler time: {self.cum * 1000:.3f} ms")
 
         self.finished_req_ids = set()
         self.aborted_req_ids = set()
-        for request in self.running:
-            num_tokens = num_scheduled_tokens[request.request_id]
-            request.num_computed_tokens = num_computed_tokens + num_tokens
-            if request.num_tokens == request.num_computed_tokens:
-                # TODO: Consider speculative decoding.
-                request.num_output_tokens += 1
         return scheduler_output
+
+    def update_from_output(
+        self,
+        scheduler_output: "SchedulerOutput",
+        model_runner_output: "ModelRunnerOutput",
+    ) -> List[Request]:
+        sampled_token_ids = model_runner_output.sampled_token_ids_cpu.numpy()
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        new_running: Deque[Request] = deque()
+        finished_reqs: List[Request] = []
+        for request in self.running:
+            req_id = request.request_id
+            # TODO: Consider speculative decoding.
+            request.num_computed_tokens += num_scheduled_tokens[req_id]
+            if request.num_computed_tokens >= request.num_prompt_tokens:
+                req_index = model_runner_output.req_id_to_index[req_id]
+                token_id = sampled_token_ids[req_index]
+                request.output_token_ids.append(token_id)
+                # TODO: Update the KV cache manager for prefix caching.
+
+                if (request.num_tokens >= self.max_model_len
+                        or request.num_output_tokens >= request.max_tokens):
+                    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                    self.finished_req_ids.add(req_id)
+                    finished_reqs.append(request)
+                    self._free_request(request)
+                    continue
+            new_running.append(request)
+        self.running = new_running
+        return finished_reqs
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
@@ -249,23 +277,9 @@ class Scheduler:
                 self.finished_req_ids.add(request.request_id)
                 self._free_request(request)
 
-    def _check_stop_by_len(self) -> None:
-        stopped_reqs: List[Request] = []
-        # TODO: Optimize this.
-        for request in self.running:
-            assert request.max_tokens is not None
-            if (request.num_tokens >= self.max_model_len
-                    or request.num_output_tokens >= request.max_tokens):
-                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-                stopped_reqs.append(request)
-        for request in stopped_reqs:
-            self.running.remove(request)
-            self.finished_req_ids.add(request.request_id)
-            self._free_request(request)
-
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
-        self.block_manager.free(request)
+        self.kv_cache_manager.free(request)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)

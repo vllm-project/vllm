@@ -1,12 +1,14 @@
 from typing import Dict, List, Optional, Tuple
 
-from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
-
 from .tokenizer import AnyTokenizer
 from .tokenizer_group import BaseTokenizerGroup
+from vllm.sampling_params import SamplingParams
 
 # Used eg. for marking rejected tokens in spec decoding.
 INVALID_TOKEN_ID = -1
+Sequence = None
+SequenceGroup = None
+Logprob = None
 
 
 class Detokenizer:

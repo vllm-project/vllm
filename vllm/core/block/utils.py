@@ -1,5 +1,4 @@
 """Block manager utils."""
-from vllm.sequence import SequenceGroup
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
                         STR_NOT_IMPL_ENC_DEC_SWA)
 
@@ -26,8 +25,7 @@ def _get_block_mgr_sliding_window_attr(block_mgr):
                          "max_block_sliding_window attributes.")
 
 
-def check_no_caching_or_swa_for_blockmgr_encdec(
-        block_mgr, seq_group: SequenceGroup) -> None:
+def check_no_caching_or_swa_for_blockmgr_encdec(block_mgr, seq_group) -> None:
     '''
     Enforce that prefix caching & sliding-window attention (SWA)
     are currently unsupported *specifically* for encoder/decoder models.

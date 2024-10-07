@@ -17,7 +17,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs_v2 import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -28,6 +28,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
+EmbeddingRequestOutput = RequestOutput  # FIXME
 
 
 class LLM:
@@ -352,7 +353,8 @@ class LLM:
             guided_options=guided_options_request)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return LLMEngine.validate_outputs(outputs, RequestOutput)
+        # return LLMEngine.validate_outputs(outputs, RequestOutput)
+        return outputs
 
     def chat(
         self,
@@ -704,8 +706,10 @@ class LLM:
         return params
 
     def _run_engine(
-            self, *, use_tqdm: bool
-    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+        self,
+        *,
+        use_tqdm: bool,
+    ) -> List[Union[RequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -722,24 +726,20 @@ class LLM:
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
-            step_outputs = self.llm_engine.step()
-            for output in step_outputs:
-                if output.finished:
-                    outputs.append(output)
-                    if use_tqdm:
-                        if isinstance(output, RequestOutput):
-                            # Calculate tokens only for RequestOutput
-                            assert output.prompt_token_ids is not None
-                            total_in_toks += len(output.prompt_token_ids)
-                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
-                            total_out_toks += sum(
-                                len(stp.token_ids) for stp in output.outputs)
-                            out_spd = (total_out_toks /
-                                       pbar.format_dict["elapsed"])
-                            pbar.postfix = (
-                                f"est. speed input: {in_spd:.2f} toks/s, "
-                                f"output: {out_spd:.2f} toks/s")
-                        pbar.update(1)
+            finished_reqs, _ = self.llm_engine.step()
+            for req in finished_reqs:
+                output = RequestOutput.from_request(req)
+                outputs.append(output)
+                if use_tqdm:
+                    # Calculate tokens only for RequestOutput
+                    assert output.prompt_token_ids is not None
+                    total_in_toks += len(output.prompt_token_ids)
+                    in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                    total_out_toks += len(output.outputs[0].token_ids)
+                    out_spd = (total_out_toks / pbar.format_dict["elapsed"])
+                    pbar.postfix = (f"est. speed input: {in_spd:.2f} toks/s, "
+                                    f"output: {out_spd:.2f} toks/s")
+                    pbar.update(1)
 
         if use_tqdm:
             pbar.close()

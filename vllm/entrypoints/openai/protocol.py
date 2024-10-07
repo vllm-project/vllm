@@ -14,9 +14,10 @@ from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (LogitsProcessor, RequestOutputKind,
                                   SamplingParams)
-from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
+
+Logprob = float
 
 # torch is mocked during docs generation,
 # so we have to provide the values as literals

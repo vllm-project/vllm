@@ -16,9 +16,10 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.outputs_v2 import ModelRunnerOutput
 from vllm.platforms import current_platform
 from vllm.worker.model_runner_v2 import GPUModelRunner
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
 logger = init_logger(__name__)
 
@@ -32,23 +33,33 @@ class Worker:
         self,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool,
+        speculative_config: Optional[SpeculativeConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.is_driver_worker = is_driver_worker
         self.lora_config = lora_config
+        self.speculative_config = speculative_config
+        self.prompt_adapter_config = prompt_adapter_config
+        self.observability_config = observability_config
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -58,10 +69,10 @@ class Worker:
         self.model_runner = GPUModelRunner(
             model_config,
             parallel_config,
+            scheduler_config,
             device_config,
             cache_config,
             load_config,
-            kv_cache_dtype=cache_config.kv_cache_dtype,
             lora_config=lora_config,
         )
 
@@ -131,7 +142,9 @@ class Worker:
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-        cache_block_size = self.get_cache_block_size_bytes()
+        cache_block_size = _get_cache_block_size(self.cache_config,
+                                                 self.model_config,
+                                                 self.parallel_config)
         num_gpu_blocks = int(
             (total_gpu_memory * self.cache_config.gpu_memory_utilization -
              peak_memory) // cache_block_size)
@@ -139,8 +152,8 @@ class Worker:
                              cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
+        # if self.model_runner.lora_manager:
+        #     self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
@@ -165,9 +178,7 @@ class Worker:
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        # TODO(woosuk): Create KV cache.
-        self.model_runner.initialize_kv_cache()
+        self.model_runner.initialize_kv_cache(num_gpu_blocks)
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -180,9 +191,10 @@ class Worker:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> None:
-        sampler_output = self.model_runner.execute_model(scheduler_output)
+    ) -> ModelRunnerOutput:
+        output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
+        return output
 
 
 def init_worker_distributed_environment(
@@ -219,3 +231,24 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
                 "You can use float16 instead by explicitly setting the"
                 "`dtype` flag in CLI, for example: --dtype=half.")
+
+
+def _get_cache_block_size(
+    cache_config: CacheConfig,
+    model_config: ModelConfig,
+    parallel_config: ParallelConfig,
+) -> int:
+    head_size = model_config.get_head_size()
+    num_heads = model_config.get_num_kv_heads(parallel_config)
+    num_attention_layers = model_config.get_num_attention_layers(
+        parallel_config)
+
+    key_cache_block = cache_config.block_size * num_heads * head_size
+    value_cache_block = key_cache_block
+    total = num_attention_layers * (key_cache_block + value_cache_block)
+    if cache_config.cache_dtype == "auto":
+        dtype = model_config.dtype
+    else:
+        dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+    dtype_size = get_dtype_size(dtype)
+    return dtype_size * total

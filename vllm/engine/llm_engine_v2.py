@@ -6,7 +6,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union
+from typing import Set, Type, Union, Tuple
 
 import torch
 from typing_extensions import TypeVar
@@ -28,8 +28,6 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
-                          RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -62,7 +60,6 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
 
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
-_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 
 class LLMEngine:
@@ -312,7 +309,6 @@ class LLMEngine:
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     @classmethod
@@ -325,7 +321,7 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
-        executor_class = cls._get_executor_cls(engine_config)
+        executor_class = _get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(
             **engine_config.to_dict(),
@@ -334,19 +330,7 @@ class LLMEngine:
             usage_context=usage_context,
             stat_loggers=stat_loggers,
         )
-
         return engine
-
-    def __reduce__(self):
-        # This is to ensure that the LLMEngine is not referenced in
-        # the closure used to initialize Ray worker actors
-        raise RuntimeError("LLMEngine should not be pickled!")
-
-    def __del__(self):
-        # Shutdown model executor when engine is garbage collected
-        # Use getattr since __init__ can fail before the field is set
-        if model_executor := getattr(self, "model_executor", None):
-            model_executor.shutdown()
 
     def get_tokenizer_group(
         self,
@@ -413,7 +397,7 @@ class LLMEngine:
                       processed_inputs,
                       arrival_time,
                       sampling_params=params)
-        self.scheduler.add_req(req)
+        self.scheduler.add_request(req)
 
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
@@ -510,7 +494,7 @@ class LLMEngine:
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
-        self.scheduler.abort_reqs(request_id)
+        self.scheduler.abort_requests(request_id)
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
@@ -534,26 +518,19 @@ class LLMEngine:
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
-        return self.scheduler.get_num_unfinished_reqs()
+        return self.scheduler.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        return self.scheduler.has_unfinished_req()
+        return self.scheduler.has_unfinished_requests()
 
-    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def step(self) -> Tuple[List[Request], List[Request]]:
         scheduler_output = self.scheduler.schedule()
-        sampler_output = self.model_executor.execute_model(scheduler_output)
-        self._process_model_outputs(sampler_output)
-
-        if not self.has_unfinished_requests():
-            # Stop the execute model loop in parallel workers until there are
-            # more requests to process. This avoids waiting indefinitely in
-            # torch.distributed ops which may otherwise timeout, and unblocks
-            # the RPC thread in the workers so that they can process any other
-            # queued control plane messages, such as add/remove lora adapters.
-            logger.debug("Stopping remote worker execution loop.")
-            self.model_executor.stop_remote_worker_execution_loop()
-        return sampler_output
+        output = self.model_executor.execute_model(scheduler_output)
+        finished_reqs = self.scheduler.update_from_output(
+            scheduler_output, output)
+        running_reqs = self.scheduler.running
+        return finished_reqs, running_reqs
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
         if not self.log_stats:
@@ -580,10 +557,11 @@ class LLMEngine:
 
     def _validate_model_inputs(self, inputs: Union[LLMInputs,
                                                    EncoderDecoderLLMInputs]):
-        if self.is_encoder_decoder_model():
-            prompt_ids = inputs.get("encoder_prompt_token_ids")
-        else:
-            prompt_ids = inputs.get("prompt_token_ids")
+        # if self.is_encoder_decoder_model():
+        #     prompt_ids = inputs.get("encoder_prompt_token_ids")
+        # else:
+        #     prompt_ids = inputs.get("prompt_token_ids")
+        prompt_ids = inputs.get("prompt_token_ids")
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
@@ -662,6 +640,6 @@ def _get_executor_cls(engine_config: EngineConfig) -> Type[ExecutorBase]:
             "support VLLM_USE_RAY_SPMD_WORKER=1")
         executor_class = MultiprocessingGPUExecutor
     else:
-        from vllm.executor.gpu_executor import GPUExecutor
+        from vllm.executor.executor_v2 import GPUExecutor
         executor_class = GPUExecutor
     return executor_class

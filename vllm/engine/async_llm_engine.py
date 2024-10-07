@@ -9,29 +9,29 @@ from weakref import ReferenceType
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-from vllm.core.scheduler import SchedulerOutputs
+from vllm.core.scheduler_v2 import SchedulerOutput
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
-from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
+from vllm.engine.llm_engine_v2 import LLMEngine
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
-from vllm.executor.gpu_executor import GPUExecutorAsync
+from vllm.executor.executor_v2 import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
+EmbeddingRequestOutput = None
+RequestOutput = None
 
 
 class AsyncEngineDeadError(RuntimeError):
@@ -1017,7 +1017,7 @@ class AsyncLLMEngine:
 
     async def do_log_stats(
             self,
-            scheduler_outputs: Optional[SchedulerOutputs] = None,
+            scheduler_outputs: Optional[SchedulerOutput] = None,
             model_output: Optional[List[SamplerOutput]] = None) -> None:
         self.engine.do_log_stats()
 

@@ -35,18 +35,28 @@ class Request:
 
         self.status = RequestStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
+        assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
 
-        self.num_prompt_tokens = len(inputs["prompt_token_ids"])
-        self.num_output_tokens = 0
+        self.prompt = inputs.get("prompt")
+        self.prompt_token_ids = inputs["prompt_token_ids"]
+        self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.output_token_ids: List[int] = []
         self.num_computed_tokens = 0
 
     @property
     def num_tokens(self) -> int:
-        return self.num_prompt_tokens + self.num_output_tokens
+        return self.num_prompt_tokens + len(self.output_token_ids)
+
+    @property
+    def num_output_tokens(self) -> int:
+        return len(self.output_token_ids)
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
+
+    def get_finished_reason(self) -> Union[str, None]:
+        return RequestStatus.get_finished_reason(self.status)
 
 
 class RequestStatus(enum.IntEnum):

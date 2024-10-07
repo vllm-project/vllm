@@ -48,15 +48,11 @@ class LogitsProcessor(nn.Module):
         self,
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
         else:
-            hidden_states = _prune_hidden_states(hidden_states,
-                                                 sampling_metadata)
-
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, lm_head, embedding_bias)
         if logits is not None:
@@ -69,7 +65,7 @@ class LogitsProcessor(nn.Module):
                 logits *= self.scale
 
             # Apply logits processors (if any).
-            logits = _apply_logits_processors(logits, sampling_metadata)
+            # logits = _apply_logits_processors(logits, sampling_metadata)
 
         return logits
 
@@ -103,14 +99,6 @@ class LogitsProcessor(nn.Module):
         s += f", forg_vocab_size={self.org_vocab_size}"
         s += f", scale={self.scale}, logits_as_input={self.logits_as_input}"
         return s
-
-
-def _prune_hidden_states(
-    hidden_states: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
-    return hidden_states.index_select(0,
-                                      sampling_metadata.selected_token_indices)
 
 
 def _apply_logits_processors(

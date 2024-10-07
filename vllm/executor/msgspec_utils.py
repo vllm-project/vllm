@@ -1,7 +1,7 @@
 from array import array
 from typing import Any, Type
 
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE
+# from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE
 
 
 def encode_hook(obj: Any) -> Any:

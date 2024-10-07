@@ -12,8 +12,8 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
 from vllm.engine.arg_utils import DEVICE_OPTIONS, AsyncEngineArgs, EngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args)
+# from vllm.entrypoints.openai.api_server import (
+#     build_async_engine_client_from_engine_args)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 

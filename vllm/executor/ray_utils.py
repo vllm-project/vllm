@@ -9,9 +9,7 @@ from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip, is_hip, is_xpu
-from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 PG_WAIT_TIMEOUT = 1800
@@ -22,73 +20,73 @@ try:
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
 
-    class RayWorkerWrapper(WorkerWrapperBase):
-        """Ray wrapper for vllm.worker.Worker, allowing Worker to be
-        lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
+    # class RayWorkerWrapper(WorkerWrapperBase):
+    #     """Ray wrapper for vllm.worker.Worker, allowing Worker to be
+    #     lazliy initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs)
-            # Since the compiled DAG runs a main execution
-            # in a different thread that calls cuda.set_device.
-            # The flag indicates is set_device is called on
-            # that thread.
-            self.compiled_dag_cuda_device_set = False
+    #     def __init__(self, *args, **kwargs) -> None:
+    #         super().__init__(*args, **kwargs)
+    #         # Since the compiled DAG runs a main execution
+    #         # in a different thread that calls cuda.set_device.
+    #         # The flag indicates is set_device is called on
+    #         # that thread.
+    #         self.compiled_dag_cuda_device_set = False
 
-            self.input_decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
-                                                         dec_hook=decode_hook)
-            self.output_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
+    #         self.input_decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
+    #                                                      dec_hook=decode_hook)
+    #         self.output_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
 
-        def get_node_ip(self) -> str:
-            return get_ip()
+    #     def get_node_ip(self) -> str:
+    #         return get_ip()
 
-        def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
-            node_id = ray.get_runtime_context().get_node_id()
-            gpu_ids = ray.get_gpu_ids()
-            return node_id, gpu_ids
+    #     def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
+    #         node_id = ray.get_runtime_context().get_node_id()
+    #         gpu_ids = ray.get_gpu_ids()
+    #         return node_id, gpu_ids
 
-        def execute_model_spmd(
-            self, req_or_tuple: Union[bytes,
-                                      Tuple[bytes,
-                                            Optional[IntermediateTensors]]]
-        ) -> bytes:
-            """Execute model in SPMD fashion: used only when SPMD worker and
-            compiled DAG are both enabled.
+    #     def execute_model_spmd(
+    #         self, req_or_tuple: Union[bytes,
+    #                                   Tuple[bytes,
+    #                                         Optional[IntermediateTensors]]]
+    #     ) -> bytes:
+    #         """Execute model in SPMD fashion: used only when SPMD worker and
+    #         compiled DAG are both enabled.
 
-            Args:
-                req_or_tuple: A request or a tuple containing the
-                    request and intermediate tensors. Intermediate tensors are
-                    None unless if it is provided because it is > 0 pipeline
-                    stage. The request is serialized by msgspec.
-            """
-            if isinstance(req_or_tuple, bytes):
-                serialized_req, intermediate_tensors = req_or_tuple, None
-            else:
-                serialized_req, intermediate_tensors = req_or_tuple
+    #         Args:
+    #             req_or_tuple: A request or a tuple containing the
+    #                 request and intermediate tensors. Intermediate tensors are
+    #                 None unless if it is provided because it is > 0 pipeline
+    #                 stage. The request is serialized by msgspec.
+    #         """
+    #         if isinstance(req_or_tuple, bytes):
+    #             serialized_req, intermediate_tensors = req_or_tuple, None
+    #         else:
+    #             serialized_req, intermediate_tensors = req_or_tuple
 
-            execute_model_req = self.input_decoder.decode(serialized_req)
+    #         execute_model_req = self.input_decoder.decode(serialized_req)
 
-            # TODO(swang): This is needed right now because Ray aDAG executes
-            # on a background thread, so we need to reset torch's current
-            # device.
-            import torch
-            if not self.compiled_dag_cuda_device_set:
-                torch.cuda.set_device(self.worker.device)
-                self.compiled_dag_cuda_device_set = True
+    #         # TODO(swang): This is needed right now because Ray aDAG executes
+    #         # on a background thread, so we need to reset torch's current
+    #         # device.
+    #         import torch
+    #         if not self.compiled_dag_cuda_device_set:
+    #             torch.cuda.set_device(self.worker.device)
+    #             self.compiled_dag_cuda_device_set = True
 
-            output = self.worker._execute_model_spmd(execute_model_req,
-                                                     intermediate_tensors)
-            # Pipeline model request and output to the next pipeline stage.
-            if isinstance(output, IntermediateTensors):
-                output = serialized_req, output
-            else:
-                output = self.output_encoder.encode(output)
+    #         output = self.worker._execute_model_spmd(execute_model_req,
+    #                                                  intermediate_tensors)
+    #         # Pipeline model request and output to the next pipeline stage.
+    #         if isinstance(output, IntermediateTensors):
+    #             output = serialized_req, output
+    #         else:
+    #             output = self.output_encoder.encode(output)
 
-            return output
+    #         return output
 
-        def override_env_vars(self, vars: Dict[str, str]):
-            os.environ.update(vars)
+    #     def override_env_vars(self, vars: Dict[str, str]):
+    #         os.environ.update(vars)
 
-    ray_import_err = None
+    # ray_import_err = None
 
 except ImportError as e:
     ray = None  # type: ignore

@@ -14,7 +14,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal.base import NestedTensors
-from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 
 

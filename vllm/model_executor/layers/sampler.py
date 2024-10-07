@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.sampler_output import SamplerOutput
+from vllm.outputs_v2 import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 _SAMPLING_EPS = 1e-5
@@ -25,13 +25,14 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
-        logits = self.apply_penalties(logits, sampling_metadata)
 
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
 
         if sampling_metadata.max_num_logprobs > 0:
             logprobs = self.get_logprobs(logits)
+            # FIXME: Mask the sampled token_id, get topk logprobs,
+            # and concatenate the topk with the sampled token_id.
             topk_logprobs, topk_indices = torch.topk(
                 logprobs, sampling_metadata.max_num_logprobs, dim=-1)
         else:
@@ -44,8 +45,6 @@ class Sampler(nn.Module):
             logprobs=topk_logprobs,
             prompt_logprob_token_ids=None,
             prompt_logprobs=None,
-            model_forward_time=0.0,
-            model_execute_time=0.0,
         )
         return sampler_output
 
@@ -62,13 +61,6 @@ class Sampler(nn.Module):
         logits.div_(temp.unsqueeze(dim=1))
         return logits
 
-    def apply_penalties(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
-        return logits
-
     def get_probs(self, logits: torch.Tensor) -> torch.Tensor:
         return torch.softmax(logits, dim=-1, dtype=torch.float32)
 
@@ -76,23 +68,23 @@ class Sampler(nn.Module):
         return torch.log_softmax(logits, dim=-1, dtype=torch.float32)
 
     def greedy_sample(self, probs: torch.Tensor) -> torch.Tensor:
-        return probs.argmax(dim=1).view(-1)
+        return probs.argmax(dim=-1).view(-1)
 
     def random_sample(
         self,
         probs: torch.Tensor,
-        generators: Optional[List[torch.Generator]],
+        generators: List[Optional[torch.Generator]],
         no_generator: bool,
     ) -> torch.Tensor:
         q = torch.empty_like(probs)
         if no_generator:
             q.exponential_()
         else:
-            assert generators is not None and len(generators) == probs.shape[0]
+            assert len(generators) == probs.shape[0]
             # TODO(woosuk): Optimize this.
             for i, generator in enumerate(generators):
                 q[i].exponential_(generator=generator)
-        return probs.div_(q).argmax(dim=1).view(-1)
+        return probs.div_(q).argmax(dim=-1).view(-1)
 
     def sample(
         self,
