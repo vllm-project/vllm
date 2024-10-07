@@ -62,7 +62,8 @@ def _check_vllm_model_init(model: Union[Type[object], object]) -> bool:
     missing_kws = tuple(kw for kw in vllm_kws
                         if not supports_kw(model_init, kw))
 
-    if missing_kws and isinstance(model, nn.Module):
+    if missing_kws and (isinstance(model, type)
+                        and issubclass(model, nn.Module)):
         logger.warning(
             "The model (%s) is missing "
             "vLLM-specific keywords from its initializer: %s",
@@ -82,7 +83,8 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
     missing_kws = tuple(kw for kw in vllm_kws
                         if not supports_kw(model_forward, kw))
 
-    if missing_kws and isinstance(model, nn.Module):
+    if missing_kws and (isinstance(model, type)
+                        and issubclass(model, nn.Module)):
         logger.warning(
             "The model (%s) is missing "
             "vLLM-specific keywords from its initializer: %s",
