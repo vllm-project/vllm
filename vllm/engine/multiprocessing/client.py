@@ -457,7 +457,7 @@ class MQLLMEngineClient:
         temperature = params.temperature
         length_penalty = params.length_penalty
 
-        tokenizer = await self.get_tokenizer(None)
+        tokenizer = await self.get_tokenizer(lora_request=None)
         tokenizedPrompt = prompt if isinstance(
             prompt, list) else tokenizer.encode(prompt)
         tokenizedLength = len(tokenizedPrompt)
