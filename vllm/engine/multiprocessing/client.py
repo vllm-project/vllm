@@ -3,7 +3,7 @@ import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
-                    Union, overload)
+                    Union, List, overload)
 
 import cloudpickle
 import zmq
@@ -26,13 +26,14 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
+from vllm.entrypoints.llm import BeamSearchSequence
 from vllm.envs import VLLM_RPC_TIMEOUT
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import CompletionOutput, EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import deprecate_kwargs
 
@@ -440,6 +441,103 @@ class MQLLMEngineClient:
         return self._process_request(prompt, sampling_params, request_id,
                                      lora_request, trace_headers,
                                      prompt_adapter_request, priority)
+
+    async def beam_search(
+        self,
+        prompt: Union[PromptType, List[int]],
+        request_id: str,
+        params: BeamSearchParams,
+    ) -> AsyncGenerator[RequestOutput, None]:
+
+        beam_width = params.beam_width
+        max_tokens = params.max_tokens
+        ignore_eos = params.ignore_eos
+        temperature = params.temperature
+
+        tokenizer = await self.get_tokenizer()
+        tokenizedPrompt = prompt if isinstance(
+            prompt, list) else tokenizer.encode(prompt)
+        tokenizedLength = len(tokenizedPrompt)
+
+        beam_search_params = SamplingParams(logprobs=2 * beam_width,
+                                            max_tokens=1,
+                                            temperature=temperature)
+        all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
+        completed = []
+
+        for _ in range(max_tokens):
+            prompts_batch = [
+                TokensPrompt(prompt_token_ids=beam.tokens)
+                for beam in all_beams
+            ]
+
+            tasks = []
+
+            request_id = f"beam_search-{random_uuid()}"
+            for i, individual_prompt in enumerate(prompts_batch):
+                request_id_item = f"{request_id}-{i}"
+                task = asyncio.create_task(
+                    collect_from_async_generator(
+                        self.generate(individual_prompt, beam_search_params,
+                                      request_id_item)))
+                tasks.append(task)
+
+            output = await asyncio.gather(*tasks)
+
+            output = [x[0] for x in output]
+
+            logger.info(output)
+
+            new_beams = []
+            for i, current_beam in enumerate(all_beams):
+                result = output[i]
+
+                if result.outputs[0].logprobs is not None:
+                    logprobs = result.outputs[0].logprobs[0]
+                    for token_id, logprob_obj in logprobs.items():
+                        new_beam = BeamSearchSequence(
+                            tokens=current_beam.tokens + [token_id],
+                            cum_logprob=current_beam.cum_logprob +
+                            logprob_obj.logprob)
+
+                        if token_id == tokenizer.eos_token_id and \
+                            not ignore_eos:
+                            completed.append(new_beam)
+                        else:
+                            new_beams.append(new_beam)
+
+            sorted_beams = sorted(new_beams,
+                                  key=lambda x: x.cum_logprob,
+                                  reverse=True)
+            all_beams = sorted_beams[:beam_width]
+
+        completed.extend(all_beams)
+        sorted_completed = sorted(completed,
+                                  key=lambda x: x.cum_logprob,
+                                  reverse=True)
+        best_beams = sorted_completed[:beam_width]
+
+        for beam in best_beams:
+            beam.text = tokenizer.decode(beam.tokens[tokenizedLength:])
+
+        beam_search_output = RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            outputs=[
+                CompletionOutput(
+                    text=beam.text,
+                    cumulative_logprob=beam.cum_logprob,
+                    token_ids=beam.tokens,
+                    index=i,
+                    logprobs=beam.cum_logprob,
+                ) for (i, beam) in enumerate(best_beams)
+            ],
+            finished=True,
+            prompt_token_ids=tokenizedPrompt,
+            prompt_logprobs=None)
+
+        yield beam_search_output, RequestOutput
+
 
     @overload  # DEPRECATED
     def encode(
