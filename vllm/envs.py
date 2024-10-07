@@ -12,6 +12,11 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_TEST_DYNAMO_GRAPH_CAPTURE: int = 0
+    VLLM_DYNAMO_USE_CUSTOM_DISPATCHER: bool = True
+    VLLM_TEST_COMPILE_NO_CUSTOM_OPS: int = 0
+    VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE: bool = True
+    VLLM_TORCH_COMPILE_FUSION_DUMP: List[str] = []
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
@@ -215,6 +220,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+
+    # Internal flag for dumping the model graph before and after fusion
+    "VLLM_TORCH_COMPILE_FUSION_DUMP":
+    lambda: list(
+        os.environ.get("VLLM_TORCH_COMPILE_FUSION_DUMP", "").split(",")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
