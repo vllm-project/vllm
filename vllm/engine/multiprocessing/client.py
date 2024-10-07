@@ -2,8 +2,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
-                    Union, List, overload)
+from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
+                    Optional, Union, overload)
 
 import cloudpickle
 import zmq
@@ -31,11 +31,13 @@ from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import deprecate_kwargs
+from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
+                        random_uuid)
 
 logger = init_logger(__name__)
 
@@ -447,6 +449,7 @@ class MQLLMEngineClient:
         prompt: Union[PromptType, List[int]],
         request_id: str,
         params: BeamSearchParams,
+        lora_request: Optional[LoRARequest] = None
     ) -> AsyncGenerator[RequestOutput, None]:
 
         beam_width = params.beam_width
@@ -454,7 +457,7 @@ class MQLLMEngineClient:
         ignore_eos = params.ignore_eos
         temperature = params.temperature
 
-        tokenizer = await self.get_tokenizer()
+        tokenizer = await self.get_tokenizer(lora_request)
         tokenizedPrompt = prompt if isinstance(
             prompt, list) else tokenizer.encode(prompt)
         tokenizedLength = len(tokenizedPrompt)
@@ -536,8 +539,9 @@ class MQLLMEngineClient:
             prompt_token_ids=tokenizedPrompt,
             prompt_logprobs=None)
 
-        yield beam_search_output, RequestOutput
+        logger.info(beam_search_output)
 
+        yield beam_search_output
 
     @overload  # DEPRECATED
     def encode(
