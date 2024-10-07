@@ -1424,6 +1424,7 @@ def migrate_to_cpu():
     import habana_frameworks.torch as htorch
     htorch.utils.internal.is_lazy.return_value = False
 
+
 def get_beam_search_score(
     tokens: List[int],
     cumulative_logprob: float,
