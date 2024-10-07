@@ -16,7 +16,7 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 
 Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM either [without compilation](https://docs.vllm.ai/en/latest/getting_started/installation.html#build-from-source-without-compilation) or [with compilation](https://docs.vllm.ai/en/latest/getting_started/installation.html#build-from-source-with-compilation).
 
-### Testing
+## Testing
 
 ```bash
 pip install -r requirements-dev.txt
