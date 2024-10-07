@@ -740,9 +740,14 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
+        best_of: Optional[int] = None,
+        use_beam_search: bool = False,
         images: Optional[PromptImageInput] = None,
     ) -> List[Tuple[List[int], str]]:
-        greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
+        greedy_params = SamplingParams(temperature=0.0,
+                                       max_tokens=max_tokens,
+                                       best_of=best_of,
+                                       use_beam_search=use_beam_search)
         outputs = self.generate(prompts, greedy_params, images=images)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
@@ -753,6 +758,8 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         num_prompt_logprobs: Optional[int] = None,
+        best_of: Optional[int] = None,
+        use_beam_search: bool = False,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -764,7 +771,9 @@ class VllmRunner:
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=num_prompt_logprobs,
-            stop_token_ids=stop_token_ids)
+            stop_token_ids=stop_token_ids,
+            best_of=best_of,
+            use_beam_search=use_beam_search)
 
         return self.generate_w_logprobs(prompts,
                                         greedy_logprobs_params,
