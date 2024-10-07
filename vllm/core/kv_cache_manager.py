@@ -1,5 +1,7 @@
 from typing import Dict, List, Optional, Set, Tuple
 
+import numpy as np
+
 from vllm.request import Request
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -26,9 +28,7 @@ class KVCacheManager:
         # Reserve block id 0 for padding.
         self.free_block_ids = list(range(num_gpu_blocks))
         self.req_to_block_ids: Dict[str, List[int]] = {}
-        self.block_id_to_reqs: List[Set[str]] = [
-            set() for _ in range(num_gpu_blocks)
-        ]
+        self.ref_cnts = np.zeros(num_gpu_blocks, dtype=np.int32)
 
     def get_computed_blocks(self, request: Request) -> List[int]:
         return []
@@ -51,8 +51,7 @@ class KVCacheManager:
         # Allocate new blocks.
         new_block_ids = self._get_new_blocks(num_new_blocks)
         req_block_ids.extend(new_block_ids)
-        for block_id in new_block_ids:
-            self.block_id_to_reqs[block_id].add(request.request_id)
+        self.ref_cnts[new_block_ids] += 1 
         return new_block_ids
 
     def allocate_slots(
@@ -68,18 +67,17 @@ class KVCacheManager:
             return None
 
         new_block_ids = self._get_new_blocks(num_new_blocks)
-        self.req_to_block_ids[request.request_id] = (computed_block_ids +
-                                                     new_block_ids)
-        for block_id in new_block_ids:
-            self.block_id_to_reqs[block_id].add(request.request_id)
+        block_ids = computed_block_ids + new_block_ids
+        self.req_to_block_ids[request.request_id] = block_ids
+        self.ref_cnts[block_ids] += 1
         return new_block_ids
 
     def free(self, request: Request) -> None:
         block_ids = self.req_to_block_ids.pop(request.request_id)
+        self.ref_cnts[block_ids] -= 1
         for block_id in block_ids:
-            reqs = self.block_id_to_reqs[block_id]
-            reqs.remove(request.request_id)
-            if not reqs:
+            ref_cnt = self.ref_cnts[block_id]
+            if ref_cnt == 0:
                 self.free_block_ids.append(block_id)
 
     def _get_new_blocks(self, num_blocks: int) -> List[int]:
