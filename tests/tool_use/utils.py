@@ -73,14 +73,6 @@ CONFIGS: Dict[str, ServerConfig] = {
         "supports_parallel":
         False,
     },
-    "granite": {
-        "model":
-        "ibm-granite/granite-20b-functioncalling",
-        "arguments": [
-            "--tool-call-parser", "granite", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
-        ],
-    },
     "mistral": {
         "model":
         "mistralai/Mistral-7B-Instruct-v0.3",
