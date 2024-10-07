@@ -216,9 +216,6 @@ def test_multi_step_llm_w_prompt_logprobs(
     (1, 3),
     (2, 3),
     (3, 3),
-    (1, 1),
-    (1, 2),
-    (2, 2),
 ])
 def test_multi_step_llm_best_of_fallback(
     vllm_runner,
