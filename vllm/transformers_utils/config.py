@@ -209,10 +209,20 @@ def get_config(
             cloudpickle.register_pickle_by_value(transformers_modules)
             # Ray vendors its own version of cloudpickle
             ray.cloudpickle.register_pickle_by_value(transformers_modules)
-        # ignore import errors in the case that trust_remote_code is set
-        # unnecessarily and transformers_modules does not exist
-        except ImportError:
-            pass
+
+        except Exception as e:
+            if isinstance(e, ImportError) and e.name == 'transformers_modules':
+                logger.debug(
+                    "Could not import transformers_modules used for remote"
+                    " code. If remote code is not needed remove"
+                    " `--trust-remote-code`.")
+            else:
+                logger.warning(
+                    "Unable to register remote classes used by"
+                    " trust_remote_code with by-value serialization. This may"
+                    " lead to a later error. If remote code is not needed"
+                    " remove `--trust-remote-code`",
+                    exc_info=e)
 
     return config
 
