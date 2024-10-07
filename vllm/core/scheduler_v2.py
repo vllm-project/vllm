@@ -54,7 +54,7 @@ class Scheduler:
 
         # Priority queues for requests.
         self.waiting: Deque[Request] = deque()
-        self.running: Deque[Request] = deque()
+        self.running: List[Request] = []
 
         self.finished_req_ids: Set[str] = set()
         self.aborted_req_ids: Set[str] = set()
@@ -62,7 +62,6 @@ class Scheduler:
         self.cum = 0
 
     def schedule(self) -> "SchedulerOutput":
-        start = time.time()
         scheduled_new_reqs: List[Request] = []
         scheduled_resumed_reqs: List[Request] = []
         scheduled_running_reqs: List[Request] = []
@@ -73,12 +72,12 @@ class Scheduler:
         token_budget = self.max_num_scheduled_tokens
 
         # First, schedule the RUNNING requests.
-        new_running: Deque[Request] = deque()
-        while self.running:
+        req_index = 0
+        while req_index < len(self.running):
             if token_budget == 0:
                 break
 
-            request = self.running[0]
+            request = self.running[req_index]
             num_tokens = request.num_tokens - request.num_computed_tokens
             num_tokens = min(num_tokens, token_budget)
             assert num_tokens > 0
@@ -101,17 +100,15 @@ class Scheduler:
                         break
                 else:
                     # The request can be scheduled.
-                    self.running.popleft()
-                    new_running.append(request)
                     scheduled_running_reqs.append(request)
 
                     req_to_new_block_ids[request.request_id] = new_block_ids
                     num_scheduled_tokens[request.request_id] = num_tokens
                     token_budget -= num_tokens
-                    request.status = RequestStatus.RUNNING
+                    req_index += 1
                     break
-        self.running = new_running
 
+        start = time.time()
         # Next, schedule the WAITING requests.
         while self.waiting:
             if preempted_reqs:
@@ -209,7 +206,7 @@ class Scheduler:
     ) -> List[Request]:
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.numpy()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        new_running: Deque[Request] = deque()
+        new_running: List[Request] = []
         finished_reqs: List[Request] = []
         for request in self.running:
             req_id = request.request_id
