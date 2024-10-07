@@ -225,11 +225,8 @@ if __name__ == "__main__":
         "--quantization",
         "-q",
         type=str,
-        choices=['awq', 'gptq', 'squeezellm', 'marlin', 'smoothquant', None],
-        default=None,
-        help="The method used to quantize the model weights, "
-        "options are \"marlin\", \"awq\", \"gptq\", "
-        "\"squeezellm\", \"smoothquant\"")
+        choices=[*QUANTIZATION_METHODS, None],
+        default=None)
     parser.add_argument("--dtype",
                         type=str,
                         default='auto',
