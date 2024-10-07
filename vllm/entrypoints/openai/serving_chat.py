@@ -237,19 +237,25 @@ class OpenAIServingChat(OpenAIServing):
                 log_tracing_disabled_warning()
 
             if isinstance(sampling_params, BeamSearchParams):
-                if not isinstance(self.engine_client, AsyncLLMEngine) and \
-                    not isinstance(self.engine_client, MQLLMEngineClient):
+                if isinstance(self.engine_client, AsyncLLMEngine):
+                    result_generator = self.engine_client.beam_search(
+                        engine_inputs['prompt_token_ids'],
+                        request_id,
+                        sampling_params,
+                    )
+                elif isinstance(self.engine_client, MQLLMEngineClient):
+                    result_generator = self.engine_client.beam_search(
+                        engine_inputs['prompt_token_ids'],
+                        request_id,
+                        sampling_params,
+                        lora_request,
+                    )
+                else:
                     raise ValueError(
                         "Beam search in the API server is only supported with"
                         " AsyncLLMEngine and MQLLMEngineClient. please add "
                         "`--disable-frontend-multiprocessing` to "
                         "use beam search.")
-                result_generator = self.engine_client.beam_search(
-                    engine_inputs['prompt_token_ids'],
-                    request_id,
-                    sampling_params,
-                    lora_request,
-                )
             else:
                 result_generator = self.engine_client.generate(
                     engine_inputs,
