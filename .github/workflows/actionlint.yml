@@ -32,11 +32,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: "Download actionlint"
+      - name: "Run actionlint"
         run: |
-          docker build --tag actionlint - < .github/workflows/actionlint.dockerfile
-
-      - name: "Check workflow files"
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-          docker run --volume="${PWD}:/repo" --workdir=/repo actionlint -color
+          tools/actionlint.sh -color
