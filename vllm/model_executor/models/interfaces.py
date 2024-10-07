@@ -2,7 +2,6 @@ from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
                     Protocol, Type, Union, overload, runtime_checkable)
 
 import torch
-import torch.nn as nn
 from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
@@ -13,6 +12,45 @@ if TYPE_CHECKING:
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
+
+
+@runtime_checkable
+class SupportsInputEmbeds(Protocol):
+    """The interface required to support embedding inputs."""
+
+    def forward(
+        self,
+        *,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        ...
+
+
+@overload
+def supports_input_embeds(
+        model: Type[object]) -> TypeIs[Type[SupportsInputEmbeds]]:
+    ...
+
+
+@overload
+def supports_input_embeds(model: object) -> TypeIs[SupportsInputEmbeds]:
+    ...
+
+
+def supports_input_embeds(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsInputEmbeds]], TypeIs[SupportsInputEmbeds]]:
+    """Check if the model supports input_embeds and input_embeds_masks."""
+    model_forward = getattr(model, "forward", None)
+    if not callable(model_forward):
+        return False
+
+    required_kws = ("inputs_embeds", "inputs_embeds_masks")
+    missing_kws = tuple(kw for kw in required_kws
+                        if not supports_kw(model_forward, kw))
+
+    return len(missing_kws) == 0
 
 
 @runtime_checkable
@@ -308,10 +346,3 @@ def has_inner_state(
         return isinstance(model, _HasInnerStateType)
 
     return isinstance(model, HasInnerState)
-
-
-def supports_input_embeds(model: nn.Module) -> bool:
-    """Check if the model supports input_embeds and input_embeds_masks."""
-    model_forward = model.forward
-    return (supports_kw(model_forward, "inputs_embeds")
-            and supports_kw(model_forward, "inputs_embeds_masks"))
