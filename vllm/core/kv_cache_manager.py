@@ -38,6 +38,8 @@ class KVCacheManager:
         request: Request,
         num_tokens: int,
     ) -> Optional[List[int]]:
+        # NOTE(woosuk): This method takes up to 5% of the total runtime.
+        # OPTIMIZE THIS.
         num_blocks = cdiv(request.num_computed_tokens + num_tokens,
                           self.block_size)
         req_block_ids = self.req_to_block_ids[request.request_id]
@@ -51,7 +53,7 @@ class KVCacheManager:
         # Allocate new blocks.
         new_block_ids = self._get_new_blocks(num_new_blocks)
         req_block_ids.extend(new_block_ids)
-        self.ref_cnts[new_block_ids] += 1 
+        self.ref_cnts[new_block_ids] += 1
         return new_block_ids
 
     def allocate_slots(
