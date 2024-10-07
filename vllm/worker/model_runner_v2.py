@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Tuple, Type, TypeVar, Union)
@@ -80,6 +81,10 @@ class GPUModelRunner:
             pin_memory=self.pin_memory,
         )
 
+        self.cum1 = 0
+        self.cum2 = 0
+        self.cum3 = 0
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
         # Keep the states of the pre-empted requests.
@@ -104,19 +109,23 @@ class GPUModelRunner:
         for req_data in scheduler_output.scheduled_running_reqs:
             req_id = req_data.req_id
             req_state = self.requests[req_id]
-            req_state.block_ids.extend(req_data.new_block_ids)
-            req_state.num_computed_tokens = req_data.num_computed_tokens
-
-            # Update the block table and num_computed_tokens.
             req_index = self.persistent_batch.req_id_to_index[req_id]
-            end_block_index = len(req_state.block_ids)
-            start_block_index = end_block_index - len(req_data.new_block_ids)
-            self.persistent_batch.block_table_cpu[
-                req_index,
-                start_block_index:end_block_index] = torch.as_tensor(
-                    req_data.new_block_ids, dtype=torch.int32, device="cpu")
+
+            # Update the num_computed_tokens.
+            req_state.num_computed_tokens = req_data.num_computed_tokens
             self.persistent_batch.num_computed_tokens_cpu[req_index] = (
                 req_data.num_computed_tokens)
+
+            # Update the block table.
+            num_new_blocks = len(req_data.new_block_ids)
+            if num_new_blocks == 0:
+                continue
+            start_block_index = len(req_state.block_ids)
+            req_state.block_ids.extend(req_data.new_block_ids)
+            for i, block_id in enumerate(req_data.new_block_ids):
+                self.persistent_batch.block_table_cpu[req_index,
+                                                      start_block_index +
+                                                      i] = block_id
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -297,9 +306,17 @@ class GPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
+        start = time.time()
         self._update_states(scheduler_output)
+        end = time.time()
+        self.cum1 += end - start
+
+        start = time.time()
         inputs = self._prepare_inputs(scheduler_output)
         input_ids, positions, attn_metadata, logits_indices = inputs
+        end = time.time()
+        self.cum2 += end - start
+
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -318,6 +335,8 @@ class GPUModelRunner:
 
         # CPU-GPU synchronization happens here.
         # TODO: Optimize.
+        # torch.cuda.synchronize()
+        start = time.time()
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
         num_reqs = self.persistent_batch.num_reqs
         for i, req_id in enumerate(self.persistent_batch.req_ids[:num_reqs]):
@@ -354,6 +373,11 @@ class GPUModelRunner:
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
         )
+        end = time.time()
+        self.cum3 += end - start
+        # print(f"cum1: {self.cum1 * 1000:.3f} ms")
+        # print(f"cum2: {self.cum2 * 1000:.3f} ms")
+        # print(f"cum3: {self.cum3 * 1000:.3f} ms")
         return model_runner_output
 
     def load_model(self) -> None:
