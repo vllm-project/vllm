@@ -89,15 +89,8 @@ def test_default_processor_is_a_noop():
     assert proc_inputs is proc_outputs
 
 
-@pytest.mark.parametrize("init_num_crops,inference_num_crops", [
-    (None, None),
-    (NUM_CROPS_OVERRIDE, None),
-    (DEFAULT_NUM_CROPS, NUM_CROPS_OVERRIDE),
-])
-def test_input_processor_kwargs(use_processor_mock, init_num_crops,
-                                inference_num_crops):
-    """Ensure input processors can use processor kwargs."""
-    dummy_registry = InputRegistry()
+def _get_num_crops_info(init_num_crops: int, inference_num_crops: int):
+    """Get the init / inference kwargs and expected num_crops for this test."""
     # If we have a value for num_crops, pass the override value and make
     # sure we get that value as a return-value from out mock processor,
     # otherwise fall back to the default value
@@ -113,6 +106,21 @@ def test_input_processor_kwargs(use_processor_mock, init_num_crops,
         expected_seq_count = init_num_crops
     else:
         expected_seq_count = DEFAULT_NUM_CROPS
+    return init_kwargs, inference_kwargs, expected_seq_count
+
+
+@pytest.mark.parametrize("init_num_crops,inference_num_crops", [
+    (None, None),
+    (NUM_CROPS_OVERRIDE, None),
+    (DEFAULT_NUM_CROPS, NUM_CROPS_OVERRIDE),
+])
+def test_input_processor_kwargs(use_processor_mock, init_num_crops,
+                                inference_num_crops):
+    """Ensure input processors can use processor kwargs."""
+    dummy_registry = InputRegistry()
+
+    init_kwargs, inference_kwargs, expected_seq_count = _get_num_crops_info(
+        init_num_crops, inference_num_crops)
 
     ctx = build_model_context(DUMMY_MODEL_ID, mm_processor_kwargs=init_kwargs)
     processor = dummy_registry.create_input_processor(ctx.model_config)
@@ -299,19 +307,8 @@ def test_default_mapper_with_processer_kwargs(image_assets, num_crops):
 def test_custom_mapper_kwarg_overrides(image_assets, init_num_crops,
                                        inference_num_crops):
     """Ensure custom mappers can use processor kwargs."""
-    init_kwargs = None if init_num_crops is None else {
-        "num_crops": init_num_crops
-    }
-    inference_kwargs = None if inference_num_crops is None else {
-        "num_crops": inference_num_crops
-    }
-    # Priority: inference -> init -> model config
-    if inference_num_crops is not None:
-        expected_seq_count = inference_num_crops
-    elif init_num_crops is not None:
-        expected_seq_count = init_num_crops
-    else:
-        expected_seq_count = DEFAULT_NUM_CROPS
+    init_kwargs, inference_kwargs, expected_seq_count = _get_num_crops_info(
+        init_num_crops, inference_num_crops)
 
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
                               trust_remote_code=True,
