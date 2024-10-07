@@ -334,6 +334,7 @@ def compare_all_settings(model: str,
         all_envs: A list of environment dictionaries to pass to the API server.
     """
 
+    trust_remote_code = False
     for args in all_args:
         if "--trust-remote-code" in args:
             trust_remote_code = True
