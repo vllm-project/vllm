@@ -6,7 +6,9 @@ from typing import Dict, Sequence, Union
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest, DeltaFunctionCall, DeltaMessage,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, 
+                                              DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
@@ -40,8 +42,11 @@ class Granite20bFCToolParser(ToolParser):
         self.tool_start_token = self.bot_token
         self.tool_call_regex = re.compile(r"<function_call>\s*")
 
-    def extract_tool_calls(self,
-                           model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(
+        self,
+        model_output: str, 
+        request: ChatCompletionRequest
+    ) -> ExtractedToolCallInformation:
         if self.tool_start_token not in model_output:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
