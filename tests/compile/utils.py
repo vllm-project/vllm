@@ -71,7 +71,7 @@ def check_full_graph_support(model,
                              optimization_level,
                              tp_size=1):
     # make sure these models can be captured in full graph mode
-    os.environ["VLLM_TEST_TORCH_COMPILE_LEVEL"] = str(optimization_level)
+    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(optimization_level)
     os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
 
     # Inductor doesn't support fp8/gptq_marlin_24 yet.

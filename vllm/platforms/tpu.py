@@ -1,6 +1,15 @@
+import os
+
 import torch
 
+from vllm.plugins import set_torch_compile_backend
+
 from .interface import Platform, PlatformEnum
+
+if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
+    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "2"
+
+set_torch_compile_backend("openxla")
 
 
 class TpuPlatform(Platform):

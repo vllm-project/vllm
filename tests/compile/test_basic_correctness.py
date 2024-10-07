@@ -21,10 +21,10 @@ def test_compile_correctness(model_info, pp_size, tp_size):
     model_args = model_info[1]
     all_args = [["--enforce-eager"] + model_args + ["--max_model_len", "1024"]
                 + ["-pp", str(pp_size)] + ["-tp", str(tp_size)]] * 3
-    # don't test VLLM_TEST_TORCH_COMPILE_LEVEL == 2 case
+    # don't test VLLM_TORCH_COMPILE_LEVEL == 3 case
     # inductor will change the output, so we cannot compare them.
     all_envs: List[Optional[Dict[str, str]]] = [{
-        "VLLM_TEST_TORCH_COMPILE_LEVEL":
+        "VLLM_TORCH_COMPILE_LEVEL":
         str(i)
-    } for i in range(2)]
+    } for i in range(3)]
     compare_all_settings(model, all_args, all_envs)

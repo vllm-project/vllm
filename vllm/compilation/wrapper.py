@@ -36,8 +36,7 @@ class TorchCompileWrapperWithCustomDispatcher:
             backend = get_torch_compile_backend()
             if backend is None:
                 from vllm.compilation.backends import select_default_backend
-                backend = select_default_backend(
-                    envs.VLLM_TEST_TORCH_COMPILE_LEVEL)
+                backend = select_default_backend(envs.VLLM_TORCH_COMPILE_LEVEL)
 
             compiled_callable = torch.compile(
                 self.forward,
@@ -53,7 +52,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
-            envs.VLLM_DYNAMO_USE_CUSTOM_DISPATCHER
+            envs.VLLM_TORCH_COMPILE_LEVEL >= 2
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.

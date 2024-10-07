@@ -206,14 +206,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # 1: capture the graph, run in eager mode (seconds of compilation time)
     # 2: capture the graph, compile with inductor (minutes of compilation time)
     # 3: capture the graph, compile with inductor max-autotune (dozens of minutes of compilation time) # noqa
-    "VLLM_TEST_TORCH_COMPILE_LEVEL":
-    lambda: int(os.environ.get("VLLM_TEST_TORCH_COMPILE_LEVEL", "0")),
-
-    # Internal flag for Dynamo testing
-    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
-    lambda:
-    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
-     ("true", "1")),
+    "VLLM_TORCH_COMPILE_LEVEL":
+    lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":

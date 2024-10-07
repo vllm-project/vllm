@@ -24,7 +24,7 @@ def support_compile_llama_style(cls: type):
 
     def __init__(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
-        self._use_torch_compile = envs.VLLM_TEST_TORCH_COMPILE_LEVEL > 0
+        self._use_torch_compile = envs.VLLM_TORCH_COMPILE_LEVEL > 0
         if self._use_torch_compile:
             TorchCompileWrapperWithCustomDispatcher.__init__(self)
 
