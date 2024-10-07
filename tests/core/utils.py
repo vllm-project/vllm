@@ -14,9 +14,10 @@ def create_dummy_prompt(
     prompt_length: int,
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
-    use_beam_search: bool = False,
     best_of: int = 1,
     prompt_tokens: Optional[List[int]] = None,
+    min_tokens: int = 0,
+    max_tokens: int = 16,
 ) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
@@ -33,8 +34,9 @@ def create_dummy_prompt(
                               seqs=[prompt],
                               arrival_time=time.time(),
                               sampling_params=SamplingParams(
-                                  use_beam_search=use_beam_search,
-                                  best_of=best_of),
+                                  best_of=best_of,
+                                  max_tokens=max_tokens,
+                                  min_tokens=min_tokens),
                               lora_request=lora_request)
 
     return prompt, seq_group
@@ -46,7 +48,6 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_length: int,
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
-    use_beam_search: bool = False,
     best_of: int = 1,
 ) -> Tuple[Sequence, Sequence, SequenceGroup]:
     if not block_size:
@@ -77,9 +78,7 @@ def create_dummy_prompt_encoder_decoder(
 
     seq_group = SequenceGroup(request_id=request_id,
                               seqs=[decoder_prompt],
-                              sampling_params=SamplingParams(
-                                  use_beam_search=use_beam_search,
-                                  best_of=best_of),
+                              sampling_params=SamplingParams(best_of=best_of),
                               arrival_time=time.time(),
                               lora_request=lora_request,
                               encoder_seq=encoder_prompt)
