@@ -455,8 +455,8 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
     def make_model_input_from_broadcasted_tensor_dict(
         self,
         tensor_dict: Dict[str, Any],
-    ) -> ModelInputForCPU:
-        return ModelInputForCPU.from_broadcasted_tensor_dict(
+    ) -> ModelInputForCPUWithSamplingMetadata:
+        return ModelInputForCPUWithSamplingMetadata.from_broadcasted_tensor_dict(  # noqa: E501
             tensor_dict,
             attn_backend=self.attn_backend,
         )
