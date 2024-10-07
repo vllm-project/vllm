@@ -3,9 +3,9 @@ import warnings
 import pytest
 import torch.cuda
 
-from vllm.model_executor.models import (supports_embedding,
+from vllm.model_executor.models import (is_embedding_model,
                                         supports_multimodal,
-                                        supports_text_generation)
+                                        is_text_generation_model)
 from vllm.model_executor.models.registry import (_EMBEDDING_MODELS,
                                                  _MULTIMODAL_MODELS,
                                                  _SPECULATIVE_DECODING_MODELS,
@@ -24,11 +24,11 @@ def test_registry_imports(model_arch):
     if model_arch in _SPECULATIVE_DECODING_MODELS:
         pass  # Ignore these models which do not have a unified format
     else:
-        assert supports_text_generation(model_cls) is (
+        assert is_text_generation_model(model_cls) is (
             model_arch in _TEXT_GENERATION_MODELS
             or model_arch in _MULTIMODAL_MODELS)
 
-        assert supports_embedding(model_cls) is (model_arch
+        assert is_embedding_model(model_cls) is (model_arch
                                                  in _EMBEDDING_MODELS)
 
         assert supports_multimodal(model_cls) is (model_arch

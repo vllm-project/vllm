@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils import is_hip
 
 from .interfaces import supports_multimodal, supports_pp
-from .interfaces_base import supports_embedding, supports_text_generation
+from .interfaces_base import is_embedding_model, is_text_generation_model
 
 logger = init_logger(__name__)
 
@@ -328,7 +328,7 @@ class ModelRegistry:
             logger.warning("No model architectures are specified")
 
         is_txt_gen = partial(ModelRegistry._check_stateless,
-                             supports_text_generation,
+                             is_text_generation_model,
                              default=False)
 
         return any(is_txt_gen(arch) for arch in architectures)
@@ -341,7 +341,7 @@ class ModelRegistry:
             logger.warning("No model architectures are specified")
 
         is_emb = partial(ModelRegistry._check_stateless,
-                         supports_embedding,
+                         is_embedding_model,
                          default=False)
 
         return any(is_emb(arch) for arch in architectures)
