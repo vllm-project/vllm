@@ -24,7 +24,8 @@ class RMSNorm(CustomOp):
 
         self.hidden_size = hidden_size
         self.variance_epsilon = eps
-        self.var_hidden_size = var_hidden_size
+        self.variance_size_override = (None if var_hidden_size == hidden_size
+                                       else var_hidden_size)
 
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
@@ -45,15 +46,15 @@ class RMSNorm(CustomOp):
             raise ValueError("Expected hidden_size to be "
                              f"{self.hidden_size}, but found: {hidden_size}")
 
-        if self.var_hidden_size is None:
+        if self.variance_size_override is None:
             x_var = x
         else:
-            if hidden_size < self.var_hidden_size:
+            if hidden_size < self.variance_size_override:
                 raise ValueError(
                     "Expected hidden_size to be at least "
-                    f"{self.var_hidden_size}, but found: {hidden_size}")
+                    f"{self.variance_size_override}, but found: {hidden_size}")
 
-            x_var = x[:, :, :self.var_hidden_size]
+            x_var = x[:, :, :self.variance_size_override]
 
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
 
@@ -69,7 +70,7 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if self.var_hidden_size is not None:
+        if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
         from vllm import _custom_ops as ops
@@ -96,7 +97,7 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if self.var_hidden_size is not None:
+        if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
         from vllm._ipex_ops import ipex_ops as ops

@@ -72,6 +72,8 @@ class InternVisionEmbeddings(nn.Module):
 
     def _get_position_embedding(self, H: int, W: int) -> torch.Tensor:
         position_embedding = self.position_embedding
+        if self.num_patches == H * W:
+            return position_embedding
 
         return torch.cat(
             [
@@ -102,27 +104,34 @@ class InternParallelAttention(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        *,
+        num_dummy_heads: int = 0,
+    ) -> None:
         super().__init__()
+
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
                 f'embed_dim must be divisible by num_heads '
                 f'(got `embed_dim`: {self.embed_dim} and `num_heads`:'
                 f' {self.num_heads}).')
 
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+        # Additional dummy heads are used to enable TP for common GPU counts.
+        self.dummy_dim = (num_dummy_heads + self.num_heads) * self.head_dim
+        self.num_heads_per_partition = divide(num_dummy_heads + self.num_heads,
+                                              self.tp_size)
+
         self.scale = self.head_dim**-0.5
         self.qkv = QKVParallelLinear(
             self.embed_dim,
             self.head_dim,
-            self.num_heads,
+            num_dummy_heads + self.num_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
         )
@@ -130,16 +139,20 @@ class InternParallelAttention(nn.Module):
         self.qk_normalization = config.qk_normalization
 
         if self.qk_normalization:
-            self.q_norm = RMSNorm(self.embed_dim, eps=config.layer_norm_eps)
-            self.k_norm = RMSNorm(self.embed_dim, eps=config.layer_norm_eps)
+            self.q_norm = RMSNorm(self.dummy_dim,
+                                  eps=config.layer_norm_eps,
+                                  var_hidden_size=self.embed_dim)
+            self.k_norm = RMSNorm(self.dummy_dim,
+                                  eps=config.layer_norm_eps,
+                                  var_hidden_size=self.embed_dim)
 
         self.proj = RowParallelLinear(
-            self.embed_dim,
+            self.dummy_dim,
             self.embed_dim,
             quant_config=quant_config,
         )
 
-    def _apply_qk_norm(self, q, k):
+    def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
@@ -152,7 +165,7 @@ class InternParallelAttention(nn.Module):
             k = splitter(k)[self.tp_rank]
         return q, k
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, _ = x.shape
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
@@ -174,8 +187,14 @@ class InternParallelAttention(nn.Module):
 class InternSdpaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        *,
+        num_dummy_heads: int = 0,
+    ) -> None:
         super().__init__()
+
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -186,20 +205,27 @@ class InternSdpaAttention(nn.Module):
                 f'(got `embed_dim`: {self.embed_dim} and `num_heads`:'
                 f' {self.num_heads}).')
 
+        # Additional dummy heads are used to enable TP for common GPU counts.
+        self.dummy_dim = (num_dummy_heads + self.num_heads) * self.head_dim
+
         self.scale = self.head_dim**-0.5
         self.qkv = nn.Linear(self.embed_dim,
-                             3 * self.embed_dim,
+                             3 * self.dummy_dim,
                              bias=config.qkv_bias)
 
         self.qk_normalization = config.qk_normalization
 
         if self.qk_normalization:
-            self.q_norm = RMSNorm(self.embed_dim, eps=config.layer_norm_eps)
-            self.k_norm = RMSNorm(self.embed_dim, eps=config.layer_norm_eps)
+            self.q_norm = RMSNorm(self.dummy_dim,
+                                  eps=config.layer_norm_eps,
+                                  var_hidden_size=self.embed_dim)
+            self.k_norm = RMSNorm(self.dummy_dim,
+                                  eps=config.layer_norm_eps,
+                                  var_hidden_size=self.embed_dim)
 
-        self.proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.proj = nn.Linear(self.dummy_dim, self.embed_dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
@@ -252,15 +278,22 @@ class InternMLP(nn.Module):
 
 class InternVisionEncoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_dummy_heads: int = 0,
+    ) -> None:
         super().__init__()
+
         self.embed_dim = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.norm_type = config.norm_type
 
-        self.attn = self._init_attn(config, quant_config)
+        self.attn = self._init_attn(config,
+                                    quant_config,
+                                    num_dummy_heads=num_dummy_heads)
 
         self.mlp = InternMLP(config, quant_config=quant_config)
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim,
@@ -273,16 +306,23 @@ class InternVisionEncoderLayer(nn.Module):
         self.ls2 = nn.Parameter(config.initializer_factor *
                                 torch.ones(self.embed_dim))
 
-    def _init_attn(self, config: PretrainedConfig,
-                   quant_config: Optional[QuantizationConfig]):
+    def _init_attn(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig],
+        *,
+        num_dummy_heads: int,
+    ):
         # fallback to sdpa attention if tp unavailable
         tp_size = get_tensor_model_parallel_world_size()
         num_heads = config.num_attention_heads
 
-        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            return InternParallelAttention(config, quant_config=quant_config)
+        if USE_XFORMERS_OPS and (num_heads + num_dummy_heads) % tp_size == 0:
+            return InternParallelAttention(config,
+                                           quant_config=quant_config,
+                                           num_dummy_heads=num_dummy_heads)
 
-        return InternSdpaAttention(config)
+        return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
 
     def forward(
         self,
@@ -299,26 +339,29 @@ class InternVisionEncoderLayer(nn.Module):
 
 class InternVisionEncoder(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        num_dummy_heads: int = 0,
+    ):
         super().__init__()
+
         self.config = config
 
         if num_hidden_layers_override is None:
             num_hidden_layers = config.num_hidden_layers
         else:
             num_hidden_layers = num_hidden_layers_override
+
         self.layers = nn.ModuleList([
-            self._init_encoder_layer(config, quant_config)
+            InternVisionEncoderLayer(config,
+                                     quant_config,
+                                     num_dummy_heads=num_dummy_heads)
             for _ in range(num_hidden_layers)
         ])
-
-    def _init_encoder_layer(self, config: PretrainedConfig,
-                            quant_config: Optional[QuantizationConfig]):
-        return InternVisionEncoderLayer(config=config,
-                                        quant_config=quant_config)
 
     def forward(self, inputs_embeds: torch.Tensor):
 
@@ -331,30 +374,24 @@ class InternVisionEncoder(nn.Module):
 
 class InternVisionModel(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        num_dummy_heads: int = 0,
+    ):
         super().__init__()
+
         self.config = config
 
-        self.embeddings = self._init_embeddings(config)
-        self.encoder = self._init_encoder(
-            config,
-            quant_config,
-            num_hidden_layers_override=num_hidden_layers_override,
-        )
-
-    def _init_embeddings(self, config: PretrainedConfig):
-        return InternVisionEmbeddings(config)
-
-    def _init_encoder(self, config: PretrainedConfig,
-                      quant_config: Optional[QuantizationConfig],
-                      num_hidden_layers_override: Optional[int]):
-        return InternVisionEncoder(
+        self.embeddings = InternVisionEmbeddings(config)
+        self.encoder = InternVisionEncoder(
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            num_dummy_heads=num_dummy_heads,
         )
 
     def get_input_embeddings(self):
