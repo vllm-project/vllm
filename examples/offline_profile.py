@@ -1,14 +1,16 @@
-import argparse
 import inspect
 import json
 import sys
+from argparse import RawTextHelpFormatter
 from dataclasses import asdict, dataclass
 from typing import Optional
 
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.profiler import layerwise_profile
+from vllm.utils import FlexibleArgumentParser
 
 BATCH_SIZE_DEFAULT = 1
 PROMPT_LEN_DEFAULT = 256
@@ -194,7 +196,31 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = FlexibleArgumentParser(description="""
+Profile a model
+
+    example:
+    ```
+    python examples/offline_profile.py \\
+        --model neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8 --batch-size 4 \\
+        --prompt-len 512 --max-num-batched-tokens 8196 --json Llama31-8b-FP8
+                
+    ```
+
+    then you can use various tools to analyze the json output
+    terminal ascii tables:
+        ```
+        python tools/profiler/print_layerwise_table.py \\
+            --json-trace Llama31-8b-FP8.json --phase prefill --table summary
+        ```
+    or create matplotlib stacked bar charts:
+        ```
+        python tools/profiler/visualize_layerwise_profile.py \\
+            --json-trace Llama31-8b-FP8.json \\
+            --output-directory profile_breakdown --plot-metric pct_cuda_time
+        ```
+""",
+                                    formatter_class=RawTextHelpFormatter)
 
     parser.add_argument(
         "--model",
@@ -221,12 +247,11 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Export the results as a json file. This should be the filename")
-    parser.add_argument(
-        "--quantization",
-        "-q",
-        type=str,
-        choices=[*QUANTIZATION_METHODS, None],
-        default=None)
+    parser.add_argument("--quantization",
+                        "-q",
+                        type=str,
+                        choices=[*QUANTIZATION_METHODS, None],
+                        default=None)
     parser.add_argument("--dtype",
                         type=str,
                         default='auto',
