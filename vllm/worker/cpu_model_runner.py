@@ -133,7 +133,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             (input_tokens, input_positions,
              attn_metadata) = self._prepare_decode(
                  self.seq_group_metadata_list)
-            seq_lens = []
+            seq_lens = None
 
         return self.model_input_cls(
             input_tokens=input_tokens,
