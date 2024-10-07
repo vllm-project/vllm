@@ -61,6 +61,7 @@ class NVLMVisionEmbeddings(InternVisionEmbeddings):
         return self.position_embedding
 
 
+# Adpted from vllm.model_executor.models.intern_vit.InternParallelAttention
 class NVLMParallelAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -148,6 +149,7 @@ class NVLMParallelAttention(nn.Module):
         return x
 
 
+# Adpted from vllm.model_executor.models.intern_vit.InternSdpalAttention
 class NVLMSdpaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
