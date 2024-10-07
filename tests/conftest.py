@@ -871,6 +871,7 @@ def num_gpus_available():
 temp_dir = tempfile.gettempdir()
 _dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
 _dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
+_dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
 
 
 @pytest.fixture
@@ -909,3 +910,22 @@ def dummy_llava_path():
         with open(json_path, "w") as f:
             json.dump(config, f)
     return _dummy_llava_path
+
+
+@pytest.fixture
+def dummy_gemma2_embedding_path():
+    json_path = os.path.join(_dummy_gemma2_embedding_path, "config.json")
+    if not os.path.exists(_dummy_gemma2_embedding_path):
+        snapshot_download(repo_id="BAAI/bge-multilingual-gemma2",
+                          local_dir=_dummy_gemma2_embedding_path,
+                          ignore_patterns=[
+                              "*.bin", "*.bin.index.json", "*.pt", "*.h5",
+                              "*.msgpack"
+                          ])
+        assert os.path.exists(json_path)
+        with open(json_path, "r") as f:
+            config = json.load(f)
+        config["architectures"] = ["MyGemma2Embedding"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_gemma2_embedding_path
