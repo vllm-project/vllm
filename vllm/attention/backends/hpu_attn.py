@@ -13,22 +13,22 @@ from vllm_hpu_extension.utils import Matmul, Softmax, VLLMKVCache
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
-                                                  HabanaPagedAttentionMetadata)
+from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
+                                               HPUPagedAttentionMetadata)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class HabanaAttentionBackend(AttentionBackend):
+class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
-    def get_impl_cls() -> Type["HabanaAttentionImpl"]:
-        return HabanaAttentionImpl
+    def get_impl_cls() -> Type["HPUAttentionImpl"]:
+        return HPUAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return HabanaAttentionMetadata
+        return HPUAttentionMetadata
 
     @staticmethod
     def get_state_cls() -> Type["CommonAttentionState"]:
@@ -41,8 +41,8 @@ class HabanaAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return HabanaPagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                       num_kv_heads, head_size)
+        return HPUPagedAttention.get_kv_cache_shape(num_blocks, block_size,
+                                                    num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -50,20 +50,19 @@ class HabanaAttentionBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: Dict[int, int],
     ) -> None:
-        HabanaPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache,
-                                         src_to_dst)
+        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: Dict[int, List[int]],
     ) -> None:
-        HabanaPagedAttention.copy_blocks(kv_caches, src_to_dists)
+        HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
 
 
 @dataclass
-class HabanaAttentionMetadata(HabanaPagedAttentionMetadata, AttentionMetadata):
-    """Metadata for HabanaAttentionbackend."""
+class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
+    """Metadata for HPUAttentionbackend."""
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
@@ -71,7 +70,7 @@ class HabanaAttentionMetadata(HabanaPagedAttentionMetadata, AttentionMetadata):
     seq_lens_tensor: Optional[torch.Tensor]
 
 
-class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
+class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prefill_tokens ----------------->|
@@ -126,7 +125,7 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
             assert alibi_slopes is None, \
                 'Prefill with FusedSDPA not supported with alibi slopes!'
 
-        suppored_head_sizes = HabanaPagedAttention.get_supported_head_sizes()
+        suppored_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
@@ -138,7 +137,7 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: HabanaAttentionMetadata,
+        attn_metadata: HPUAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
@@ -158,7 +157,7 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "HabanaAttentionImpl")
+                                      "HPUAttentionImpl")
         batch_size, seq_len, hidden_size = query.shape
         _, seq_len_kv, _ = key.shape
 
@@ -171,7 +170,7 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
         if kv_cache is not None:
-            key_cache, value_cache = HabanaPagedAttention.split_kv_cache(
+            key_cache, value_cache = HPUPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
             # Reshape the input keys and values and store them in the cache.
@@ -216,7 +215,7 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
-            output = HabanaPagedAttention.forward_decode(
+            output = HPUPagedAttention.forward_decode(
                 query=query,
                 key_cache=key_cache,
                 value_cache=value_cache,
