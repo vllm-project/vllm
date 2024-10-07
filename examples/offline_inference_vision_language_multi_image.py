@@ -151,7 +151,7 @@ def load_nvlm_d(question: str, image_urls: List[str]):
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=8192,
         tensor_parallel_size=4,
         limit_mm_per_prompt={"image": len(image_urls)},
         mm_processor_kwargs={"max_dynamic_patch": 4},
