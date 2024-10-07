@@ -391,7 +391,6 @@ async def benchmark(
     input_requests: List[Tuple[str, int, int]],
     logprobs: Optional[int],
     best_of: int,
-    use_beam_search: bool,
     request_rate: float,
     disable_tqdm: bool,
     profile: bool,
@@ -419,7 +418,6 @@ async def benchmark(
         output_len=test_output_len,
         logprobs=logprobs,
         best_of=best_of,
-        use_beam_search=use_beam_search,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
     )
@@ -441,7 +439,6 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
             best_of=best_of,
-            use_beam_search=use_beam_search,
             multi_modal_content=test_mm_content,
         )
         profile_output = await request_func(request_func_input=profile_input)
@@ -464,7 +461,6 @@ async def benchmark(
             output_len=output_len,
             logprobs=logprobs,
             best_of=best_of,
-            use_beam_search=use_beam_search,
             multi_modal_content=mm_content,
         )
         tasks.append(
@@ -483,7 +479,6 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
             best_of=best_of,
-            use_beam_search=use_beam_search,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -679,7 +674,6 @@ def main(args: argparse.Namespace):
             input_requests=input_requests,
             logprobs=args.logprobs,
             best_of=args.best_of,
-            use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
@@ -701,7 +695,6 @@ def main(args: argparse.Namespace):
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
-        result_json["use_beam_search"] = args.use_beam_search
         result_json["num_prompts"] = args.num_prompts
 
         # Metadata
