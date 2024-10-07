@@ -140,7 +140,7 @@ $ vllm serve SOME_MODEL --config config.yaml
 ```
 ---
 **NOTE**  
-In case an argument is supplied using command line and the config file, the value from the commandline will take precedence.
+In case an argument is supplied simultaneously using command line and the config file, the value from the commandline will take precedence.
 The order of priorities is `command line > config file values > defaults`.
 
 ---
@@ -157,8 +157,9 @@ vLLM will use guided decoding to ensure the response matches the tool parameter 
 To enable this feature, you should set the following flags:
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
 deems appropriate.
-* `--tool-call-parser` -- select the tool parser to use - currently either `hermes`, `mistral`, `llama3_json` or `granite-20b-fc`. Additional tool parsers 
-will continue to be added in the future.
+* `--tool-call-parser` -- select the tool parser to use - currently either `hermes`, `mistral`, `llama3_json`, `internlm` or `granite-20b-fc`. Additional tool parsers 
+will continue to be added in the future, and also can register your own tool parsers in the `--tool-parser-plugin`.
+* `--tool-parser-plugin` -- **optional** tool parser plugin used to register user defined tool parsers into vllm, the registered tool parser name can be specified in `--tool-call-parser`.
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
 that contain previously generated tool calls. Hermes, Mistral and Llama models have tool-compatible chat templates in their 
 `tokenizer_config.json` files, but you can specify a custom template. This argument can be set to `tool_use` if your model has a tool use-specific chat 
@@ -221,6 +222,18 @@ it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
 
+
+#### Internlm Models
+Supported models:
+* `internlm/internlm2_5-7b-chat` (confirmed)
+* Additional internlm2.5 function-calling models are compatible as well
+
+Known issues:
+* Although this implementation also supports Internlm2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
+
+Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
+
+
 #### IBM Granite
 
 Supported models:
@@ -228,3 +241,64 @@ Supported models:
 
 Flags: `--tool-call-parser granite-20b-fc`
 `examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+
+
+### How to write a tool parser plugin
+
+A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py.
+
+Here is a summary of a plugin file:
+
+```python
+
+# import the required packages
+
+# define a tool parser and register it to vllm
+# the name list in register_module can be used
+# in --tool-call-parser. you can define as many
+# tool parsers as you want here.
+@ToolParserManager.register_module(["example"])
+class ExampleToolParser(ToolParser):
+    def __init__(self, tokenizer: AnyTokenizer):
+        super().__init__(tokenizer)
+
+    # adjust request. e.g.: set skip special tokens
+    # to False for tool call output.
+    def adjust_request(
+            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        return request
+
+    # implement the tool call parse for stream call
+    def extract_tool_calls_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
+    ) -> Union[DeltaMessage, None]:
+        return delta
+
+    # implement the tool parse for non-stream call
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
+        return ExtractedToolCallInformation(tools_called=False,
+                                            tool_calls=[],
+                                            content=text)
+
+
+```
+
+Then you can use this plugin in the command line like this.
+```
+    --enable-auto-tool-choice \
+    --tool-parser-plugin <absolute path of the plugin file>
+    --tool-call-parser example \
+    --chat-template <your chat template> \
+```
+
