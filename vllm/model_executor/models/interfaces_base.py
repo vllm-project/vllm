@@ -93,7 +93,19 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
     return len(missing_kws) == 0
 
 
-def is_vllm_model(model: Union[Type[object], object]) -> bool:
+@overload
+def is_vllm_model(model: Type[object]) -> TypeIs[Type[VllmModel]]:
+    ...
+
+
+@overload
+def is_vllm_model(model: object) -> TypeIs[VllmModel]:
+    ...
+
+
+def is_vllm_model(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[VllmModel]], TypeIs[VllmModel]]:
     return _check_vllm_model_init(model) and _check_vllm_model_forward(model)
 
 
