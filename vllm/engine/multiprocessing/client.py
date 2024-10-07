@@ -37,7 +37,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
-                        random_uuid)
+                        get_beam_search_score, random_uuid)
 
 logger = init_logger(__name__)
 
@@ -456,6 +456,12 @@ class MQLLMEngineClient:
         max_tokens = params.max_tokens
         ignore_eos = params.ignore_eos
         temperature = params.temperature
+        length_penalty = params.length_penalty
+
+        def sort_beams_key(x: BeamSearchSequence) -> float:
+            return get_beam_search_score(x.tokens, x.cum_logprob,
+                                         tokenizer.eos_token_id,
+                                         length_penalty)
 
         tokenizer = await self.get_tokenizer(lora_request)
         tokenizedPrompt = prompt if isinstance(
@@ -509,15 +515,11 @@ class MQLLMEngineClient:
                         else:
                             new_beams.append(new_beam)
 
-            sorted_beams = sorted(new_beams,
-                                  key=lambda x: x.cum_logprob,
-                                  reverse=True)
+            sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
             all_beams = sorted_beams[:beam_width]
 
         completed.extend(all_beams)
-        sorted_completed = sorted(completed,
-                                  key=lambda x: x.cum_logprob,
-                                  reverse=True)
+        sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
