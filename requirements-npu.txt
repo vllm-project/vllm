@@ -1,0 +1,11 @@
+# Common dependencies
+-r requirements-common.txt
+
+decorator
+pyyaml
+scipy
+setuptools
+torch == 2.1.0
+torch_npu == 2.1.0.post6
+# torch == 2.4.0
+# torch_npu == 2.4.0.rc1

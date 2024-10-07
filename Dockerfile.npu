@@ -1,0 +1,28 @@
+FROM ascendai/cann:8.0.rc3.alpha002-910b-ubuntu22.04-py3.9
+## Change to use the following if you failed with the above one
+# FROM quay.io/ascend/cann:8.0.rc3.alpha002-910b-ubuntu22.04-py3.9
+
+# Define environments
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y && \
+    apt-get install -y python3-pip git vim
+WORKDIR /workspace
+
+# copy requirements
+COPY requirements-build.txt /workspace/vllm/
+COPY requirements-common.txt /workspace/vllm/
+COPY requirements-npu.txt /workspace/vllm/
+
+COPY vllm/ /workspace/vllm/vllm
+COPY setup.py /workspace/vllm/
+COPY examples/ /workspace/vllm/examples
+COPY tests/ /workspace/vllm/tests
+
+# install build requirements
+RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/vllm/requirements-build.txt
+# build vLLM with NPU backend
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE="npu" python3 -m pip install /workspace/vllm/
+
+CMD ["/bin/bash"]

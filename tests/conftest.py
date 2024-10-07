@@ -38,6 +38,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
+from vllm.platforms import current_platform
+
 
 logger = init_logger(__name__)
 
@@ -249,7 +251,15 @@ class HfRunner:
 
     def wrap_device(self, input: _T, device: Optional[str] = None) -> _T:
         if device is None:
-            return self.wrap_device(input, "cpu" if is_cpu() else "cuda")
+            if current_platform.is_cpu():
+                current_device = "cpu"
+            elif current_platform.is_npu():
+                current_device = "npu"
+            elif current_platform.is_xpu():
+                current_device = "xpu"
+            else:
+                current_device = "cuda"
+            return self.wrap_device(input, current_device)
 
         if hasattr(input, "device") and input.device.type == device:
             return input

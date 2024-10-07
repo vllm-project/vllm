@@ -42,6 +42,14 @@ try:
 except Exception:
     pass
 
+is_npu = False
+
+try:
+    import torch_npu  # noqa: F401
+    is_npu = True
+except Exception:
+    pass
+
 is_xpu = False
 
 try:
@@ -69,6 +77,9 @@ elif is_cuda:
 elif is_rocm:
     from .rocm import RocmPlatform
     current_platform = RocmPlatform()
+elif is_npu:
+    from .ascend import AscendPlatform
+    current_platform = AscendPlatform()
 elif is_xpu:
     from .xpu import XPUPlatform
     current_platform = XPUPlatform()

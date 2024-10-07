@@ -24,6 +24,7 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    ASCEND = enum.auto()
 
 
 def backend_name_to_enum(backend_name: str) -> _Backend:
@@ -146,6 +147,10 @@ def get_attn_backend(
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
+    elif backend == _Backend.ASCEND:
+        logger.info("Using ASCEND backend.")
+        from vllm.attention.backends.ascend import AscendAttentionBackend
+        return AscendAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
 
@@ -210,6 +215,12 @@ def which_attn_to_use(
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         return _Backend.ROCM_FLASH
 
+    if current_platform.is_npu():
+        # Ascend NPU
+        # TODO: mindie
+        if selected_backend != _Backend.ASCEND:
+            logger.info("Cannot use %s backend on NPU.", selected_backend)
+        return _Backend.ASCEND
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
         if not current_platform.has_device_capability(80):

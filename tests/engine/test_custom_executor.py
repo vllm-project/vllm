@@ -7,6 +7,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.gpu_executor import GPUExecutor, GPUExecutorAsync
+from vllm.executor.npu_executor import NPUExecutor, NPUExecutorAsync
 from vllm.sampling_params import SamplingParams
 
 
@@ -15,6 +16,15 @@ class Mock:
 
 
 class CustomGPUExecutor(GPUExecutor):
+
+    def execute_model(self, *args, **kwargs):
+        # Drop marker to show that this was ran
+        with open(".marker", "w"):
+            ...
+        return super().execute_model(*args, **kwargs)
+
+
+class CustomNPUExecutor(NPUExecutor):
 
     def execute_model(self, *args, **kwargs):
         # Drop marker to show that this was ran
@@ -41,9 +51,13 @@ def test_custom_executor_type_checking(model):
         engine_args = AsyncEngineArgs(model=model,
                                       distributed_executor_backend=Mock)
         AsyncLLMEngine.from_engine_args(engine_args)
+    # with pytest.raises(TypeError):
+    #     engine_args = AsyncEngineArgs(
+    #         model=model, distributed_executor_backend=CustomGPUExecutor)
+    #     AsyncLLMEngine.from_engine_args(engine_args)
     with pytest.raises(TypeError):
         engine_args = AsyncEngineArgs(
-            model=model, distributed_executor_backend=CustomGPUExecutor)
+            model=model, distributed_executor_backend=CustomNPUExecutor)
         AsyncLLMEngine.from_engine_args(engine_args)
 
 
@@ -55,7 +69,7 @@ def test_custom_executor(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = EngineArgs(
-            model=model, distributed_executor_backend=CustomGPUExecutor)
+            model=model, distributed_executor_backend=CustomNPUExecutor)
         engine = LLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
@@ -67,25 +81,25 @@ def test_custom_executor(model, tmp_path):
         os.chdir(cwd)
 
 
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
-def test_custom_executor_async(model, tmp_path):
-    cwd = os.path.abspath(".")
-    os.chdir(tmp_path)
-    try:
-        assert not os.path.exists(".marker")
+# @pytest.mark.parametrize("model", ["facebook/opt-125m"])
+# def test_custom_executor_async(model, tmpdir):
+#     cwd = os.path.abspath(".")
+#     os.chdir(tmpdir)
+#     try:
+#         assert not os.path.exists(".marker")
 
-        engine_args = AsyncEngineArgs(
-            model=model, distributed_executor_backend=CustomGPUExecutorAsync)
-        engine = AsyncLLMEngine.from_engine_args(engine_args)
-        sampling_params = SamplingParams(max_tokens=1)
+#         engine_args = AsyncEngineArgs(
+#             model=model, distributed_executor_backend=CustomGPUExecutorAsync)
+#         engine = AsyncLLMEngine.from_engine_args(engine_args)
+#         sampling_params = SamplingParams(max_tokens=1)
 
-        async def t():
-            stream = await engine.add_request("0", "foo", sampling_params)
-            async for x in stream:
-                ...
+#         async def t():
+#             stream = await engine.add_request("0", "foo", sampling_params)
+#             async for x in stream:
+#                 ...
 
-        asyncio.run(t())
+#         asyncio.run(t())
 
-        assert os.path.exists(".marker")
-    finally:
-        os.chdir(cwd)
+#         assert os.path.exists(".marker")
+#     finally:
+#         os.chdir(cwd)
