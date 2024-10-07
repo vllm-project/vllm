@@ -12,10 +12,13 @@ from vllm.logger import init_logger
 from vllm.utils import is_hip
 
 from .interfaces import supports_multimodal, supports_pp
+from .interfaces_base import is_embedding_model, is_text_generation_model
 
 logger = init_logger(__name__)
 
-_GENERATION_MODELS = {
+# yapf: disable
+_TEXT_GENERATION_MODELS = {
+    # [Decoder-only]
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
@@ -66,68 +69,63 @@ _GENERATION_MODELS = {
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
-    "Qwen2VLForConditionalGeneration":
-    ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
-    # NOTE: The below models are for speculative decoding only
-    "MedusaModel": ("medusa", "Medusa"),
-    "EAGLEModel": ("eagle", "EAGLE"),
-    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
+    # [Encoder-decoder]
+    "BartModel": ("bart", "BartForConditionalGeneration"),
+    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
 }
 
 _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Gemma2Model": ("gemma2_embedding", "Gemma2EmbeddingModel"),
 }
 
 _MULTIMODAL_MODELS = {
-    "Blip2ForConditionalGeneration":
-    ("blip2", "Blip2ForConditionalGeneration"),
-    "ChameleonForConditionalGeneration":
-    ("chameleon", "ChameleonForConditionalGeneration"),
+    # [Decoder-only]
+    "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
+    "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
-    "LlavaForConditionalGeneration": ("llava",
-                                      "LlavaForConditionalGeneration"),
-    "LlavaNextForConditionalGeneration": ("llava_next",
-                                          "LlavaNextForConditionalGeneration"),
-    "LlavaNextVideoForConditionalGeneration":
-    ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),
-    "LlavaOnevisionForConditionalGeneration":
-    ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),
+    "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
+    "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
+    "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
+    "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
-    "PaliGemmaForConditionalGeneration": ("paligemma",
-                                          "PaliGemmaForConditionalGeneration"),
+    "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
+    "PaliGemmaForConditionalGeneration": ("paligemma", "PaliGemmaForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
-    "PixtralForConditionalGeneration": ("pixtral",
-                                        "PixtralForConditionalGeneration"),
+    "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
-    "Qwen2VLForConditionalGeneration": ("qwen2_vl",
-                                        "Qwen2VLForConditionalGeneration"),
+    "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
-    "MllamaForConditionalGeneration": ("mllama",
-                                       "MllamaForConditionalGeneration"),
+    # [Encoder-decoder]
+    "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
 }
-_CONDITIONAL_GENERATION_MODELS = {
-    "BartModel": ("bart", "BartForConditionalGeneration"),
-    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+
+_SPECULATIVE_DECODING_MODELS = {
+    "EAGLEModel": ("eagle", "EAGLE"),
+    "MedusaModel": ("medusa", "Medusa"),
+    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
+# yapf: enable
 
 _MODELS = {
-    **_GENERATION_MODELS,
+    **_TEXT_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
     **_MULTIMODAL_MODELS,
-    **_CONDITIONAL_GENERATION_MODELS,
+    **_SPECULATIVE_DECODING_MODELS,
 }
 
-# Architecture -> type.
+# Architecture -> type or (module, class).
 # out of tree models
 _OOT_MODELS: Dict[str, Type[nn.Module]] = {}
+_OOT_MODELS_LAZY: Dict[str, Tuple[str, str]] = {}
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: List[str] = []
@@ -159,17 +157,24 @@ class ModelRegistry:
 
     @staticmethod
     def _get_module_cls_name(model_arch: str) -> Tuple[str, str]:
-        module_relname, cls_name = _MODELS[model_arch]
-        return f"vllm.model_executor.models.{module_relname}", cls_name
+        if model_arch in _MODELS:
+            module_relname, cls_name = _MODELS[model_arch]
+            return f"vllm.model_executor.models.{module_relname}", cls_name
+
+        if model_arch in _OOT_MODELS_LAZY:
+            return _OOT_MODELS_LAZY[model_arch]
+
+        raise KeyError(model_arch)
 
     @staticmethod
     @lru_cache(maxsize=128)
     def _try_get_model_stateful(model_arch: str) -> Optional[Type[nn.Module]]:
-        if model_arch not in _MODELS:
+        try:
+            mod_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
+        except KeyError:
             return None
 
-        module_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
-        module = importlib.import_module(module_name)
+        module = importlib.import_module(mod_name)
         return getattr(module, cls_name, None)
 
     @staticmethod
@@ -219,14 +224,35 @@ class ModelRegistry:
         return list(_MODELS.keys()) + list(_OOT_MODELS.keys())
 
     @staticmethod
-    def register_model(model_arch: str, model_cls: Type[nn.Module]):
+    def register_model(model_arch: str, model_cls: Union[Type[nn.Module],
+                                                         str]):
+        """
+        Register an external model to be used in vLLM.
+
+        :code:`model_cls` can be either:
+
+        - A :class:`torch.nn.Module` class directly referencing the model.
+        - A string in the format :code:`<module>:<class>` which can be used to
+          lazily import the model. This is useful to avoid initializing CUDA
+          when importing the model and thus the related error
+          :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
+        """
         if model_arch in _MODELS:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
                 "overwritten by the new model class %s.", model_arch,
-                model_cls.__name__)
+                model_cls)
 
-        _OOT_MODELS[model_arch] = model_cls
+        if isinstance(model_cls, str):
+            split_str = model_cls.split(":")
+            if len(split_str) != 2:
+                msg = "Expected a string in the format `<module>:<class>`"
+                raise ValueError(msg)
+
+            module_name, cls_name = split_str
+            _OOT_MODELS_LAZY[model_arch] = module_name, cls_name
+        else:
+            _OOT_MODELS[model_arch] = model_cls
 
     @staticmethod
     @lru_cache(maxsize=128)
@@ -248,13 +274,16 @@ class ModelRegistry:
         if model is not None:
             return func(model)
 
-        if model_arch not in _MODELS and default is not None:
-            return default
+        try:
+            mod_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
+        except KeyError:
+            if default is not None:
+                return default
 
-        module_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
+            raise
 
         valid_name_characters = string.ascii_letters + string.digits + "._"
-        if any(s not in valid_name_characters for s in module_name):
+        if any(s not in valid_name_characters for s in mod_name):
             raise ValueError(f"Unsafe module name detected for {model_arch}")
         if any(s not in valid_name_characters for s in cls_name):
             raise ValueError(f"Unsafe class name detected for {model_arch}")
@@ -266,7 +295,7 @@ class ModelRegistry:
         err_id = uuid.uuid4()
 
         stmts = ";".join([
-            f"from {module_name} import {cls_name}",
+            f"from {mod_name} import {cls_name}",
             f"from {func.__module__} import {func.__name__}",
             f"assert {func.__name__}({cls_name}), '{err_id}'",
         ])
@@ -285,13 +314,30 @@ class ModelRegistry:
         return result.returncode == 0
 
     @staticmethod
+    def is_text_generation_model(architectures: Union[str, List[str]]) -> bool:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        is_txt_gen = partial(ModelRegistry._check_stateless,
+                             is_text_generation_model,
+                             default=False)
+
+        return any(is_txt_gen(arch) for arch in architectures)
+
+    @staticmethod
     def is_embedding_model(architectures: Union[str, List[str]]) -> bool:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        return any(arch in _EMBEDDING_MODELS for arch in architectures)
+        is_emb = partial(ModelRegistry._check_stateless,
+                         is_embedding_model,
+                         default=False)
+
+        return any(is_emb(arch) for arch in architectures)
 
     @staticmethod
     def is_multimodal_model(architectures: Union[str, List[str]]) -> bool:
