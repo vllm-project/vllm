@@ -17,7 +17,6 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, ensure_future
-from dataclasses import dataclass
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
@@ -1364,37 +1363,6 @@ class AtomicCounter:
         return self._value
 
 
-@dataclass
-class BeamSearchSequence:
-    """A sequence for beam search.
-    It keeps track of the tokens and the log probability of the sequence.
-    The text field is optional and will only be filled when the sequence is
-    about to be returned to the user.
-    """
-    # The tokens includes the prompt.
-    tokens: List[int]
-    cum_logprob: float = 0.0
-    text: Optional[str] = None
-
-
-@dataclass
-class BeamSearchOutput:
-    """The output of beam search.
-    It contains the list of the best beam search sequences.
-    The length of the list is equal to the beam width.
-    """
-    sequences: List[BeamSearchSequence]
-
-
-class BeamSearchInstance:
-
-    def __init__(self, prompt_tokens: List[int]):
-        self.beams: List[BeamSearchSequence] = [
-            BeamSearchSequence(tokens=prompt_tokens)
-        ]
-        self.completed: List[BeamSearchSequence] = []
-
-
 def get_beam_search_score(
     tokens: List[int],
     cumulative_logprob: float,
@@ -1412,12 +1380,3 @@ def get_beam_search_score(
         seq_len -= 1
 
     return cumulative_logprob / (seq_len**length_penalty)
-
-
-def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
-
-    def sort_beams_key(x: BeamSearchSequence) -> float:
-        return get_beam_search_score(x.tokens, x.cum_logprob, eos_token_id,
-                                     length_penalty)
-
-    return sort_beams_key

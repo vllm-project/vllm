@@ -34,9 +34,9 @@ from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
                           RequestOutput)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sequence import BeamSearchSequence, create_sort_beams_key_function
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import (BeamSearchSequence, collect_from_async_generator,
-                        create_sort_beams_key_function, deprecate_kwargs,
+from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
                         random_uuid)
 
 logger = init_logger(__name__)

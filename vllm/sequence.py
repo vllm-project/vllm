@@ -20,6 +20,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+from vllm.utils import get_beam_search_score
 
 if TYPE_CHECKING:
     from vllm.multimodal.base import MultiModalDataDict
@@ -1365,3 +1366,43 @@ class ExecuteModelRequest(
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
             async_callback=self.async_callback)
+
+
+@dataclass
+class BeamSearchSequence:
+    """A sequence for beam search.
+    It keeps track of the tokens and the log probability of the sequence.
+    The text field is optional and will only be filled when the sequence is
+    about to be returned to the user.
+    """
+    # The tokens includes the prompt.
+    tokens: List[int]
+    cum_logprob: float = 0.0
+    text: Optional[str] = None
+
+
+@dataclass
+class BeamSearchOutput:
+    """The output of beam search.
+    It contains the list of the best beam search sequences.
+    The length of the list is equal to the beam width.
+    """
+    sequences: List[BeamSearchSequence]
+
+
+class BeamSearchInstance:
+
+    def __init__(self, prompt_tokens: List[int]):
+        self.beams: List[BeamSearchSequence] = [
+            BeamSearchSequence(tokens=prompt_tokens)
+        ]
+        self.completed: List[BeamSearchSequence] = []
+
+
+def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
+
+    def sort_beams_key(x: BeamSearchSequence) -> float:
+        return get_beam_search_score(x.tokens, x.cum_logprob, eos_token_id,
+                                     length_penalty)
+
+    return sort_beams_key
