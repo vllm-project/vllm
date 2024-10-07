@@ -14,7 +14,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.entrypoints.llm import BeamSearchSequence
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
@@ -32,8 +31,9 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
-                        get_beam_search_score, random_uuid, weak_bind)
+from vllm.utils import (BeamSearchSequence, collect_from_async_generator,
+                        create_sort_beams_key_function, deprecate_kwargs,
+                        random_uuid, weak_bind)
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -1052,15 +1052,13 @@ class AsyncLLMEngine:
         temperature = params.temperature
         length_penalty = params.length_penalty
 
-        def sort_beams_key(x: BeamSearchSequence) -> float:
-            return get_beam_search_score(x.tokens, x.cum_logprob,
-                                         tokenizer.eos_token_id,
-                                         length_penalty)
-
         tokenizer = await self.get_tokenizer()
         tokenizedPrompt = prompt if isinstance(
             prompt, list) else tokenizer.encode(prompt)
         tokenizedLength = len(tokenizedPrompt)
+
+        sort_beams_key = create_sort_beams_key_function(
+            tokenizer, length_penalty=length_penalty)
 
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,

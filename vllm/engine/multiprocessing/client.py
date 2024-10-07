@@ -26,7 +26,6 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.entrypoints.llm import BeamSearchSequence
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
@@ -36,8 +35,9 @@ from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
-                        get_beam_search_score, random_uuid)
+from vllm.utils import (BeamSearchSequence, collect_from_async_generator,
+                        create_sort_beams_key_function, deprecate_kwargs,
+                        random_uuid)
 
 logger = init_logger(__name__)
 
@@ -449,7 +449,6 @@ class MQLLMEngineClient:
         prompt: Union[PromptType, List[int]],
         request_id: str,
         params: BeamSearchParams,
-        lora_request: Optional[LoRARequest] = None
     ) -> AsyncGenerator[RequestOutput, None]:
 
         beam_width = params.beam_width
@@ -458,15 +457,13 @@ class MQLLMEngineClient:
         temperature = params.temperature
         length_penalty = params.length_penalty
 
-        def sort_beams_key(x: BeamSearchSequence) -> float:
-            return get_beam_search_score(x.tokens, x.cum_logprob,
-                                         tokenizer.eos_token_id,
-                                         length_penalty)
-
-        tokenizer = await self.get_tokenizer(lora_request)
+        tokenizer = await self.get_tokenizer(None)
         tokenizedPrompt = prompt if isinstance(
             prompt, list) else tokenizer.encode(prompt)
         tokenizedLength = len(tokenizedPrompt)
+
+        sort_beams_key = create_sort_beams_key_function(
+            tokenizer, length_penalty=length_penalty)
 
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,
