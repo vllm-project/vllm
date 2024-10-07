@@ -37,6 +37,7 @@ class RWKV5Config(PretrainedConfig):
             print(kwargs)
             kwargs["num_attention_heads"] = kwargs["attention_hidden_size"] // kwargs["head_size"]
             kwargs["num_kv_heads"] = kwargs["num_attention_heads"]
+            kwargs["max_seq_len"] = -1
         
         super().__init__(**kwargs)
 

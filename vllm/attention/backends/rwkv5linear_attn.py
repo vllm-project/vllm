@@ -1,4 +1,5 @@
 """Attention layer with FlashAttention."""
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -7,11 +8,79 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionMetadataBuilder)
-from vllm.attention.backends.utils import PAD_SLOT_ID, compute_slot_mapping, compute_slot_mapping_start_idx, is_block_tables_empty
+                                              AttentionMetadata, AttentionMetadataBuilder, AttentionState)
+from vllm.attention.backends.utils import PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping, compute_slot_mapping_start_idx, is_block_tables_empty
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from vllm.worker.model_runner import ModelInputForGPUBuilder
+from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
+
+class RWKVAttentionState(AttentionState):
+
+    def __init__(self, runner: "ModelRunnerBase"):
+        self.runner = runner
+        self._is_graph_capturing = False
+
+    @contextmanager
+    def graph_capture(self, max_batch_size: int):
+        self._is_graph_capturing = True
+        self._graph_slot_mapping = torch.full((max_batch_size, ),
+                                              PAD_SLOT_ID,
+                                              dtype=torch.long,
+                                              device=self.runner.device)
+        self._graph_seq_lens = torch.ones(max_batch_size,
+                                          dtype=torch.int32,
+                                          device=self.runner.device)
+        self._graph_block_tables = torch.from_numpy(
+            self.runner.graph_block_tables).to(device=self.runner.device)
+        yield
+        self._is_graph_capturing = False
+        del self._graph_slot_mapping
+        del self._graph_seq_lens
+        del self._graph_block_tables
+
+    def graph_clone(self, batch_size: int) -> "RWKVAttentionState":
+        assert self._is_graph_capturing
+        return self.__class__(self.runner)
+
+    def graph_capture_get_metadata_for_batch(
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
+        assert self._is_graph_capturing
+        attn_metadata = self.runner.attn_backend.make_metadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=batch_size,
+            slot_mapping=self._graph_slot_mapping[:batch_size],
+            seq_lens=None,
+            seq_lens_tensor=self._graph_seq_lens[:batch_size],
+            max_query_len=None,
+            max_prefill_seq_len=0,
+            max_decode_seq_len=self.runner.max_seq_len_to_capture,
+            query_start_loc=None,
+            seq_start_loc=None,
+            context_lens_tensor=None,
+            block_tables=self._graph_block_tables[:batch_size],
+            use_cuda_graph=True,
+        )
+        if is_encoder_decoder_model:
+            # The encoder decoder model works only with XFormers backend.
+            # Assert the same.
+            assert self.runner.attn_backend.get_name() == "xformers", \
+            f"Expected attn_backend name to be 'xformers', but "\
+            f" got '{self.runner.attn_backend.get_name()}'"
+            self._update_captured_metadata_for_enc_dec_model(
+                batch_size=batch_size, attn_metadata=attn_metadata)
+
+        return attn_metadata
+    
+    def begin_forward(self, model_input: ModelRunnerInputBase) -> None:
+        return super().begin_forward(model_input)
+    
+    def get_graph_input_buffers(self, attn_metadata: Any, is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
+        return super().get_graph_input_buffers(attn_metadata, is_encoder_decoder_model)
+    
+    def prepare_graph_input_buffers(self, input_buffers: Dict[str, Any], attn_metadata: Any, is_encoder_decoder_model: bool = False) -> None:
+        return super().prepare_graph_input_buffers(input_buffers, attn_metadata, is_encoder_decoder_model)
 
 class RWKVFlashAttentionBackend(AttentionBackend):
 
@@ -22,6 +91,10 @@ class RWKVFlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "linear-flash-attn"
+    
+    @staticmethod
+    def get_state_cls() -> type[AttentionState]:
+        return RWKVAttentionState
 
     @staticmethod
     def get_impl_cls() -> Type["LinearFlashAttentionImpl"]:

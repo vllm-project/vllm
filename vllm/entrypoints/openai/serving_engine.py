@@ -247,7 +247,7 @@ class OpenAIServing:
 
         # Note: EmbeddingRequest doesn't have max_tokens
         if isinstance(request, EmbeddingRequest):
-            if token_num > self.max_model_len:
+            if token_num > self.max_model_len and self.max_model_len > 0:
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
@@ -264,13 +264,13 @@ class OpenAIServing:
                                     prompt_token_ids=input_ids)
 
         if request.max_tokens is None:
-            if token_num >= self.max_model_len:
+            if token_num >= self.max_model_len and self.max_model_len > 0:
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the messages, "
                     f"Please reduce the length of the messages.")
-        elif token_num + request.max_tokens > self.max_model_len:
+        elif token_num + request.max_tokens > self.max_model_len and self.max_model_len > 0:
             raise ValueError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, you requested "

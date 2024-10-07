@@ -891,7 +891,7 @@ class Scheduler:
                 assert num_new_tokens == num_prompt_tokens
 
             prompt_limit = self._get_prompt_limit(seq_group)
-            if num_new_tokens > prompt_limit:
+            if num_new_tokens > prompt_limit and prompt_limit > 0:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
                     " and exceeds limit of %d", num_new_tokens, prompt_limit)

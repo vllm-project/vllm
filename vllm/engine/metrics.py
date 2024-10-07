@@ -297,6 +297,8 @@ def build_1_2_5_buckets(max_value: int) -> List[int]:
     [1, 2, 5, 10, 20, 50, 100]
     """
     mantissa_lst = [1, 2, 5]
+    if max_value <= 0:
+        max_value = 100 # for infinite context models
     exponent = 0
     buckets: List[int] = []
     while True:

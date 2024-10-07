@@ -39,7 +39,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import SampleLogprobs
 
 
 class RWKVAttention(nn.Module):
@@ -96,12 +96,14 @@ class RWKVAttention(nn.Module):
                 kv_cache[blocknum,blockidx,0,:] = x.chunk(get_tensor_model_parallel_world_size(),-1)[get_tensor_model_parallel_rank()].reshape_as(state)
                 state = tensor_model_parallel_all_gather(state.reshape(-1,x.shape[-1]//get_tensor_model_parallel_world_size()))
         else:
+            print(x.shape)
             ott = torch.arange(x.shape[0]).to(x.device)
             ott = ott-1
             state = x[ott]
             state[position_ids==0]*=0 # for start of sequence
-            if(kv_cache != None):
-                kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],0,:] = x[ott[position_ids==0]-1].chunk(get_tensor_model_parallel_world_size(),-1)[get_tensor_model_parallel_rank()].reshape_as(kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],0,:])
+            if(kv_cache != None and kv_cache.shape[0] > 0):
+                mm = kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],0,:]
+                mm[:] = x[ott[position_ids==0]-1].chunk(get_tensor_model_parallel_world_size(),-1)[get_tensor_model_parallel_rank()].reshape_as(mm)
                 state = state.reshape_as(x)
 
         # state[position_ids.query_start_loc] = cache
@@ -141,7 +143,7 @@ class RWKVAttention(nn.Module):
         
         if(attn_metadata.num_prefill_tokens != 0):
         # print(kv_cache.shape if kv_cache != None else None)
-            s = kv_cache[blocknum,blockidx,2:,:].transpose(-3,-2) if kv_cache != None else torch.zeros(1,self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
+            s = kv_cache[blocknum,blockidx,2:,:].transpose(-3,-2) if kv_cache != None and kv_cache.shape[0] > 0 else torch.zeros(1,self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
             # print(kv_cache.shape if kv_cache != None else None)
             for t in range(T):
                 print(out[t].shape, r[t].shape, s.shape)
@@ -149,7 +151,7 @@ class RWKVAttention(nn.Module):
                 s[0] *= w
                 s[0] += at[t]
             
-            if(kv_cache != None):
+            if(kv_cache != None and kv_cache.shape[0] > 0):
                 kv_cache[blocknum,blockidx,2:,:,] = s.transpose(-3,-2)
 
         else:
@@ -225,7 +227,7 @@ class RWKVMLP(nn.Module):
             ott = ott-1
             state = x[ott]
             state[position_ids==0]*=0 # for start of sequence
-            if kv_cache != None:
+            if kv_cache != None and kv_cache.shape[0] > 0:
                 kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],1,:] = x[ott[position_ids==0]-1].chunk(get_tensor_model_parallel_world_size(),-1)[get_tensor_model_parallel_rank()].reshape_as(kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],1,:])
                 state = state.reshape_as(x)
 
@@ -376,7 +378,7 @@ class Rwkv5ForCausalLM(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
+    ) -> Optional[SampleLogprobs]:
         next_tokens = self.sampler(logits, sampling_metadata)
         print(next_tokens)
         return next_tokens

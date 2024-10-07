@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 _GENERATION_MODELS = {
 
-    "RwkvForCausalLM": ("Rwkv5ForCausalLM","Rwkv5ForCausalLM"),
+    "Rwkv5ForCausalLM": ("Rwkv5ForCausalLM","Rwkv5ForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
