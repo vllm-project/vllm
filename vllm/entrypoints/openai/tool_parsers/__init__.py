@@ -1,4 +1,3 @@
-from .abstract_tool_parser import ToolParser
 from .abstract_tool_parser import ToolParser, ToolParserManager
 from .granite_20b_fc_tool_parser import Granite20bFCToolParser
 from .hermes_tool_parser import Hermes2ProToolParser
