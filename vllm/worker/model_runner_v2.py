@@ -84,6 +84,7 @@ class GPUModelRunner:
         self.cum1 = 0
         self.cum2 = 0
         self.cum3 = 0
+        self.cum4 = 0
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -106,29 +107,28 @@ class GPUModelRunner:
                 removed_req_indices.append(req_index)
 
         # Update the states of the running requests.
-        start = time.time()
         for req_data in scheduler_output.scheduled_running_reqs:
             req_id = req_data.req_id
             req_state = self.requests[req_id]
             req_index = self.persistent_batch.req_id_to_index[req_id]
 
             # Update the num_computed_tokens.
+            start = time.time()
             req_state.num_computed_tokens = req_data.num_computed_tokens
             self.persistent_batch.num_computed_tokens_cpu[req_index] = (
                 req_data.num_computed_tokens)
+            end = time.time()
+            self.cum4 += end - start
 
             # Update the block table.
             num_new_blocks = len(req_data.new_block_ids)
             if num_new_blocks == 0:
                 continue
-            start_block_index = len(req_state.block_ids)
+            start_index = len(req_state.block_ids)
+            end_index = start_index + num_new_blocks
             req_state.block_ids.extend(req_data.new_block_ids)
-            for i, block_id in enumerate(req_data.new_block_ids):
-                self.persistent_batch.block_table_cpu[req_index,
-                                                      start_block_index +
-                                                      i] = block_id
-        end = time.time()
-        self.cum2 += end - start
+            self.persistent_batch.block_table_cpu[
+                req_index, start_index:end_index] = req_data.new_block_ids
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -182,7 +182,7 @@ class GPUModelRunner:
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.persistent_batch.block_table[:num_reqs].copy_(
-            self.persistent_batch.block_table_cpu[:num_reqs],
+            self.persistent_batch.block_table_cpu_tensor[:num_reqs],
             non_blocking=True)
 
         # Get the number of scheduled tokens for each request.
@@ -201,7 +201,6 @@ class GPUModelRunner:
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         indices = np.arange(num_reqs)
         req_indices = np.repeat(indices, num_scheduled_tokens)
-        req_indices = torch.from_numpy(req_indices)
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -209,33 +208,35 @@ class GPUModelRunner:
                                 (num_reqs, 1))
         mask = arange_matrix < num_scheduled_tokens[:, np.newaxis]
         arange = arange_matrix[mask]
-        arange = torch.from_numpy(arange)
 
         # Get positions.
         positions = torch.empty((total_num_scheduled_tokens, ),
                                 dtype=torch.int32,
                                 device="cpu",
                                 pin_memory=self.pin_memory)
-        torch.add(self.persistent_batch.num_computed_tokens_cpu[req_indices],
-                  arange,
-                  out=positions)
+        positions_np = positions.numpy()
+        np.add(self.persistent_batch.num_computed_tokens_cpu[req_indices],
+               arange,
+               out=positions_np)
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
         # where M is the max_model_len.
-        token_indices = positions + req_indices * self.max_model_len
+        token_indices = positions_np + req_indices * self.max_model_len
+        token_indices = torch.from_numpy(token_indices)
         input_ids = torch.empty((total_num_scheduled_tokens, ),
                                 dtype=torch.int32,
                                 device="cpu",
                                 pin_memory=self.pin_memory)
-        torch.index_select(self.persistent_batch.token_ids_cpu.flatten(),
+        torch.index_select(torch.from_numpy(
+            self.persistent_batch.token_ids_cpu).flatten(),
                            0,
                            token_indices,
                            out=input_ids)
 
         # Calculate the slot mapping.
-        block_numbers = self.persistent_batch.block_table_cpu.flatten()[
+        block_numbers = self.persistent_batch.block_table_cpu_tensor.flatten()[
             token_indices // self.block_size]
         block_offsets = token_indices % self.block_size
         slot_mapping = torch.empty((total_num_scheduled_tokens, ),
@@ -245,27 +246,28 @@ class GPUModelRunner:
         torch.add(block_numbers * self.block_size,
                   block_offsets,
                   out=slot_mapping)
+        slot_mapping = block_numbers * self.block_size + block_offsets
 
         # Prepare the attention metadata.
-        num_scheduled_tokens = torch.from_numpy(num_scheduled_tokens)
         query_start_loc = torch.empty((num_reqs + 1, ),
                                       dtype=torch.int32,
                                       device="cpu",
                                       pin_memory=self.pin_memory)
-        query_start_loc[0] = 0
-        torch.cumsum(num_scheduled_tokens, dim=0, out=query_start_loc[1:])
+        query_start_loc_np = query_start_loc.numpy()
+        query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
 
         seq_lens = (self.persistent_batch.num_computed_tokens_cpu[:num_reqs] +
                     num_scheduled_tokens)
-        max_seq_len = seq_lens.max().item()
+        max_seq_len = seq_lens.max()
         seq_start_loc = torch.empty((num_reqs + 1, ),
                                     dtype=torch.int32,
                                     device="cpu",
                                     pin_memory=self.pin_memory)
-        seq_start_loc[0] = 0
-        torch.cumsum(seq_lens, dim=0, out=seq_start_loc[1:])
+        seq_start_loc_np = seq_start_loc.numpy()
+        seq_start_loc_np[0] = 0
+        np.cumsum(seq_lens, out=seq_start_loc_np[1:])
 
-        # Move the tensors to the device.
         input_ids = input_ids.to(self.device, non_blocking=True)
         positions = positions.to(self.device, non_blocking=True).long()
         query_start_loc = query_start_loc.to(self.device, non_blocking=True)
@@ -318,7 +320,7 @@ class GPUModelRunner:
         inputs = self._prepare_inputs(scheduler_output)
         input_ids, positions, attn_metadata, logits_indices = inputs
         end = time.time()
-        # self.cum2 += end - start
+        self.cum2 += end - start
 
         hidden_states = self.model(
             input_ids=input_ids,
@@ -381,6 +383,7 @@ class GPUModelRunner:
         # print(f"cum1: {self.cum1 * 1000:.3f} ms")
         # print(f"cum2: {self.cum2 * 1000:.3f} ms")
         # print(f"cum3: {self.cum3 * 1000:.3f} ms")
+        # print(f"cum4: {self.cum4 * 1000:.3f} ms")
         return model_runner_output
 
     def load_model(self) -> None:
@@ -463,50 +466,52 @@ class PersistentBatch:
         self.req_ids: List[Optional[str]] = [None] * max_num_reqs
         self.req_id_to_index: Dict[str, int] = {}
 
-        self.token_ids_cpu = torch.empty((max_num_reqs, max_model_len),
-                                         dtype=torch.int32,
-                                         device="cpu")
-        self.num_computed_tokens_cpu = torch.empty((max_num_reqs, ),
-                                                   dtype=torch.int32,
-                                                   device="cpu")
+        self.token_ids_cpu = np.empty((max_num_reqs, max_model_len),
+                                      dtype=np.int32)
+        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
         # Attention-related.
-        self.block_table = torch.empty((max_num_reqs, max_num_blocks_per_req),
+        self.block_table = torch.zeros((max_num_reqs, max_num_blocks_per_req),
                                        device=self.device,
                                        dtype=torch.int32)
-        self.block_table_cpu = torch.empty(
+        self.block_table_cpu_tensor = torch.zeros(
             (max_num_reqs, max_num_blocks_per_req),
             device="cpu",
             dtype=torch.int32,
-            pin_memory=pin_memory)
+            pin_memory=pin_memory,
+        )
+        self.block_table_cpu = self.block_table_cpu_tensor.numpy()
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),
                                        dtype=torch.float32,
                                        device=device)
-        self.temperature_cpu = torch.empty((max_num_reqs, ),
-                                           dtype=torch.float32,
-                                           device="cpu",
-                                           pin_memory=pin_memory)
+        self.temperature_cpu_tensor = torch.empty((max_num_reqs, ),
+                                                  dtype=torch.float32,
+                                                  device="cpu",
+                                                  pin_memory=pin_memory)
+        self.temperature_cpu = self.temperature_cpu_tensor.numpy()
         self.greedy_reqs: Set[str] = set()
         self.random_reqs: Set[str] = set()
 
         self.top_p = torch.empty((max_num_reqs, ),
                                  dtype=torch.float32,
                                  device=device)
-        self.top_p_cpu = torch.empty((max_num_reqs, ),
-                                     dtype=torch.float32,
-                                     device="cpu",
-                                     pin_memory=pin_memory)
+        self.top_p_cpu_tensor = torch.empty((max_num_reqs, ),
+                                            dtype=torch.float32,
+                                            device="cpu",
+                                            pin_memory=pin_memory)
+        self.top_p_cpu = self.top_p_cpu_tensor.numpy()
         self.top_p_reqs: Set[str] = set()
 
         self.top_k = torch.empty((max_num_reqs, ),
-                                 dtype=torch.float32,
+                                 dtype=torch.int32,
                                  device=device)
-        self.top_k_cpu = torch.empty((max_num_reqs, ),
-                                     dtype=torch.float32,
-                                     device="cpu",
-                                     pin_memory=pin_memory)
+        self.top_k_cpu_tensor = torch.empty((max_num_reqs, ),
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=pin_memory)
+        self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
 
         self.generators: List[Optional[torch.Generator]] = [None
@@ -529,15 +534,16 @@ class PersistentBatch:
 
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
-        self.token_ids_cpu[req_index, :num_prompt_tokens] = torch.as_tensor(
-            request.prompt_token_ids, dtype=torch.int32, device="cpu")
-        for i, token_id in enumerate(request.output_token_ids):
-            self.token_ids_cpu[req_index, num_prompt_tokens + i] = token_id
+        self.token_ids_cpu[
+            req_index, :num_prompt_tokens] = request.prompt_token_ids
+        start_idx = num_prompt_tokens
+        end_idx = start_idx + len(request.output_token_ids)
+        self.token_ids_cpu[req_index,
+                           start_idx:end_idx] = request.output_token_ids
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        # TODO: Optimize.
-        for i, block_id in enumerate(request.block_ids):
-            self.block_table_cpu[req_index, i] = block_id
+        num_blocks = len(request.block_ids)
+        self.block_table_cpu[req_index, :num_blocks] = request.block_ids
 
         sampling_params = request.sampling_params
         self.temperature_cpu[req_index] = sampling_params.temperature
@@ -637,10 +643,10 @@ class PersistentBatch:
     ) -> SamplingMetadata:
         if not skip_copy:
             self.temperature[:self.num_reqs].copy_(
-                self.temperature_cpu[:self.num_reqs], non_blocking=True)
-            self.top_p[:self.num_reqs].copy_(self.top_p_cpu[:self.num_reqs],
+                self.temperature_cpu_tensor[:self.num_reqs], non_blocking=True)
+            self.top_p[:self.num_reqs].copy_(self.top_p_cpu_tensor[:self.num_reqs],
                                              non_blocking=True)
-            self.top_k[:self.num_reqs].copy_(self.top_k_cpu[:self.num_reqs],
+            self.top_k[:self.num_reqs].copy_(self.top_k_cpu_tensor[:self.num_reqs],
                                              non_blocking=True)
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],
