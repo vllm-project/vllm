@@ -1,9 +1,15 @@
 from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple
 
-import flux
+try:
+    import flux
+    has_flux = True
+except ImportError:
+    has_flux = False
+
 import torch
 import torch.nn.functional as F
+import torch.distributed as D
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -11,7 +17,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_tp_group, get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -137,7 +143,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return F.linear(x, layer.weight, bias)
 
 
-class GemmRS(LinearMethodBase):
+class FluxGemmRS(LinearMethodBase):
     #Fused Gemm-ReduceScatter without quantization.
 
     def __init__(self, separate_bias_add: bool = False):
@@ -184,7 +190,7 @@ class GemmRS(LinearMethodBase):
         return output
 
 
-class AGCook(LinearMethodBase):
+class FluxAGCook(LinearMethodBase):
     #Fused AllGather-Gemm without quantization.
 
     def __init__(self, separate_bias_add: bool = False):
@@ -235,6 +241,86 @@ class AGCook(LinearMethodBase):
         return output
 
 
+class GemmRS(LinearMethodBase):
+    #Fused Gemm-ReduceScatter without quantization.
+
+    def __init__(self, separate_bias_add: bool = False):
+        self.separate_bias_add = separate_bias_add
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+        weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                       input_size_per_partition,
+                                       dtype=params_dtype),
+                           requires_grad=False)
+        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, extra_weight_attrs)
+        print(f"out_partitions={output_partition_sizes}, input_size={input_size}, output_size={output_size}")
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert bias is None
+
+        group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
+
+        print(f"MATMUL_RS {group_name}")
+
+        output = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+            x,
+            layer.weight,
+            "avg",  # ?
+            scatter_dim=0,  # rows
+            group_name=group_name
+        )
+
+        return output
+
+
+class AGCook(LinearMethodBase):
+    #Fused AllGather-Gemm without quantization.
+
+    def __init__(self, separate_bias_add: bool = False):
+        self.separate_bias_add = separate_bias_add
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+        weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                       input_size_per_partition,
+                                       dtype=params_dtype),
+                           requires_grad=False)
+        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, extra_weight_attrs)
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert bias is None
+
+        group_name = torch.distributed.group.WORLD.group_name
+
+        print(f"AG_MATMUL {group_name}")
+
+        ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
+            x,
+            [layer.weight], #?
+            gather_dim=1,  # cols
+            group_name=group_name,
+        )
+
+        return mm_outputs
+
+
 class LinearBase(torch.nn.Module):
     """Base linear layer.
 
@@ -267,13 +353,16 @@ class LinearBase(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
+        self.quant_method: Optional[QuantizeMethodBase] = None
 
-        if fuse_gemm_rs:
+        tp_size = get_tensor_model_parallel_world_size()
+
+        if fuse_gemm_rs and tp_size > 1:
             assert (quant_config is None)
-            self.quant_method: Optional[QuantizeMethodBase] = GemmRS()
-        elif fuse_ag_gemm:
+            self.quant_method = FluxGemmRS() if has_flux else GemmRS()
+        elif fuse_ag_gemm and tp_size > 1:
             assert (quant_config is None)
-            self.quant_method = AGCook()
+            self.quant_method = FluxAGCook() if has_flux else AGCook()
         elif quant_config is None:
             self.quant_method = UnquantizedLinearMethod()
         else:

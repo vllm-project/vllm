@@ -30,15 +30,23 @@ from multiprocessing import shared_memory
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
-import flux
+try:
+    import flux
+    has_flux = True
+except ImportError:
+    has_flux = False
+
 import torch
 import torch.distributed
-from torch.distributed import Backend, ProcessGroup
+from torch.distributed import Backend, ProcessGroup, _symmetric_memory
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import supports_custom_op
+
+
+torch._inductor.config._micro_pipeline_tp = True
 
 
 @dataclass
@@ -153,6 +161,7 @@ class GroupCoordinator:
     rank_in_group: int  # rank inside the group
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
+    #device_mesh: DeviceMesh
     use_pynccl: bool  # a hint of whether to use PyNccl
     use_custom_allreduce: bool  # a hint of whether to use CustomAllreduce
     # communicators are only created for world size > 1
@@ -206,7 +215,7 @@ class GroupCoordinator:
         self.use_tpu_communicator = use_tpu_communicator
 
         # Initialize pynvshmem
-        if torch.distributed.get_world_size(self.device_group) > 1:
+        if has_flux and torch.distributed.get_world_size(self.device_group) > 1:
             flux.init_flux_shm(self.device_group)
 
         # lazy import to avoid documentation build error
@@ -944,12 +953,12 @@ def graph_capture():
 
 logger = init_logger(__name__)
 
-_ENABLE_CUSTOM_ALL_REDUCE = True
+_ENABLE_CUSTOM_ALL_REDUCE = False #True
 
 
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
-    _ENABLE_CUSTOM_ALL_REDUCE = enable
+    _ENABLE_CUSTOM_ALL_REDUCE = False #enable
 
 
 def init_distributed_environment(
@@ -973,6 +982,7 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank)
+        print(f"INIT {backend}, {distributed_init_method}, {world_size}, {rank}")
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -990,6 +1000,10 @@ def init_distributed_environment(
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
+
+    group_name = torch.distributed.group.WORLD.group_name
+    print(f"WORLD! {group_name}")
+    _symmetric_memory.enable_symm_mem_for_group(group_name)
 
 
 def initialize_model_parallel(
@@ -1050,6 +1064,10 @@ def initialize_model_parallel(
                                     backend,
                                     use_message_queue_broadcaster=True,
                                     group_name="tp")
+
+    print(f"ENABLE! {_TP.device_group.group_name}, {backend}")
+    _symmetric_memory.enable_symm_mem_for_group(_TP.device_group.group_name)
+
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //

@@ -296,6 +296,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         if self.last_layer:
+            print("GOT HERE")
             residual = tensor_model_parallel_all_gather(my_residual, 0)
         else:
             residual = my_residual
