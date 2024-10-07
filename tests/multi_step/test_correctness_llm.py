@@ -204,11 +204,9 @@ def test_multi_step_llm_w_prompt_logprobs(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("tp_size", [1])
-@pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
-@pytest.mark.parametrize("num_logprobs", [None, 5])
 @pytest.mark.parametrize("max_output_len", [7])
 @pytest.mark.parametrize("n_best_of", [
     (1, 2),
@@ -227,7 +225,7 @@ def test_multi_step_llm_best_of_fallback(
     num_scheduler_steps: int,
     num_prompts: int,
     max_output_len: int,
-    n_best_of: Tuple[int, int, bool],
+    n_best_of: Tuple[int, int],
 ) -> None:
     """Test vLLM engine with multi-step & best_of > 1
 
