@@ -1414,10 +1414,10 @@ def get_beam_search_score(
     return cumulative_logprob / (seq_len**length_penalty)
 
 
-def create_sort_beams_key_function(tokenizer, length_penalty):
+def create_sort_beams_key_function(eos_token_id: int, length_penalty):
 
     def sort_beams_key(x: BeamSearchSequence) -> float:
-        return get_beam_search_score(x.tokens, x.cum_logprob,
-                                     tokenizer.eos_token_id, length_penalty)
+        return get_beam_search_score(x.tokens, x.cum_logprob, eos_token_id,
+                                     length_penalty)
 
     return sort_beams_key
