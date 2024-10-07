@@ -315,6 +315,9 @@ Multimodal Language Models
 
 .. _supported_vlms:
 
+Text Generation
+---------------
+
 .. list-table::
   :widths: 25 25 25 25 5 5
   :header-rows: 1
