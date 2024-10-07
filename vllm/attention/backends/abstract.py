@@ -18,6 +18,19 @@ class AttentionType(Enum):
     ENCODER = auto()  # Encoder attention between previous layer Q/K/V
     ENCODER_DECODER = auto()  # Attention between dec. Q and enc. K/V
 
+    @staticmethod
+    def attn_type_name_to_enum(attn_type: str) -> "AttentionType":
+        assert attn_type is not None
+
+        attn_type_members = AttentionType.__members__
+        if attn_type not in attn_type_members:
+            raise ValueError(
+                f"Invalid attn_type '{attn_type}'. "
+                f"Available backends: {', '.join(attn_type_members)} "
+                "(case-sensitive).")
+
+        return AttentionType[attn_type]
+
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
