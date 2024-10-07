@@ -1075,6 +1075,10 @@ class DeviceConfig:
             # Set device with device type
             self.device = torch.device(self.device_type)
 
+    @property
+    def require_compilation(self) -> bool:
+        return self.device_type == "neuron"
+
 
 class SpeculativeConfig:
     """Configuration for speculative decoding.
@@ -1494,7 +1498,6 @@ class SpeculativeConfig:
             draft_model = self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
-
 
 @dataclass
 class LoRAConfig:

@@ -65,6 +65,9 @@ class NeuronExecutor(ExecutorBase):
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 
+    def compile_model(self) -> bool:
+        return self.driver_worker.compile_model()
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.driver_worker.add_lora(lora_request)
 

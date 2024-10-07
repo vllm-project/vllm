@@ -15,24 +15,21 @@ prompts = [
     "The future of AI is",
 ]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+sampling_params = SamplingParams()
 
 # Create an LLM.
 llm = LLM(
-    model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    model="meta-llama/Llama-3.2-1B-Instruct",
     max_num_seqs=8,
-    # The max_model_len and block_size arguments are required to be same as
-    # max sequence length when targeting neuron device.
-    # Currently, this is a known limitation in continuous batching support
-    # in transformers-neuronx.
-    # TODO(liangfu): Support paged-attention in transformers-neuronx.
     max_model_len=2048,
-    block_size=2048,
-    # The device can be automatically detected when AWS Neuron SDK is installed.
+    max_num_batched_tokens=2048,
+    block_size=32,
+
     # The device argument can be either unspecified for automated detection,
     # or explicitly assigned.
     device="neuron",
-    tensor_parallel_size=2)
+    tensor_parallel_size=2,
+    gpu_memory_utilization=0.2)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)

@@ -1125,6 +1125,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "Using FP8 KV cache but no scaling factors "
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
+        elif self.model_config.quantization_param_path is not None:
+            logger.warn("KV cache scaling factors provided, "
+                        "but the KV cache data type is not FP8. "
+                        "KV cache scaling factors will not be used.")
 
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
             from vllm.compilation.backends import vllm_backend
@@ -1134,6 +1138,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend)
+
+    def compile_model(self) -> None:
+        self.model.compile_model()
+
+    def set_block_size(self, block_size: int) -> None:
+        self.block_size = block_size
+
+        self.graph_block_tables = np.zeros(
+            (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
+            dtype=np.int32)
 
     def save_sharded_state(
         self,

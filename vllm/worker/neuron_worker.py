@@ -9,7 +9,8 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata
+from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
@@ -44,7 +45,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             init_cached_hf_modules()
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
-            model_config, parallel_config, scheduler_config, device_config)
+            model_config, parallel_config, cache_config, scheduler_config, device_config)
         self.is_driver_worker = True
 
     def init_device(self) -> None:
@@ -60,13 +61,12 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         """Determine the number of available KV blocks.
 
         Swapping is not yet supported, so always return num_cpu_blocks=0.
-
-        We configure num_gpu_blocks to be equal to max_num_seqs.
         """
-        # Set the number of GPU blocks to be the same as the maximum number of
-        # sequences that can be processed in a single batch. This is equivalent
-        # to schedule without PagedAttention.
-        num_gpu_blocks = self.scheduler_config.max_num_seqs
+        total_gpu_memory = 16 * 1e9 # 16GiB per NeuronCore
+        cache_block_size = CacheEngine.get_cache_block_size(self.cache_config, self.model_config, self.parallel_config)
+        num_gpu_blocks = int((total_gpu_memory * self.cache_config.gpu_memory_utilization) // cache_block_size)
+        num_gpu_blocks = max(num_gpu_blocks, 0)
+        assert num_gpu_blocks > 0, f"insufficient K/V cache space."
 
         # Swap not yet supported with Neuron backend.
         num_cpu_blocks = 0
@@ -77,13 +77,25 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                          num_cpu_blocks: int) -> None:
         """Initialize the KV cache.
         """
-
         # Different values are not tested.
         assert num_cpu_blocks == 0
-        assert num_gpu_blocks == self.scheduler_config.max_num_seqs
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        self._init_cache_engine()
+
+    def _init_cache_engine(self):
+        assert self.cache_config.num_gpu_blocks is not None
+
+        neuron_config = self.model_runner.model.model.neuron_config
+        neuron_config.continuous_batching.init_cache_engine(
+            block_size=self.cache_config.block_size,
+            num_blocks=self.cache_config.num_gpu_blocks
+        )
+
+        self.model_runner.set_block_size(self.cache_config.block_size)
+        self.model_runner.compile_model()
 
     @property
     def do_metadata_broadcast(self) -> bool:

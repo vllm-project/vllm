@@ -33,8 +33,6 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str, str]] = {
     "LlamaForCausalLM": ("transformers_neuronx.llama.model",
                          "LlamaForSampling", "LlamaForCausalLM"),
-    "MistralForCausalLM": ("transformers_neuronx.mistral.model",
-                           "MistralForSampling", "MistralForCausalLM")
 }
 
 
@@ -60,11 +58,12 @@ class NeuronCasualLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        input_block_ids: torch.Tensor,
+        input_metadata,
     ) -> torch.Tensor:
         logits = self.model(input_ids,
                             cache_ids=positions,
-                            start_ids=input_block_ids)
+                            start_ids=input_metadata.slot_mapping,
+                            input_metadata=input_metadata)
         return logits
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -108,20 +107,8 @@ class NeuronCasualLM(nn.Module):
         neuronx_module = importlib.import_module(neuronx_module_path)
         neuronx_model_cls = getattr(neuronx_module, neuronx_model_cls_name)
 
-        split_model_dir = f"{model_name_or_path}-split"
-        if _is_pretrained_neuron_checkpoint(model_name_or_path):
-            split_model_dir = model_name_or_path
-        elif not os.path.exists(f"{model_name_or_path}-split"):
-            hf_model_cls = getattr(transformers, hf_model_cls_name)
-            from transformers_neuronx.module import save_pretrained_split
-
-            hf_model = hf_model_cls.from_pretrained(model_name_or_path,
-                                                    low_cpu_mem_usage=True)
-            save_pretrained_split(hf_model, f"{model_name_or_path}-split")
-
-        self.model = neuronx_model_cls.from_pretrained(split_model_dir,
+        self.model = neuronx_model_cls.from_pretrained(model_name_or_path,
                                                        **kwargs)
-        self.model.to_neuron()
 
 
 def _is_pretrained_neuron_checkpoint(model_name_or_path: str) -> bool:
@@ -170,19 +157,19 @@ def _get_default_neuron_config(model_config: ModelConfig,
     from transformers_neuronx.constants import LAYOUT_BSH
 
     continuous_batching_config = ContinuousBatchingConfig(
-        batch_size_for_shared_caches=scheduler_config.max_num_seqs)
+        max_model_len=model_config.max_model_len,
+        max_num_seqs=scheduler_config.max_num_seqs,
+        optimized_paged_attention=True)
     quant_config = dict(
         dequant_dtype=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
         quantize_method="vector_dynamic")
-    neuron_quantization_config_builder = lambda quant: get_quantization_config(
-        quant).from_config(quant_config).get_quant_method(None, "")
-    # TODO: Add Paged attention config to the default neuron arguments.
+    quantization_config = get_quantization_config(
+        model_config.quantization).from_config(quant_config).get_quant_method(None, "")
     default_neuron_args = dict(
         collectives_layout=LAYOUT_BSH,
         attention_layout=LAYOUT_BSH,
         fuse_qkv=True,
-        quant=neuron_quantization_config_builder(model_config.quantization)
-        if model_config.quantization else None,
+        quant=quantization_config if model_config.quantization else None,
         continuous_batching=continuous_batching_config,
         weight_tiling=bool(model_config.quantization),
         on_device_generation=_get_neuron_on_device_generation_config(
@@ -211,7 +198,6 @@ def _get_neuron_config_after_override(default_neuron_config,
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
-
     # Create a model instance.
     model = NeuronCasualLM(
         model_config.hf_config,

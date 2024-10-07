@@ -361,8 +361,7 @@ class EngineArgs:
                             default=EngineArgs.block_size,
                             choices=[8, 16, 32],
                             help='Token block size for contiguous chunks of '
-                            'tokens. This is ignored on neuron devices and '
-                            'set to max-model-len')
+                            'tokens.')
 
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
@@ -905,8 +904,7 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
         cache_config = CacheConfig(
-            block_size=self.block_size if self.device != "neuron" else
-            self.max_model_len,  # neuron needs block_size = max_model_len
+            block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
