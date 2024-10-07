@@ -1286,8 +1286,19 @@ def supports_kw(callable: Callable[..., object], kw_name: str) -> bool:
                for param in params.values())
 
 
-def resolve_mm_processor_kwargs(init_kwargs, inference_kwargs,
-                                callable) -> Dict[str, Any]:
+def resolve_mm_processor_kwargs(
+    init_kwargs: Optional[Dict[str, Any]],
+    inference_kwargs: Optional[Dict[str, Any]],
+    callable: Optional[Callable],
+) -> Dict[str, Any]:
+    """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
+    those who are not explicit keywords to the given callable (of one is
+    given; otherwise no filtering is done), then merges the kwarg dicts,
+    giving priority to inference_kwargs if there are any collisions.
+
+    In the case that no kwarg overrides are provided, returns an empty
+    dict so that it can still be kwarg expanded into the callable later on.
+    """
     # Filter inference time multimodal processor kwargs provided
     runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
         callable, overrides=inference_kwargs)
