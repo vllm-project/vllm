@@ -110,6 +110,8 @@ class InternParallelAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
+
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
                 f'embed_dim must be divisible by num_heads '
@@ -137,9 +139,6 @@ class InternParallelAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-
     def _apply_qk_norm(self, q, k):
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
@@ -154,7 +153,7 @@ class InternParallelAttention(nn.Module):
         return q, k
 
     def forward(self, x):
-        B, N, C = x.shape
+        B, N, _ = x.shape
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
 

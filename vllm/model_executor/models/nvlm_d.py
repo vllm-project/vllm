@@ -88,6 +88,8 @@ class NVLMParallelAttention(nn.Module):
         self.num_dummy_heads = num_dummy_heads
         self.dummy_dim = (self.num_dummy_heads +
                           self.num_heads) * self.head_dim
+        self.num_heads_per_partition = divide(
+            self.num_dummy_heads + self.num_heads, self.tp_size)
 
         self.scale = self.head_dim**-0.5
         self.qkv = QKVParallelLinear(
@@ -114,25 +116,30 @@ class NVLMParallelAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_partition = divide(
-            self.num_dummy_heads + self.num_heads, self.tp_size)
+    def _apply_qk_norm(self, q, k):
+        if self.tp_size > 1:
+            q = tensor_model_parallel_all_gather(q.contiguous())
+            k = tensor_model_parallel_all_gather(k.contiguous())
+        q = self.q_norm.forward_native(q)
+        k = self.k_norm.forward_native(k)
+        if self.tp_size > 1:
+            splitter = partial(split_tensor_along_last_dim,
+                               num_partitions=self.tp_size)
+            q = splitter(q)[self.tp_rank]
+            k = splitter(k)[self.tp_rank]
+        return q, k
 
     def forward(self, x):
-        B, N, C = x.shape
+        B, N, _ = x.shape
         qkv, _ = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
+
+        if self.qk_normalization:
+            q, k = self._apply_qk_norm(q, k)
 
         q = q.view(B, N, self.num_heads_per_partition, self.head_dim)
         k = k.view(B, N, self.num_heads_per_partition, self.head_dim)
         v = v.view(B, N, self.num_heads_per_partition, self.head_dim)
-
-        if self.qk_normalization:
-            B_, N_, H_, D_ = q.shape
-            q = self.q_norm.forward_native(q.flatten(-2,
-                                                     -1)).view(B_, N_, H_, D_)
-            k = self.k_norm.forward_native(k.flatten(-2,
-                                                     -1)).view(B_, N_, H_, D_)
 
         x = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
         x = x.view(B, N, -1)
@@ -179,31 +186,21 @@ class NVLMSdpaAttention(nn.Module):
 
         self.proj = nn.Linear(self.dummy_dim, self.embed_dim)
 
-    def _apply_qk_norm(self, q, k):
-        if self.tp_size > 1:
-            q = tensor_model_parallel_all_gather(q.contiguous())
-            k = tensor_model_parallel_all_gather(k.contiguous())
-        q = self.q_norm.forward_native(q)
-        k = self.k_norm.forward_native(k)
-        if self.tp_size > 1:
-            splitter = partial(split_tensor_along_last_dim,
-                               num_partitions=self.tp_size)
-            q = splitter(q)[self.tp_rank]
-            k = splitter(k)[self.tp_rank]
-        return q, k
-
     def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
-        if self.qk_normalization:
-            q, k = self._apply_qk_norm(q, k)
-
         q = q.view(B, N, self.num_dummy_heads + self.num_heads, self.head_dim)
         k = k.view(B, N, self.num_dummy_heads + self.num_heads, self.head_dim)
         v = v.view(B, N, self.num_dummy_heads + self.num_heads, self.head_dim)
 
+        if self.qk_normalization:
+            B_, N_, H_, D_ = q.shape
+            q = self.q_norm.forward_native(q.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
+            k = self.k_norm.forward_native(k.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
