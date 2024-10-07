@@ -1,9 +1,11 @@
 # Test the LLMEngine with multi-step-decoding
 
 import copy
-from typing import Optional
+from typing import Optional, Tuple
 
 import pytest
+
+from vllm import SamplingParams
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
 
@@ -194,8 +196,113 @@ def test_multi_step_llm_w_prompt_logprobs(
     check_logprobs_close(
         outputs_0_lst=single_step_vllm_outputs,
         outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+        name_0="single_step_vllm",
+        name_1="multi_step_vllm",
+    )
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
+@pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
+@pytest.mark.parametrize("num_logprobs", [None, 5])
+@pytest.mark.parametrize("max_output_len", [7])
+@pytest.mark.parametrize("n_best_of_use_beam_search", [
+    (1, 2, False),
+    (2, 2, False),
+    (1, 3, False),
+    (2, 3, False),
+    (3, 3, False),
+    (1, 1, True),
+    (1, 2, True),
+    (2, 2, True),
+])
+def test_multi_step_llm_best_of_beam_search_fallback(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    tp_size: int,
+    max_tokens: int,
+    enforce_eager: int,
+    num_scheduler_steps: int,
+    num_prompts: int,
+    num_logprobs: Optional[int],
+    max_output_len: int,
+    n_best_of_use_beam_search: Tuple[int, int, bool],
+) -> None:
+    """Test vLLM engine with multi-step & beam search enabled or best_of > 1
+
+    Currently multi-step scheduling does not support best_of > 1 or beam search,
+    however the default behavior is for the engine to fall back on single-step
+    scheduling rather than failing.
+    
+    Args:
+      hf_runner: HF transformers model runner fixture
+      vllm_runner: vLLM model runner fixture
+      example_prompts: test fixture providing example prompts
+      model: model under test (same for single- and multi-step engines)
+      dtype: tensor datatype for engine to utilize
+      tp_size: degree of tensor-parallelism
+      max_tokens: the maximum number of tokens to generate
+      enforce_eager
+      num_scheduler_steps: for multi-step scheduling, GPU-side steps per
+                           GPU -> CPU output transfer
+      num_prompts: number of example prompts under test
+      num_logprobs: corresponds to the `logprobs` argument to the OpenAI
+                    completions endpoint; `None` -> 1 logprob returned.
+      best_of: `best_of` sampling param
+      use_beam_search: `use_beam_search` sampling param
+    """
+
+    prompts = example_prompts
+    if len(prompts) < num_prompts:
+        prompts = prompts * ((num_prompts // len(prompts)) + 1)
+    prompts = prompts[:num_prompts]
+    assert len(prompts) == num_prompts
+
+    n = n_best_of_use_beam_search[0]
+    best_of = n_best_of_use_beam_search[1]
+    use_beam_search = n_best_of_use_beam_search[2]
+    sampling_params = SamplingParams(
+        max_tokens=max_output_len,
+        ignore_eos=True,
+        temperature=0.0 if use_beam_search else 1.0,
+        n=n,
+        best_of=best_of,
+        use_beam_search=use_beam_search,
+        seed=42,
+    )
+
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            enforce_eager=enforce_eager,
+            gpu_memory_utilization=0.7,
+            tensor_parallel_size=tp_size,
+    ) as vllm_model:
+        outputs_baseline = vllm_model.generate(prompts, sampling_params)
+
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            enforce_eager=enforce_eager,
+            gpu_memory_utilization=0.7,
+            tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
+            num_scheduler_steps=num_scheduler_steps,
+    ) as vllm_model:
+        outputs_ms = vllm_model.generate(prompts, sampling_params)
+
+    check_outputs_equal(
+        outputs_0_lst=outputs_baseline,
+        outputs_1_lst=outputs_ms,
+        name_0="single_step_vllm",
+        name_1="multi_step_vllm",
     )
 
 
@@ -354,107 +461,3 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             name_0="multi-step",
             name_1="multi-step+features",
         )
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("tp_size", [1])
-@pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [True])
-@pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
-@pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
-@pytest.mark.parametrize("num_logprobs", [None, 5])
-@pytest.mark.parametrize("max_output_len", [7])
-@pytest.mark.parametrize("n_best_of_use_beam_search", [
-    (1, 2, False),
-    (2, 2, False),
-    (1, 3, False),
-    (2, 3, False),
-    (3, 3, False),
-    (1, 1, True),
-    (1, 2, True),
-    (2, 2, True),
-])
-def test_multi_step_llm_best_of_beam_search_fallback(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    tp_size: int,
-    max_tokens: int,
-    enforce_eager: int,
-    num_scheduler_steps: int,
-    num_prompts: int,
-    num_logprobs: Optional[int],
-    max_output_len: int,
-    n_best_of_use_beam_search: Tuple[int, int, bool],
-) -> None:
-    """Test vLLM engine with multi-step & beam search enabled or best_of > 1
-
-    Currently multi-step scheduling does not support best_of > 1 or beam search,
-    however the default behavior is for the engine to fall back on single-step
-    scheduling rather than failing.
-    
-    Args:
-      hf_runner: HF transformers model runner fixture
-      vllm_runner: vLLM model runner fixture
-      example_prompts: test fixture providing example prompts
-      model: model under test (same for single- and multi-step engines)
-      dtype: tensor datatype for engine to utilize
-      tp_size: degree of tensor-parallelism
-      max_tokens: the maximum number of tokens to generate
-      enforce_eager
-      num_scheduler_steps: for multi-step scheduling, GPU-side steps per
-                           GPU -> CPU output transfer
-      num_prompts: number of example prompts under test
-      num_logprobs: corresponds to the `logprobs` argument to the OpenAI
-                    completions endpoint; `None` -> 1 logprob returned.
-      best_of: `best_of` sampling param
-      use_beam_search: `use_beam_search` sampling param
-    """
-
-    prompts = example_prompts
-    if len(prompts) < num_prompts:
-        prompts = prompts * ((num_prompts // len(prompts)) + 1)
-    prompts = prompts[:num_prompts]
-    assert len(prompts) == num_prompts
-
-    n = n_best_of_use_beam_search[0]
-    best_of = n_best_of_use_beam_search[1]
-    use_beam_search = n_best_of_use_beam_search[2]
-    sampling_params = SamplingParams(
-        max_tokens=max_output_len,
-        ignore_eos=True,
-        temperature=0.0 if use_beam_search else 1.0,
-        n=n,
-        best_of=best_of,
-        use_beam_search=use_beam_search,
-        seed=42,
-    )
-
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            gpu_memory_utilization=0.7,
-            tensor_parallel_size=tp_size,
-    ) as vllm_model:
-        outputs_baseline = vllm_model.generate(prompts, sampling_params)
-
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            gpu_memory_utilization=0.7,
-            tensor_parallel_size=tp_size,
-            use_v2_block_manager=True,
-            num_scheduler_steps=num_scheduler_steps,
-    ) as vllm_model:
-        outputs_ms = vllm_model.generate(prompts, sampling_params)
-
-    check_outputs_equal(
-        outputs_0_lst=outputs_baseline,
-        outputs_1_lst=outputs_ms,
-        name_0="single_step_vllm",
-        name_1="multi_step_vllm",
-    )
