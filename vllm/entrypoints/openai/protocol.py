@@ -11,8 +11,8 @@ from typing_extensions import Annotated, Required, TypedDict
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import (GuidedDecodingParams, RequestOutputKind,
-                                  SamplingParams)
+from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
+                                  RequestOutputKind, SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
 
@@ -184,7 +184,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -288,6 +287,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: end-chat-completion-extra-params
 
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+        )
+
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
@@ -329,12 +345,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
@@ -502,7 +515,6 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -567,6 +579,23 @@ class CompletionRequest(OpenAIBaseModel):
 
     # doc: end-completion-extra-params
 
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+        )
+
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
@@ -609,13 +638,10 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
             prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,

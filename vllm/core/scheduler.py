@@ -1202,9 +1202,9 @@ class Scheduler:
             seq_group=seq_group, num_lookahead_slots=num_lookahead_slots)
 
     def _allow_async_output_proc(self, seq_group: SequenceGroup) -> bool:
+        # TODO: does it work with parallel sampling?
         no_beam_search = seq_group.sampling_params is None or (
-            seq_group.sampling_params.best_of == 1
-            and not seq_group.sampling_params.use_beam_search)
+            seq_group.sampling_params.best_of == 1)
         return no_beam_search
 
     def schedule(

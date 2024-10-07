@@ -35,6 +35,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
 
@@ -781,7 +782,6 @@ class VllmRunner:
                List[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
-            use_beam_search=False,
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=(num_prompt_logprobs),
@@ -795,24 +795,13 @@ class VllmRunner:
 
     def generate_beam_search(
         self,
-        prompts: List[str],
-        beam_width: int,
-        max_tokens: int,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
-        beam_search_params = SamplingParams(n=beam_width,
-                                            use_beam_search=True,
-                                            temperature=0.0,
-                                            max_tokens=max_tokens)
-        outputs = self.generate(prompts, beam_search_params)
-        return outputs
-
-    def generate_beam_search_new(
-        self,
         prompts: Union[List[str], List[List[int]]],
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        outputs = self.model.beam_search(prompts, beam_width, max_tokens)
+        outputs = self.model.beam_search(
+            prompts,
+            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
         returned_outputs = []
         for output in outputs:
             token_ids = [x.tokens for x in output.sequences]
@@ -882,6 +871,7 @@ def num_gpus_available():
 temp_dir = tempfile.gettempdir()
 _dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
 _dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
+_dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
 
 
 @pytest.fixture
@@ -920,3 +910,22 @@ def dummy_llava_path():
         with open(json_path, "w") as f:
             json.dump(config, f)
     return _dummy_llava_path
+
+
+@pytest.fixture
+def dummy_gemma2_embedding_path():
+    json_path = os.path.join(_dummy_gemma2_embedding_path, "config.json")
+    if not os.path.exists(_dummy_gemma2_embedding_path):
+        snapshot_download(repo_id="BAAI/bge-multilingual-gemma2",
+                          local_dir=_dummy_gemma2_embedding_path,
+                          ignore_patterns=[
+                              "*.bin", "*.bin.index.json", "*.pt", "*.h5",
+                              "*.msgpack"
+                          ])
+        assert os.path.exists(json_path)
+        with open(json_path, "r") as f:
+            config = json.load(f)
+        config["architectures"] = ["MyGemma2Embedding"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_gemma2_embedding_path
