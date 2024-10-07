@@ -782,7 +782,6 @@ class VllmRunner:
                List[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
-            use_beam_search=False,
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=(num_prompt_logprobs),
@@ -795,19 +794,6 @@ class VllmRunner:
             encoder_decoder_prompts, greedy_logprobs_params)
 
     def generate_beam_search(
-        self,
-        prompts: List[str],
-        beam_width: int,
-        max_tokens: int,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
-        beam_search_params = SamplingParams(n=beam_width,
-                                            use_beam_search=True,
-                                            temperature=0.0,
-                                            max_tokens=max_tokens)
-        outputs = self.generate(prompts, beam_search_params)
-        return outputs
-
-    def generate_beam_search_new(
         self,
         prompts: Union[List[str], List[List[int]]],
         beam_width: int,
