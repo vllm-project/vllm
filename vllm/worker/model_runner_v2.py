@@ -106,6 +106,7 @@ class GPUModelRunner:
                 removed_req_indices.append(req_index)
 
         # Update the states of the running requests.
+        start = time.time()
         for req_data in scheduler_output.scheduled_running_reqs:
             req_id = req_data.req_id
             req_state = self.requests[req_id]
@@ -126,6 +127,8 @@ class GPUModelRunner:
                 self.persistent_batch.block_table_cpu[req_index,
                                                       start_block_index +
                                                       i] = block_id
+        end = time.time()
+        self.cum2 += end - start
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -315,7 +318,7 @@ class GPUModelRunner:
         inputs = self._prepare_inputs(scheduler_output)
         input_ids, positions, attn_metadata, logits_indices = inputs
         end = time.time()
-        self.cum2 += end - start
+        # self.cum2 += end - start
 
         hidden_states = self.model(
             input_ids=input_ids,
@@ -333,11 +336,11 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
-        # CPU-GPU synchronization happens here.
-        # TODO: Optimize.
-        # torch.cuda.synchronize()
-        start = time.time()
+        # NOTE: CPU-GPU synchronization happens here.
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
+        start = time.time()
+        sampled_token_ids_list = sampled_token_ids.tolist()
+        # TODO: Optimize.
         num_reqs = self.persistent_batch.num_reqs
         for i, req_id in enumerate(self.persistent_batch.req_ids[:num_reqs]):
             req_state = self.requests[req_id]
@@ -346,7 +349,7 @@ class GPUModelRunner:
             num_prompt_tokens = len(req_state.prompt_token_ids)
             if seq_len >= num_prompt_tokens:
                 # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids[i]
+                token_id = sampled_token_ids_list[i]
                 self.persistent_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
             else:
@@ -357,6 +360,8 @@ class GPUModelRunner:
                     offset = generator.get_offset()
                     generator = generator.set_offset(offset - 1)
                     self.persistent_batch.generators[i] = generator
+        end = time.time()
+        self.cum3 += end - start
 
         if sampler_output.logprob_token_ids is None:
             logprob_token_ids = None
@@ -373,8 +378,6 @@ class GPUModelRunner:
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
         )
-        end = time.time()
-        self.cum3 += end - start
         # print(f"cum1: {self.cum1 * 1000:.3f} ms")
         # print(f"cum2: {self.cum2 * 1000:.3f} ms")
         # print(f"cum3: {self.cum3 * 1000:.3f} ms")
@@ -525,10 +528,9 @@ class PersistentBatch:
         self.req_id_to_index[request.req_id] = req_index
 
         # Copy the prompt token ids and output token ids.
-        # TODO: Optimize.
-        for i, token_id in enumerate(request.prompt_token_ids):
-            self.token_ids_cpu[req_index, i] = token_id
         num_prompt_tokens = len(request.prompt_token_ids)
+        self.token_ids_cpu[req_index, :num_prompt_tokens] = torch.as_tensor(
+            request.prompt_token_ids, dtype=torch.int32, device="cpu")
         for i, token_id in enumerate(request.output_token_ids):
             self.token_ids_cpu[req_index, num_prompt_tokens + i] = token_id
 

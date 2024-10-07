@@ -83,8 +83,11 @@ class Scheduler:
             assert num_tokens > 0
 
             while True:
+                start = time.time()
                 new_block_ids = self.kv_cache_manager.append_slots(
                     request, num_tokens)
+                end = time.time()
+                self.cum += (end - start)
                 if new_block_ids is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -190,10 +193,6 @@ class Scheduler:
             finished_req_ids=self.finished_req_ids,
             aborted_req_ids=self.aborted_req_ids,
         )
-        end = time.time()
-        self.cum += (end - start)
-        print(f"Scheduler time: {(end - start) * 1000:.3f} ms")
-        print(f"Cumulative scheduler time: {self.cum * 1000:.3f} ms")
 
         self.finished_req_ids = set()
         self.aborted_req_ids = set()
