@@ -2,6 +2,7 @@ from contextlib import nullcontext
 
 import numpy as np
 import pytest
+from PIL import Image
 from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 
 from vllm.config import ModelConfig
@@ -155,3 +156,31 @@ def test_image_mapper_multi(image_assets, mm_registry, num_images):
 
     mapped_inputs = mm_registry.map_input(model_config, mm_inputs)
     assert len(mapped_inputs["pixel_values"]) == num_images
+
+
+@pytest.mark.parametrize("image_size", [(1, 1), (2, 1), (1, 2), (2, 2)])
+def test_llama3p2_image_processor_when_small_width_or_height(
+        mm_registry, image_size):
+    MODEL_NAME = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+    model_config = ModelConfig(
+        model=MODEL_NAME,
+        tokenizer=MODEL_NAME,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        dtype="bfloat16",
+        seed=0,
+        revision=None,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    mm_registry.init_mm_limits_per_prompt(model_config)
+
+    try:
+        image = Image.new("RGB", image_size)
+        mm_registry.map_input(
+            model_config,
+            {"image": image},
+        )
+    except Exception as e:
+        raise AssertionError(f"Expected no exceptions: {e} ") from e

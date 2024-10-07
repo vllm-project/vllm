@@ -45,8 +45,11 @@ class ImagePlugin(MultiModalPlugin):
             return MultiModalInputs(data.data)
 
         # PIL image
-        if isinstance(data, Image.Image) or is_list_of(data, Image.Image):
+        if (isinstance(data, Image.Image)
+                or is_list_of(data, Image.Image, check="all")):
             image_processor = self._get_hf_image_processor(model_config)
+
+            data = self._handle_single_row_images(data)
 
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "
@@ -71,6 +74,28 @@ class ImagePlugin(MultiModalPlugin):
             return MultiModalInputs({"image_embeds": data})
 
         raise TypeError(f"Invalid image type: {type(data)}")
+
+    def _handle_single_row_images(self, data):
+        # transformers library has error when image height is 1
+        # https://github.com/huggingface/transformers/issues/21638
+        if isinstance(data, Image.Image):
+            if data.height == 1:
+                # Pad the image to a height of 2
+                padded_image = Image.new("RGB", (data.width, 2))
+                padded_image.paste(data, (0, 0))
+                return padded_image
+        else:
+            # Pad the images in the list to a height of 2
+            padded_images = []
+            for image in data:
+                if image.height == 1:
+                    padded_image = Image.new("RGB", (image.width, 2))
+                    padded_image.paste(image, (0, 0))
+                    padded_images.append(padded_image)
+                else:
+                    padded_images.append(image)
+            return padded_images
+        return data
 
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         return 3000
