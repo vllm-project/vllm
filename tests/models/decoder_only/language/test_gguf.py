@@ -19,12 +19,12 @@ MAX_MODEL_LEN = 1024
 
 # FIXME: Move this to confest
 MODELS = [
-    ("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-     hf_hub_download("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
-                     filename="tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")),
-    ("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-     hf_hub_download("duyntnet/TinyLlama-1.1B-Chat-v1.0-imatrix-GGUF",
-                     filename="TinyLlama-1.1B-Chat-v1.0-IQ4_XS.gguf")),
+    ("meta-llama/Llama-3.2-1B-Instruct",
+     hf_hub_download("bartowski/Llama-3.2-1B-Instruct-GGUF",
+                     filename="Llama-3.2-1B-Instruct-Q4_K_M.gguf")),
+    ("meta-llama/Llama-3.2-1B-Instruct",
+     hf_hub_download("bartowski/Llama-3.2-1B-Instruct-GGUF",
+                     filename="Llama-3.2-1B-Instruct-IQ4_XS.gguf")),
     ("Qwen/Qwen2-1.5B-Instruct",
      hf_hub_download("Qwen/Qwen2-1.5B-Instruct-GGUF",
                      filename="qwen2-1_5b-instruct-q4_k_m.gguf")),

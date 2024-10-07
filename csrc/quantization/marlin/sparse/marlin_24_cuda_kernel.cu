@@ -28,6 +28,7 @@
 
 #include "common/base.h"
 #include "core/scalar_type.hpp"
+#include "core/registration.h"
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
@@ -1133,4 +1134,8 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
       at::cuda::getCurrentCUDAStream(dev), thread_k, thread_m, sms, max_par);
 
   return c;
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("gptq_marlin_24_gemm", &gptq_marlin_24_gemm);
 }

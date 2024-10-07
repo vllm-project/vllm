@@ -32,6 +32,15 @@ def hint_on_error(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+
+        except NotImplementedError as e:
+            msg = (
+                "Error in calling custom op %s: %s\n"
+                "Not implemented or built, mostly likely because the current current device "
+                "does not support this kernel (less likely TORCH_CUDA_ARCH_LIST was set "
+                "incorrectly while building)")
+            logger.error(msg, fn.__name__, e)
+            raise NotImplementedError(msg % (fn.__name__, e)) from e
         except AttributeError as e:
             msg = (
                 "Error in calling custom op %s: %s\n"
@@ -559,6 +568,20 @@ def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
     return output
 
 
+def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                          size_k: int, size_n: int,
+                          num_bits: int) -> torch.Tensor:
+    num_experts = b_q_weight.shape[0]
+    assert size_k % 16 == 0
+    output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
+                         device=b_q_weight.device,
+                         dtype=b_q_weight.dtype)
+    for e in range(num_experts):
+        output[e] = torch.ops._C.awq_marlin_repack(b_q_weight[e], size_k,
+                                                   size_n, num_bits)
+    return output
+
+
 def gptq_marlin_gemm(a: torch.Tensor,
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
@@ -819,11 +842,12 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
                              sorted_ids: torch.Tensor,
                              topk_weights: torch.Tensor,
                              topk_ids: torch.Tensor, b_scales: torch.Tensor,
-                             g_idx: torch.Tensor, perm: torch.Tensor,
-                             workspace: torch.Tensor, b_q_type: ScalarType,
-                             size_m: int, size_n: int, size_k: int,
-                             is_k_full: bool, num_experts: int, topk: int,
-                             moe_block_size: int, replicate_input: bool,
+                             b_zero_points: torch.Tensor, g_idx: torch.Tensor,
+                             perm: torch.Tensor, workspace: torch.Tensor,
+                             b_q_type: ScalarType, size_m: int, size_n: int,
+                             size_k: int, is_k_full: bool, num_experts: int,
+                             topk: int, moe_block_size: int,
+                             replicate_input: bool,
                              apply_weights: bool) -> torch.Tensor:
         return torch.empty((size_m, topk, size_n),
                            dtype=a.dtype,

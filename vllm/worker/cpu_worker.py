@@ -1,5 +1,5 @@
 """A CPU worker class."""
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.distributed
@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
@@ -163,7 +164,10 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
-        self.model_runner: CPUModelRunner = CPUModelRunner(
+        ModelRunnerClass: Type[CPUModelRunner] = CPUModelRunner
+        if self._is_encoder_decoder_model():
+            ModelRunnerClass = CPUEncoderDecoderModelRunner
+        self.model_runner: CPUModelRunner = ModelRunnerClass(
             model_config,
             parallel_config,
             scheduler_config,
@@ -204,6 +208,9 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
+
+    def _is_encoder_decoder_model(self):
+        return self.model_config.is_encoder_decoder_model
 
     def init_device(self) -> None:
         if self.local_omp_cpuid != "all":

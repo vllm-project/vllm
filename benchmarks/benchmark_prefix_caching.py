@@ -113,7 +113,7 @@ def repeat_and_sort_requests(requests: List[Tuple[str, int, int]],
 def main(args):
     tokenizer = get_tokenizer(args.model, trust_remote_code=True)
     input_length_range = tuple(map(int, args.input_length_range.split(':')))
-
+    random.seed(args.seed)
     if args.dataset_path is not None:
         print(f"Start to sample {args.num_prompts} prompts"
               "from {args.dataset_path}")
@@ -194,5 +194,9 @@ if __name__ == "__main__":
                         default='128:256',
                         help='Range of input lengths for sampling prompts,'
                         'specified as "min:max" (e.g., "128:256").')
+    parser.add_argument("--seed",
+                        type=int,
+                        default=0,
+                        help='Random seed for reproducibility')
     args = parser.parse_args()
     main(args)

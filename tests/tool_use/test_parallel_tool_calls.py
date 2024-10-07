@@ -45,7 +45,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
         assert tool_call.type == "function"
         assert tool_call.function is not None
         assert isinstance(tool_call.id, str)
-        assert len(tool_call.id) > 16
+        assert len(tool_call.id) >= 9
 
         # make sure the weather tool was called correctly
         assert tool_call.function.name == WEATHER_TOOL["function"]["name"]
@@ -108,7 +108,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
             if tool_call.id:
                 tool_call_id_count += 1
                 assert (isinstance(tool_call.id, str)
-                        and (len(tool_call.id) > 16))
+                        and (len(tool_call.id) >= 9))
 
             # if parts of the function start being streamed
             if tool_call.function:

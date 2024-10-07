@@ -17,6 +17,14 @@ from vllm.utils import (GiB_bytes, get_distributed_init_method, get_ip,
 logger = init_logger(__name__)
 
 
+def is_openvino_cpu() -> bool:
+    return "CPU" in envs.VLLM_OPENVINO_DEVICE
+
+
+def is_openvino_gpu() -> bool:
+    return "GPU" in envs.VLLM_OPENVINO_DEVICE
+
+
 class OpenVINOExecutor(ExecutorBase):
 
     uses_ray: bool = False
@@ -24,8 +32,13 @@ class OpenVINOExecutor(ExecutorBase):
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "openvino"
         assert self.lora_config is None, "OpenVINO backend doesn't support LoRA"
+        assert is_openvino_cpu() or is_openvino_gpu(), \
+            "OpenVINO backend supports only CPU and GPU devices"
+
+        self.ov_core = ov.Core()
         self.model_config = _verify_and_get_model_config(self.model_config)
-        self.cache_config = _verify_and_get_cache_config(self.cache_config)
+        self.cache_config = _verify_and_get_cache_config(
+            self.ov_core, self.cache_config)
 
         # Instantiate the worker and load the model to CPU.
         self._init_worker()
@@ -40,6 +53,7 @@ class OpenVINOExecutor(ExecutorBase):
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
         self.driver_worker = OpenVINOWorker(
+            ov_core=self.ov_core,
             model_config=self.model_config,
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
@@ -68,10 +82,13 @@ class OpenVINOExecutor(ExecutorBase):
         # NOTE: We log here to avoid multiple logs when number of workers is
         # greater than one. We could log in the engine, but not all executors
         # have GPUs.
-        # NOTE: `cpu block` for OpenVINO backend is located on CPU memory but is
-        # referred as `gpu block`. Because we want to reuse the existing block
-        # management procedure.
-        logger.info("# CPU blocks: %d", num_gpu_blocks)
+        # NOTE: In case of a CPU device, `cpu block` for OpenVINO backend
+        # is located on CPU memory but is referred as `gpu block`.
+        # Because we want to reuse the existing block management procedure.
+        device_blocks = num_gpu_blocks
+        swap_blocks = num_cpu_blocks
+        logger.info("OpenVINO %s: # device blocks: %d; # swap blocks: %d",
+                    envs.VLLM_OPENVINO_DEVICE, device_blocks, swap_blocks)
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(
@@ -143,29 +160,45 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
     return config
 
 
-def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
+def _verify_and_get_cache_config(ov_core: ov.Core,
+                                 config: CacheConfig) -> CacheConfig:
     if envs.VLLM_OPENVINO_CPU_KV_CACHE_PRECISION == "u8":
-        logger.info("KV cache type is overried to u8 via "
-                    "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION env var.")
-        config.cache_dtype = ov.Type.u8
+        if not is_openvino_cpu():
+            logger.info("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION is"
+                        "ignored for GPU, f16 data type will be used.")
+            config.cache_dtype = ov.Type.f16
+        else:
+            logger.info("KV cache type is overridden to u8 via "
+                        "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION env var.")
+            config.cache_dtype = ov.Type.u8
     else:
-        core = ov.Core()
-        inference_precision = core.get_property("CPU",
-                                                hints.inference_precision)
-        if inference_precision == ov.Type.bf16:
-            config.cache_dtype = ov.Type.bf16
+        if is_openvino_cpu():
+            ov_device = envs.VLLM_OPENVINO_DEVICE
+            inference_precision = ov_core.get_property(
+                ov_device, hints.inference_precision)
+            if inference_precision == ov.Type.bf16:
+                config.cache_dtype = ov.Type.bf16
+            else:
+                config.cache_dtype = ov.Type.f16
         else:
             config.cache_dtype = ov.Type.f16
 
-    if config.block_size != 32:
-        logger.info(
-            f"OpenVINO optimal block size is 32, overriding currently set {config.block_size}"  # noqa: G004, E501
-        )
-        config.block_size = 32
+    if is_openvino_cpu():
+        if config.block_size != 32:
+            logger.info(
+                f"OpenVINO CPU optimal block size is 32, overriding currently set {config.block_size}"  # noqa: G004, E501
+            )
+            config.block_size = 32
+    else:
+        if config.block_size != 16:
+            logger.info(
+                f"OpenVINO GPU optimal block size is 16, overriding currently set {config.block_size}"  # noqa: G004, E501
+            )
+            config.block_size = 16
 
     kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
     if kv_cache_space >= 0:
-        if kv_cache_space == 0:
+        if kv_cache_space == 0 and is_openvino_cpu():
             config.openvino_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
             logger.warning(
                 "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "

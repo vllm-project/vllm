@@ -30,6 +30,7 @@ class RPCProcessRequest:
     lora_request: Optional[LoRARequest] = None
     trace_headers: Optional[Mapping[str, str]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
+    priority: int = 0
 
     @overload  # DEPRECATED
     def __init__(
@@ -41,6 +42,7 @@ class RPCProcessRequest:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         ...
 
@@ -53,6 +55,7 @@ class RPCProcessRequest:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         ...
 
@@ -68,6 +71,7 @@ class RPCProcessRequest:
             lora_request: Optional[LoRARequest] = None,
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            priority: int = 0,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -84,6 +88,7 @@ class RPCProcessRequest:
         self.lora_request = lora_request
         self.trace_headers = trace_headers
         self.prompt_adapter_request = prompt_adapter_request
+        self.priority = priority
 
 
 @dataclass

@@ -97,7 +97,8 @@ def run_test(
             self.tokenizer = hf_runner.tokenizer
             self.dtype = hf_runner.model.dtype
 
-            self.config = AutoConfig.from_pretrained(hf_runner.model_name)
+            self.config = AutoConfig.from_pretrained(hf_runner.model_name,
+                                                     trust_remote_code=True)
             self.vision_config = self.config.vision_config
             self.use_thumbnail = self.config.use_thumbnail
             self.min_num = self.config.min_dynamic_patch
