@@ -297,7 +297,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         cross_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_encoder_seq())
         num_required_blocks = self_num_required_blocks + \
-                              cross_num_required_blocks
+            cross_num_required_blocks
 
         if self.block_sliding_window is not None:
 
@@ -314,9 +314,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
-    def _allocate_sequence(self, \
-                           seq: Optional[Sequence], \
-                           ref_count: int, \
+    def _allocate_sequence(self,
+                           seq: Optional[Sequence],
+                           ref_count: int,
                            is_encoder_decoder: bool = True) -> BlockTable:
         # Allocate new physical token blocks that will store the prompt tokens.
         num_prompt_blocks = self._get_seq_num_required_blocks(seq)
@@ -727,7 +727,13 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             return []
 
         ids_list = [self.get_all_computed_blocks(seq) for seq in seqs]
-        return commonprefix([ids for ids in ids_list if ids != []])
+        # Remove empty lists
+        ids_list = [ids for ids in ids_list if ids]
+
+        # Avoid calling commonprefix([]) which returns ''.
+        if not ids_list:
+            return []
+        return commonprefix(ids_list)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup,
                                 token_chunk_size: int):
