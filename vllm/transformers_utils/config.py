@@ -191,6 +191,29 @@ def get_config(
             )
             config.update({key: value})
 
+    if trust_remote_code:
+        # With trust_remote_code, the config is typically an instance of a
+        # custom class imported from the HF modules cache.
+        #
+        # The class will not be importable in Ray workers by default (and won't
+        # exist at all on other nodes), which breaks serialization of the
+        # config. Here we tell the serialization library used by Ray to pass
+        # instances of these generated classes by value instead of by reference
+        # (eg. the class definition is serialized along with its data).
+        #
+        # See: https://github.com/cloudpipe/cloudpickle?tab=readme-ov-file#overriding-pickles-serialization-mechanism-for-importable-constructs
+        try:
+            import cloudpickle
+            import ray
+            import transformers_modules
+            cloudpickle.register_pickle_by_value(transformers_modules)
+            # Ray vendors its own version of cloudpickle
+            ray.cloudpickle.register_pickle_by_value(transformers_modules)
+        # ignore import errors in the case that trust_remote_code is set
+        # unnecessarily and transformers_modules does not exist
+        except ImportError:
+            pass
+
     return config
 
 
