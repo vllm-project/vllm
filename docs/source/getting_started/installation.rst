@@ -47,6 +47,9 @@ You can install vLLM using pip:
 
     Therefore, it is recommended to install vLLM with a **fresh new** conda environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See below for instructions.
 
+
+.. _install-the-latest-code:
+
 Install the latest code
 =========================
 
@@ -87,7 +90,7 @@ The first step is to install the latest vLLM wheel:
 
     pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 
-You can find more information about vLLM's wheels `here <https://docs.vllm.ai/en/latest/getting_started/installation.html#install-the-latest-code>`_.
+You can find more information about vLLM's wheels `above <#install-the-latest-code>`_.
 
 After verifying that the installation is successful, you can use `the following script <https://github.com/vllm-project/vllm/blob/main/python_only_dev.py>`_:
 
