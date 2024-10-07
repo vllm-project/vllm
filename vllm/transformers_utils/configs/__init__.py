@@ -13,6 +13,7 @@ from vllm.transformers_utils.configs.mllama import MllamaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
+from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
                                                      Qwen2VLVisionConfig)
 from vllm.transformers_utils.configs.solar import SolarConfig
@@ -31,6 +32,7 @@ __all__ = [
     "MllamaConfig",
     "MLPSpeculatorConfig",
     "NemotronConfig",
+    "NVLM_D_Config",
     "SolarConfig",
     "UltravoxConfig",
     "Qwen2VLConfig",

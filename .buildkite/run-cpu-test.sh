@@ -23,6 +23,7 @@ docker exec cpu-test-avx2 bash -c "python3 examples/offline_inference.py"
 # Run basic model test
 docker exec cpu-test bash -c "
   pip install pytest matplotlib einops transformers_stream_generator datamodel_code_generator
+  pytest -v -s tests/models/encoder_decoder/language
   pytest -v -s tests/models/decoder_only/language \
     --ignore=tests/models/test_fp8.py \
     --ignore=tests/models/decoder_only/language/test_jamba.py \

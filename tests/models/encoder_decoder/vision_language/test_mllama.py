@@ -195,11 +195,6 @@ def _run_test(
     def process(hf_inputs: BatchEncoding):
         return hf_inputs
 
-    from transformers.models.mllama import MllamaConfig as MllamaConfigHf
-
-    # use transformer's MllamaConfig for hf_runner
-    # and vllm's MllamaConfig for vllm_runner
-    AutoConfig.register("mllama", MllamaConfigHf, exist_ok=True)
     with hf_runner(model,
                    dtype=dtype,
                    model_kwargs={"device_map": "auto"},
@@ -213,8 +208,6 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-    from vllm.transformers_utils.configs.mllama import MllamaConfig
-    AutoConfig.register("mllama", MllamaConfig, exist_ok=True)
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
         check_logprobs_close(
