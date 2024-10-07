@@ -30,10 +30,6 @@ import torch.nn as nn
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
-if current_platform.is_hpu():
-    from vllm_hpu_extension.rotary_embed import (HpuLlama3RotaryEmbedding,
-                                                 HpuRotaryEmbedding)
-
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :x.shape[-1] // 2]
@@ -923,6 +919,7 @@ def get_rope(
 
     if rope_scaling is None:
         if current_platform.is_hpu():
+            from vllm_hpu_extension.rotary_embed import HpuRotaryEmbedding
             rotary_emb = HpuRotaryEmbedding(head_size,
                                             rotary_dim,
                                             max_position,
@@ -945,6 +942,8 @@ def get_rope(
             original_max_position = rope_scaling[
                 "original_max_position_embeddings"]
             if current_platform.is_hpu():
+                from vllm_hpu_extension.rotary_embed import (
+                    HpuLlama3RotaryEmbedding)
                 rotary_emb = HpuLlama3RotaryEmbedding(
                     head_size,
                     rotary_dim,
