@@ -4,8 +4,8 @@ import pytest
 import torch.cuda
 
 from vllm.model_executor.models import (is_embedding_model,
-                                        supports_multimodal,
-                                        is_text_generation_model)
+                                        is_text_generation_model,
+                                        supports_multimodal)
 from vllm.model_executor.models.registry import (_EMBEDDING_MODELS,
                                                  _MULTIMODAL_MODELS,
                                                  _SPECULATIVE_DECODING_MODELS,
