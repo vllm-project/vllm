@@ -29,6 +29,8 @@ class Sampler(nn.Module):
 
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
+        # Use int32 to reduce the tensor size.
+        sampled = sampled.to(torch.int32)
 
         if sampling_metadata.max_num_logprobs > 0:
             logprobs = self.get_logprobs(logits)
@@ -36,6 +38,8 @@ class Sampler(nn.Module):
             # and concatenate the topk with the sampled token_id.
             topk_logprobs, topk_indices = torch.topk(
                 logprobs, sampling_metadata.max_num_logprobs, dim=-1)
+            # Use int32 to reduce the tensor size.
+            topk_indices = topk_indices.to(torch.int32)
         else:
             topk_logprobs = None
             topk_indices = None
