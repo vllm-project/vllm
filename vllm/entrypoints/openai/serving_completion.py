@@ -158,7 +158,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     "AsyncLLMEngine and MQLLMEngineClient."
                     generator = self.engine_client.beam_search(
                         prompt_inputs["prompt_token_ids"],
-                        request_id,
+                        request_id_item,
                         sampling_params,
                     )
                 else:
