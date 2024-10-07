@@ -401,6 +401,10 @@ class LLM:
         penalty, and stopping criteria, etc.?
         """
 
+        assert not self.llm_engine.scheduler_config.is_multi_step, (
+            "Currently beam search is not supported in combination with "
+            "multi-step scheduling.")
+
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         temperature = params.temperature
