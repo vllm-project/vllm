@@ -386,7 +386,8 @@ class InputPreprocessor:
                     decoder_input,
                     request_id=request_id,
                 )
-            mm_processor_kwargs = prompt["mm_processor_kwargs"]
+            # Handle this carefully in case it was directly initialized by user
+            mm_processor_kwargs = prompt.get("mm_processor_kwargs", {})
         else:
             encoder_comps = self._extract_prompt_components(
                 prompt,
