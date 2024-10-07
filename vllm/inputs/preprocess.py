@@ -386,16 +386,17 @@ class InputPreprocessor:
                     decoder_input,
                     request_id=request_id,
                 )
+            mm_processor_kwargs = prompt["mm_processor_kwargs"]
         else:
             encoder_comps = self._extract_prompt_components(
                 prompt,
                 request_id=request_id,
             )
-
+            # If there are no decoder components, we assume the
+            # mm_processor_kwargs are in the encoder prompt
+            mm_processor_kwargs = encoder_comps[-1] if encoder_comps[
+                -1] is not None else {}
             decoder_comps = None, None, None, None
-
-        mm_processor_kwargs = self._get_encoder_decoder_processor_kwargs(
-            prompt, encoder_comps, decoder_comps)
 
         return self._build_enc_dec_llm_inputs(
             encoder_comps,
@@ -429,39 +430,23 @@ class InputPreprocessor:
 
                 encoder_comps, decoder_comps = await asyncio.gather(
                     encoder_task, decoder_task)
+            mm_processor_kwargs = prompt["mm_processor_kwargs"]
         else:
             encoder_comps = await self._extract_prompt_components_async(
                 prompt,
                 request_id=request_id,
             )
-
+            # If there are no decoder components, we assume the
+            # mm_processor_kwargs are in the encoder prompt
+            mm_processor_kwargs = encoder_comps[-1] if encoder_comps[
+                -1] is not None else {}
             decoder_comps = None, None, None, None
 
-        mm_processor_kwargs = self._get_encoder_decoder_processor_kwargs(
-            prompt, encoder_comps, decoder_comps)
         return self._build_enc_dec_llm_inputs(
             encoder_comps,
             decoder_comps,
             mm_processor_kwargs,
         )
-
-    @staticmethod
-    def _get_encoder_decoder_processor_kwargs(prompt, encoder_comps,
-                                              decoder_comps):
-        mm_processor_kwargs = prompt.get("mm_processor_kwargs")
-        # Because of the common logic and types with decoder-only models,
-        # mm_processor_kwargs can technically be passed to individual prompts;
-        # users should instead pass these at the top level of the prompt, since
-        # the mm mapper/processor are component agnostic.
-        enc_kwargs = encoder_comps[-1]
-        dec_kwargs = decoder_comps[-1]
-        if enc_kwargs is not None or dec_kwargs is not None:
-            logger.warning(
-                "mm_processor_kwargs are encoder / decoder agnostic ",
-                "and should be passed as a top-level option for ",
-                "explicit encoder / decoder prompts; the provided ",
-                "values will not be used.")
-        return mm_processor_kwargs
 
     def _build_decoder_only_llm_inputs(
         self,
