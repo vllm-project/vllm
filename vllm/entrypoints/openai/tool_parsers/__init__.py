@@ -6,7 +6,7 @@ from .llama_tool_parser import Llama3JsonToolParser
 from .mistral_tool_parser import MistralToolParser
 
 __all__ = [
-    "ToolParser", "ToolParserManager", "Granite20bFCToolParser", 
+    "ToolParser", "ToolParserManager", "Granite20bFCToolParser",
     "Hermes2ProToolParser", "MistralToolParser", "Internlm2ToolParser",
     "Llama3JsonToolParser"
 ]

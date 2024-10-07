@@ -42,10 +42,8 @@ class Granite20bFCToolParser(ToolParser):
         self.tool_call_regex = re.compile(r"<function_call>\s*")
 
     def extract_tool_calls(
-        self,
-        model_output: str, 
-        request: ChatCompletionRequest
-    ) -> ExtractedToolCallInformation:
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         if self.tool_start_token not in model_output:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
