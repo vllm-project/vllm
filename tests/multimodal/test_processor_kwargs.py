@@ -89,7 +89,6 @@ def test_default_processor_is_a_noop():
     assert proc_inputs is proc_outputs
 
 
-# @pytest.mark.parametrize("num_crops", [None, NUM_CROPS_OVERRIDE])
 @pytest.mark.parametrize("init_num_crops,inference_num_crops", [
     (None, None),
     (NUM_CROPS_OVERRIDE, None),
