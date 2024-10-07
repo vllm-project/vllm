@@ -25,6 +25,7 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        logits = self.apply_top_k_top_p(logits, sampling_metadata)
 
         probs = self.get_probs(logits)
         sampled = self.sample(probs, sampling_metadata)
@@ -59,6 +60,20 @@ class Sampler(nn.Module):
         temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
         # Use in-place division to avoid creating a new tensor.
         logits.div_(temp.unsqueeze(dim=1))
+        return logits
+
+    def apply_top_k_top_p(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        logits = _apply_top_k_top_p(
+            logits,
+            sampling_metadata.no_top_k,
+            sampling_metadata.top_k,
+            sampling_metadata.no_top_p,
+            sampling_metadata.top_p,
+        )
         return logits
 
     def get_probs(self, logits: torch.Tensor) -> torch.Tensor:
@@ -109,3 +124,36 @@ class Sampler(nn.Module):
             random_sampled,
         )
         return sampled
+
+
+def _apply_top_k_top_p(
+    logits: torch.Tensor,
+    no_top_k: bool,
+    k: torch.Tensor,
+    no_top_p: bool,
+    p: torch.Tensor,
+) -> torch.Tensor:
+    if no_top_k and no_top_p:
+        return logits
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+
+    if not no_top_k:
+        # Apply top-k.
+        top_k_mask = logits_sort.size(1) - k.to(torch.long)
+        # Get all the top_k values.
+        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+        top_k_mask = logits_sort < top_k_mask
+        logits_sort.masked_fill_(top_k_mask, -float("inf"))
+
+    if not no_top_p:
+        # Apply top-p.
+        probs_sort = logits_sort.softmax(dim=-1)
+        probs_sum = probs_sort.cumsum(dim=-1)
+        top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+        # at least one
+        top_p_mask[:, -1] = False
+        logits_sort.masked_fill_(top_p_mask, -float("inf"))
+
+    # Re-sort the probabilities.
+    logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    return logits
