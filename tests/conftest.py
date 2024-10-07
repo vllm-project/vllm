@@ -35,6 +35,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
 
@@ -277,6 +278,7 @@ class HfRunner:
                 SentenceTransformer(
                     model_name,
                     device="cpu",
+                    trust_remote_code=True,
                 ).to(dtype=torch_dtype))
         else:
             model_kwargs = model_kwargs if model_kwargs is not None else {}
@@ -811,7 +813,9 @@ class VllmRunner:
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        outputs = self.model.beam_search(prompts, beam_width, max_tokens)
+        outputs = self.model.beam_search(
+            prompts,
+            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
         returned_outputs = []
         for output in outputs:
             token_ids = [x.tokens for x in output.sequences]

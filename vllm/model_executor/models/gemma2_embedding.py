@@ -8,18 +8,18 @@ from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
+from .gemma2 import Gemma2Model
 from .interfaces import SupportsPP
-from .llama import LlamaModel
 
 
-class LlamaEmbeddingModel(nn.Module, SupportsPP):
-    """A model that uses Llama with additional embedding functionalities.
+class Gemma2EmbeddingModel(nn.Module, SupportsPP):
+    """A model that uses Gemma2 with additional embedding functionalities.
 
-   This class encapsulates the LlamaModel and provides an interface for
+   This class encapsulates the Gemma2Model and provides an interface for
    embedding operations and customized pooling functions.
 
    Attributes:
-       model: An instance of LlamaModel used for forward operations.
+       model: An instance of Gemma2Model used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
 
@@ -28,8 +28,9 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
         **kwargs,
     ) -> None:
         super().__init__()
-        self.model = LlamaModel(**kwargs)
+        self.model = Gemma2Model(**kwargs)
         self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -54,6 +55,3 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)
-
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        self.model.load_kv_cache_scales(quantization_param_path)
