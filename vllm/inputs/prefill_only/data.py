@@ -56,7 +56,10 @@ class ValidationError(ValueError):
 
 
 class SchedulableRequest(Request):
-    pass
+
+    @property
+    def num_new_tokens(self):
+        raise NotImplementedError
 
 
 @dataclass
