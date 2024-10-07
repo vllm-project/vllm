@@ -348,6 +348,8 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if device_config.device_type not in ("cuda", "tpu"):
             logger.warning(
                 "Async output processing is only supported for CUDA or TPU. "
@@ -361,6 +363,8 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if device_config.device_type == "cuda" and self.enforce_eager:
             logger.warning(
                 "To see benefits of async output processing, enable CUDA "
@@ -374,6 +378,8 @@ class ModelConfig:
         if self.embedding_mode:
             self.use_async_output_proc = False
 
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if speculative_config:
             logger.warning("Async output processing is not supported with"
                            " speculative decoding currently.")
@@ -1182,6 +1188,8 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if enable_chunked_prefill:
             raise ValueError(
                 "Speculative decoding and chunked prefill are "
@@ -1543,6 +1551,8 @@ class LoRAConfig:
                            model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if scheduler_config.chunked_prefill_enabled:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
 

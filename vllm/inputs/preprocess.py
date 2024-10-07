@@ -298,6 +298,8 @@ class InputPreprocessor:
         encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
         decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
 
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if decoder_mm_data is not None:
             raise ValueError(
                 "Multi-modality decoder inputs of encoder-decoder models are "
