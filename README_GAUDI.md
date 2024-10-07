@@ -81,6 +81,7 @@ Supported Features
 -   Inference with [HPU
     Graphs](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html)
     for accelerating low-batch latency and throughput
+-   Attention with Linear Biases (ALiBi)
 -   INC quantization
 
 Unsupported Features
@@ -88,7 +89,6 @@ Unsupported Features
 
 -   Beam search
 -   LoRA adapters
--   Attention with Linear Biases (ALiBi)
 -   AWQ quantization
 -   Prefill chunking (mixed-batch inferencing)
 
