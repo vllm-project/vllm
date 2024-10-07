@@ -84,6 +84,7 @@ _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
     "Gemma2Model": ("gemma2_embedding", "Gemma2EmbeddingModel"),
+    "BertForMaskedLM": ("bert_embedding", "BertEmbeddingModel"),
 }
 
 _MULTIMODAL_MODELS = {

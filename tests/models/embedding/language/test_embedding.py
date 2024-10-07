@@ -14,6 +14,10 @@ MODELS = [
         "is_decoder_only": True
     },
     {
+        "name": "BAAI/bge-multilingual-gemma2",
+        "is_decoder_only": True
+    },
+    {
         "name": "bert-base-uncased",
         "is_decoder_only": False,
         "max_model_len": 512
