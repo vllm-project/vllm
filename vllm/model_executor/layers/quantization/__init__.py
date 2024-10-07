@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.neuron_quant import (
     NeuronQuantConfig)
 from vllm.model_executor.layers.quantization.qqq import QQQConfig
 from vllm.model_executor.layers.quantization.tpu_int8 import Int8TpuConfig
+from vllm.model_executor.layers.quantization.hqq_marlin import HQQMarlinConfig
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
@@ -47,6 +48,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "compressed-tensors": CompressedTensorsConfig,
     "bitsandbytes": BitsAndBytesConfig,
     "qqq": QQQConfig,
+    "hqq_marlin": HQQMarlinConfig,
     "experts_int8": ExpertsInt8Config,
     "neuron_quant": NeuronQuantConfig,
 }

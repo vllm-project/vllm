@@ -272,17 +272,22 @@ class DefaultModelLoader(BaseModelLoader):
         # Some quantized models use .pt files for storing the weights.
         if load_format == LoadFormat.AUTO:
             allow_patterns = ["*.safetensors", "*.bin"]
+            print("AUTO")
         elif load_format == LoadFormat.SAFETENSORS:
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
+            print("SAFETENSORS")
         elif load_format == LoadFormat.MISTRAL:
             use_safetensors = True
             allow_patterns = ["consolidated*.safetensors"]
             index_file = "consolidated.safetensors.index.json"
+            print("MISTRAL")
         elif load_format == LoadFormat.PT:
             allow_patterns = ["*.pt"]
+            print("PT")
         elif load_format == LoadFormat.NPCACHE:
             allow_patterns = ["*.bin"]
+            print("NPCACHE")
         else:
             raise ValueError(f"Unknown load_format: {load_format}")
 

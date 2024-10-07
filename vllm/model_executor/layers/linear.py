@@ -980,6 +980,8 @@ class RowParallelLinear(LinearBase):
         self.input_size_per_partition = divide(input_size, self.tp_size)
         assert self.quant_method is not None
 
+        print("rowpar", self.quant_method)
+
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,

@@ -67,6 +67,7 @@ class LlamaMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        print("Quant config:", quant_config)
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
@@ -404,6 +405,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
     ) -> None:
         super().__init__()
 
+        print("===== LLAMA FOR CAUSAL LM =====")
+
         self.config = config
         self.lora_config = lora_config
 
@@ -490,6 +493,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        # print(*[(n, w['meta'] if 'meta' in w else "") for n, w in weights], sep="\n")
+        # print(*[(n, w) for n, w in weights], sep="\n")
+
         for name, loaded_weight in weights:
             name, loaded_weight = self.maybe_remap_mistral(name, loaded_weight)
 

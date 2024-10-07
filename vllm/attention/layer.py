@@ -49,6 +49,8 @@ class Attention(nn.Module):
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
+        print("QUANT CONFIG:", quant_config)
+
         # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
         # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
@@ -59,6 +61,7 @@ class Attention(nn.Module):
         self._v_scale = 1.0
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
+        print("QUANT METHOD:", quant_method)
         if quant_method is not None:
             assert isinstance(quant_method, BaseKVCacheMethod)
             # TODO (mgoin): kv cache dtype should be specified in the FP8
