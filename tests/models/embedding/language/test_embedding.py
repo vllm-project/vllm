@@ -1,6 +1,6 @@
 """Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
 
-Run `pytest tests/models/test_llama_embedding.py`.
+Run `pytest tests/models/embedding/language/test_embedding.py`.
 """
 import pytest
 import torch
@@ -38,6 +38,14 @@ def test_models(
     model: dict,
     dtype: str,
 ) -> None:
+    # The example_prompts has ending "\n", for example:
+    # "Write a short story about a robot that dreams for the first time.\n"
+    # sentence_transformers will strip the input texts, see:
+    # https://github.com/UKPLab/sentence-transformers/blob/v3.1.1/sentence_transformers/models/Transformer.py#L159
+    # This makes the input_ids different between hf_model and vllm_model.
+    # So we need to strip the input texts to avoid test failing.
+    example_prompts = [str(s).strip() for s in example_prompts]
+
     model_name = model["name"]
     is_decoder_only = model["is_decoder_only"]
     max_model_len = model.get("max_model_len", 1024)

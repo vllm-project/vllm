@@ -107,7 +107,7 @@ class EngineArgs:
     block_size: int = 16
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
-    use_v2_block_manager: bool = False
+    use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
@@ -145,7 +145,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
-    multi_step_stream_outputs: bool = False
+    multi_step_stream_outputs: bool = True
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
@@ -183,6 +183,8 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -369,9 +371,12 @@ class EngineArgs:
                             action='store_true',
                             help='Disables sliding window, '
                             'capping to sliding window size')
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            help='Use BlockSpaceMangerV2.')
+        parser.add_argument(
+            '--use-v2-block-manager',
+            default=EngineArgs.use_v2_block_manager,
+            action='store_true',
+            help='Use BlockSpaceMangerV2. By default this is set to True. '
+            'Set to False to use BlockSpaceManagerV1')
         parser.add_argument(
             '--num-lookahead-slots',
             type=int,
@@ -600,13 +605,17 @@ class EngineArgs:
 
         parser.add_argument(
             '--multi-step-stream-outputs',
-            action='store_true',
-            help='If True, then multi-step will stream outputs for every step')
+            action=StoreBoolean,
+            default=EngineArgs.multi_step_stream_outputs,
+            nargs="?",
+            const="True",
+            help='If False, then multi-step will stream outputs at the end '
+            'of all steps')
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
             default=EngineArgs.scheduler_delay_factor,
-            help='Apply a delay (of delay factor multiplied by previous'
+            help='Apply a delay (of delay factor multiplied by previous '
             'prompt latency) before scheduling next prompt.')
         parser.add_argument(
             '--enable-chunked-prefill',
@@ -629,7 +638,7 @@ class EngineArgs:
             type=nullable_str,
             choices=[*QUANTIZATION_METHODS, None],
             default=EngineArgs.speculative_model_quantization,
-            help='Method used to quantize the weights of speculative model.'
+            help='Method used to quantize the weights of speculative model. '
             'If None, we first check the `quantization_config` '
             'attribute in the model config file. If that is '
             'None, we assume the model weights are not '
@@ -797,13 +806,10 @@ class EngineArgs:
             "lower performance.")
         parser.add_argument(
             '--override-neuron-config',
-            type=lambda configs: {
-                str(key): value
-                for key, value in
-                (config.split(':') for config in configs.split(','))
-            },
+            type=json.loads,
             default=None,
-            help="override or set neuron device configuration.")
+            help="Override or set neuron device configuration. "
+            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
 
         parser.add_argument(
             '--scheduling-policy',
@@ -897,6 +903,11 @@ class EngineArgs:
                     "--enable-prefix-caching is currently not "
                     "supported for multimodal models and has been disabled.")
             self.enable_prefix_caching = False
+        if model_config.is_encoder_decoder_model:
+            logger.warning(
+                "Block Manager v2 does not support encoder-decoder models"
+                " currently. Using Block Manager v1 as fallback.")
+            self.use_v2_block_manager = False
 
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
