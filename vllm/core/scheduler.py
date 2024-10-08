@@ -314,6 +314,8 @@ class Scheduler:
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
+        if self.scheduler_config.embedding_mode:
+            version = "embedding"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
@@ -1200,10 +1202,11 @@ class Scheduler:
             seq_group=seq_group, num_lookahead_slots=num_lookahead_slots)
 
     def _allow_async_output_proc(self, seq_group: SequenceGroup) -> bool:
-        no_beam_search = seq_group.sampling_params is None or (
-            seq_group.sampling_params.best_of == 1
-            and not seq_group.sampling_params.use_beam_search)
-        return no_beam_search
+        # async_output_proc is allowed only when we have a single sequence
+        # in the sequence group
+        no_single_seq = seq_group.sampling_params is None or (
+            seq_group.sampling_params.best_of == 1)
+        return no_single_seq
 
     def schedule(
             self

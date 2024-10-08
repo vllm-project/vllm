@@ -14,6 +14,7 @@ from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
+from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
@@ -328,10 +329,12 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
                     cross_slot_mapping.extend([PAD_SLOT_ID] * seq_len)
                 else:
                     for i in range(0, seq_len):
-                        block_number = seq_group_metadata.cross_block_table[
-                            i // self.block_size]
-                        block_offset = i % self.block_size
-                        slot = block_number * self.block_size + block_offset
+                        slot = PAD_SLOT_ID
+                        if seq_group_metadata.cross_block_table is not None:
+                            block_number = seq_group_metadata.cross_block_table[
+                                i // self.block_size]
+                            block_offset = i % self.block_size
+                            slot = block_number * self.block_size + block_offset
                         cross_slot_mapping.append(slot)
 
                 # Build encoder input tokens
@@ -436,13 +439,6 @@ class EncoderDecoderModelRunner(
         EncoderDecoderModelInput)
     _builder_cls: Type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)
 
-    def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> EncoderDecoderModelInput:
-        return EncoderDecoderModelInput.from_broadcasted_tensor_dict(
-            tensor_dict,
-            attn_backend=self.attn_backend,
-        )
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -464,23 +460,25 @@ class EncoderDecoderModelRunner(
                 model_input.virtual_engine][graph_batch_size]
         else:
             model_executable = self.model
+
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        hidden_or_intermediate_states = model_executable(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            encoder_input_ids=model_input.encoder_input_tokens,
-            encoder_positions=model_input.encoder_input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=model_input.attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                         device=self.device),
-            **seqlen_agnostic_kwargs)
+        with set_forward_context(model_input.attn_metadata):
+            hidden_or_intermediate_states = model_executable(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                encoder_input_ids=model_input.encoder_input_tokens,
+                encoder_positions=model_input.encoder_input_positions,
+                kv_caches=kv_caches,
+                attn_metadata=model_input.attn_metadata,
+                intermediate_tensors=intermediate_tensors,
+                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                             device=self.device),
+                **seqlen_agnostic_kwargs)
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
@@ -499,6 +497,13 @@ class EncoderDecoderModelRunner(
 
         return [output]
 
+    def make_model_input_from_broadcasted_tensor_dict(
+            self, tensor_dict: Dict[str, Any]) -> EncoderDecoderModelInput:
+        return EncoderDecoderModelInput.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
+
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -515,12 +520,13 @@ class EncoderDecoderModelRunner(
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
-
-        (attn_metadata, encoder_input_tokens_tensor,
-         encoder_input_positions_tensor,
-         _) = self._prepare_encoder_model_input_tensors(
-             seq_group_metadata_list, model_input)
-
+        (
+            attn_metadata,
+            encoder_input_tokens_tensor,
+            encoder_input_positions_tensor,
+            _,
+        ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
+                                                       model_input))
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
         # Frozen dataclass fields cannot be modified, so use

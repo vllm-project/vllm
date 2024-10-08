@@ -504,6 +504,15 @@ async def merge_async_iterators(
                 await it.aclose()
 
 
+async def collect_from_async_generator(
+        iterator: AsyncGenerator[T, None]) -> List[T]:
+    """Collect all items from an async generator into a list."""
+    items = []
+    async for item in iterator:
+        items.append(item)
+    return items
+
+
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
     if host_ip:
@@ -1201,11 +1210,21 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = FlexibleArgumentParser._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
+        # followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+        if args[0] == "serve":
+            if index == 1:
+                raise ValueError(
+                    "No model_tag specified! Please check your command-line"
+                    " arguments.")
+            args = [args[0]] + [
+                args[1]
+            ] + config_args + args[2:index] + args[index + 2:]
+        else:
+            args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
         return args
 
@@ -1256,6 +1275,15 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+def supports_kw(callable: Callable[..., object], kw_name: str) -> bool:
+    params = inspect.signature(callable).parameters
+    if kw_name in params:
+        return True
+
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD
+               for param in params.values())
 
 
 def get_allowed_kwarg_only_overrides(

@@ -1,6 +1,6 @@
 """Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
 
-Run `pytest tests/models/test_llama_embedding.py`.
+Run `pytest tests/models/embedding/language/test_embedding.py`.
 """
 import pytest
 import torch
@@ -11,6 +11,10 @@ from vllm.inputs import build_decoder_prompts
 MODELS = [
     {
         "name": "intfloat/e5-mistral-7b-instruct",
+        "is_decoder_only": True
+    },
+    {
+        "name": "BAAI/bge-multilingual-gemma2",
         "is_decoder_only": True
     },
     {
@@ -38,6 +42,14 @@ def test_models(
     model: dict,
     dtype: str,
 ) -> None:
+    # The example_prompts has ending "\n", for example:
+    # "Write a short story about a robot that dreams for the first time.\n"
+    # sentence_transformers will strip the input texts, see:
+    # https://github.com/UKPLab/sentence-transformers/blob/v3.1.1/sentence_transformers/models/Transformer.py#L159
+    # This makes the input_ids different between hf_model and vllm_model.
+    # So we need to strip the input texts to avoid test failing.
+    example_prompts = [str(s).strip() for s in example_prompts]
+
     model_name = model["name"]
     is_decoder_only = model["is_decoder_only"]
     max_model_len = model.get("max_model_len", 1024)
@@ -49,9 +61,6 @@ def test_models(
             model_name,
             dtype=dtype,
             disable_sliding_window=True,
-            enforce_eager=True,
-            # NOTE: Uncomment this line if runs out of GPU memory.
-            # gpu_memory_utilization=0.95,
             max_model_len=max_model_len,
     ) as vllm_model:
         prompt_inputs = build_decoder_prompts(
