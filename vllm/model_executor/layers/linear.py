@@ -241,7 +241,7 @@ class FluxAGCook(LinearMethodBase):
         return output
 
 
-class GemmRS(LinearMethodBase):
+class MatmulRS(LinearMethodBase):
     #Fused Gemm-ReduceScatter without quantization.
 
     def __init__(self, separate_bias_add: bool = False):
@@ -259,7 +259,38 @@ class GemmRS(LinearMethodBase):
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
-        print(f"out_partitions={output_partition_sizes}, input_size={input_size}, output_size={output_size}")
+        print(f"inpp={input_size_per_partition}, output_part_siz={output_partition_sizes}, input_size={input_size}, output_size={output_size}")
+
+    def apply_old(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert bias is None
+
+        group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
+
+        print(f"MATMUL_RS {group_name} {x.shape}, {layer.weight.transpose(1,0).shape}")
+
+        if x.shape[0] % 2 != 0:
+            res = torch.matmul(x, layer.weight.transpose(1,0))
+            output = D._symmetric_memory._SymmetricMemory.empty_strided_p2p(res.shape,
+                                                                            res.stride(),
+                                                                            res.dtype,
+                                                                            res.device,
+                                                                            group_name).copy_(res)
+        else:
+            output = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+                x,
+                layer.weight.transpose(1, 0),
+                "avg",
+                scatter_dim=0,  # ?
+                group_name=group_name
+            )
+
+        print(f"MATMUL_RS DONE {output.shape}")
+
+        return output
+
 
     def apply(self,
               layer: torch.nn.Module,
@@ -269,20 +300,25 @@ class GemmRS(LinearMethodBase):
 
         group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
 
-        print(f"MATMUL_RS {group_name}")
+        print(f"MATMUL_RS {get_tp_group().rank} {x.shape}, {layer.weight.transpose(1,0).shape}")
 
-        output = torch.ops.symm_mem.fused_matmul_reduce_scatter(
-            x,
-            layer.weight,
-            "avg",  # ?
-            scatter_dim=0,  # rows
-            group_name=group_name
-        )
+        if True or x.shape[0] % 2 != 0 or x.shape[0] < 128:
+            output = torch.matmul(x, layer.weight.transpose(1, 0))
+        else:
+            output = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+                x,
+                layer.weight.transpose(1, 0),
+                "avg",
+                scatter_dim=0,  # ?
+                group_name=group_name
+            )
+
+        print(f"MATMUL_RS DONE {get_tp_group().rank} {output.shape}")
 
         return output
 
 
-class AGCook(LinearMethodBase):
+class AGMatmul(LinearMethodBase):
     #Fused AllGather-Gemm without quantization.
 
     def __init__(self, separate_bias_add: bool = False):
@@ -309,16 +345,22 @@ class AGCook(LinearMethodBase):
 
         group_name = torch.distributed.group.WORLD.group_name
 
-        print(f"AG_MATMUL {group_name}")
+        print(f"AG_MATMUL {get_tp_group().rank}, {x.shape}, {layer.weight.transpose(1,0).shape}")
 
-        ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
-            x,
-            [layer.weight], #?
-            gather_dim=1,  # cols
-            group_name=group_name,
-        )
+        if True or x.shape[0] % 2 != 0 or x.shape[0] < 128:
+            output = torch.matmul(x, layer.weight.transpose(1,0))
+        else:
+            ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
+                x,
+                [layer.weight.transpose(1,0)],
+                gather_dim=0,
+                group_name=group_name,
+            )
+            output = mm_outputs[0]
 
-        return mm_outputs
+        print(f"AG_MATMUL DONE {get_tp_group().rank}, {output.shape}")
+
+        return output
 
 
 class LinearBase(torch.nn.Module):
@@ -357,12 +399,12 @@ class LinearBase(torch.nn.Module):
 
         tp_size = get_tensor_model_parallel_world_size()
 
-        if fuse_gemm_rs and tp_size > 1:
+        if False and fuse_gemm_rs and tp_size > 1:
             assert (quant_config is None)
-            self.quant_method = FluxGemmRS() if has_flux else GemmRS()
-        elif fuse_ag_gemm and tp_size > 1:
+            self.quant_method = FluxGemmRS() if has_flux else MatmulRS()
+        elif False and fuse_ag_gemm and tp_size > 1:
             assert (quant_config is None)
-            self.quant_method = FluxAGCook() if has_flux else AGCook()
+            self.quant_method = FluxAGCook() if has_flux else AGMatmul()
         elif quant_config is None:
             self.quant_method = UnquantizedLinearMethod()
         else:

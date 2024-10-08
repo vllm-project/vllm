@@ -32,7 +32,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather)
+                              tensor_model_parallel_all_gather, get_tp_group)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -274,34 +274,58 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        # Partition residual
-        if self.first_layer:
+        def slices(residual) -> bool:
+            return [residual]
+            if residual.shape[0] < 128:
+                print(f"SLICES TOO SMALL {[residual.shape]}")
+                return [residual]
+
             n_slices = get_tensor_model_parallel_world_size()
             residual_slices = torch.chunk(residual, n_slices, dim=0)
-            my_residual = residual_slices[get_tensor_model_parallel_rank()]
+            if all(r.shape == residual_slices[0].shape for r in residual_slices):
+                print(f"SLICES SAME {[r.shape for r in residual_slices]}")
+                return residual_slices
+            else:
+                print(f"SLICES TAIL {[residual.shape]}")
+                return [residual]
+
+        # Partition residual
+        if self.first_layer:
+            residual_slices = slices(residual)
+            if len(residual_slices) > 1:
+                my_residual = residual_slices[get_tensor_model_parallel_rank()]
+            else:
+                my_residual = residual
         else:
             my_residual = residual
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states,
+                                       kv_cache=kv_cache,
+                                       attn_metadata=attn_metadata)
 
         # Fully Connected
-        assert (hidden_states.shape == my_residual.shape)
+        assert (hidden_states.shape == my_residual.shape), f"{hidden_states.shape} != {my_residual.shape}"
         hidden_states, my_residual = self.post_attention_layernorm(
             hidden_states, my_residual)
         hidden_states = self.mlp(hidden_states)
 
-        if self.last_layer:
-            print("GOT HERE")
-            residual = tensor_model_parallel_all_gather(my_residual, 0)
+        if self.last_layer and len(slices(residual)) > 1:
+            print(f"GOT HERE {my_residual.shape}")
+            if True:
+                residual = tensor_model_parallel_all_gather(my_residual, 0)
+            else:
+                residual = torch.ops._c10d_functional.all_gather_into_tensor(
+                    my_residual.contiguous(),
+                    get_tp_group().world_size,
+                    torch.distributed.group.WORLD.group_name
+                )
+
+            print(f"GOT HERE2 {my_residual.shape}, {residual.shape}")
         else:
             residual = my_residual
 
-        assert (hidden_states.shape == residual.shape)
+        assert (hidden_states.shape == residual.shape), f"{hidden_states.shape} != {residual.shape}"
         return hidden_states, residual
 
 
