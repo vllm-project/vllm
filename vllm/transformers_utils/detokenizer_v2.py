@@ -6,9 +6,8 @@ import msgspec
 import zmq
 
 from .tokenizer import get_tokenizer
-from .detokenizer_utils import (
-    convert_prompt_ids_to_tokens,
-    detokenize_incrementally)
+from .detokenizer_utils import (convert_prompt_ids_to_tokens,
+                                detokenize_incrementally)
 
 
 class RequestData(msgspec.Struct):
@@ -74,6 +73,9 @@ class Detokenizer(multiprocessing.Process):
 
         while True:
             message = self.pull_socket.recv()
+            if message == b"":
+                # Terminate signal.
+                break
             data = self.decoder.decode(message)
 
             for req_id in data.free_request_ids:
@@ -90,7 +92,8 @@ class Detokenizer(multiprocessing.Process):
                         request_id=req_id,
                         prompt_token_ids=data.prompt_token_ids[i],
                         skip_special_tokens=data.skip_special_tokens[i],
-                        spaces_between_special_tokens=data.spaces_between_special_tokens[i],
+                        spaces_between_special_tokens=data.
+                        spaces_between_special_tokens[i],
                     )
                 new_str = self.detokenize(req_id, data.new_token_ids[i])
                 detokenized_texts.append(new_str)
@@ -99,7 +102,8 @@ class Detokenizer(multiprocessing.Process):
                 request_ids=req_ids,
                 detokenized_texts=detokenized_texts,
             )
-            self.push_socket.send(self.encoder.encode(detokenized), flags=zmq.NOBLOCK)
+            self.push_socket.send(self.encoder.encode(detokenized),
+                                  flags=zmq.NOBLOCK)
 
     def add_request(
         self,
@@ -132,15 +136,16 @@ class Detokenizer(multiprocessing.Process):
         for new_token_id in new_token_ids:
             req_state.token_ids.append(new_token_id)
             (new_tokens, new_decoded_token_text, prefix_offset,
-            read_offset) = detokenize_incrementally(
-                tokenizer=self.tokenizer,
-                all_input_ids=req_state.token_ids,
-                prev_tokens=req_state.tokens,
-                prefix_offset=req_state.prefix_offset,
-                read_offset=req_state.read_offset,
-                skip_special_tokens=req_state.skip_special_tokens,
-                spaces_between_special_tokens=req_state.spaces_between_special_tokens,
-            )
+             read_offset) = detokenize_incrementally(
+                 tokenizer=self.tokenizer,
+                 all_input_ids=req_state.token_ids,
+                 prev_tokens=req_state.tokens,
+                 prefix_offset=req_state.prefix_offset,
+                 read_offset=req_state.read_offset,
+                 skip_special_tokens=req_state.skip_special_tokens,
+                 spaces_between_special_tokens=req_state.
+                 spaces_between_special_tokens,
+             )
 
             req_state.tokens.extend(new_tokens)
             req_state.prefix_offset = prefix_offset
