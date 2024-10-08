@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
+    VLLM_TORCH_COMPILE_LEVEL: int = 0
 
 
 def get_default_cache_root():
