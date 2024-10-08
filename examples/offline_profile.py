@@ -1,7 +1,7 @@
 import inspect
 import json
-import sys
 import os
+import sys
 from argparse import RawTextHelpFormatter
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -110,17 +110,18 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
                 request_id=f"seq{i}",
                 prompt={'prompt_token_ids': prompt_token_ids},
                 params=sampling_params)
+
     def abort_requests():
         for i in range(batch_size):
             llm.llm_engine.abort_request(f"seq{i}")
-    
+
     # Warm up run
     print("Warm up run ...")
     add_requests()
-    llm.llm_engine.step() # Prefill
-    llm.llm_engine.step() # Decode
+    llm.llm_engine.step()  # Prefill
+    llm.llm_engine.step()  # Decode
     abort_requests()
-    
+
     print("Profile run ...")
     add_requests()
 
@@ -211,11 +212,10 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             json.dump(json_dict, f, indent=2)
         pass
 
-
     if context.save_traces_folder is not None:
         os.makedirs(context.save_traces_folder, exist_ok=True)
-        prefill_prof.profiler.export_chrome_trace(
-            context.save_traces_folder + "/prefill.json")
+        prefill_prof.profiler.export_chrome_trace(context.save_traces_folder +
+                                                  "/prefill.json")
         for idx, decode_prof in enumerate(decode_profs):
             decode_prof.profiler.export_chrome_trace(
                 context.save_traces_folder + f"/decode_{idx + 1}.json")
