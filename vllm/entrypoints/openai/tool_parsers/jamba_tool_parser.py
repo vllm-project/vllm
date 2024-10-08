@@ -67,17 +67,6 @@ class JambaToolParser(ToolParser):
             request.skip_special_tokens = False
         return request
 
-    def load_tool_string(self):
-        # TODO: maybe we want to implement a function that allows
-        #  the model to make some mistakes
-        # options:
-        # 1. use json_repair to fix the string. But it behaves
-        # weird
-        # 2. use a regex to extract the string and then
-        # load (or not) it
-        # Anyway, these are all fallbacks if json.loads fails
-        pass
-
     def extract_tool_calls(
             self,
             model_output: str,
@@ -93,20 +82,12 @@ class JambaToolParser(ToolParser):
 
             try:
                 # TODO: edit comment
-                # there are two possible captures - between tags, or between a
-                # tag and end-of-string so the result of
-                # findall is an array of tuples where one is a function call and
-                # the other is None
+                # use a regex to find the tool call between the tags
                 function_calls = self.tool_calls_regex.findall(model_output)[0]
 
-                # TODO: edit comment
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
                 raw_function_calls = json.loads(function_calls)
-                # raw_function_calls = [
-                #     json.loads(match[0] if match[0] else match[1])
-                #     for match in function_call_tuples
-                # ]
                 tool_calls = [
                     ToolCall(
                         type="function",
@@ -150,12 +131,12 @@ class JambaToolParser(ToolParser):
         # if the tool call token ID IS in the tokens generated so far, that
         # means we're parsing as tool calls now
 
-        # handle if we detected the BOT token which means the start of tool
-        # calling
+        # handle if we detected the start of tool calls token which means
+        # the start of tool calling
         if (self.tool_calls_start_token_id in delta_token_ids
                 and len(delta_token_ids) == 1):
             # if it's the only token, return None, so we don't send a chat
-            # completion any don't send a control token
+            # completion and don't send a control token
             return None
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
@@ -166,9 +147,7 @@ class JambaToolParser(ToolParser):
             else Allow.ALL & ~Allow.STR
         try:
 
-            # replace BOT token with empty string, and convert single quotes
-            # to double to allow parsing as JSON since mistral uses single
-            # quotes instead of double for tool calls
+            # Extract the tool calls between the special tool call tokens
             parsable_arr = current_text.split(
                 self.tool_calls_start_token)[-1].split(
                     self.tool_calls_end_token)[0]
