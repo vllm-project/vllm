@@ -79,10 +79,10 @@ class AutoWeightsLoader:
         self.module = module
         self.allow_missing_prefixes = allow_missing_prefixes or []
 
-    def _is_strict(self, prefix: str, rest: str) -> bool:
+    def _allow_missing(self, prefix: str, rest: str) -> bool:
         weight_name = prefix if rest == "" else ".".join((prefix, rest))
 
-        return not any(
+        return any(
             weight_name.startswith(p) for p in self.allow_missing_prefixes)
 
     def _load_param(
@@ -93,7 +93,7 @@ class AutoWeightsLoader:
     ) -> None:
         for weight_name, weight_data in weights:
             if weight_name != "":
-                if self._is_strict(prefix, weight_name):
+                if not self._allow_missing(prefix, weight_name):
                     raise ValueError(
                         f"Attempted to load nested weight ({weight_name}) "
                         f"into a single parameter ({prefix})")
@@ -122,7 +122,7 @@ class AutoWeightsLoader:
                 continue
 
             if weight_name not in params_dict:
-                if self._is_strict(prefix, weight_name):
+                if not self._allow_missing(prefix, weight_name):
                     raise ValueError(
                         f"Attempted to load unexpected weight ({weight_name}) "
                         f"into module ({prefix}). "
