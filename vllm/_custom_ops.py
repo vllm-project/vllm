@@ -32,6 +32,15 @@ def hint_on_error(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+
+        except NotImplementedError as e:
+            msg = (
+                "Error in calling custom op %s: %s\n"
+                "Not implemented or built, mostly likely because the current current device "
+                "does not support this kernel (less likely TORCH_CUDA_ARCH_LIST was set "
+                "incorrectly while building)")
+            logger.error(msg, fn.__name__, e)
+            raise NotImplementedError(msg % (fn.__name__, e)) from e
         except AttributeError as e:
             msg = (
                 "Error in calling custom op %s: %s\n"
@@ -440,9 +449,10 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     @torch.library.register_fake("_C::causal_conv1d_fwd")
     def causal_conv1d_fwd_fake(x: torch.Tensor, weight: torch.Tensor,
                                bias_: Optional[torch.Tensor],
-                               seq_idx_: Optional[torch.Tensor],
-                               initial_states_: Optional[torch.Tensor],
-                               final_states_out_: Optional[torch.Tensor],
+                               conv_states: Optional[torch.Tensor],
+                               cu_seq_len: Optional[torch.Tensor],
+                               cache_indices: Optional[torch.Tensor],
+                               has_initial_state: Optional[torch.Tensor],
                                silu_activation: bool) -> torch.Tensor:
         return torch.empty_like(x)
 
@@ -450,22 +460,22 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     def causal_conv1d_update_fake(
             x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
             bias_: Optional[torch.Tensor], silu_activation: bool,
+            cache_seqlens: Optional[torch.Tensor],
             conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
         return torch.empty_like(x)
 
     @torch.library.register_fake("_C::selective_scan_fwd")
-    def selective_scan_fwd_fake(
-            u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
-            B: torch.Tensor, C: torch.Tensor, D_: Optional[torch.Tensor],
-            z_: Optional[torch.Tensor], delta_bias_: Optional[torch.Tensor],
-            delta_softplus: bool, index_: Optional[torch.Tensor],
-            x: Optional[torch.Tensor]) -> List[torch.Tensor]:
-        a = torch.empty_like(u)
-        if z_ is not None:
-            c = torch.empty_like(z_)
-            return [a, c]
-        else:
-            return [a]
+    def selective_scan_fwd_fake(u: torch.Tensor, delta: torch.Tensor,
+                                A: torch.Tensor, B: torch.Tensor,
+                                C: torch.Tensor, D_: Optional[torch.Tensor],
+                                z_: Optional[torch.Tensor],
+                                delta_bias_: Optional[torch.Tensor],
+                                delta_softplus: bool,
+                                cu_seq_len: Optional[torch.Tensor],
+                                cache_indices: Optional[torch.Tensor],
+                                has_initial_state: Optional[torch.Tensor],
+                                ssm_states: Optional[torch.Tensor]) -> None:
+        return None
 
 
 # cutlass
@@ -555,6 +565,20 @@ def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
     for e in range(num_experts):
         output[e] = torch.ops._C.gptq_marlin_repack(b_q_weight[e], perm[e],
                                                     size_k, size_n, num_bits)
+    return output
+
+
+def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                          size_k: int, size_n: int,
+                          num_bits: int) -> torch.Tensor:
+    num_experts = b_q_weight.shape[0]
+    assert size_k % 16 == 0
+    output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
+                         device=b_q_weight.device,
+                         dtype=b_q_weight.dtype)
+    for e in range(num_experts):
+        output[e] = torch.ops._C.awq_marlin_repack(b_q_weight[e], size_k,
+                                                   size_n, num_bits)
     return output
 
 
@@ -761,37 +785,37 @@ def ggml_mul_mat_a8(
 # mamba
 def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       bias_: Optional[torch.Tensor],
-                      seq_idx_: Optional[torch.Tensor],
-                      initial_states_: Optional[torch.Tensor],
-                      final_states_out_: Optional[torch.Tensor],
+                      conv_states: Optional[torch.Tensor],
+                      query_start_loc: Optional[torch.Tensor],
+                      cache_indices: Optional[torch.Tensor],
+                      has_initial_state: Optional[torch.Tensor],
                       silu_activation: bool) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
-                                          initial_states_, final_states_out_,
-                                          silu_activation)
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
+                                          query_start_loc, cache_indices,
+                                          has_initial_state, silu_activation)
 
 
 def causal_conv1d_update(
-    x: torch.Tensor,
-    conv_state: torch.Tensor,
-    weight: torch.Tensor,
-    bias_: Optional[torch.Tensor],
-    silu_activation: bool,
-    conv_state_indices: Optional[torch.Tensor],
-) -> torch.Tensor:
+        x: torch.Tensor, conv_state: torch.Tensor, weight: torch.Tensor,
+        bias_: Optional[torch.Tensor], silu_activation: bool,
+        cache_seqlens: Optional[torch.Tensor],
+        conv_state_indices: Optional[torch.Tensor]) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                             silu_activation,
+                                             silu_activation, cache_seqlens,
                                              conv_state_indices)
 
 
-def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
-                       B: torch.Tensor, C: torch.Tensor,
-                       D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
-                       delta_bias_: Optional[torch.Tensor],
-                       delta_softplus: bool, index_: Optional[torch.Tensor],
-                       x: Optional[torch.Tensor]) -> List[torch.Tensor]:
-    return torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_,
-                                           delta_bias_, delta_softplus, index_,
-                                           x)
+def selective_scan_fwd(
+        u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor, B: torch.Tensor,
+        C: torch.Tensor, D_: Optional[torch.Tensor],
+        z_: Optional[torch.Tensor], delta_bias_: Optional[torch.Tensor],
+        delta_softplus: bool, query_start_loc: Optional[torch.Tensor],
+        cache_indices: Optional[torch.Tensor],
+        has_initial_state: Optional[torch.Tensor], ssm_states: torch.Tensor):
+    torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_, delta_bias_,
+                                    delta_softplus, query_start_loc,
+                                    cache_indices, has_initial_state,
+                                    ssm_states)
 
 
 # moe
@@ -818,11 +842,12 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
                              sorted_ids: torch.Tensor,
                              topk_weights: torch.Tensor,
                              topk_ids: torch.Tensor, b_scales: torch.Tensor,
-                             g_idx: torch.Tensor, perm: torch.Tensor,
-                             workspace: torch.Tensor, b_q_type: ScalarType,
-                             size_m: int, size_n: int, size_k: int,
-                             is_k_full: bool, num_experts: int, topk: int,
-                             moe_block_size: int, replicate_input: bool,
+                             b_zero_points: torch.Tensor, g_idx: torch.Tensor,
+                             perm: torch.Tensor, workspace: torch.Tensor,
+                             b_q_type: ScalarType, size_m: int, size_n: int,
+                             size_k: int, is_k_full: bool, num_experts: int,
+                             topk: int, moe_block_size: int,
+                             replicate_input: bool,
                              apply_weights: bool) -> torch.Tensor:
         return torch.empty((size_m, topk, size_n),
                            dtype=a.dtype,

@@ -281,9 +281,14 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def _get_seq_num_required_blocks(self, seq: Optional[Sequence]) -> int:
         return 0 if seq is None else seq.n_blocks
 
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+    def can_allocate(self,
+                     seq_group: SequenceGroup,
+                     num_lookahead_slots: int = 0) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
+
+        assert (num_lookahead_slots == 0
+                ), "lookahead allocation not supported in BlockSpaceManagerV1"
 
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
@@ -438,7 +443,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # prefix tokens)
         new_block = self.gpu_allocator.allocate(block_hash, num_hashed_tokens)
 
-        # If the block has is None, then the block is not full.
+        # If the block_hash is None, then the block is not full.
         # If the block is not full, then we expect it to have a refcount of 1.
         if block_hash is None:
             assert new_block.ref_count == 1
