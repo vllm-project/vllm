@@ -1,11 +1,15 @@
 import pytest
 
+from vllm.compilation.levels import CompilationLevel
+
 from ..utils import fork_new_process_for_each_test
 from .utils import TEST_MODELS, check_full_graph_support
 
 
 @pytest.mark.parametrize("model_info", TEST_MODELS)
-@pytest.mark.parametrize("optimization_level", [1, 2])
+@pytest.mark.parametrize(
+    "optimization_level",
+    [CompilationLevel.DYNAMO_ONCE, CompilationLevel.INDUCTOR])
 @fork_new_process_for_each_test
 def test_full_graph(model_info, optimization_level):
     model = model_info[0]
