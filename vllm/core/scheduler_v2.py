@@ -203,7 +203,7 @@ class Scheduler:
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> List[Request]:
-        sampled_token_ids = model_runner_output.sampled_token_ids_cpu.numpy()
+        sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         finished_reqs: List[Request] = []
