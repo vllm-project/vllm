@@ -644,10 +644,10 @@ class PersistentBatch:
         if not skip_copy:
             self.temperature[:self.num_reqs].copy_(
                 self.temperature_cpu_tensor[:self.num_reqs], non_blocking=True)
-            self.top_p[:self.num_reqs].copy_(self.top_p_cpu_tensor[:self.num_reqs],
-                                             non_blocking=True)
-            self.top_k[:self.num_reqs].copy_(self.top_k_cpu_tensor[:self.num_reqs],
-                                             non_blocking=True)
+            self.top_p[:self.num_reqs].copy_(
+                self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
+            self.top_k[:self.num_reqs].copy_(
+                self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],
             all_greedy=self.all_greedy,
