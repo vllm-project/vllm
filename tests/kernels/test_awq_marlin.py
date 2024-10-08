@@ -7,6 +7,7 @@ import torch
 
 from tests.kernels.utils import (compute_max_diff, stack_and_dev, torch_moe,
                                  torch_moe_single)
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe, single_marlin_moe)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
@@ -21,6 +22,9 @@ from vllm.scalar_type import scalar_types
 @pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+@pytest.mark.skipif(not (ops.supports_moe_ops
+                         and hasattr(torch.ops._moe_C, "marlin_gemm_moe")),
+                    reason="Marlin is not supported on this GPU type.")
 def test_fused_marlin_moe_awq(
     m: int,
     n: int,
