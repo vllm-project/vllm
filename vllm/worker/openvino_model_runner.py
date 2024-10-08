@@ -172,7 +172,11 @@ class OpenVINOModelRunner:
 
                 mm_data = seq_group_metadata.multi_modal_data
                 if mm_data:
-                    mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                    mm_kwargs = self.multi_modal_input_mapper(
+                        mm_data,
+                        mm_processor_kwargs=seq_group_metadata.
+                        mm_processor_kwargs,
+                    )
                     multi_modal_inputs_list.append(mm_kwargs)
 
                 block_table = seq_group_metadata.block_tables[seq_id]

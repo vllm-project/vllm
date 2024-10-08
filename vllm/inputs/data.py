@@ -1,5 +1,5 @@
-from typing import (TYPE_CHECKING, Generic, Iterable, List, Optional, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
+                    Optional, Tuple, Union)
 
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
@@ -19,6 +19,14 @@ class TextPrompt(TypedDict):
     if the model supports it.
     """
 
+    mm_processor_kwargs: NotRequired[Dict[str, Any]]
+    """
+    Optional multi-modal processor kwargs to be forwarded to the
+    multimodal input mapper & processor. Note that if multiple modalities
+    have registered mappers etc for the model being considered, we attempt
+    to pass the mm_processor_kwargs to each of them.
+    """
+
 
 class TokensPrompt(TypedDict):
     """Schema for a tokenized prompt."""
@@ -30,6 +38,14 @@ class TokensPrompt(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+    """
+
+    mm_processor_kwargs: NotRequired[Dict[str, Any]]
+    """
+    Optional multi-modal processor kwargs to be forwarded to the
+    multimodal input mapper & processor. Note that if multiple modalities
+    have registered mappers etc for the model being considered, we attempt
+    to pass the mm_processor_kwargs to each of them.
     """
 
 
@@ -74,7 +90,9 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     according to any of the :class:`SingletonPrompt` schemas,
     and are not required to have the same schema.
 
-    Only the encoder prompt may have multi-modal data.
+    Only the encoder prompt may have multi-modal data. mm_processor_kwargs
+    should be at the top-level, and should not be set in the encoder/decoder
+    prompts, since they are agnostic to the encoder/decoder.
 
     Note that an :class:`ExplicitEncoderDecoderPrompt` may not
     be used as an input to a decoder-only model,
@@ -86,6 +104,8 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     encoder_prompt: _T1_co
 
     decoder_prompt: Optional[_T2_co]
+
+    mm_processor_kwargs: NotRequired[Dict[str, Any]]
 
 
 PromptType = Union[SingletonPrompt, ExplicitEncoderDecoderPrompt]
@@ -121,6 +141,14 @@ class LLMInputs(TypedDict):
     if the model supports it.
     """
 
+    mm_processor_kwargs: NotRequired[Optional[Dict[str, Any]]]
+    """
+    Optional multi-modal processor kwargs to be forwarded to the
+    multimodal input mapper & processor. Note that if multiple modalities
+    have registered mappers etc for the model being considered, we attempt
+    to pass the mm_processor_kwargs to each of them.
+    """
+
 
 class EncoderDecoderLLMInputs(LLMInputs):
     """
@@ -152,22 +180,43 @@ _T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)
 def build_explicit_enc_dec_prompt(
     encoder_prompt: _T1,
     decoder_prompt: Optional[_T2],
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> ExplicitEncoderDecoderPrompt[_T1, _T2]:
-    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
-                                        decoder_prompt=decoder_prompt)
+    if mm_processor_kwargs is None:
+        mm_processor_kwargs = {}
+    return ExplicitEncoderDecoderPrompt(
+        encoder_prompt=encoder_prompt,
+        decoder_prompt=decoder_prompt,
+        mm_processor_kwargs=mm_processor_kwargs)
 
 
 def zip_enc_dec_prompts(
     enc_prompts: Iterable[_T1],
     dec_prompts: Iterable[Optional[_T2]],
+    mm_processor_kwargs: Optional[Union[Iterable[Dict[str, Any]],
+                                        Dict[str, Any]]] = None,
 ) -> List[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
     """
     Zip encoder and decoder prompts together into a list of
-    :class:`ExplicitEncoderDecoderPrompt` instances.
+    :class:`ExplicitEncoderDecoderPrompt` instances. mm_processor_kwargs
+    may also be provided; if a dict is passed, the same dictionary will be
+    used for every encoder/decoder prompt. If an iterable is provided, it will
+    be zipped with the encoder/decoder prompts.
     """
+    if mm_processor_kwargs is None:
+        mm_processor_kwargs = {}
+    if isinstance(mm_processor_kwargs, Dict):
+        return [
+            build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,
+                                          mm_processor_kwargs)
+            for (encoder_prompt,
+                 decoder_prompt) in zip(enc_prompts, dec_prompts)
+        ]
     return [
-        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)
-        for (encoder_prompt, decoder_prompt) in zip(enc_prompts, dec_prompts)
+        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,
+                                      mm_proc_kwargs)
+        for (encoder_prompt, decoder_prompt, mm_proc_kwargs
+             ) in zip(enc_prompts, dec_prompts, mm_processor_kwargs)
     ]
 
 
