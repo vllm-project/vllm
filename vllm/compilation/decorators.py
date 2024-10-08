@@ -4,6 +4,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata
+from vllm.compilation.levels import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.sequence import IntermediateTensors
 
@@ -24,7 +25,8 @@ def support_compile_llama_style(cls: type):
 
     def __init__(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
-        self._use_torch_compile = envs.VLLM_TORCH_COMPILE_LEVEL > 0
+        self._use_torch_compile = \
+            envs.VLLM_TORCH_COMPILE_LEVEL > CompilationLevel.NO_COMPILATION
         if self._use_torch_compile:
             TorchCompileWrapperWithCustomDispatcher.__init__(self)
 
@@ -32,25 +34,30 @@ def support_compile_llama_style(cls: type):
 
     def __call__(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if not self._use_torch_compile:
             return self.forward(input_ids, positions, kv_caches, attn_metadata,
-                                intermediate_tensors)
+                                intermediate_tensors, inputs_embeds)
 
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
-            torch._dynamo.mark_dynamic(input_ids, 0)
+            if input_ids is not None:
+                torch._dynamo.mark_dynamic(input_ids, 0)
             torch._dynamo.mark_dynamic(positions, 0)
+            if inputs_embeds is not None:
+                torch._dynamo.mark_dynamic(inputs_embeds, 0)
             if intermediate_tensors is not None:
                 for tensors in intermediate_tensors.tensors.values():
                     torch._dynamo.mark_dynamic(tensors, 0)
             return self.compiled_callable(input_ids, positions, kv_caches,
-                                          attn_metadata, intermediate_tensors)
+                                          attn_metadata, intermediate_tensors,
+                                          inputs_embeds)
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,

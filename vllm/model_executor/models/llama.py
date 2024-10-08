@@ -267,6 +267,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_compile_llama_style
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -434,7 +435,6 @@ class LlamaModel(nn.Module):
                                    "factor attribute!")
 
 
-@support_compile_llama_style
 class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
