@@ -112,6 +112,13 @@ class AutoWeightsLoader:
 
         return ".".join((prefix, rest))
 
+    def _ignore(self, qualname: str) -> bool:
+        return any(qualname.startswith(p) for p in self.ignore_prefixes)
+
+    def _allow_unexpected(self, qualname: str) -> bool:
+        return any(
+            qualname.startswith(p) for p in self.allow_unexpected_prefixes)
+
     def _load_param(
         self,
         base_prefix: str,
@@ -121,16 +128,11 @@ class AutoWeightsLoader:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
 
-            ignore_weight = any(
-                weight_qualname.startswith(p) for p in self.ignore_prefixes)
-            if ignore_weight:
+            if self._ignore(weight_qualname):
                 continue
 
             if weight_name != "":
-                allow_unexpected = any(
-                    weight_qualname.startswith(p)
-                    for p in self.allow_unexpected_prefixes)
-                if not allow_unexpected:
+                if not self._allow_unexpected(weight_qualname):
                     raise ValueError(
                         f"Attempted to load nested weight '{weight_qualname}' "
                         f"into a single parameter '{base_prefix}'")
@@ -163,6 +165,9 @@ class AutoWeightsLoader:
 
         for child_prefix, child_weights in self._groupby_prefix(weights):
             prefix = self._get_qualname(base_prefix, child_prefix)
+            if self._ignore(prefix):
+                continue
+
             if child_prefix in child_modules:
                 self._load_module(prefix, child_modules[child_prefix],
                                   child_weights)
@@ -170,8 +175,9 @@ class AutoWeightsLoader:
                 self._load_param(prefix, child_params[child_prefix],
                                  child_weights)
             else:
-                msg = f"There is no module or parameter named '{prefix}'"
-                raise ValueError(msg)
+                if not self._allow_unexpected(prefix):
+                    msg = f"There is no module or parameter named '{prefix}'"
+                    raise ValueError(msg)
 
     def load_weights(
         self,
