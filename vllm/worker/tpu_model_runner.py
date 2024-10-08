@@ -20,6 +20,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
+from vllm.utils import temporary_env_var
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -140,7 +141,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         with patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
-                return_value=xm_tp_rank):
+                return_value=xm_tp_rank), \
+                    temporary_env_var("VLLM_TORCH_COMPILE_LEVEL", 0):
+            # patching VLLM_TORCH_COMPILE_LEVEL to 0 so that
+            # compilation for other platforms is disabled.
             model = get_model(
                 model_config=self.model_config,
                 load_config=self.load_config,

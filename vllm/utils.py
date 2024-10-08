@@ -1370,3 +1370,21 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
+
+@contextlib.contextmanager
+def temporary_env_var(key, value):
+    # Save the original value of the environment variable (if it exists)
+    original_value = os.environ.get(key)
+    # Set the environment variable to the new temporary value
+    os.environ[key] = value
+    try:
+        # Yield control back to the code block inside the "with" statement
+        yield
+    finally:
+        # Restore the original value after exiting the "with" block
+        if original_value is None:
+            del os.environ[key]  # If it was originally not set, remove it
+        else:
+            os.environ[
+                key] = original_value  # Otherwise, restore the original value
