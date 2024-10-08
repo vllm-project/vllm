@@ -64,7 +64,7 @@ def report_performance(task, input_lens, output_lens, time):
     context_lens = [i + o for i, o in zip(input_lens, output_lens)]
     gen_tput = sum(output_lens) / time
     msg = (
-        f'{task} | average generation throughput: {gen_tput:.2f} tokens/s \n'  # noqa: G004
+        f'{task} | estimated average generation throughput: {gen_tput:.2f} tokens/s \n'  # noqa: G004, E501
         f'{task} | input_tokens   | min: {min(input_lens)} | max: {max(input_lens)} | mean: {statistics.mean(input_lens):.2f} | stddev: {statistics.stdev(input_lens):.2f}\n'  # noqa: E501
         f'{task} | output_tokens  | min: {min(output_lens)} | max: {max(output_lens)} | mean: {statistics.mean(output_lens):.2f} | stddev: {statistics.stdev(output_lens):.2f}\n'  # noqa: E501
         f'{task} | context_length | min: {min(context_lens)} | max: {max(context_lens)} | mean: {statistics.mean(context_lens):.2f} | stddev: {statistics.stdev(context_lens):.2f}'  # noqa: E501
@@ -73,43 +73,46 @@ def report_performance(task, input_lens, output_lens, time):
 
 
 def test_lm_eval_correctness():
-    eval_config = yaml.safe_load(
-        Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
+    try:
+        eval_config = yaml.safe_load(
+            Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
 
-    # Launch eval requests.
-    start_time = time.perf_counter()
-    results = launch_lm_eval(eval_config)
-    total_time = time.perf_counter() - start_time
+        # Launch eval requests.
+        start_time = time.perf_counter()
+        results = launch_lm_eval(eval_config)
+        total_time = time.perf_counter() - start_time
 
-    tokenizer = vllm.transformers_utils.tokenizer.get_tokenizer(
-        eval_config['model_name'])
+        tokenizer = vllm.transformers_utils.tokenizer.get_tokenizer(
+            eval_config['model_name'])
 
-    # Confirm scores match ground truth.
-    for task in eval_config["tasks"]:
+        # Confirm scores match ground truth.
+        for task in eval_config["tasks"]:
 
-        samples = results['samples'][task["name"]]
-        tokenized_inputs = [
-            tokenizer(x['arguments'][0][0])['input_ids'] for x in samples
-        ]
-        tokenized_inputs_lens = [len(x) for x in tokenized_inputs]
-        tokenized_outputs = [
-            list(
-                itertools.chain.from_iterable(
-                    tokenizer(list(itertools.chain.from_iterable(
-                        x['resps'])))['input_ids'])) for x in samples
-        ]
-        tokenized_outputs_lens = [len(x) for x in tokenized_outputs]
-        report_performance(task['name'], tokenized_inputs_lens,
-                           tokenized_outputs_lens, total_time)
+            samples = results['samples'][task["name"]]
+            tokenized_inputs = [
+                tokenizer(x['arguments'][0][0])['input_ids'] for x in samples
+            ]
+            tokenized_inputs_lens = [len(x) for x in tokenized_inputs]
+            tokenized_outputs = [
+                list(
+                    itertools.chain.from_iterable(
+                        tokenizer(
+                            list(itertools.chain.from_iterable(
+                                x['resps'])))['input_ids'])) for x in samples
+            ]
+            tokenized_outputs_lens = [len(x) for x in tokenized_outputs]
+            report_performance(task['name'], tokenized_inputs_lens,
+                               tokenized_outputs_lens, total_time)
 
-        for metric in task["metrics"]:
-            ground_truth = metric["value"]
-            measured_value = results["results"][task["name"]][metric["name"]]
-            print(f'{task["name"]} | {metric["name"]}: '
-                  f'ground_truth={ground_truth} | measured={measured_value}')
-            try:
+            for metric in task["metrics"]:
+                ground_truth = metric["value"]
+                measured_value = results["results"][task["name"]][
+                    metric["name"]]
+                print(
+                    f'{task["name"]} | {metric["name"]}: '
+                    f'ground_truth={ground_truth} | measured={measured_value}')
                 assert numpy.isclose(ground_truth, measured_value, rtol=RTOL)
-            except AssertionError as exc:
-                # nasty workaround for HPU PT bridge bug (SW-204785)
-                atexit.register(fail_on_exit)
-                raise exc
+    except Exception as exc:
+        # nasty workaround for a nasty HPU PT bridge bug (SW-204785)
+        atexit.register(fail_on_exit)
+        raise exc
