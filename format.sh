@@ -116,7 +116,7 @@ run_mypy vllm/executor
 run_mypy vllm/lora
 run_mypy vllm/model_executor
 #run_mypy vllm/multimodal
-#run_mypy vllm/platforms
+run_mypy vllm/platforms
 run_mypy vllm/plugins
 run_mypy vllm/prompt_adapter
 run_mypy vllm/spec_decode
