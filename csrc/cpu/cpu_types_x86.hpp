@@ -266,6 +266,30 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
 };
 
 #ifdef __AVX512F__
+struct INT32Vec16: public Vec<INT32Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  union AliasReg {
+    __m512i reg;
+    int32_t values[VEC_ELEM_NUM];
+  };
+
+  __m512i reg;
+  
+  explicit INT32Vec16(const void* data_ptr) : reg(_mm512_loadu_epi32(data_ptr)) {}
+
+  void save(int32_t* ptr) const {
+    _mm512_storeu_epi32(ptr, reg);
+  }
+
+  void save(int32_t* ptr, const int elem_num) const {
+    constexpr uint32_t M = 0xFFFFFFFF;
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
+    _mm512_mask_storeu_epi32(ptr, mask, reg);
+  }
+};
+#endif
+
+#ifdef __AVX512F__
 struct FP32Vec16 : public Vec<FP32Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
   union AliasReg {
@@ -282,8 +306,6 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(const float *ptr) : reg(_mm512_loadu_ps(ptr)) {}
 
   explicit FP32Vec16(__m512 data) : reg(data) {}
-
-  explicit FP32Vec16(const FP32Vec16 &data) : reg(data.reg) {}
 
   explicit FP32Vec16(const FP32Vec4 &data)
       : reg((__m512)_mm512_inserti32x4(
@@ -302,6 +324,9 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
             _mm512_bslli_epi128(_mm512_cvtepu16_epi32(v.reg), 2))) {}
 
   explicit FP32Vec16(const BF16Vec8 &v) : FP32Vec16(FP32Vec8(v)) {}
+
+  explicit FP32Vec16(const INT32Vec16 &v)
+      : reg(_mm512_cvt_roundepi32_ps(v.reg, _MM_FROUND_TO_NEAREST_INT |_MM_FROUND_NO_EXC)) {}
 
   FP32Vec16 operator*(const FP32Vec16 &b) const {
     return FP32Vec16(_mm512_mul_ps(reg, b.reg));
