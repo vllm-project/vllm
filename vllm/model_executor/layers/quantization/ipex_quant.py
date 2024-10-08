@@ -112,7 +112,18 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 
         bias = layer.bias if not layer.skip_bias_add else None
 
-        import intel_extension_for_pytorch as ipex
+        try:
+            import intel_extension_for_pytorch as ipex
+            if ipex.__version__ < "2.4.0":
+                raise ImportError("intel_extension_for_pytorch version is "
+                                  "wrong. Please install "
+                                  "intel_extension_for_pytorch>=2.4.0.")
+        except ImportError as err:
+            raise ImportError(
+                "Please install "
+                "intel_extension_for_pytorch>=2.4.0 via "
+                "`pip install intel_extension_for_pytorch>=2.4.0`"
+                " to use IPEX-AWQ linear method.") from err
 
         # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
         # with better performance.
