@@ -11,6 +11,8 @@ from contextlib import nullcontext
 
 import pytest
 
+import vllm.envs as envs
+
 from ..models.utils import check_logprobs_close, check_outputs_equal
 from ..utils import multi_gpu_test
 
@@ -18,6 +20,16 @@ MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
+
+
+@pytest.fixture(scope="module", autouse=False)
+def check_deprecated_block_manager():
+    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
+        "To allow the use of deprecated BlockSpaceManagerV1, set the "
+        "environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
+        "You can run the tests with: "
+        "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest tests/core/test_scheduler.py`"  #noqa
+    )
 
 
 @pytest.mark.parametrize("model", MODELS)
