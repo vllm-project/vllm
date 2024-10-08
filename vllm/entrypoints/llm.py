@@ -743,6 +743,7 @@ class LLM:
 
         if use_tqdm:
             pbar.close()
+        self.llm_engine.terminate_detokenizer()
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
