@@ -22,9 +22,9 @@ from vllm.scalar_type import scalar_types
 @pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
-@pytest.mark.skipif(
-    not (ops.supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"))
-)
+@pytest.mark.skipif(not (ops.supports_moe_ops
+                         and hasattr(torch.ops._moe_C, "marlin_gemm_moe")),
+                    reason="Marlin is not supported on this GPU type.")
 def test_fused_marlin_moe_awq(
     m: int,
     n: int,
