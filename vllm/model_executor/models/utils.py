@@ -165,6 +165,7 @@ class AutoWeightsLoader:
 
         for child_prefix, child_weights in self._groupby_prefix(weights):
             prefix = self._get_qualname(base_prefix, child_prefix)
+
             if self._ignore(prefix):
                 continue
 
