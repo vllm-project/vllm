@@ -177,7 +177,9 @@ def vllm_backend(
         example_inputs,
         additional_inductor_config: Optional[Dict] = None) -> Callable:
 
-    sizes_to_specialize: List[int] = copy.deepcopy(get_compile_context())
+    context = get_compile_context()
+    context = copy.deepcopy(context) if context is not None else []
+    sizes_to_specialize: List[int] = context
 
     # flags for all the seen shapes, whether we need to specialize
     runtime_shapes_to_compile_flags: Dict[Tuple[int, ...], bool] = {}
