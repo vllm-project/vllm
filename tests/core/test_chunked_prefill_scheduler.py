@@ -34,7 +34,7 @@ def check_deprecated_block_manager():
         "To allow the use of deprecated BlockSpaceManagerV1, set the "
         "environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
         "You can run the tests with: "
-        "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest tests/core/test_scheduler.py`"  #noqa
+        "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest tests/core/test_chunked_prefill_scheduler.py`"  #noqa
     )
 
 

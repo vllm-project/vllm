@@ -1,8 +1,19 @@
 import pytest
 
+import vllm.envs as envs
 from vllm import SamplingParams
 
 from .conftest import get_output_from_llm_generator
+
+
+@pytest.fixture(scope="module", autouse=False)
+def check_deprecated_block_manager():
+    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
+        "To allow the use of deprecated BlockSpaceManagerV1, set the "
+        "environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
+        "You can run the tests with: "
+        "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest tests/spec_decode/e2e/test_compatibility.py`"  #noqa
+    )
 
 
 @pytest.mark.parametrize(
