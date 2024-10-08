@@ -143,16 +143,19 @@ Multi-image input can be extended to perform video captioning. We show this with
 
     # Create the request payload.
     video_frames = ... # load your video making sure it only has the number of frames specified earlier.
-    messages = [
-        {"role": "user", "content": [{"type": "text", "text": "Describe this set of frames. Consider the frames to be a part of the same video."}]}
-    ]
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this set of frames. Consider the frames to be a part of the same video."},
+        ],
+    }
     for i in range(len(video_frames)):
         base64_image = encode_image(video_frames[i]) # base64 encoding.
         new_image = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-        messages[0]["content"].append(new_image)
+        message["content"].append(new_image)
 
     # Perform inference and log output.
-    outputs = llm.chat(messages)
+    outputs = llm.chat([message])
     
     for o in outputs:
         generated_text = o.outputs[0].text
