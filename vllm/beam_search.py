@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional
 
+
 @dataclass
 class BeamSearchSequence:
     """A sequence for beam search.
@@ -30,6 +31,7 @@ class BeamSearchInstance:
             BeamSearchSequence(tokens=prompt_tokens)
         ]
         self.completed: List[BeamSearchSequence] = []
+
 
 def get_beam_search_score(
     tokens: List[int],
