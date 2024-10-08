@@ -11,6 +11,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.compilation.levels import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
@@ -142,7 +143,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank), \
-                    temporary_env_var("VLLM_TORCH_COMPILE_LEVEL", 0):
+            temporary_env_var("VLLM_TORCH_COMPILE_LEVEL", str(CompilationLevel.NO_COMPILATION)): # noqa
             # patching VLLM_TORCH_COMPILE_LEVEL to 0 so that
             # compilation for other platforms is disabled.
             model = get_model(
