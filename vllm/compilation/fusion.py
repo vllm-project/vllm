@@ -13,18 +13,17 @@ logger.setLevel(logging.DEBUG)  # TODO
 
 
 # DYNAMIC
-@torch.library.custom_op("vllm::fused_rms_norm_quant_dynamic", mutates_args=['result', 'scale', 'azp'])
+@torch.library.custom_op("vllm::fused_rms_norm_quant_dynamic", mutates_args=['result', 'scale'])
 def fused_rms_norm_quant_dynamic(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-                                 azp: torch.Tensor, epsilon: float) -> None:
+                                 epsilon: float) -> None:
     print("vllm::fused_rms_norm_quant_dynamic")
     result_rms = torch.empty_like(input)
     torch.ops._C.rms_norm(result_rms, input, weight, epsilon)
-    torch.ops._C.dynamic_scaled_int8_quant(result, result_rms, scale, azp)
+    torch.ops._C.dynamic_scaled_fp8_quant(result, result_rms, scale)
 
 
 @torch.library.register_fake("vllm::fused_rms_norm_quant_dynamic")
-def _(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, azp: torch.Tensor,
-      epsilon: float) -> None:
+def _(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, epsilon: float) -> None:
     return
 
 
@@ -33,8 +32,7 @@ def rms_pattern(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Ten
                 scale: torch.Tensor):
     at1 = auto_functionalized(torch.ops._C.rms_norm.default, result=result_rms, input=input, weight=weight,
                               epsilon=1e-6)
-    at2 = auto_functionalized(torch.ops._C.dynamic_scaled_int8_quant.default, result=result, input=at1[1], scale=scale,
-                              azp=None)
+    at2 = auto_functionalized(torch.ops._C.dynamic_scaled_fp8_quant.default, result=result, input=at1[1], scale=scale)
 
     # result, scale (multi-output not currently working)
     return at2[1:3]
@@ -44,7 +42,7 @@ def rms_replacement(result: torch.Tensor, result_rms: torch.Tensor, input: torch
                     scale: torch.Tensor):
     at = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.fused_rms_norm_quant_dynamic.default, result=result,
                                                     input=input, weight=weight,
-                                                    epsilon=1e-6, scale=scale, azp=None)
+                                                    epsilon=1e-6, scale=scale)
 
     # result, scale (multi-output not currently working)
     return at[1:3]
@@ -53,16 +51,15 @@ def rms_replacement(result: torch.Tensor, result_rms: torch.Tensor, input: torch
 # STATIC
 @torch.library.custom_op("vllm::fused_rms_norm_quant_static", mutates_args=['result'])
 def fused_rms_norm_quant_static(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-                                azp: torch.Tensor, epsilon: float) -> None:
+                                epsilon: float) -> None:
     print("vllm::fused_rms_norm_quant_static")
     result_rms = torch.empty_like(input)
     torch.ops._C.rms_norm(result_rms, input, weight, epsilon)
-    torch.ops._C.static_scaled_int8_quant(result, result_rms, scale, azp)
+    torch.ops._C.static_scaled_fp8_quant(result, result_rms, scale)
 
 
 @torch.library.register_fake("vllm::fused_rms_norm_quant_static")
-def _(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, azp: torch.Tensor,
-      epsilon: float) -> None:
+def _(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, epsilon: float) -> None:
     return
 
 
@@ -70,8 +67,7 @@ def rms_pattern_static(result: torch.Tensor, result_rms: torch.Tensor, input: to
                        scale: torch.Tensor):
     at1 = auto_functionalized(torch.ops._C.rms_norm.default, result=result_rms, input=input, weight=weight,
                               epsilon=1e-5)
-    at2 = auto_functionalized(torch.ops._C.static_scaled_int8_quant.default, result=result, input=at1[1], scale=scale,
-                              azp=None)
+    at2 = auto_functionalized(torch.ops._C.static_scaled_fp8_quant.default, result=result, input=at1[1], scale=scale)
 
     # result
     return at2[1]
@@ -80,8 +76,7 @@ def rms_pattern_static(result: torch.Tensor, result_rms: torch.Tensor, input: to
 def rms_replacement_static(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
                            scale: torch.Tensor):
     at = auto_functionalized(torch.ops.vllm.fused_rms_norm_quant_static.default, result=result, input=input,
-                             weight=weight,
-                             epsilon=1e-5, scale=scale, azp=None)
+                             weight=weight, epsilon=1e-5, scale=scale)
 
     # result
     return at[1]
@@ -89,16 +84,15 @@ def rms_replacement_static(result: torch.Tensor, result_rms: torch.Tensor, input
 
 @torch.library.custom_op("vllm::fused_rms_norm_residual_quant_static", mutates_args=['result', 'input', 'residual'])
 def fused_rms_norm_residual_quant_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
-                                         weight: torch.Tensor, scale: torch.Tensor, azp: torch.Tensor,
-                                         epsilon: float) -> None:
+                                         weight: torch.Tensor, scale: torch.Tensor, epsilon: float) -> None:
     # print("vllm::fused_rms_norm_residual_quant_static")
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
-    torch.ops._C.static_scaled_int8_quant(result, input, scale, azp)
+    torch.ops._C.static_scaled_fp8_quant(result, input, scale)
 
 
 @torch.library.register_fake("vllm::fused_rms_norm_residual_quant_static")
 def _(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-      azp: torch.Tensor, epsilon: float) -> None:
+      epsilon: float) -> None:
     return
 
 
@@ -106,8 +100,7 @@ def rms_pattern_residual_static(result: torch.Tensor, input: torch.Tensor, resid
                                 scale: torch.Tensor):
     at = auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=input, residual=residual, weight=weight,
                              epsilon=1e-5)
-    at1 = auto_functionalized(torch.ops._C.static_scaled_int8_quant.default, result=result, input=at[1], scale=scale,
-                              azp=None)
+    at1 = auto_functionalized(torch.ops._C.static_scaled_fp8_quant.default, result=result, input=at[1], scale=scale)
 
     # result, residual
     return at1[1], at[2]
@@ -116,7 +109,7 @@ def rms_pattern_residual_static(result: torch.Tensor, input: torch.Tensor, resid
 def rms_replacement_residual_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
                                     weight: torch.Tensor, scale: torch.Tensor):
     at = auto_functionalized(torch.ops.vllm.fused_rms_norm_residual_quant_static.default, result=result, input=input,
-                             residual=residual, weight=weight, epsilon=1e-5, scale=scale, azp=None)
+                             residual=residual, weight=weight, epsilon=1e-5, scale=scale)
     # result, residual
     return at[1], at[3]
 
@@ -128,14 +121,14 @@ def empty_bf16(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
 
 
-def empty_int8(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.int8, device="cuda")
+def empty_fp8(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.float8_e4m3fn, device="cuda")
 
 
 def get_patterns():
     my_patterns = PatternMatcherPass(pass_name="fusion_pass")
 
-    inputs = [empty_int8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda")]
+    inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda")]
     register_replacement(rms_pattern, rms_replacement, inputs, fwd_only, my_patterns)
     register_replacement(rms_pattern_static, rms_replacement_static, inputs, fwd_only, my_patterns)
 
@@ -146,7 +139,7 @@ def get_patterns():
         return False
 
     # with residual
-    inputs = [empty_int8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda")]
+    inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda")]
     register_replacement(rms_pattern_residual_static, rms_replacement_residual_static, inputs, fwd_only, my_patterns,
                          extra_check=record_match_fn)
 
@@ -162,7 +155,6 @@ def process_matches(matches, graph: torch.fx.Graph):
         last_node_in_match = max(match.nodes, key=lambda x: nodes.index(x))
         with graph.inserting_after(last_node_in_match):
             kwargs = match.kwargs
-            kwargs["azp"] = None
             kwargs["epsilon"] = 1e-5
 
             fused_node = graph.call_function(auto_functionalized,
@@ -187,7 +179,7 @@ def process_matches(matches, graph: torch.fx.Graph):
             return None
 
         rms_node = find_auto_fn(torch.ops._C.fused_add_rms_norm.default)
-        quant_node = find_auto_fn(torch.ops._C.static_scaled_int8_quant.default)
+        quant_node = find_auto_fn(torch.ops._C.static_scaled_fp8_quant.default)
         assert rms_node is not None
         assert quant_node is not None
 
