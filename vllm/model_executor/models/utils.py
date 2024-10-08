@@ -72,68 +72,12 @@ class AutoWeightsLoader:
         self,
         module: nn.Module,
         *,
-        allow_missing_prefixes: Optional[List[str]] = None,
+        allow_unexpected_prefixes: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
 
         self.module = module
-        self.allow_missing_prefixes = allow_missing_prefixes or []
-
-    def _allow_missing(self, prefix: str, rest: str) -> bool:
-        weight_name = prefix if rest == "" else ".".join((prefix, rest))
-
-        return any(
-            weight_name.startswith(p) for p in self.allow_missing_prefixes)
-
-    def _load_param(
-        self,
-        prefix: str,
-        param: nn.Parameter,
-        weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> None:
-        for weight_name, weight_data in weights:
-            if weight_name != "":
-                if not self._allow_missing(prefix, weight_name):
-                    raise ValueError(
-                        f"Attempted to load nested weight ({weight_name}) "
-                        f"into a single parameter ({prefix})")
-
-                continue
-
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, weight_data)
-
-    def _load_module(
-        self,
-        prefix: str,
-        module: nn.Module,
-        weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> None:
-        # TODO: Recursive search for load_weights
-        module_load_weights = getattr(module, "load_weights", None)
-        if callable(module_load_weights):
-            module_load_weights(weights)
-
-        params_dict = dict(module.named_parameters())
-
-        for weight_name, weight_data in weights:
-            if is_pp_missing_parameter(weight_name, module):
-                continue
-
-            if weight_name not in params_dict:
-                if not self._allow_missing(prefix, weight_name):
-                    raise ValueError(
-                        f"Attempted to load unexpected weight ({weight_name}) "
-                        f"into module ({prefix}). "
-                        f"Available weights: {list(params_dict.keys())}")
-
-                continue
-
-            param = params_dict[weight_name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, weight_data)
+        self.allow_unexpected_prefixes = allow_unexpected_prefixes or []
 
     def _groupby_prefix(
         self,
@@ -152,27 +96,81 @@ class AutoWeightsLoader:
                  for parts, weights_data in group),
             )
 
+    def _get_qualname(self, prefix: str, rest: str) -> str:
+        if prefix == "":
+            return rest
+        if rest == "":
+            return prefix
+
+        return ".".join((prefix, rest))
+
+    def _load_param(
+        self,
+        base_prefix: str,
+        param: nn.Parameter,
+        weights: Iterable[Tuple[str, torch.Tensor]],
+    ) -> None:
+        for weight_name, weight_data in weights:
+            weight_qualname = self._get_qualname(base_prefix, weight_name)
+
+            if weight_name != "":
+                allow_unexpected = any(
+                    weight_qualname.startswith(p)
+                    for p in self.allow_unexpected_prefixes)
+                if not allow_unexpected:
+                    raise ValueError(
+                        f"Attempted to load nested weight ({weight_qualname}) "
+                        f"into a single parameter ({base_prefix})")
+
+                continue
+
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, weight_data)
+
+    def _load_module(
+        self,
+        base_prefix: str,
+        module: nn.Module,
+        weights: Iterable[Tuple[str, torch.Tensor]],
+    ) -> None:
+        if isinstance(module, PPMissingLayer):
+            return
+
+        # Avoid infinite recursion since this function is typically
+        # called inside load_weights itself
+        if module != self.module:
+            module_load_weights = getattr(module, "load_weights", None)
+            if callable(module_load_weights):
+                module_load_weights(weights)
+                return
+
+        child_modules = dict(module.named_children())
+        child_params = dict(module.named_parameters(recurse=False))
+
+        for child_prefix, child_weights in self._groupby_prefix(weights):
+            prefix = self._get_qualname(base_prefix, child_prefix)
+            if child_prefix in child_modules:
+                self._load_module(prefix, child_modules[child_prefix],
+                                  child_weights)
+            elif child_prefix in child_params:
+                self._load_param(prefix, child_params[child_prefix],
+                                 child_weights)
+            else:
+                msg = f"There is no child module or parameter named {prefix}"
+                raise ValueError(msg)
+
     def load_weights(
         self,
         weights: Iterable[Tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
     ) -> None:
-        child_modules = dict(self.module.named_children())
-        child_params = dict(self.module.named_parameters(recurse=False))
-
         if mapper is not None:
             weights = ((out_name, data) for name, data in weights
                        if (out_name := mapper.apply(name)) is not None)
 
-        for prefix, child_weights in self._groupby_prefix(weights):
-            if prefix in child_modules:
-                self._load_module(prefix, child_modules[prefix], child_weights)
-            elif prefix in child_params:
-                self._load_param(prefix, child_params[prefix], child_weights)
-            else:
-                msg = f"There is no child module or parameter named {prefix}"
-                raise ValueError(msg)
+        self._load_module("", self.module, weights)
 
 
 def init_vllm_registered_model(
