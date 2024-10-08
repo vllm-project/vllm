@@ -12,6 +12,7 @@ class PoolingType(IntEnum):
     """Enumeration for different types of pooling methods."""
     LAST = 0
     ALL = 1
+    MEAN = 2
 
 
 class Pooler(nn.Module):
@@ -50,6 +51,17 @@ class Pooler(nn.Module):
             for prompt_len in prompt_lens:
                 pooled_data.append(hidden_states[offset:offset + prompt_len])
                 offset += prompt_len
+        elif self.pooling_type == PoolingType.MEAN:
+            # Calculate mean pooling
+            cumsum = torch.cumsum(hidden_states, dim=0)
+            start_indices = torch.cat([
+                torch.tensor([0], device=hidden_states.device),
+                torch.cumsum(prompt_lens[:-1], dim=0)
+            ])
+            end_indices = torch.cumsum(prompt_lens, dim=0)
+            pooled_data = (
+                cumsum[end_indices - 1] - cumsum[start_indices] +
+                hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
         else:
             raise ValueError(f"Invalid pooling type: {self.pooling_type}")
 
