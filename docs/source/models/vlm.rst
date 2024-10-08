@@ -138,6 +138,7 @@ A code example can be found in `examples/offline_inference_vision_language_multi
 Multi-image input can be extended to perform video captioning. We show this with `Qwen2-VL <https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct>`_ as it supports videos: 
 
 .. code-block:: python
+
     # Specify the maximum number of frames per video to be 4. This can be changed. 
     llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
 
