@@ -15,7 +15,8 @@ from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
 from vllm.sampling_params import SamplingType
-from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
+                           CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
@@ -433,12 +434,9 @@ def _apply_top_k_top_p(
     logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
     # Re-sort the probabilities.
-    src = torch.arange(logits_idx.shape[-1],
-                       device=logits_idx.device).expand_as(logits_idx)
-    logits_idx_inv = torch.empty_like(logits_idx).scatter_(dim=-1,
-                                                           index=logits_idx,
-                                                           src=src)
-    logits = torch.gather(logits_sort, dim=-1, index=logits_idx_inv)
+    logits = torch.empty_like(logits_sort).scatter_(dim=-1,
+                                                    index=logits_idx,
+                                                    src=logits_sort)
     return logits
 
 
@@ -762,10 +760,10 @@ def _sample_with_torch(
 
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
-        sampled_token_ids_tensor = torch.empty(logprobs.shape[0],
-                                               1,
-                                               dtype=torch.long,
-                                               device=logprobs.device)
+        sampled_token_ids_tensor = torch.full((logprobs.shape[0], 1),
+                                              VLLM_INVALID_TOKEN_ID,
+                                              dtype=torch.long,
+                                              device=logprobs.device)
     else:
         sampled_token_ids_tensor = None
 
@@ -914,7 +912,7 @@ def get_logprobs(
     sampling_metadata: SamplingMetadata,
     sample_results: SampleResultType,
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
-    """Return sample lobprobs and prompt logprobs.
+    """Return sample logprobs and prompt logprobs.
 
     The logic consists of 3 parts.
     - Select indices to compute logprob from, ranks of token ids, and
@@ -949,8 +947,6 @@ def get_logprobs(
     # largest num logprobs in this API. If every logprobs is None, it will be
     # set to -1.
     largest_num_logprobs = -1
-    # If beam search is enabled.
-    use_beam_search = False
 
     # Select indices to compute logprob from, ranks of token ids, and the top
     # k token ids from logprobs.
@@ -983,8 +979,6 @@ def get_logprobs(
                 largest_num_logprobs = max(largest_num_logprobs,
                                            sampling_params.logprobs)
 
-            use_beam_search = use_beam_search or sampling_params.use_beam_search
-
         assert len(next_token_ids) == len(query_indices)
 
     if len(query_indices) == 0:
@@ -997,7 +991,7 @@ def get_logprobs(
 
     # If largest_num_logprobs == -1, i.e. no logprobs are requested, we can
     # skip the whole logprob calculation.
-    if largest_num_logprobs >= 0 or use_beam_search:
+    if largest_num_logprobs >= 0:
         query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
         next_token_ids_gpu = torch.tensor(next_token_ids,
                                           device=logprobs.device)
@@ -1123,13 +1117,12 @@ def _get_sampled_logprob_if_needed(
     """Compute the sample logprob if needed."""
     seq_ids = seq_group.seq_ids
     num_logprobs = seq_group.sampling_params.logprobs
-    use_beam_search = seq_group.sampling_params.use_beam_search
     sampled_logprobs: SampleLogprobs = []
     next_token_ids, parent_seq_ids = sample_result
 
     if seq_group.do_sample:
         assert len(next_token_ids) > 0
-        if num_logprobs is None and not use_beam_search:
+        if num_logprobs is None:
             for next_token_id in next_token_ids:
                 # Use a dummy logprob
                 sampled_logprobs.append({next_token_id: Logprob(inf)})

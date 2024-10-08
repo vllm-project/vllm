@@ -22,6 +22,8 @@
 #include "../gptq_marlin/marlin.cuh"
 #include "../gptq_marlin/marlin_dtypes.cuh"
 
+#include "core/registration.h"
+
 using namespace marlin;
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
@@ -1303,3 +1305,7 @@ torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
 }
 
 #endif
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("fp8_marlin_gemm", &fp8_marlin_gemm);
+}

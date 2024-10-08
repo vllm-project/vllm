@@ -28,6 +28,10 @@ def _can_p2p(rank: int, world_size: int) -> bool:
     for i in range(world_size):
         if i == rank:
             continue
+        if envs.VLLM_SKIP_P2P_CHECK:
+            logger.info(
+                "Skipping P2P check and trusting the driver's P2P report.")
+            return torch.cuda.can_device_access_peer(rank, i)
         if not gpu_p2p_access_check(rank, i):
             return False
     return True
@@ -261,24 +265,21 @@ class CustomAllreduce:
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         # when custom allreduce is disabled, this will be None
-        if self.disabled:
+        if self.disabled or not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                if self.should_custom_ar(input):
-                    return self.all_reduce_reg(input)
+                return self.all_reduce_reg(input)
             else:
-                if self.should_custom_ar(input):
-                    # if warm up, mimic the allocation pattern
-                    # since custom allreduce is out-of-place
-                    return torch.empty_like(input)
+                # if warm up, mimic the allocation pattern
+                # since custom allreduce is out-of-place
+                return torch.empty_like(input)
         else:
             # note: outside of cuda graph context,
             # custom allreduce incurs a cost of cudaMemcpy, which should
             # be small(<=1% of overall latency) compared to the performance
             # gains of using custom kernels
-            if self.should_custom_ar(input):
-                return self.all_reduce_unreg(input)
+            return self.all_reduce_unreg(input)
 
         return None
 

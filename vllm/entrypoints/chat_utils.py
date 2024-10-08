@@ -157,8 +157,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat"):
+            if model_type in ("chameleon", "internvl_chat", "NVLM_D"):
                 return "<image>"
+            if model_type == "mllama":
+                return "<|image|>"
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|image_pad|><|vision_end|>"
 
@@ -301,6 +303,28 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder(placeholder)
 
 
+def validate_chat_template(chat_template: Optional[Union[Path, str]]):
+    """Raises if the provided chat template appears invalid."""
+    if chat_template is None:
+        return
+
+    elif isinstance(chat_template, Path) and not chat_template.exists():
+        raise FileNotFoundError(
+            "the supplied chat template path doesn't exist")
+
+    elif isinstance(chat_template, str):
+        JINJA_CHARS = "{}\n"
+        if not any(c in chat_template
+                   for c in JINJA_CHARS) and not Path(chat_template).exists():
+            raise ValueError(
+                f"The supplied chat template string ({chat_template}) "
+                f"appears path-like, but doesn't exist!")
+
+    else:
+        raise TypeError(
+            f"{type(chat_template)} is not a valid chat template type")
+
+
 def load_chat_template(
         chat_template: Optional[Union[Path, str]]) -> Optional[str]:
     if chat_template is None:
@@ -358,6 +382,7 @@ _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
+MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
 
 def _parse_chat_message_content_parts(
@@ -368,7 +393,11 @@ def _parse_chat_message_content_parts(
     texts: List[str] = []
 
     mm_parser = mm_tracker.create_parser()
+    keep_multimodal_content = \
+        mm_tracker._model_config.hf_config.model_type in \
+            MODEL_KEEP_MULTI_MODAL_CONTENT
 
+    has_image = False
     for part in parts:
         part_type = part["type"]
         if part_type == "text":
@@ -383,6 +412,7 @@ def _parse_chat_message_content_parts(
                     "will be ignored.")
 
             mm_parser.parse_image(image_url["url"])
+            has_image = True
         elif part_type == "audio_url":
             audio_url = _AudioParser(part)["audio_url"]
 
@@ -394,12 +424,20 @@ def _parse_chat_message_content_parts(
             raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
-    mm_placeholder_counts = mm_parser.mm_placeholder_counts()
-    if mm_placeholder_counts:
-        text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_counts,
-                                                       text_prompt)
+    if keep_multimodal_content:
+        text_prompt = "\n".join(texts)
+        role_content = [{'type': 'text', 'text': text_prompt}]
 
-    return [ConversationMessage(role=role, content=text_prompt)]
+        if has_image:
+            role_content = [{'type': 'image'}] + role_content
+        return [ConversationMessage(role=role,
+                                    content=role_content)]  # type: ignore
+    else:
+        mm_placeholder_counts = mm_parser.mm_placeholder_counts()
+        if mm_placeholder_counts:
+            text_prompt = _get_full_multimodal_text_prompt(
+                mm_placeholder_counts, text_prompt)
+        return [ConversationMessage(role=role, content=text_prompt)]
 
 
 # No need to validate using Pydantic again
@@ -526,6 +564,14 @@ def apply_mistral_chat_template(
     if chat_template is not None:
         logger.warning(
             "'chat_template' cannot be overridden for mistral tokenizer.")
+    if "add_generation_prompt" in kwargs:
+        logger.warning(
+            "'add_generation_prompt' is not supported for mistral tokenizer, "
+            "so it will be ignored.")
+    if "continue_final_message" in kwargs:
+        logger.warning(
+            "'continue_final_message' is not supported for mistral tokenizer, "
+            "so it will be ignored.")
 
     return tokenizer.apply_chat_template(
         messages=messages,

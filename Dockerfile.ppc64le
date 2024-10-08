@@ -16,9 +16,15 @@ COPY ./ /workspace/vllm
 WORKDIR /workspace/vllm
 
 # These packages will be in rocketce eventually
-RUN pip install -v cmake xformers torch==2.3.1 uvloop==0.20.0 -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
+RUN --mount=type=cache,target=/root/.cache/pip  \
+    pip install -v --prefer-binary --extra-index-url https://repo.fury.io/mgiessing \
+        cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
+        torch==2.3.1 \
+        -r requirements-cpu.txt \
+        xformers uvloop==0.20.0
 
-RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
+RUN --mount=type=bind,source=.git,target=.git \
+    VLLM_TARGET_DEVICE=cpu python3 setup.py install
 
 WORKDIR /workspace/
 

@@ -3,15 +3,17 @@
 Installation with ROCm
 ======================
 
-vLLM supports AMD GPUs with ROCm 6.1.
+vLLM supports AMD GPUs with ROCm 6.2.
 
 Requirements
 ------------
 
 * OS: Linux
-* Python: 3.8 -- 3.11
+* Python: 3.9 -- 3.12
 * GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
-* ROCm 6.1
+* ROCm 6.2
+
+Note: PyTorch 2.5+/ROCm6.2 dropped the support for python 3.8.
 
 Installation options:
 
@@ -26,8 +28,18 @@ Option 1: Build from source with docker (recommended)
 You can build and install vLLM from source.
 
 First, build a docker image from `Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ and launch a docker container from the image.
+It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
-`Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ uses ROCm 6.1 by default, but also supports ROCm 5.7 and 6.0 in older vLLM branches.
+.. code-block:: console
+    
+    {
+        "features": {
+            "buildkit": true
+        }
+    }
+
+
+`Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ uses ROCm 6.2 by default, but also supports ROCm 5.7, 6.0 and 6.1 in older vLLM branches.
 It provides flexibility to customize the build of docker image using the following arguments:
 
 * `BASE_IMAGE`: specifies the base image used when running ``docker build``, specifically the PyTorch on ROCm base image.
@@ -39,13 +51,13 @@ It provides flexibility to customize the build of docker image using the followi
 Their values can be passed in when running ``docker build`` with ``--build-arg`` options.
 
 
-To build vllm on ROCm 6.1 for MI200 and MI300 series, you can use the default:
+To build vllm on ROCm 6.2 for MI200 and MI300 series, you can use the default:
 
 .. code-block:: console
 
     $ DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
 
-To build vllm on ROCm 6.1 for Radeon RX7900 series (gfx1100), you should specify ``BUILD_FA`` as below:
+To build vllm on ROCm 6.2 for Radeon RX7900 series (gfx1100), you should specify ``BUILD_FA`` as below:
 
 .. code-block:: console
 
@@ -79,37 +91,55 @@ Option 2: Build from source
 
 - `ROCm <https://rocm.docs.amd.com/en/latest/deploy/linux/index.html>`_
 - `PyTorch <https://pytorch.org/>`_
-- `hipBLAS <https://rocm.docs.amd.com/projects/hipBLAS/en/latest/install.html>`_
 
-For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging`, `rocm/pytorch-nightly`.
+For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0`, `rocm/pytorch-nightly`.
 
-Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guild in PyTorch `Getting Started <https://pytorch.org/get-started/locally/>`_
+Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch `Getting Started <https://pytorch.org/get-started/locally/>`_
 
 
 1. Install `Triton flash attention for ROCm <https://github.com/ROCm/triton>`_
 
 Install ROCm's Triton flash attention (the default triton-mlir branch) following the instructions from `ROCm/triton <https://github.com/ROCm/triton/blob/triton-mlir/README.md>`_
 
+    .. code-block:: console
+
+        $ python3 -m pip install ninja cmake wheel pybind11
+        $ pip uninstall -y triton 
+        $ git clone https://github.com/OpenAI/triton.git
+        $ cd triton
+        $ git checkout e192dba
+        $ cd python
+        $ pip3 install .
+        $ cd ../..
+
+.. note::
+    - If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
+
+
 2. Optionally, if you choose to use CK flash attention, you can install `flash attention for ROCm <https://github.com/ROCm/flash-attention/tree/ck_tile>`_
+
 
 Install ROCm's flash attention (v2.5.9.post1) following the instructions from `ROCm/flash-attention <https://github.com/ROCm/flash-attention/tree/ck_tile#amd-gpurocm-support>`_
 Alternatively, wheels intended for vLLM use can be accessed under the releases.
+
+For example, for ROCm 6.2, suppose your gfx arch is `gfx90a`.
+Note to get your gfx architecture, run `rocminfo |grep gfx`.
+
+    .. code-block:: console
+
+        $ git clone https://github.com/ROCm/flash-attention.git
+        $ cd flash-attention
+        $ git checkout 3cea2fb
+        $ git submodule update --init
+        $ GPU_ARCHS="gfx90a" python3 setup.py install
+        $ cd ..
 
 .. note::
     - You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
 
 3. Build vLLM.
 
-.. code-block:: console
-
-    $ cd vllm
-    $ pip install -U -r requirements-rocm.txt
-    $ python setup.py develop # This may take 5-10 minutes. Currently, `pip install .`` does not work for ROCm installation
-
-
-.. tip::
-
-    For example, vLLM v0.5.3 on ROCM 6.1 can be built with the following steps:
+    For example, vLLM on ROCM 6.2 can be built with the following steps:
 
     .. code-block:: console
 
@@ -117,7 +147,7 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
         $ # Install PyTorch
         $ pip uninstall torch -y
-        $ pip install --no-cache-dir --pre torch==2.5.0.dev20240726 --index-url https://download.pytorch.org/whl/nightly/rocm6.1
+        $ pip install --no-cache-dir --pre torch==2.6.0.dev20240918 --index-url https://download.pytorch.org/whl/nightly/rocm6.2
 
         $ # Build & install AMD SMI
         $ pip install /opt/rocm/share/amd_smi
@@ -127,13 +157,12 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
         $ pip install "numpy<2"
         $ pip install -r requirements-rocm.txt
 
-        $ # Apply the patch to ROCM 6.1 (requires root permission)
-        $ wget -N https://github.com/ROCm/vllm/raw/fa78403/rocm_patch/libamdhip64.so.6 -P /opt/rocm/lib
-        $ rm -f "$(python3 -c 'import torch; print(torch.__path__[0])')"/lib/libamdhip64.so*
-
         $ # Build vLLM for MI210/MI250/MI300.
         $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
         $ python3 setup.py develop
+
+
+    This may take 5-10 minutes. Currently, :code:`pip install .` does not work for ROCm installation.
 
 
 .. tip::

@@ -11,7 +11,7 @@ Below are the steps to utilize BitsAndBytes with vLLM.
 
 .. code-block:: console
 
-    $ pip install bitsandbytes>=0.42.0
+    $ pip install bitsandbytes>=0.44.0
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
 
