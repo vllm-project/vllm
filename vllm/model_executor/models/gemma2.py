@@ -438,7 +438,8 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.model.load_weights(weights_group["model"])
 
-        if not self.config.tie_word_embeddings:
+        # For EAGLE model, lm_head has already been popped from weights
+        if not self.config.tie_word_embeddings and "lm_head" in weights_group:
             # NOTE: For now self.lm_head is not defined because
             # tie_word_embeddings is assumed to the False
             weights_group["lm_head"].load_into_module(self.lm_head)

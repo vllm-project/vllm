@@ -557,7 +557,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.model.load_weights(weights_group["model"])
 
-        if not self.config.tie_word_embeddings:
+        # For EAGLE model, lm_head has already been popped from weights
+        if not self.config.tie_word_embeddings and "lm_head" in weights_group:
             weights_group["lm_head"].load_into_module(self.lm_head)
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
