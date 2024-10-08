@@ -131,6 +131,8 @@ class Detokenizer(multiprocessing.Process):
         del self.requests[request_id]
 
     def detokenize(self, request_id: str, new_token_ids: List[int]) -> str:
+        # TODO(woosuk): This method becomes very inefficient when the number of
+        # new_token_ids is more than 1. We need to optimize this.
         req_state = self.requests[request_id]
         decoded_text = ""
         for new_token_id in new_token_ids:
