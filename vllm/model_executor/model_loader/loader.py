@@ -746,6 +746,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         ".k_proj.",
         ".v_proj.",
         ".o_proj.",
+        '.fc1.',
+        '.fc2.',
+        '.dense.',
+        '.query_key_value.',
+        '.qkv_proj.',
+        '.dense_h_to_4h.',
+        '.dense_4h_to_h.',
+        '.out_proj.',
     ]
 
     def __init__(self, load_config: LoadConfig):
@@ -947,9 +955,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # pre quantized weights would have a quant_state
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
-            # Filter out all weights whose suffix is not ".weight"
+
             if not weight_name.endswith((".weight", ".bias")):
                 continue
+
             if (f"{weight_name}.quant_state.bitsandbytes__nf4" \
                     in temp_state_dict) or \
             (f"{weight_name}.quant_state.bitsandbytes__fp4" \

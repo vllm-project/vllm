@@ -375,6 +375,8 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     # Gemma does not apply LoRA to the embedding layer.
     embedding_modules = {}
     embedding_padding_modules = []
+
+    # BitandBytes specific attributes
     default_bitsandbytes_target_modules = [
         ".gate_proj.",
         ".down_proj.",
@@ -384,10 +386,8 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ".v_proj.",
         ".o_proj.",
     ]
-    # BitandBytes specific attributes
     # in TP, these weights are partitioned along the column dimension (dim=-1)
     column_parallel_weights_modules = [".down_proj.", ".o_proj."]
-
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
