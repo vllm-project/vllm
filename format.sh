@@ -94,31 +94,36 @@ else
 fi
 echo 'vLLM yapf: Done'
 
+run_mypy() {
+    echo "Running mypy on $1"
+    mypy --follow-imports skip "$@"
+}
+
 # Run mypy
 echo 'vLLM mypy:'
-mypy --follow-imports skip  # Note that this is less strict than CI
-mypy tests --follow-imports skip
-#mypy vllm/assets --follow-imports skip
-mypy vllm/attention --follow-imports skip
-#mypy vllm/compilation --folow-imports skip
-#mypy vllm/core --folow-imports skip
-mypy vllm/distributed --follow-imports skip
-mypy vllm/engine  --follow-imports skip
-#mypy vllm/entrypoints  --follow-imports skip
-mypy vllm/executor --follow-imports skip
-#mypy vllm/inputs  --follow-imports skip
-#mypy vllm/logging  --follow-imports skip
-mypy vllm/lora --follow-imports skip
-mypy vllm/model_executor  --follow-imports skip
-#mypy vllm/multimodal  --follow-imports skip
-#mypy vllm/platforms  --follow-imports skip
-#mypy vllm/plugins  --follow-imports skip
-mypy vllm/prompt_adapter --follow-imports skip
-mypy vllm/spec_decode --follow-imports skip
-#mypy vllm/transformers_utils  --follow-imports skip
-mypy vllm/usage  --follow-imports skip
-#mypy vllm/vllm_flash_attn  --follow-imports skip
-mypy vllm/worker --follow-imports skip
+run_mypy # Note that this is less strict than CI
+run_mypy tests
+#run_mypy vllm/assets
+run_mypy vllm/attention
+#run_mypy vllm/compilation
+#run_mypy vllm/core
+run_mypy vllm/distributed
+run_mypy vllm/engine
+#run_mypy vllm/entrypoints
+run_mypy vllm/executor
+#run_mypy vllm/inputs
+#run_mypy vllm/logging
+run_mypy vllm/lora
+run_mypy vllm/model_executor
+#run_mypy vllm/multimodal
+#run_mypy vllm/platforms
+#run_mypy vllm/plugins
+run_mypy vllm/prompt_adapter
+run_mypy vllm/spec_decode
+#run_mypy vllm/transformers_utils
+run_mypy vllm/usage
+#run_mypy vllm/vllm_flash_attn
+run_mypy vllm/worker
 echo 'vLLM mypy: Done'
 
 
