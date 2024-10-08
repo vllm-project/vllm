@@ -6,7 +6,7 @@ import pytest
 
 from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
                     MESSAGES_WITH_PARALLEL_TOOL_RESPONSE, SEARCH_TOOL,
-                    WEATHER_TOOL)
+                    WEATHER_TOOL, ServerConfig)
 
 
 # test: getting the model to generate parallel tool calls (streaming/not)
@@ -14,7 +14,13 @@ from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
 # may be added in the future. e.g. llama 3.1 models are not designed to support
 # parallel tool calls.
 @pytest.mark.asyncio
-async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
+async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
+                                   server_config: ServerConfig):
+
+    if not server_config.get("supports_parallel", True):
+        pytest.skip("The {} model doesn't support parallel tool calls".format(
+            server_config["model"]))
+
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
@@ -39,7 +45,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
         assert tool_call.type == "function"
         assert tool_call.function is not None
         assert isinstance(tool_call.id, str)
-        assert len(tool_call.id) > 16
+        assert len(tool_call.id) >= 9
 
         # make sure the weather tool was called correctly
         assert tool_call.function.name == WEATHER_TOOL["function"]["name"]
@@ -102,7 +108,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
             if tool_call.id:
                 tool_call_id_count += 1
                 assert (isinstance(tool_call.id, str)
-                        and (len(tool_call.id) > 16))
+                        and (len(tool_call.id) >= 9))
 
             # if parts of the function start being streamed
             if tool_call.function:
@@ -136,7 +142,13 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
 # test: providing parallel tool calls back to the model to get a response
 # (streaming/not)
 @pytest.mark.asyncio
-async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI):
+async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
+                                                server_config: ServerConfig):
+
+    if not server_config.get("supports_parallel", True):
+        pytest.skip("The {} model doesn't support parallel tool calls".format(
+            server_config["model"]))
+
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(

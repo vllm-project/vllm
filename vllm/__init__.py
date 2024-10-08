@@ -6,7 +6,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.fast_sync_llm import FastSyncLLM
 from vllm.entrypoints.llm import LLM
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import PromptInputs, TextPrompt, TokensPrompt
+from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.model_executor.models import ModelRegistry
 from vllm.outputs import (CompletionOutput, EmbeddingOutput,
                           EmbeddingRequestOutput, RequestOutput)
@@ -21,7 +21,7 @@ __all__ = [
     "LLM",
     "FastSyncLLM",
     "ModelRegistry",
-    "PromptInputs",
+    "PromptType",
     "TextPrompt",
     "TokensPrompt",
     "SamplingParams",

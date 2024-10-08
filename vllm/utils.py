@@ -119,6 +119,9 @@ STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
+GB_bytes = 1_000_000_000
+"""The number of bytes in one gigabyte (GB)."""
+
 GiB_bytes = 1 << 30
 """The number of bytes in one gibibyte (GiB)."""
 
@@ -609,6 +612,15 @@ async def merge_async_iterators(
                 await it.aclose()
 
 
+async def collect_from_async_generator(
+        iterator: AsyncGenerator[T, None]) -> List[T]:
+    """Collect all items from an async generator into a list."""
+    items = []
+    async for item in iterator:
+        items.append(item)
+    return items
+
+
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
     if host_ip:
@@ -852,7 +864,8 @@ def create_kv_caches_with_random(
 
 @lru_cache
 def print_warning_once(msg: str) -> None:
-    logger.warning(msg)
+    # Set the stacklevel to 2 to print the caller's line info
+    logger.warning(msg, stacklevel=2)
 
 
 @lru_cache(maxsize=None)
@@ -1198,6 +1211,13 @@ def cuda_device_count_stateless() -> int:
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
+def cuda_is_initialized() -> bool:
+    """Check if CUDA is initialized."""
+    if not torch.cuda._is_compiled():
+        return False
+    return torch.cuda.is_initialized()
+
+
 def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     """Make an instance method that weakly references
     its associated instance and no-ops once that
@@ -1298,11 +1318,21 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = FlexibleArgumentParser._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
+        # followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+        if args[0] == "serve":
+            if index == 1:
+                raise ValueError(
+                    "No model_tag specified! Please check your command-line"
+                    " arguments.")
+            args = [args[0]] + [
+                args[1]
+            ] + config_args + args[2:index] + args[index + 2:]
+        else:
+            args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
         return args
 
@@ -1353,6 +1383,15 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+def supports_kw(callable: Callable[..., object], kw_name: str) -> bool:
+    params = inspect.signature(callable).parameters
+    if kw_name in params:
+        return True
+
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD
+               for param in params.values())
 
 
 def get_allowed_kwarg_only_overrides(
@@ -1439,3 +1478,22 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
+
+def get_beam_search_score(
+    tokens: List[int],
+    cumulative_logprob: float,
+    eos_token_id: int,
+    length_penalty: float = 1.0,
+) -> float:
+    """Calculate the beam search score with length penalty.
+
+    Adapted from
+
+    https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
+    """
+    seq_len = len(tokens)
+    if tokens[-1] == eos_token_id:
+        seq_len -= 1
+
+    return cumulative_logprob / (seq_len**length_penalty)

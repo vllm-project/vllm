@@ -1,14 +1,15 @@
 """Sampling parameters for text generation."""
 import copy
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import msgspec
 import torch
+from pydantic import BaseModel
 from typing_extensions import Annotated
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -21,8 +22,7 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
-    BEAM = 3
-    FORCED = 4
+    FORCED = 3
 
 
 LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
@@ -33,6 +33,54 @@ of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
 first argument, and returns a modified tensor of logits
 to sample from."""
+
+
+# maybe make msgspec?
+@dataclass
+class GuidedDecodingParams:
+    """One of these fields will be used to build a logit processor."""
+    json: Optional[Union[str, Dict]] = None
+    regex: Optional[str] = None
+    choice: Optional[List[str]] = None
+    grammar: Optional[str] = None
+    json_object: Optional[bool] = None
+    """These are other options that can be set"""
+    backend: Optional[str] = None
+    whitespace_pattern: Optional[str] = None
+
+    @staticmethod
+    def from_optional(
+        json: Optional[Union[Dict, BaseModel, str]],
+        regex: Optional[str] = None,
+        choice: Optional[List[str]] = None,
+        grammar: Optional[str] = None,
+        json_object: Optional[bool] = None,
+        backend: Optional[str] = None,
+        whitespace_pattern: Optional[str] = None,
+    ) -> "GuidedDecodingParams":
+        # Extract json schemas from pydantic models
+        if isinstance(json, (BaseModel, type(BaseModel))):
+            json = json.model_json_schema()
+        return GuidedDecodingParams(
+            json=json,
+            regex=regex,
+            choice=choice,
+            grammar=grammar,
+            json_object=json_object,
+            backend=backend,
+            whitespace_pattern=whitespace_pattern,
+        )
+
+    def __post_init__(self):
+        """Validate that some fields are mutually exclusive."""
+        guide_count = sum([
+            self.json is not None, self.regex is not None, self.choice
+            is not None, self.grammar is not None, self.json_object is not None
+        ])
+        if guide_count > 1:
+            raise ValueError(
+                "You can only use one kind of guided decoding but multiple are "
+                f"specified: {self.__dict__}")
 
 
 class RequestOutputKind(Enum):
@@ -87,16 +135,6 @@ class SamplingParams(
         ppl_measurement: Measure perplexity towards the deterministic string 
             instead of probabilistic regressing.
         seed: Random seed to use for the generation.
-        use_beam_search: Whether to use beam search instead of sampling.
-        length_penalty: Float that penalizes sequences based on their length.
-            Used in beam search.
-        early_stopping: Controls the stopping condition for beam search. It
-            accepts the following values: `True`, where the generation stops as
-            soon as there are `best_of` complete candidates; `False`, where an
-            heuristic is applied and the generation stops when is it very
-            unlikely to find better candidates; `"never"`, where the beam search
-            procedure only stops when there cannot be better candidates
-            (canonical beam search algorithm).
         stop: List of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
         stop_token_ids: List of tokens that stop the generation when they are
@@ -127,6 +165,13 @@ class SamplingParams(
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
+        guided_decoding: If provided, the engine will construct a guided
+            decoding logits processor from these parameters. Defaults to None.
+        logit_bias: If provided, the engine will construct a logits processor
+            that applies these logit biases. Defaults to None.
+        allowed_token_ids: If provided, the engine will construct a logits
+            processor which only retains scores for the given token ids.
+            Defaults to None.
     """
 
     n: int = 1
@@ -142,9 +187,6 @@ class SamplingParams(
     future_context: Optional[List[int]] = None
     cntr: Optional[int] = None
     seed: Optional[int] = None
-    use_beam_search: bool = False
-    length_penalty: float = 1.0
-    early_stopping: Union[bool, str] = False
     stop: Optional[Union[str, List[str]]] = None
     stop_token_ids: Optional[List[int]] = None
     ignore_eos: bool = False
@@ -170,6 +212,11 @@ class SamplingParams(
     output_text_buffer_length: int = 0
     _all_stop_token_ids: Set[int] = msgspec.field(default_factory=set)
 
+    # Fields used to construct logits processors
+    guided_decoding: Optional[GuidedDecodingParams] = None
+    logit_bias: Optional[Dict[int, float]] = None
+    allowed_token_ids: Optional[List[int]] = None
+
     @staticmethod
     def from_optional(
         n: Optional[int] = 1,
@@ -185,9 +232,6 @@ class SamplingParams(
         future_context: Optional[List[int]] = None,
         cntr: Optional[int] = None,
         seed: Optional[int] = None,
-        use_beam_search: bool = False,
-        length_penalty: float = 1.0,
-        early_stopping: Union[bool, str] = False,
         stop: Optional[Union[str, List[str]]] = None,
         stop_token_ids: Optional[List[int]] = None,
         include_stop_str_in_output: bool = False,
@@ -203,7 +247,16 @@ class SamplingParams(
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+        guided_decoding: Optional[GuidedDecodingParams] = None,
+        logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None,
+        allowed_token_ids: Optional[List[int]] = None,
     ) -> "SamplingParams":
+        if logit_bias is not None:
+            logit_bias = {
+                int(token): bias
+                for token, bias in logit_bias.items()
+            }
+
         return SamplingParams(
             n=1 if n is None else n,
             best_of=best_of,
@@ -221,9 +274,6 @@ class SamplingParams(
             future_context=future_context,
             cntr=cntr,
             seed=seed,
-            use_beam_search=use_beam_search,
-            length_penalty=length_penalty,
-            early_stopping=early_stopping,
             stop=stop,
             stop_token_ids=stop_token_ids,
             include_stop_str_in_output=include_stop_str_in_output,
@@ -238,6 +288,9 @@ class SamplingParams(
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
+            guided_decoding=guided_decoding,
+            logit_bias=logit_bias,
+            allowed_token_ids=allowed_token_ids,
         )
 
     def __post_init__(self) -> None:
@@ -272,20 +325,13 @@ class SamplingParams(
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
 
         self._verify_args()
-        if self.use_beam_search:
-            if not envs.VLLM_ALLOW_DEPRECATED_BEAM_SEARCH:
-                raise ValueError(
-                    "Using beam search as a sampling parameter is deprecated, and will be removed in the future release. Please use the `vllm.LLM.use_beam_search` method for dedicated beam search instead, or set the environment variable `VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1` to suppress this error. For more details, see https://github.com/vllm-project/vllm/issues/8306 ."  # noqa
-                )
-            self._verify_beam_search()
-        else:
-            self._verify_non_beam_search()
-            if self.temperature < _SAMPLING_EPS:
-                # Zero temperature means greedy sampling.
-                self.top_p = 1.0
-                self.top_k = -1
-                self.min_p = 0.0
-                self._verify_greedy_sampling()
+
+        if self.temperature < _SAMPLING_EPS:
+            # Zero temperature means greedy sampling.
+            self.top_p = 1.0
+            self.top_k = -1
+            self.min_p = 0.0
+            self._verify_greedy_sampling()
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids = set(self.stop_token_ids)
 
@@ -355,31 +401,6 @@ class SamplingParams(
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
 
-    def _verify_beam_search(self) -> None:
-        if self.best_of == 1:
-            raise ValueError("best_of must be greater than 1 when using beam "
-                             f"search. Got {self.best_of}.")
-        if self.temperature > _SAMPLING_EPS:
-            raise ValueError("temperature must be 0 when using beam search.")
-        if self.top_p < 1.0 - _SAMPLING_EPS:
-            raise ValueError("top_p must be 1 when using beam search.")
-        if self.top_k != -1:
-            raise ValueError("top_k must be -1 when using beam search.")
-        if self.early_stopping not in [True, False, "never"]:
-            raise ValueError(
-                f"early_stopping must be True, False, or 'never', "
-                f"got {self.early_stopping}.")
-
-    def _verify_non_beam_search(self) -> None:
-        if self.early_stopping is not False:
-            raise ValueError("early_stopping is not effective and must be "
-                             "False when not using beam search.")
-        if (self.length_penalty < 1.0 - _SAMPLING_EPS
-                or self.length_penalty > 1.0 + _SAMPLING_EPS):
-            raise ValueError(
-                "length_penalty is not effective and must be the "
-                "default value of 1.0 when not using beam search.")
-
     def _verify_greedy_sampling(self) -> None:
         assert isinstance(self.best_of, int)
         if self.best_of > 1:
@@ -416,8 +437,6 @@ class SamplingParams(
     def sampling_type(self) -> SamplingType:
         if self.ppl_measurement:
             return SamplingType.FORCED
-        if self.use_beam_search:
-            return SamplingType.BEAM
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
@@ -455,9 +474,6 @@ class SamplingParams(
             f"min_p={self.min_p}, "
             f"ppl_measurement={self.ppl_measurement}, "
             f"seed={self.seed}, "
-            f"use_beam_search={self.use_beam_search}, "
-            f"length_penalty={self.length_penalty}, "
-            f"early_stopping={self.early_stopping}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
@@ -469,4 +485,18 @@ class SamplingParams(
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens})")
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}), "
+            f"guided_decoding={self.guided_decoding}")
+
+
+class BeamSearchParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):  # type: ignore[call-arg]
+    """Beam search parameters for text generation."""
+    beam_width: int
+    max_tokens: int
+    ignore_eos: bool = False
+    temperature: float = 0.0
+    length_penalty: float = 1.0
