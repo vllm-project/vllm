@@ -54,26 +54,14 @@ def test_parse_single_batch_string_slice(inputs_slice: slice):
         == parse_and_batch_prompt(STRING_INPUTS[inputs_slice])
 
 
+# yapf: disable
 @pytest.mark.parametrize('mm_processor_kwargs,expected_mm_kwargs', [
     (None, [{}, {}]),
     ({}, [{}, {}]),
-    ({
-        "foo": 100
-    }, [{
-        "foo": 100
-    }, {
-        "foo": 100
-    }]),
-    ([{
-        "foo": 100
-    }, {
-        "bar": 200
-    }], [{
-        "foo": 100
-    }, {
-        "bar": 200
-    }]),
+    ({"foo": 100}, [{"foo": 100}, {"foo": 100}]),
+    ([{"foo": 100}, {"bar": 200}], [{"foo": 100}, {"bar": 200}]),
 ])
+# yapf: enable
 def test_zip_enc_dec_prompts(mm_processor_kwargs, expected_mm_kwargs):
     """Test mm_processor_kwargs init for zipping enc/dec prompts."""
     encoder_prompts = ['An encoder prompt', 'Another encoder prompt']
