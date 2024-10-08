@@ -35,7 +35,7 @@ pytest tests/
 
 ### Issues
 
-If you encounter a bug or have a feature request, please check our issues page first to see if someone else has already reported it. If not, please file a new issue, providing as much relevant information as possible.
+If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
 > [!IMPORTANT]
 > If you discover a security vulnerability, please follow the instructions [here](/SECURITY.md#reporting-a-vulnerability).
