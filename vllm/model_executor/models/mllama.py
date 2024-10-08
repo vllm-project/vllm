@@ -746,6 +746,7 @@ class MllamaTextCrossAttention(nn.Module):
         kv_range_for_decode: List[Tuple[int, int]],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        # Skip writing kv-cache for the initial profiling run.
         if len(kv_cache.shape) == 3:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_local_key_value_heads, self.head_dim)
