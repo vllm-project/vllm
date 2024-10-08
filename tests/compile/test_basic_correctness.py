@@ -28,6 +28,8 @@ def test_compile_correctness(model, model_args, pp_size, tp_size, attn_backend,
     # don't use "<", as it will duplicate the tests.
     if cuda_device_count_stateless() != pp_size * tp_size:
         pytest.skip("Not correct CUDA devices for the test.")
+    import os
+    os.environ["VLLM_ATTENTION_BACKEND"] = attn_backend
     all_args = [["--enforce-eager"] + model_args + ["--max_model_len", "1024"]
                 + ["-pp", str(pp_size)] + ["-tp", str(tp_size)]] * 3
     # don't test VLLM_TORCH_COMPILE_LEVEL == 3 case
@@ -40,4 +42,4 @@ def test_compile_correctness(model, model_args, pp_size, tp_size, attn_backend,
         CompilationLevel.DYNAMO_AS_IS,
         CompilationLevel.DYNAMO_ONCE,
     ]]
-    compare_all_settings(model, all_args, all_envs)
+    compare_all_settings(model, all_args, all_envs, method=method)
