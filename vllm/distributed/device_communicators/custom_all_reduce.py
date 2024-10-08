@@ -12,7 +12,7 @@ from vllm.distributed.device_communicators.custom_all_reduce_utils import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils import cuda_device_count_stateless, is_hip
 
 try:
     ops.meta_size()
@@ -44,10 +44,15 @@ class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
     # max_size: max supported allreduce size
+    _MAX_CAR_SIZE = 8192 * 1024
+    if is_hip():
+        # crossover is at 16MB buffer size for ROCm
+        _MAX_CAR_SIZE = 2 * 8192 * 1024
+
     def __init__(self,
                  group: ProcessGroup,
                  device: Union[int, str, torch.device],
-                 max_size=8192 * 1024) -> None:
+                 max_size=_MAX_CAR_SIZE) -> None:
         """
         Args:
             group: the process group to work on. If None, it will use the
