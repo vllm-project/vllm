@@ -136,6 +136,7 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
     assert hf_config.vision_config.image_size % 14 == 0, \
         "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
+    print(f"vllm num_tiles: {num_tiles}")
     num_tokens = num_tiles * token_per_chunk
     llm_inputs["encoder_prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
     llm_inputs["encoder_prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID
@@ -762,20 +763,25 @@ class MllamaTextCrossAttention(nn.Module):
         # images and interleaved images.
         q_len = q.shape[0]
         kv_len = k.shape[0]
-        q = q.transpose(0, 1).view(self.num_key_value_groups,
-                                   self.num_local_key_value_heads, q_len,
+        q = q.transpose(0, 1).view(self.num_local_key_value_heads,
+                                   self.num_key_value_groups, q_len,
                                    self.head_dim)
-        k = k.transpose(0, 1).expand(self.num_key_value_groups,
-                                     self.num_local_key_value_heads, kv_len,
-                                     self.head_dim)
-        v = v.transpose(0, 1).expand(self.num_key_value_groups,
-                                     self.num_local_key_value_heads, kv_len,
-                                     self.head_dim)
+        k = k.transpose(0,
+                        1)[:,
+                           None, :, :].expand(self.num_local_key_value_heads,
+                                              self.num_key_value_groups,
+                                              kv_len, self.head_dim)
+        v = v.transpose(0,
+                        1)[:,
+                           None, :, :].expand(self.num_local_key_value_heads,
+                                              self.num_key_value_groups,
+                                              kv_len, self.head_dim)
         attention_mask = attention_mask.view(1, 1, q_len, kv_len)
         output = F.scaled_dot_product_attention(q,
                                                 k,
                                                 v,
-                                                attn_mask=attention_mask)
+                                                attn_mask=attention_mask,
+                                                is_causal=False)
         output = output.permute(2, 0, 1, 3).reshape(
             q_len, self.num_local_heads * self.head_dim)
         return output
@@ -1145,6 +1151,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # NOTE: llama's reference implementation runs vision model on CPU
         pixel_values = image_inputs['data']
+        print(f"pixel_values={pixel_values.shape}")
         aspect_ratio_ids = image_inputs['aspect_ratio_ids']
         aspect_ratio_mask = image_inputs['aspect_ratio_mask']
         cross_attention_states = self.vision_model(pixel_values,
@@ -1182,7 +1189,10 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             get_cross_attention_token_mask(t, MLLAMA_IMAGE_TOKEN_ID)
             for t in batch_token_ids
         ]
+        print(f"sparse_mask={sparse_mask}")
 
+        # Skip generating cross-attention mask if all samples
+        # are text-only or have only 1 leading image.
         if skip_attention_mask(sparse_mask):
             return None, None
 
@@ -1297,9 +1307,17 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
 def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:
     for mask in sparse_mask:
+        # Skip text-only samples.
+        if len(mask) == 0:
+            continue
+        # If the sample contains more than 1 images,
+        # we can't skip mask.
         if len(mask) != 1:
             return False
-        if mask[0][1] != -1:
+        # If the sample contains only 1 image,
+        # but the image is not the leading one,
+        # we can't skip mask.
+        if mask[0][0] != 0 or mask[0][1] != -1:
             return False
     return True
 
@@ -1320,7 +1338,7 @@ def convert_sparse_cross_attention_mask_to_dense(
     seq_start = 0
     tile_start = 0
     for masks, tiles, length in zip(sparse_mask, num_tiles, lengths):
-        ts, td = 0, 0
+        ts, td = -1, 0
         for mask, tile in zip(masks, tiles):
             if len(mask) != 2:
                 continue
@@ -1329,7 +1347,7 @@ def convert_sparse_cross_attention_mask_to_dense(
             if end == -1:
                 end = length
             if end == length:
-                if ts == 0:
+                if ts == -1:
                     ts = tile_start
                 td += tile
             dense_mask[seq_start + start:seq_start + end,
