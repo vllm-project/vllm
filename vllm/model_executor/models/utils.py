@@ -138,7 +138,7 @@ class AutoWeightsLoader:
             return
 
         # Avoid infinite recursion since this function is typically
-        # called inside load_weights itself
+        # called inside load_weights of the module itself
         if module != self.module:
             module_load_weights = getattr(module, "load_weights", None)
             if callable(module_load_weights):
