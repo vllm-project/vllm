@@ -197,29 +197,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
-    # Internal flag to enable Dynamo graph capture
-    "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
-    lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
-    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
-    lambda:
-    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
-     ("true", "1")),
-
-    # Internal flag to control whether we use custom op,
-    # or use the native pytorch implementation
-    "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
-    lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
-
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
-
-    # torch.compile optimization level
-    # 0: no optimization (don't use torch.compile)
-    # 1: capture the graph, run in eager mode (seconds of compilation time)
-    # 2: capture the graph, compile with inductor (minutes of compilation time)
-    # 3: capture the graph, compile with inductor max-autotune (dozens of minutes of compilation time) # noqa
     "VLLM_TORCH_COMPILE_LEVEL":
     lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
 
