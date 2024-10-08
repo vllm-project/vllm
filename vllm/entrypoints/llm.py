@@ -6,6 +6,8 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
 
 from tqdm import tqdm
 
+from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
+                              BeamSearchSequence, get_beam_search_score)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
@@ -23,14 +25,11 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.sequence import (BeamSearchInstance, BeamSearchOutput,
-                           BeamSearchSequence)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Counter, deprecate_kwargs, get_beam_search_score,
-                        is_list_of)
+from vllm.utils import Counter, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
 

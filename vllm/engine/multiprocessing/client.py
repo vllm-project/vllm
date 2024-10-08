@@ -12,6 +12,7 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
+from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
@@ -34,7 +35,6 @@ from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
                           RequestOutput)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import BeamSearchSequence, create_sort_beams_key_function
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
                         random_uuid)
