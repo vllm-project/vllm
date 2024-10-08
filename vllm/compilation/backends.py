@@ -91,7 +91,7 @@ def fix_functionalization(graph: fx.Graph):
                 kwargs = node.kwargs
 
                 input = kwargs['input']
-                out = kwargs['out']
+                out = kwargs['result']
                 weight = kwargs['weight']
                 epsilon = kwargs['epsilon']
                 # Create a new call to torch.ops._C.rotary_embedding.default

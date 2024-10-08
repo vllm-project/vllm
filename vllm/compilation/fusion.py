@@ -36,9 +36,8 @@ def rms_pattern(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Ten
     at2 = auto_functionalized(torch.ops._C.dynamic_scaled_int8_quant.default, result=result, input=at1[1], scale=scale,
                               azp=None)
 
-    # result, scale
-    # TODO azp
-    return at2[1:2]
+    # result, scale (multi-output not currently working)
+    return at2[1:3]
 
 
 def rms_replacement(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
@@ -47,9 +46,8 @@ def rms_replacement(result: torch.Tensor, result_rms: torch.Tensor, input: torch
                                                     input=input, weight=weight,
                                                     epsilon=1e-6, scale=scale, azp=None)
 
-    # result, scale
-    # TODO azp
-    return at[1:2]
+    # result, scale (multi-output not currently working)
+    return at[1:3]
 
 
 # STATIC
@@ -206,7 +204,7 @@ def process_matches(matches, graph: torch.fx.Graph):
 
     # Finally, remove matched nodes
     graph.eliminate_dead_code()
-    assert all(node not in graph.nodes for node in match.nodes for match in matches)
+    assert all(node not in graph.nodes for node in (match for match in matches))
 
 
 def get_fusion_pass():
@@ -214,6 +212,7 @@ def get_fusion_pass():
 
     def dump_graph(graph: torch.fx.Graph, stage: str):
         if stage in envs.VLLM_TORCH_COMPILE_FUSION_DUMP:
+            logger.info("Printing graph to %s", f"{stage}.py")
             with open(f"{stage}.py", "w") as f:
                 print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
