@@ -79,8 +79,13 @@ These docker images are used for CI and testing only, and they are not intended 
 
 Latest code can contain bugs and may not be stable. Please use it with caution.
 
-Build from source without compilation
-======================================
+.. _build_from_source:
+
+Build from source
+==================
+
+Python-only build (without compilation)
+--------------------------------------
 
 If you only need to change Python code, you can simply build vLLM without compilation.
 
@@ -112,8 +117,8 @@ Now, you can edit the Python code in the current directory, and the changes will
 
 .. _with_compilation:
 
-Build from source with compilation
-===================================
+Full build (with compilation)
+---------------------------------
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes: 
 
@@ -131,7 +136,7 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
 
 
 Use an existing PyTorch installation
--------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 There are scenarios where the PyTorch dependency cannot be easily installed via pip, e.g.:
 
 * Building vLLM with PyTorch nightly or a custom PyTorch build.
@@ -150,7 +155,7 @@ To build vLLM using an existing PyTorch installation:
 
 
 Troubleshooting
-----------------
+~~~~~~~~~~~~~~~~~
 
 To avoid your system being overloaded, you can limit the number of compilation jobs
 to be run simultaneously, via the environment variable ``MAX_JOBS``. For example:
@@ -185,8 +190,8 @@ Here is a sanity check to verify that the CUDA Toolkit is correctly installed:
     $ ${CUDA_HOME}/bin/nvcc --version # verify that nvcc is in your CUDA_HOME
 
 
-Developing on an unsupported OS
-===================================
+Unsupported OS build
+----------------------
 
 vLLM can fully run only on Linux but for development purposes, you can still build it on other systems (for example, macOS), allowing for imports and a more convenient development environment. The binaries will not be compiled and won't work on non-Linux systems. 
 

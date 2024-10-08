@@ -14,7 +14,8 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 
 ## Developing
 
-Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM either [without compilation](https://docs.vllm.ai/en/latest/getting_started/installation.html#build-from-source-without-compilation) or [with compilation](https://docs.vllm.ai/en/latest/getting_started/installation.html#build-from-source-with-compilation).
+Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation. Check out the [building from source](https://docs.vllm.ai/en/latest/getting_started/installation.html#build-from-source) documentation for details.
+
 
 ## Testing
 
@@ -30,12 +31,14 @@ pytest tests/
 ```
 **Note:** Currently, the repository does not pass the ``mypy`` tests.
 
-## Contributing Guidelines
+## Contribution Guidelines
 
 ### Issues
 
-If you encounter a bug or have a feature request, please check our issues page first to see if someone else has already reported it.
-If not, please file a new issue, providing as much relevant information as possible.
+If you encounter a bug or have a feature request, please check our issues page first to see if someone else has already reported it. If not, please file a new issue, providing as much relevant information as possible.
+
+> [!IMPORTANT]
+> If you discover a security vulnerability, please follow the instructions [here](/SECURITY.md#reporting-a-vulnerability).
 
 ### Pull Requests & Code Reviews
 
