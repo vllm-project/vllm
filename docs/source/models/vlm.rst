@@ -133,7 +133,8 @@ Instead of passing in a single image, you can pass in a list of images.
         generated_text = o.outputs[0].text
         print(generated_text)
 
-A code example can be found in `examples/offline_inference_vision_language_multi_image.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language_multi_image.py>`_.
+A code example can be found in `examples/offline_inference_vision_language_multi_image.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language_multi_image.py>`_. Multi-image input can be extended to 
+perform video captioning. Refer to [this resource](https://github.com/vllm-project/vllm/issues/9128#issuecomment-2399642038) for a full example. 
 
 Online Inference
 ----------------
