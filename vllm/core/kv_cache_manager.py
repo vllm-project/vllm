@@ -28,7 +28,7 @@ class KVCacheManager:
         # Reserve block id 0 for padding.
         self.free_block_ids = list(range(num_gpu_blocks))
         self.req_to_block_ids: Dict[str, List[int]] = {}
-        # self.ref_cnts = np.zeros(num_gpu_blocks, dtype=np.int32)
+        self.ref_cnts = np.zeros(num_gpu_blocks, dtype=np.int32)
 
     def get_computed_blocks(self, request: Request) -> List[int]:
         return []
@@ -53,7 +53,7 @@ class KVCacheManager:
         # Allocate new blocks.
         new_block_ids = self._get_new_blocks(num_new_blocks)
         req_block_ids.extend(new_block_ids)
-        # self.ref_cnts[new_block_ids] += 1
+        self.ref_cnts[new_block_ids] += 1
         return new_block_ids
 
     def allocate_slots(
@@ -71,16 +71,16 @@ class KVCacheManager:
         new_block_ids = self._get_new_blocks(num_new_blocks)
         block_ids = computed_block_ids + new_block_ids
         self.req_to_block_ids[request.request_id] = block_ids
-        # self.ref_cnts[block_ids] += 1
+        self.ref_cnts[block_ids] += 1
         return new_block_ids
 
     def free(self, request: Request) -> None:
         block_ids = self.req_to_block_ids.pop(request.request_id)
-        # self.ref_cnts[block_ids] -= 1
+        self.ref_cnts[block_ids] -= 1
         for block_id in block_ids:
-            # ref_cnt = self.ref_cnts[block_id]
-            # if ref_cnt == 0:
-            self.free_block_ids.append(block_id)
+            ref_cnt = self.ref_cnts[block_id]
+            if ref_cnt == 0:
+                self.free_block_ids.append(block_id)
 
     def _get_new_blocks(self, num_blocks: int) -> List[int]:
         assert num_blocks <= len(self.free_block_ids)
