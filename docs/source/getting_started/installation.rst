@@ -115,8 +115,6 @@ The script will:
 Now, you can edit the Python code in the current directory, and the changes will be reflected when you run vLLM.
 
 
-.. _with_compilation:
-
 Full build (with compilation)
 ---------------------------------
 
