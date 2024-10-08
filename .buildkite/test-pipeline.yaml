@@ -189,7 +189,8 @@ steps:
   - vllm/
   - tests/prefix_caching
   commands:
-    - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s prefix_caching -k "test_prefix_caching"
+    - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s prefix_caching/test_prefix_caching.py
+    - pytest -v -s prefix_caching --ignore=prefix_caching/test_prefix_caching.py
 
 - label: Samplers Test # 36min
   source_file_dependencies:
