@@ -110,8 +110,6 @@ class TTExecutorAsync(TTExecutor, ExecutorAsyncBase):
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> SamplerOutput:
-        # TODO: async execution of the TT model is currently not supported, make call async when supported
-        # output = await make_async(self.driver_worker.execute_model
-        #                           )(execute_model_req)
-        output = self.driver_worker.execute_model(execute_model_req)
+        output = await make_async(self.driver_worker.execute_model
+                                  )(execute_model_req)
         return output
