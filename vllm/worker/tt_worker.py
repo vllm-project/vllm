@@ -376,6 +376,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             ttnn.MeshShape(2, 4),
             dispatch_core_type=self._get_dispatch_core_type(),
             **device_params,
+            mesh_type=ttnn.MeshType.Ring,
         )
         logger.debug(f"multidevice with {mesh_device.get_num_devices()} devices is created")
         return mesh_device
