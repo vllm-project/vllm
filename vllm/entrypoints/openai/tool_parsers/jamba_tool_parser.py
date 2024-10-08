@@ -5,10 +5,11 @@ from typing import Dict, List, Sequence, Union
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall, ChatCompletionRequest)
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
@@ -68,8 +69,7 @@ class JambaToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-            self,
-            model_output: str,
+            self, model_output: str,
             request: ChatCompletionRequest) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
@@ -103,7 +103,8 @@ class JambaToolParser(ToolParser):
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content if (len(content)>0 and content != " ") else None)
+                    content=content if
+                    (len(content) > 0 and content != " ") else None)
 
             except Exception as e:
                 logger.error("Error in extracting tool call from response %s",
