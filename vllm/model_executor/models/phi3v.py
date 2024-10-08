@@ -31,7 +31,6 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -42,14 +41,10 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (flatten_bn, group_weights_with_prefix,
+from .utils import (flatten_bn, group_weights_by_prefix,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
-
-_KEYS_TO_MODIFY_MAPPING = {
-    "model.vision_embed_tokens": "vision_embed_tokens",
-}
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 32044
@@ -295,35 +290,13 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(weights)
+        weight_groups = group_weights_by_prefix(weights)
 
-        # load vision encoder
-        self.img_processor.load_weights(weights_group["img_processor"])
+        self.img_processor.load_weights(weight_groups["img_processor"])
 
-        # load glb_GN
-        for name, loaded_weight in weights_group["glb_GN"]:
-            assert name == ""
-            param = self.glb_GN
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load sub_GN
-        for name, loaded_weight in weights_group["sub_GN"]:
-            assert name == ""
-            param = self.sub_GN
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load mlp projector
-        mlp_params_dict = dict(self.img_projection.named_parameters())
-        for name, loaded_weight in weights_group["img_projection"]:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+        weight_groups["glb_GN"].load_into_param(self.glb_GN)
+        weight_groups["sub_GN"].load_into_param(self.sub_GN)
+        weight_groups["img_projection"].load_into_module(self.img_projection)
 
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
@@ -728,10 +701,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
             return key
 
-        weights_group = group_weights_with_prefix(
+        weight_groups = group_weights_by_prefix(
             (hf_to_vllm_name(k), v) for k, v in weights)
 
         self.vision_embed_tokens.load_weights(
-            weights_group["vision_embed_tokens"])
+            weight_groups["vision_embed_tokens"])
 
-        self.language_model.load_weights(weights_group["language_model"])
+        self.language_model.load_weights(weight_groups["language_model"])

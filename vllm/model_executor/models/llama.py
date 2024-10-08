@@ -51,7 +51,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer, group_weights_with_prefix,
+from .utils import (PPMissingLayer, group_weights_by_prefix,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
@@ -551,15 +551,15 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights_group = group_weights_with_prefix(
+        weight_groups = group_weights_by_prefix(
             self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights)
 
-        self.model.load_weights(weights_group["model"])
+        self.model.load_weights(weight_groups["model"])
 
         # For EAGLE model, lm_head has already been popped from weights
-        if not self.config.tie_word_embeddings and "lm_head" in weights_group:
-            weights_group["lm_head"].load_into_module(self.lm_head)
+        if not self.config.tie_word_embeddings and "lm_head" in weight_groups:
+            weight_groups["lm_head"].load_into_module(self.lm_head)
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         self.model.load_kv_cache_scales(quantization_param_path)

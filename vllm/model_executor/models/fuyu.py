@@ -41,7 +41,7 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (flatten_bn, group_weights_with_prefix,
+from .utils import (flatten_bn, group_weights_by_prefix,
                     merge_multimodal_embeddings)
 
 # Cannot find the following 2 numbers from hf config.
@@ -348,9 +348,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights_group = group_weights_with_prefix(weights)
+        weight_groups = group_weights_by_prefix(weights)
 
-        weights_group["vision_embed_tokens"].load_into_module(
+        weight_groups["vision_embed_tokens"].load_into_module(
             self.vision_embed_tokens)
 
-        self.language_model.load_weights(weights_group["language_model"])
+        self.language_model.load_weights(weight_groups["language_model"])

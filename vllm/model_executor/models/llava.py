@@ -25,7 +25,7 @@ from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
-from .utils import (flatten_bn, group_weights_with_prefix,
+from .utils import (flatten_bn, group_weights_by_prefix,
                     init_vllm_registered_model, merge_multimodal_embeddings)
 
 
@@ -405,11 +405,11 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights_group = group_weights_with_prefix(weights)
+        weight_groups = group_weights_by_prefix(weights)
 
-        self.vision_tower.load_weights(weights_group["vision_tower"])
+        self.vision_tower.load_weights(weight_groups["vision_tower"])
 
-        weights_group["multi_modal_projector"].load_into_module(
+        weight_groups["multi_modal_projector"].load_into_module(
             self.multi_modal_projector)
 
-        self.language_model.load_weights(weights_group["language_model"])
+        self.language_model.load_weights(weight_groups["language_model"])

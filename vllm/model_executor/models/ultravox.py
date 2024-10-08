@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.models.utils import (flatten_bn,
-                                              group_weights_with_prefix,
+                                              group_weights_by_prefix,
                                               init_vllm_registered_model,
                                               merge_multimodal_embeddings)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -497,15 +497,15 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights_group = group_weights_with_prefix(weights)
+        weight_groups = group_weights_by_prefix(weights)
 
-        weights_group["audio_tower"].load_into_module(
+        weight_groups["audio_tower"].load_into_module(
             self.audio_tower,
             prefix=self.audio_tower.base_model_prefix,
             strict=False,
         )
 
-        weights_group["multi_modal_projector"].load_into_module(
+        weight_groups["multi_modal_projector"].load_into_module(
             self.multi_modal_projector)
 
-        self.language_model.load_weights(weights_group["language_model"])
+        self.language_model.load_weights(weight_groups["language_model"])

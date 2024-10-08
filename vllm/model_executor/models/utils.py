@@ -94,10 +94,10 @@ def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]],
             yield ".".join(rest), loaded_weight
 
 
-def group_weights_with_prefix(
+def group_weights_by_prefix(
     weights: Iterable[Tuple[str, torch.Tensor]], ) -> WeightsGroups:
     """
-    Helper function to group weights with prefix
+    Helper function to group weights by their prefix.
     """
     init_weights, repeated_weights = itertools.tee(weights, 2)
     weights_prefix = {name.split(".", 1)[0] for name, _ in init_weights}
