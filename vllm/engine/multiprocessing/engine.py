@@ -33,7 +33,6 @@ CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
 
 logger = init_logger(__name__)
 
-POLLING_TIMEOUT_MS = 10000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
@@ -207,7 +206,7 @@ class MQLLMEngine:
             self._alive()
             if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
-                while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                while self.input_socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
                     self._alive()
                     self.engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
