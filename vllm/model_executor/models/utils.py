@@ -30,7 +30,7 @@ class WeightsMapper:
     orig_to_new_prefix: WeightsMapping = field(default_factory=dict)
     orig_to_new_suffix: WeightsMapping = field(default_factory=dict)
 
-    def apply(self, key: str) -> Optional[str]:
+    def _map_name(self, key: str) -> Optional[str]:
         for substr, new_key in self.orig_to_new_substr.items():
             if substr in key:
                 if new_key is None:
@@ -53,6 +53,12 @@ class WeightsMapper:
                 key = new_key.join(key.rsplit(suffix, 1))
 
         return key
+
+    def apply(
+        self, weights: Iterable[Tuple[str, torch.Tensor]]
+    ) -> Iterable[Tuple[str, torch.Tensor]]:
+        return ((out_name, data) for name, data in weights
+                if (out_name := self._map_name(name)) is not None)
 
 
 class AutoWeightsLoader:
@@ -174,8 +180,7 @@ class AutoWeightsLoader:
         mapper: Optional[WeightsMapper] = None,
     ) -> None:
         if mapper is not None:
-            weights = ((out_name, data) for name, data in weights
-                       if (out_name := mapper.apply(name)) is not None)
+            weights = mapper.apply(weights)
 
         self._load_module("", self.module, weights)
 
