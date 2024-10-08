@@ -40,7 +40,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (group_weights_by_prefix, is_pp_missing_parameter,
+from .utils import (WeightLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 logger = init_logger(__name__)
@@ -434,12 +434,7 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weight_groups = group_weights_by_prefix(weights)
-
-        self.model.load_weights(weight_groups["model"])
-
-        # For EAGLE model, lm_head has already been popped from weights
-        if not self.config.tie_word_embeddings and "lm_head" in weight_groups:
-            # NOTE: For now self.lm_head is not defined because
-            # tie_word_embeddings is assumed to the False
-            weight_groups["lm_head"].load_into_module(self.lm_head)
+        loader = WeightLoader(self,
+                              allow_missing_prefixes=None if
+                              self.config.tie_word_embeddings else ["lm_head"])
+        loader.load_weights(weights)

@@ -27,7 +27,7 @@ from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip)
-from .utils import (group_weights_by_prefix, init_vllm_registered_model,
+from .utils import (WeightLoader, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 # For profile run
@@ -457,11 +457,5 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weight_groups = group_weights_by_prefix(weights)
-
-        self.vision_tower.load_weights(weight_groups["vision_tower"])
-
-        weight_groups["multi_modal_projector"].load_into_module(
-            self.multi_modal_projector)
-
-        self.language_model.load_weights(weight_groups["language_model"])
+        loader = WeightLoader(self)
+        loader.load_weights(weights)

@@ -25,10 +25,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
-from vllm.model_executor.models.utils import (flatten_bn,
-                                              group_weights_by_prefix,
-                                              init_vllm_registered_model,
-                                              merge_multimodal_embeddings)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs, NestedTensors
@@ -40,6 +36,8 @@ from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
+from .utils import (WeightLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, merge_multimodal_embeddings)
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
@@ -497,15 +495,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weight_groups = group_weights_by_prefix(weights)
+        hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
-        weight_groups["audio_tower"].load_into_module(
-            self.audio_tower,
-            prefix=self.audio_tower.base_model_prefix,
-            strict=False,
-        )
-
-        weight_groups["multi_modal_projector"].load_into_module(
-            self.multi_modal_projector)
-
-        self.language_model.load_weights(weight_groups["language_model"])
+        loader = WeightLoader(self, allow_missing_prefixes=["audio_tower."])
+        loader.load_weights(weights, mapper=hf_to_vllm_mapper)

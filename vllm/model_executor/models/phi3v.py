@@ -41,7 +41,7 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (flatten_bn, group_weights_by_prefix,
+from .utils import (WeightLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
@@ -290,13 +290,8 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weight_groups = group_weights_by_prefix(weights)
-
-        self.img_processor.load_weights(weight_groups["img_processor"])
-
-        weight_groups["glb_GN"].load_into_param(self.glb_GN)
-        weight_groups["sub_GN"].load_into_param(self.sub_GN)
-        weight_groups["img_projection"].load_into_module(self.img_projection)
+        loader = WeightLoader(self)
+        loader.load_weights(weights)
 
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
@@ -688,23 +683,12 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapping = {
-            "model.vision_embed_tokens.": "vision_embed_tokens.",
-            "lm_head.": "language_model.lm_head.",
-            "model.": "language_model.model.",
-        }
+        hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_prefix={
+                "model.vision_embed_tokens.": "vision_embed_tokens.",
+                "lm_head.": "language_model.lm_head.",
+                "model.": "language_model.model.",
+            })
 
-        def hf_to_vllm_name(key: str) -> str:
-            for hf_name, vllm_name in hf_to_vllm_mapping.items():
-                if key.startswith(hf_name):
-                    return key.replace(hf_name, vllm_name, 1)
-
-            return key
-
-        weight_groups = group_weights_by_prefix(
-            (hf_to_vllm_name(k), v) for k, v in weights)
-
-        self.vision_embed_tokens.load_weights(
-            weight_groups["vision_embed_tokens"])
-
-        self.language_model.load_weights(weight_groups["language_model"])
+        loader = WeightLoader(self)
+        loader.load_weights(weights, mapper=hf_to_vllm_mapper)
