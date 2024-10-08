@@ -9,6 +9,8 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, Tuple
 
 import torch
+import msgspec
+import zmq
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
@@ -33,7 +35,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.request import Request
 from vllm.transformers_utils.config import try_get_generation_config
-from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.detokenizer_v2 import Detokenizer, RequestData, DetokenizedData
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
@@ -41,6 +43,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.request import Request
+from vllm.utils import get_open_port
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -57,9 +60,6 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
         return {}
 
     return config.to_diff_dict()
-
-
-_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 
 
 class LLMEngine:
@@ -183,14 +183,28 @@ class LLMEngine:
         )
         self.log_stats = log_stats
 
-        if not self.model_config.skip_tokenizer_init:
-            self.tokenizer = self._init_tokenizer()
-            self.detokenizer = Detokenizer(self.tokenizer)
-            tokenizer_group = self.get_tokenizer_group()
-        else:
-            self.tokenizer = None
-            self.detokenizer = None
-            tokenizer_group = None
+        # Detokenizer
+        # FIXME(woosuk): This is a temporary hack.
+        assert not self.model_config.skip_tokenizer_init
+        self.tokenizer = self._init_tokenizer()
+
+        self.port1 = get_open_port()
+        self.port2 = get_open_port()
+        self.detokenizer = Detokenizer(self.model_config.tokenizer, self.port1,
+                                       self.port2)
+        self.detokenizer.start()
+
+        self.context = zmq.Context()
+        self.push_socket = self.context.socket(zmq.PUSH)
+        self.push_socket.connect(f"tcp://localhost:{self.port1}")
+        self.pull_socket = self.context.socket(zmq.PULL)
+        self.pull_socket.connect(f"tcp://localhost:{self.port2}")
+        self.poller = zmq.Poller()
+        self.poller.register(self.pull_socket, zmq.POLLIN)
+
+        self.encoder = msgspec.msgpack.Encoder()
+        self.decoder = msgspec.msgpack.Decoder(DetokenizedData)
+        self.detokenizer_reqs: Dict[str, Request] = {}
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -331,28 +345,6 @@ class LLMEngine:
             stat_loggers=stat_loggers,
         )
         return engine
-
-    def get_tokenizer_group(
-        self,
-        group_type: Type[_G] = BaseTokenizerGroup,
-    ) -> _G:
-        tokenizer_group = self.tokenizer
-
-        if tokenizer_group is None:
-            raise ValueError("Unable to get tokenizer because "
-                             "skip_tokenizer_init is True")
-        if not isinstance(tokenizer_group, group_type):
-            raise TypeError("Invalid type of tokenizer group. "
-                            f"Expected type: {group_type}, but "
-                            f"found type: {type(tokenizer_group)}")
-
-        return tokenizer_group
-
-    def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
     def _init_tokenizer(self) -> BaseTokenizerGroup:
         return init_tokenizer_from_configs(
@@ -518,19 +510,62 @@ class LLMEngine:
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
+        # FIXME(woosuk)
         return self.scheduler.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        return self.scheduler.has_unfinished_requests()
+        # FIXME(woosuk)
+        return (self.scheduler.has_unfinished_requests()
+                or len(self.detokenizer_reqs) > 0)
 
     def step(self) -> Tuple[List[Request], List[Request]]:
-        scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
-        finished_reqs = self.scheduler.update_from_output(
-            scheduler_output, output)
-        running_reqs = self.scheduler.running
-        return finished_reqs, running_reqs
+        if self.scheduler.has_unfinished_requests():
+            scheduler_output = self.scheduler.schedule()
+            output = self.model_executor.execute_model(scheduler_output)
+            finished_reqs = self.scheduler.update_from_output(
+                scheduler_output, output)
+
+            if finished_reqs:
+                for req in finished_reqs:
+                    self.detokenizer_reqs[req.request_id] = req
+                self.send_to_detokenizer(finished_reqs)
+        detokenized_reqs = self.recv_from_detokenizer()
+        return detokenized_reqs, self.scheduler.running
+
+    def send_to_detokenizer(self, requests: List[Request]) -> None:
+        data = RequestData(
+            request_ids=[req.request_id for req in requests],
+            prompt_token_ids=[req.prompt_token_ids for req in requests],
+            new_token_ids=[req.output_token_ids for req in requests],
+            skip_special_tokens=[
+                req.sampling_params.skip_special_tokens for req in requests
+            ],
+            spaces_between_special_tokens=[
+                req.sampling_params.spaces_between_special_tokens
+                for req in requests
+            ],
+            free_request_ids=[],
+        )
+        self.push_socket.send(self.encoder.encode(data), flags=zmq.NOBLOCK)
+
+    def recv_from_detokenizer(self) -> List[Request]:
+        detokenized_reqs: List[Request] = []
+        socks = dict(self.poller.poll(timeout=0))
+        if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
+            msg = self.pull_socket.recv()
+            data = self.decoder.decode(msg)
+            num_reqs = len(data.request_ids)
+            for i in range(num_reqs):
+                req_id = data.request_ids[i]
+                assert req_id in self.detokenizer_reqs
+                req = self.detokenizer_reqs.pop(req_id)
+                req.output_text += data.detokenized_texts[i]
+                detokenized_reqs.append(req)
+        return detokenized_reqs
+
+    def terminate_detokenizer(self) -> None:
+        self.push_socket.send(b"", flags=zmq.NOBLOCK)
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
         if not self.log_stats:
