@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 
 import pytest
 
+from vllm.compilation.levels import CompilationLevel
 from vllm.utils import cuda_device_count_stateless
 
 from ..utils import compare_all_settings
@@ -26,5 +27,8 @@ def test_compile_correctness(model_info, pp_size, tp_size):
     all_envs: List[Optional[Dict[str, str]]] = [{
         "VLLM_TORCH_COMPILE_LEVEL":
         str(i)
-    } for i in range(3)]
+    } for i in [
+        CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_ONCE,
+        CompilationLevel.DYNAMO_AS_IS
+    ]]
     compare_all_settings(model, all_args, all_envs)
