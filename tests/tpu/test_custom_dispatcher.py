@@ -16,4 +16,4 @@ def test_custom_dispatcher():
         arg1=["--enforce-eager"],
         arg2=["--enforce-eager"],
         env1={"VLLM_TORCH_COMPILE_LEVEL": str(CompilationLevel.DYNAMO_ONCE)},
-        env2={})
+        env2={"VLLM_TORCH_COMPILE_LEVEL": str(CompilationLevel.DYNAMO_AS_IS)})
