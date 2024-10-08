@@ -88,7 +88,10 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
-  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core
+  - pytest -v -s core -k "not (test_scheduler or test_chunked_prefill_scheduler or test_correctness)"
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core -k "test_scheduler"
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core -k "test_chunked_prefill_scheduler"
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core -k "test_correctness"
 
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
@@ -186,7 +189,8 @@ steps:
   - vllm/
   - tests/prefix_caching
   commands:
-    - pytest -v -s prefix_caching
+    - pytest -v -s prefix_caching -k "not test_prefix_caching"
+    - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s prefix_caching -k "test_prefix_caching"
 
 - label: Samplers Test # 36min
   source_file_dependencies:
