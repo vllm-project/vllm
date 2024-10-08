@@ -98,14 +98,26 @@ echo 'vLLM yapf: Done'
 echo 'vLLM mypy:'
 mypy --follow-imports skip  # Note that this is less strict than CI
 mypy tests --follow-imports skip
+#mypy vllm/assets --follow-imports skip
 mypy vllm/attention --follow-imports skip
+#mypy vllm/compilation --folow-imports skip
+#mypy vllm/core --folow-imports skip
 mypy vllm/distributed --follow-imports skip
 mypy vllm/engine  --follow-imports skip
+#mypy vllm/entrypoints  --follow-imports skip
 mypy vllm/executor --follow-imports skip
+#mypy vllm/inputs  --follow-imports skip
+#mypy vllm/logging  --follow-imports skip
 mypy vllm/lora --follow-imports skip
 mypy vllm/model_executor  --follow-imports skip
+#mypy vllm/multimodal  --follow-imports skip
+#mypy vllm/platforms  --follow-imports skip
+#mypy vllm/plugins  --follow-imports skip
 mypy vllm/prompt_adapter --follow-imports skip
 mypy vllm/spec_decode --follow-imports skip
+#mypy vllm/transformers_utils  --follow-imports skip
+#mypy vllm/usage  --follow-imports skip
+#mypy vllm/vllm_flash_attn  --follow-imports skip
 mypy vllm/worker --follow-imports skip
 echo 'vLLM mypy: Done'
 
