@@ -276,14 +276,14 @@ class MultiModalPlugin(ABC):
         # drop mm_processor_kwargs based on signature inspection
         # if we're using the default mapper.
         #
-        # NOTE: In the future, adding retry logic of some kind might be a
-        # good idea, especially if this interface is exposed through
-        # the server somehow.
+        # This should be safe in general due to the sanitation, since the
+        # transformers resource should filter unused kwargs anyway.
         uses_default_mapper = mapper == self._default_input_mapper
         mm_processor_kwargs = resolve_mm_processor_kwargs(
             model_config.mm_processor_kwargs,
             mm_processor_kwargs,
-            callable=None if uses_default_mapper else mapper,
+            callable=mapper,
+            allow_var_kwargs=uses_default_mapper,
         )
         return mapper(InputContext(model_config), data, **mm_processor_kwargs)
 
