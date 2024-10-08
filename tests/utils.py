@@ -8,13 +8,13 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
 import openai
 import pytest
 import requests
 from openai.types.completion import Completion
-from typing_extensions import ParamSpec
+from typing_extensions import ParamSpec, assert_never
 
 from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -163,11 +163,140 @@ class RemoteOpenAIServer:
         )
 
 
+def _test_completion(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+    token_ids: List[int],
+):
+    results = []
+
+    # test with text prompt
+    completion = client.completions.create(model=model,
+                                           prompt=prompt,
+                                           max_tokens=5,
+                                           temperature=0.0)
+
+    results.append({
+        "test": "single_completion",
+        "text": completion.choices[0].text,
+        "finish_reason": completion.choices[0].finish_reason,
+        "usage": completion.usage,
+    })
+
+    # test using token IDs
+    completion = client.completions.create(
+        model=model,
+        prompt=token_ids,
+        max_tokens=5,
+        temperature=0.0,
+    )
+
+    results.append({
+        "test": "token_ids",
+        "text": completion.choices[0].text,
+        "finish_reason": completion.choices[0].finish_reason,
+        "usage": completion.usage,
+    })
+
+    # test seeded random sampling
+    completion = client.completions.create(model=model,
+                                           prompt=prompt,
+                                           max_tokens=5,
+                                           seed=33,
+                                           temperature=1.0)
+
+    results.append({
+        "test": "seeded_sampling",
+        "text": completion.choices[0].text,
+        "finish_reason": completion.choices[0].finish_reason,
+        "usage": completion.usage,
+    })
+
+    # test seeded random sampling with multiple prompts
+    completion = client.completions.create(model=model,
+                                           prompt=[prompt, prompt],
+                                           max_tokens=5,
+                                           seed=33,
+                                           temperature=1.0)
+
+    results.append({
+        "test":
+        "seeded_sampling",
+        "text": [choice.text for choice in completion.choices],
+        "finish_reason":
+        [choice.finish_reason for choice in completion.choices],
+        "usage":
+        completion.usage,
+    })
+
+    # test simple list
+    batch = client.completions.create(
+        model=model,
+        prompt=[prompt, prompt],
+        max_tokens=5,
+        temperature=0.0,
+    )
+
+    results.append({
+        "test": "simple_list",
+        "text0": batch.choices[0].text,
+        "text1": batch.choices[1].text,
+    })
+
+    # test streaming
+    batch = client.completions.create(
+        model=model,
+        prompt=[prompt, prompt],
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+    )
+
+    texts = [""] * 2
+    for chunk in batch:
+        assert len(chunk.choices) == 1
+        choice = chunk.choices[0]
+        texts[choice.index] += choice.text
+
+    results.append({
+        "test": "streaming",
+        "texts": texts,
+    })
+
+    return results
+
+
+def _test_embeddings(
+    client: openai.OpenAI,
+    model: str,
+    text: str,
+):
+    results = []
+
+    # test with text input
+    embeddings = client.embeddings.create(
+        model=model,
+        input=text,
+        encoding_format="float",
+    )
+
+    results.append({
+        "test": "single_embedding",
+        "embedding": embeddings.data[0].embedding,
+        "usage": embeddings.usage,
+    })
+
+    return results
+
+
 def compare_two_settings(model: str,
                          arg1: List[str],
                          arg2: List[str],
                          env1: Optional[Dict[str, str]] = None,
                          env2: Optional[Dict[str, str]] = None,
+                         *,
+                         method: Literal["generate", "encode"] = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -180,12 +309,21 @@ def compare_two_settings(model: str,
         env1: The first set of environment variables to pass to the API server.
         env2: The second set of environment variables to pass to the API server.
     """
-    compare_all_settings(model, [arg1, arg2], [env1, env2], max_wait_seconds)
+
+    compare_all_settings(
+        model,
+        [arg1, arg2],
+        [env1, env2],
+        method=method,
+        max_wait_seconds=max_wait_seconds,
+    )
 
 
 def compare_all_settings(model: str,
                          all_args: List[List[str]],
                          all_envs: List[Optional[Dict[str, str]]],
+                         *,
+                         method: Literal["generate", "encode"] = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -219,6 +357,7 @@ def compare_all_settings(model: str,
     ref_results: List = []
     for i, (args, env) in enumerate(zip(all_args, all_envs)):
         compare_results: List = []
+        results = ref_results if i == 0 else compare_results
         with RemoteOpenAIServer(model,
                                 args,
                                 env_dict=env,
@@ -229,120 +368,18 @@ def compare_all_settings(model: str,
             models = client.models.list()
             models = models.data
             served_model = models[0]
-            (ref_results if i == 0 else compare_results).append({
-                "test":
-                "models_list",
-                "id":
-                served_model.id,
-                "root":
-                served_model.root,
+            results.append({
+                "test": "models_list",
+                "id": served_model.id,
+                "root": served_model.root,
             })
 
-            # test with text prompt
-            completion = client.completions.create(model=model,
-                                                   prompt=prompt,
-                                                   max_tokens=5,
-                                                   temperature=0.0)
-
-            (ref_results if i == 0 else compare_results).append({
-                "test":
-                "single_completion",
-                "text":
-                completion.choices[0].text,
-                "finish_reason":
-                completion.choices[0].finish_reason,
-                "usage":
-                completion.usage,
-            })
-
-            # test using token IDs
-            completion = client.completions.create(
-                model=model,
-                prompt=token_ids,
-                max_tokens=5,
-                temperature=0.0,
-            )
-
-            (ref_results if i == 0 else compare_results).append({
-                "test":
-                "token_ids",
-                "text":
-                completion.choices[0].text,
-                "finish_reason":
-                completion.choices[0].finish_reason,
-                "usage":
-                completion.usage,
-            })
-
-            # test seeded random sampling
-            completion = client.completions.create(model=model,
-                                                   prompt=prompt,
-                                                   max_tokens=5,
-                                                   seed=33,
-                                                   temperature=1.0)
-
-            (ref_results if i == 0 else compare_results).append({
-                "test":
-                "seeded_sampling",
-                "text":
-                completion.choices[0].text,
-                "finish_reason":
-                completion.choices[0].finish_reason,
-                "usage":
-                completion.usage,
-            })
-
-            # test seeded random sampling with multiple prompts
-            completion = client.completions.create(model=model,
-                                                   prompt=[prompt, prompt],
-                                                   max_tokens=5,
-                                                   seed=33,
-                                                   temperature=1.0)
-
-            (ref_results if i == 0 else compare_results).append({
-                "test":
-                "seeded_sampling",
-                "text": [choice.text for choice in completion.choices],
-                "finish_reason":
-                [choice.finish_reason for choice in completion.choices],
-                "usage":
-                completion.usage,
-            })
-
-            # test simple list
-            batch = client.completions.create(
-                model=model,
-                prompt=[prompt, prompt],
-                max_tokens=5,
-                temperature=0.0,
-            )
-
-            (ref_results if i == 0 else compare_results).append({
-                "test":
-                "simple_list",
-                "text0":
-                batch.choices[0].text,
-                "text1":
-                batch.choices[1].text,
-            })
-
-            # test streaming
-            batch = client.completions.create(
-                model=model,
-                prompt=[prompt, prompt],
-                max_tokens=5,
-                temperature=0.0,
-                stream=True,
-            )
-            texts = [""] * 2
-            for chunk in batch:
-                assert len(chunk.choices) == 1
-                choice = chunk.choices[0]
-                texts[choice.index] += choice.text
-            (ref_results if i == 0 else compare_results).append({
-                "test": "streaming",
-                "texts": texts,
-            })
+            if method == "generate":
+                results += _test_completion(client, model, prompt, token_ids)
+            elif method == "encode":
+                results += _test_embeddings(client, model, prompt)
+            else:
+                assert_never(method)
 
             if i > 0:
                 # if any setting fails, raise an error early
