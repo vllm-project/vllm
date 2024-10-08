@@ -728,14 +728,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
             return key
 
-        vllm_weights = {hf_to_vllm_name(k): v for k, v in weights}
+        weights_group = group_weights_with_prefix(
+            (hf_to_vllm_name(k), v) for k, v in weights)
 
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(vllm_weights.items())
-
-        # load vision embeddings and encoder
         self.vision_embed_tokens.load_weights(
             weights_group["vision_embed_tokens"])
 
-        # load llm backbone
         self.language_model.load_weights(weights_group["language_model"])

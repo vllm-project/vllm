@@ -12,25 +12,69 @@ from vllm.config import (CacheConfig, LoRAConfig, MultiModalConfig,
                          SchedulerConfig)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal.base import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 
 
-class WeightsGroup(UserDict):
+class WeightsGroups(UserDict):
     """
     Wraps grouped weights dictionary for a more informative error message
     when attempting to access a weight component that does not exist.
     """
 
-    def __getitem__(self, key: str) -> Iterable[Tuple[str, torch.Tensor]]:
+    def __getitem__(self, key: str) -> "WeightsGroup":
         try:
             return super().__getitem__(key)
         except KeyError as exc:
             msg = (f"There is no weights named with the prefix: {key}. "
                    f"Available prefix: {set(self.keys())}")
             raise KeyError(msg) from exc
+
+
+class WeightsGroup:
+
+    def __init__(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
+        super().__init__()
+
+        self.weights = weights
+
+    def __iter__(self):
+        return iter(self.weights)
+
+    def load_into_param(
+        self,
+        param: nn.Parameter,
+        *,
+        strict: bool = True,
+    ) -> None:
+        for name, loaded_weight in self.weights:
+            if strict:
+                assert name == ""
+
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+
+    def load_into_module(
+        self,
+        module: nn.Module,
+        *,
+        prefix: str = "",
+        strict: bool = True,
+    ) -> None:
+        params_dict = dict(module.named_parameters(prefix=prefix))
+        for name, loaded_weight in self.weights:
+            if is_pp_missing_parameter(name, module):
+                continue
+
+            if strict or name in params_dict:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
 
 
 def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]],
@@ -49,7 +93,7 @@ def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]],
 
 
 def group_weights_with_prefix(
-    weights: Iterable[Tuple[str, torch.Tensor]], ) -> WeightsGroup:
+    weights: Iterable[Tuple[str, torch.Tensor]], ) -> WeightsGroups:
     """
     Helper function to group weights with prefix
     """
@@ -57,8 +101,8 @@ def group_weights_with_prefix(
     weights_prefix = {name.split(".")[0] for name, _ in init_weights}
     repeated_weights = itertools.tee(repeated_weights, len(weights_prefix))
 
-    return WeightsGroup({
-        prefix: filter_weights(component, prefix)
+    return WeightsGroups({
+        prefix: WeightsGroup(filter_weights(component, prefix))
         for component, prefix in zip(repeated_weights, weights_prefix)
     })
 

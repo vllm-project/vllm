@@ -25,7 +25,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import (flatten_bn,
                                               group_weights_with_prefix,
                                               init_vllm_registered_model,
@@ -498,30 +497,15 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
         weights_group = group_weights_with_prefix(weights)
 
-        # load audio tower weights
-        audio_tower_weights = weights_group["audio_tower"]
-        audio_tower_params_dict = dict(
-            self.audio_tower.named_parameters(
-                prefix=self.audio_tower.base_model_prefix))
-        for name, loaded_weight in audio_tower_weights:
-            if name in audio_tower_params_dict:
-                param = audio_tower_params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+        weights_group["audio_tower"].load_into_module(
+            self.audio_tower,
+            prefix=self.audio_tower.base_model_prefix,
+            strict=False,
+        )
 
-        # load projector weights
-        projector_weights = weights_group["multi_modal_projector"]
-        projector_params_dict = dict(
-            self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in projector_weights:
-            param = projector_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+        weights_group["multi_modal_projector"].load_into_module(
+            self.multi_modal_projector)
 
-        # load llm backbone
         self.language_model.load_weights(weights_group["language_model"])

@@ -441,12 +441,4 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if not self.config.tie_word_embeddings:
             # NOTE: For now self.lm_head is not defined because
             # tie_word_embeddings is assumed to the False
-            lm_head_dict = dict(self.lm_head.named_parameters())
-            for name, loaded_weight in weights_group["lm_head"]:
-                if is_pp_missing_parameter(name, self.lm_head):
-                    continue
-
-                param = lm_head_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+            weights_group["lm_head"].load_into_module(self.lm_head)

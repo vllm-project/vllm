@@ -13,7 +13,6 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -687,35 +686,13 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
         weights_group = group_weights_with_prefix(weights)
 
-        # load vision encoder
         self.vision_model.load_weights(weights_group["vision_model"])
 
-        # load query tokens
-        for name, loaded_weight in weights_group["query_tokens"]:
-            assert name == ""
-            param = self.query_tokens
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+        weights_group["query_tokens"].load_into_param(self.query_tokens)
+        weights_group["qformer"].load_into_module(self.qformer)
+        weights_group["language_projection"].load_into_module(
+            self.language_projection)
 
-        # load qformer
-        qformer_params_dict = dict(self.qformer.named_parameters())
-        for name, loaded_weight in weights_group["qformer"]:
-            param = qformer_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load mlp projector
-        mlp_params_dict = dict(self.language_projection.named_parameters())
-        for name, loaded_weight in weights_group["language_projection"]:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load llm backbone
         self.language_model.load_weights(weights_group["language_model"])

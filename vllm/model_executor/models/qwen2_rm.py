@@ -16,7 +16,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
@@ -124,9 +123,4 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
 
         self.model.load_weights(weights_group["model"])
 
-        score_dict = dict(self.score.named_parameters())
-        for name, loaded_weight in weights_group["score"]:
-            param = score_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+        weights_group["score"].load_into_module(self.score)
