@@ -3,19 +3,19 @@ from typing import (AsyncGenerator, List, Mapping, Optional, Protocol,
 
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.inputs.data import PromptInputs
+from vllm.inputs.data import PromptType
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 @runtime_checkable
-class AsyncEngineClient(Protocol):
-    """Protocol class for Clients to AsyncLLMEngine"""
+class EngineClient(Protocol):
+    """Protocol class for Clients to Engine"""
 
     @property
     def is_running(self) -> bool:
@@ -29,25 +29,31 @@ class AsyncEngineClient(Protocol):
     def errored(self) -> bool:
         ...
 
+    @property
+    def dead_error(self) -> BaseException:
+        ...
+
     def generate(
         self,
-        inputs: PromptInputs,
+        prompt: PromptType,
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
-        """Generates outputs for a request"""
+        """Generate outputs for a request."""
         ...
 
     def encode(
         self,
-        inputs: PromptInputs,
+        prompt: PromptType,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         """Generate outputs for a request from an embedding model."""
         ...
@@ -86,4 +92,12 @@ class AsyncEngineClient(Protocol):
 
     async def check_health(self) -> None:
         """Raise if unhealthy"""
+        ...
+
+    async def start_profile(self) -> None:
+        """Start profiling the engine"""
+        ...
+
+    async def stop_profile(self) -> None:
+        """Start profiling the engine"""
         ...

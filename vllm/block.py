@@ -1,9 +1,9 @@
 """Token blocks."""
-from typing import List, Optional
+from typing import TYPE_CHECKING, Iterator, List, Optional
 
 from vllm.utils import Device
 
-DEFAULT_LAST_ACCESSED_TIME = -1
+DEFAULT_LAST_ACCESSED_TIME: float = -1
 
 
 class PhysicalTokenBlock:
@@ -58,6 +58,11 @@ class BlockTable:
 
     def __getitem__(self, key):
         return self._blocks[key]
+
+    if TYPE_CHECKING:
+
+        def __iter__(self) -> Iterator[PhysicalTokenBlock]:
+            raise RuntimeError("Method should be automatically generated")
 
     def __setitem__(self, key, value):
         if isinstance(key, slice):

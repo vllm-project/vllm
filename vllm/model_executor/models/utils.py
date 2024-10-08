@@ -1,4 +1,7 @@
-from typing import Dict, Iterable, List, Optional, Protocol, Tuple
+import itertools
+from collections import UserDict
+from typing import (Any, Dict, Iterable, List, Literal, Optional, Protocol,
+                    Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -10,11 +13,28 @@ from vllm.config import (CacheConfig, LoRAConfig, MultiModalConfig,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.models import ModelRegistry
-from vllm.multimodal import BatchedTensors
+from vllm.multimodal.base import NestedTensors
+from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 
 
-def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
+class WeightsGroup(UserDict):
+    """
+    Wraps grouped weights dictionary for a more informative error message
+    when attempting to access a weight component that does not exist.
+    """
+
+    def __getitem__(self, key: str) -> int:
+        try:
+            return super().__getitem__(key)
+        except KeyError as exc:
+            msg = (f"There is no weights named with the prefix: {key}. "
+                   f"Available prefix: {set(self.keys())}")
+            raise KeyError(msg) from exc
+
+
+def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]],
+                   prefix: str) -> Iterable[Tuple[str, torch.Tensor]]:
     """
     Helper function to load weights for inner vLLM models.
 
@@ -26,6 +46,22 @@ def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
         if prefix == name.pop(0):
             name = ".".join(name)
             yield name, loaded_weight
+
+
+def group_weights_with_prefix(
+    weights: Iterable[Tuple[str, torch.Tensor]]
+) -> Dict[str, Iterable[Tuple[str, torch.Tensor]]]:
+    """
+    Helper function to group weights with prefix
+    """
+    init_weights, repeated_weights = itertools.tee(weights, 2)
+    weights_prefix = {name.split(".")[0] for name, _ in init_weights}
+    repeated_weights = itertools.tee(repeated_weights, len(weights_prefix))
+
+    return WeightsGroup({
+        prefix: filter_weights(component, prefix)
+        for component, prefix in zip(repeated_weights, weights_prefix)
+    })
 
 
 def init_vllm_registered_model(
@@ -54,9 +90,73 @@ def init_vllm_registered_model(
     )
 
 
+@overload
+def flatten_bn(x: torch.Tensor) -> torch.Tensor:
+    ...
+
+
+@overload
+def flatten_bn(x: List[torch.Tensor]) -> List[torch.Tensor]:
+    ...
+
+
+@overload
+def flatten_bn(
+    x: Union[List[torch.Tensor], torch.Tensor],
+    *,
+    concat: Literal[True],
+) -> torch.Tensor:
+    ...
+
+
+def flatten_bn(
+    x: Union[List[torch.Tensor], torch.Tensor],
+    *,
+    concat: bool = False,
+) -> Union[List[torch.Tensor], torch.Tensor]:
+    """
+    Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.
+
+    The input tensor should have shape ``(B, N, ...)```.
+    """
+    if isinstance(x, torch.Tensor):
+        return x.flatten(0, 1)
+
+    if concat:
+        return torch.cat(x)
+
+    return [x_n for x_b in x for x_n in x_b]
+
+
+def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
+    """
+    Recursively flattens and concatenates NestedTensors on all but the last
+    dimension.
+    """
+
+    if isinstance(embeddings, torch.Tensor):
+        # Flatten all but the last dimension.
+        return embeddings.flatten(0, -2)
+
+    return torch.cat(tuple(_flatten_embeddings(t) for t in embeddings))
+
+
+def _embedding_count_expression(embeddings: NestedTensors) -> str:
+    """
+    Constructs a debugging representation of the number of embeddings in the
+    NestedTensors.
+    """
+
+    if isinstance(embeddings, torch.Tensor):
+        return " x ".join([str(dim) for dim in embeddings.shape[:-1]])
+
+    return " + ".join(
+        _embedding_count_expression(inner) for inner in embeddings)
+
+
 def merge_multimodal_embeddings(input_ids: torch.Tensor,
                                 inputs_embeds: torch.Tensor,
-                                multimodal_embeddings: BatchedTensors,
+                                multimodal_embeddings: NestedTensors,
                                 placeholder_token_id: int) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -67,30 +167,17 @@ def merge_multimodal_embeddings(input_ids: torch.Tensor,
         This updates ``inputs_embeds`` in place.
     """
     mask = (input_ids == placeholder_token_id)
-    num_expected_tokens = mask.sum()
+    num_expected_tokens = mask.sum().item()
+    assert isinstance(num_expected_tokens, int)
 
-    if isinstance(multimodal_embeddings, torch.Tensor):
-        batch_size, batch_tokens, *_, embed_dim = multimodal_embeddings.shape
-        total_tokens = batch_size * batch_tokens
-        if num_expected_tokens != total_tokens:
-            expr = f"{batch_size} x {batch_tokens}"
-            raise ValueError(
-                f"Attempted to assign {expr} = {total_tokens} "
-                f"multimodal tokens to {num_expected_tokens} placeholders")
+    flattened = _flatten_embeddings(multimodal_embeddings)
+    if flattened.shape[0] != num_expected_tokens:
+        expr = _embedding_count_expression(multimodal_embeddings)
+        raise ValueError(
+            f"Attempted to assign {expr} = {flattened.shape[0]} "
+            f"multimodal tokens to {num_expected_tokens} placeholders")
 
-        inputs_embeds[mask] = multimodal_embeddings.view(
-            total_tokens, embed_dim)
-    else:
-        size_per_batch = [t.shape[0] for t in multimodal_embeddings]
-        total_tokens = sum(size_per_batch)
-        if num_expected_tokens != total_tokens:
-            expr = ' + '.join(map(str, size_per_batch))
-            raise ValueError(
-                f"Attempted to assign {expr} = {total_tokens} "
-                f"multimodal tokens to {num_expected_tokens} placeholders")
-
-        inputs_embeds[mask] = torch.cat(multimodal_embeddings)
-
+    inputs_embeds[mask] = flattened
     return inputs_embeds
 
 
@@ -227,3 +314,36 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         if name.startswith(missing_layer_name):
             return True
     return False
+
+
+def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
+
+    def make_empty_intermediate_tensors(
+            batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            key: torch.zeros((batch_size, hidden_size),
+                             dtype=dtype,
+                             device=device)
+            for key in keys
+        })
+
+    return make_empty_intermediate_tensors
+
+
+class LLMWrapper(nn.Module):
+    """
+    To align with the key names of LoRA trained with PEFT, we need to add an 
+    additional layer to the llm's implementation.
+    """
+
+    def __init__(self, llm: nn.Module, name: str) -> None:
+        super().__init__()
+        self.model_name = name
+        setattr(self, name, llm)
+
+    def forward(self, *args, **kwargs) -> Any:
+        return getattr(self, self.model_name)(*args, **kwargs)
+
+    def embed_tokens(self, *args, **kwargs) -> Any:
+        return getattr(self, self.model_name).embed_tokens(*args, **kwargs)

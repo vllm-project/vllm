@@ -2,7 +2,7 @@
 import functools
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import triton
@@ -320,6 +320,9 @@ def get_moe_configs(E: int, N: int,
 
     # If no optimized configuration is available, we will use the default
     # configuration
+    logger.warning(
+        ("Using default MoE config. Performance might be sub-optimal! "
+         "Config file not found at %s"), config_file_path)
     return None
 
 
@@ -330,6 +333,7 @@ def get_default_config(
     K: int,
     topk: int,
     dtype: Optional[str],
+    is_marlin: bool,
 ) -> Dict[str, int]:
     config = {
         'BLOCK_SIZE_M': 64,
@@ -337,7 +341,8 @@ def get_default_config(
         'BLOCK_SIZE_K': 32,
         'GROUP_SIZE_M': 8
     }
-    if M <= E:
+    # A heuristic: fused marlin works faster with this config for small M
+    if M <= E or (is_marlin and M <= 32):
         config = {
             'BLOCK_SIZE_M': 16,
             'BLOCK_SIZE_N': 32,
@@ -354,6 +359,7 @@ def try_get_optimal_moe_config(
     dtype: Optional[str],
     M: int,
     override_config: Optional[Dict[str, Any]] = None,
+    is_marlin: bool = False,
 ):
     if override_config:
         config = override_config
@@ -368,7 +374,8 @@ def try_get_optimal_moe_config(
             config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
         else:
             # Else use the default config
-            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype)
+            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
+                                        is_marlin)
     return config
 
 
@@ -395,6 +402,7 @@ def fused_topk(
                                         topk,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
+
     ops.topk_softmax(
         topk_weights,
         topk_ids,
@@ -405,6 +413,7 @@ def fused_topk(
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
     return topk_weights, topk_ids
 
 
@@ -438,7 +447,8 @@ def grouped_topk(hidden_states: torch.Tensor,
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    return topk_weights, topk_ids
+
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
 def get_config_dtype_str(dtype: torch.dtype,
@@ -597,6 +607,7 @@ def fused_moe(
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
+    custom_routing_function: Optional[Callable] = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
@@ -644,9 +655,12 @@ def fused_moe(
         topk_weights, topk_ids = grouped_topk(hidden_states, gating_output,
                                               topk, renormalize,
                                               num_expert_group, topk_group)
-    else:
+    elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
+    else:
+        topk_weights, topk_ids = custom_routing_function(
+            hidden_states, gating_output, topk, renormalize)
 
     return fused_experts(hidden_states,
                          w1,

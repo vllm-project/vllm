@@ -43,7 +43,7 @@ vLLM is flexible and easy to use with:
 * Tensor parallelism and pipeline parallelism support for distributed inference
 * Streaming outputs
 * OpenAI-compatible API server
-* Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, TPU, and AWS Neuron.
+* Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
 * Prefix caching support
 * Multi-lora support
 
@@ -107,6 +107,7 @@ Documentation
    quantization/supported_hardware
    quantization/auto_awq
    quantization/bnb
+   quantization/gguf
    quantization/int8
    quantization/fp8
    quantization/fp8_e5m2_kvcache
@@ -136,6 +137,7 @@ Documentation
    dev/input_processing/model_inputs_index
    dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
+   dev/profiling/profiling_index
 
 .. toctree::
    :maxdepth: 1

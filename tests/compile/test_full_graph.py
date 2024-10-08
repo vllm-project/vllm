@@ -1,20 +1,13 @@
-import os
-
 import pytest
 
+from vllm.compilation.backends import vllm_backend
 
-@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
-def test_full_graph(model):
-    # make sure these models can be captured in full graph mode
-    os.environ["VLLM_TEST_DYNAMO_GRAPH_CAPTURE"] = "1"
+from .utils import TEST_MODELS, check_full_graph_support
 
-    from vllm import LLM, SamplingParams
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-    sampling_params = SamplingParams(temperature=0)
-    llm = LLM(model="meta-llama/Meta-Llama-3-8B")
-    llm.generate(prompts, sampling_params)
+
+@pytest.mark.parametrize("model_info", TEST_MODELS)
+@pytest.mark.parametrize("backend", ["eager", vllm_backend])
+def test_full_graph(model_info, backend):
+    model = model_info[0]
+    model_kwargs = model_info[1]
+    check_full_graph_support(model, model_kwargs, backend, tp_size=1)

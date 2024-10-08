@@ -8,4 +8,4 @@ HAS_TRITON = find_spec("triton") is not None
 
 if not HAS_TRITON:
     logger.info("Triton not installed; certain GPU-related functions"
-                " will be not be available.")
+                " will not be available.")

@@ -99,7 +99,6 @@ echo 'vLLM mypy:'
 mypy --follow-imports skip  # Note that this is less strict than CI
 mypy tests --follow-imports skip
 mypy vllm/attention --follow-imports skip
-mypy vllm/core --follow-imports skip
 mypy vllm/distributed --follow-imports skip
 mypy vllm/engine  --follow-imports skip
 mypy vllm/executor --follow-imports skip
@@ -160,7 +159,7 @@ echo 'vLLM codespell: Done'
 
 # Lint specified files
 lint() {
-    ruff "$@"
+    ruff check "$@"
 }
 
 # Lint files that differ from main branch. Ignores dirs that are not slated
@@ -176,7 +175,7 @@ lint_changed() {
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             ruff
+             ruff check
     fi
 
 }

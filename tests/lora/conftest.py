@@ -65,10 +65,7 @@ def should_do_global_cleanup_after_test(request) -> bool:
     to initialize torch.
     """
 
-    if request.node.get_closest_marker("skip_global_cleanup"):
-        return False
-
-    return True
+    return not request.node.get_closest_marker("skip_global_cleanup")
 
 
 @pytest.fixture(autouse=True)
@@ -200,6 +197,11 @@ def baichuan_lora_files():
 def baichuan_zero_lora_files():
     # all the lora_B weights are initialized to zero.
     return snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init")
+
+
+@pytest.fixture(scope="session")
+def minicpmv_lora_files():
+    return snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
 
 
 @pytest.fixture(scope="session")

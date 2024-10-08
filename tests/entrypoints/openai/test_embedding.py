@@ -3,6 +3,7 @@ import base64
 import numpy as np
 import openai
 import pytest
+import pytest_asyncio
 
 from ...utils import RemoteOpenAIServer
 
@@ -24,10 +25,10 @@ def embedding_server():
         yield remote_server
 
 
-@pytest.mark.asyncio
-@pytest.fixture(scope="module")
-def embedding_client(embedding_server):
-    return embedding_server.get_async_client()
+@pytest_asyncio.fixture
+async def embedding_client(embedding_server):
+    async with embedding_server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio
@@ -128,9 +129,18 @@ async def test_batch_base64_embedding(embedding_client: openai.AsyncOpenAI,
     for data in responses_base64.data:
         decoded_responses_base64_data.append(
             np.frombuffer(base64.b64decode(data.embedding),
-                          dtype="float").tolist())
+                          dtype="float32").tolist())
 
     assert responses_float.data[0].embedding == decoded_responses_base64_data[
         0]
     assert responses_float.data[1].embedding == decoded_responses_base64_data[
         1]
+
+    # Default response is float32 decoded from base64 by OpenAI Client
+    responses_default = await embedding_client.embeddings.create(
+        input=input_texts, model=model_name)
+
+    assert responses_float.data[0].embedding == responses_default.data[
+        0].embedding
+    assert responses_float.data[1].embedding == responses_default.data[
+        1].embedding

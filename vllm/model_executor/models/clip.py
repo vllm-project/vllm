@@ -1,24 +1,32 @@
-"""Minimal implementation of CLIPVisionModel intended to be only used 
+"""Minimal implementation of CLIPVisionModel intended to be only used
 within a vision language model."""
-from array import array
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import CLIPVisionConfig
-from transformers.models.clip.modeling_clip import CLIPAttention
+from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
 from vllm.config import ModelConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal.image import (cached_get_tokenizer,
-                                   repeat_and_pad_image_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   repeat_and_pad_placeholder_tokens)
+from vllm.sequence import SequenceData
+
+try:
+    from xformers import ops as xops
+    USE_XFORMERS_OPS = True
+except ImportError:
+    USE_XFORMERS_OPS = False
 
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -54,11 +62,10 @@ def dummy_seq_data_for_clip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * image_feature_size * num_images
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceData.from_token_counts(
+        (image_token_id, image_feature_size * num_images),
+        (0, seq_len - image_feature_size * num_images),
+    )
 
 
 def dummy_image_for_clip(
@@ -78,13 +85,31 @@ def dummy_image_for_clip(
     return {"image": image if num_images == 1 else [image] * num_images}
 
 
+def dummy_video_for_clip(
+    hf_config: CLIPVisionConfig,
+    num_frames: int,
+    *,
+    image_width_override: Optional[int] = None,
+    image_height_override: Optional[int] = None,
+):
+    pil_frame = dummy_image_for_clip(
+        hf_config,
+        num_images=1,
+        image_width_override=image_width_override,
+        image_height_override=image_height_override)
+    np_frame = np.array(pil_frame["image"])
+    mm_data_per_video = np.repeat([np_frame], num_frames, axis=0)
+    mm_data = {"video": mm_data_per_video}
+    return mm_data
+
+
 def input_processor_for_clip(
     model_config: ModelConfig,
     hf_config: CLIPVisionConfig,
     llm_inputs: LLMInputs,
     *,
     image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
+    image_feature_size_override: Optional[Union[int, List[int]]] = None,
 ):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
@@ -97,17 +122,17 @@ def input_processor_for_clip(
         if isinstance(image_data, Image.Image):
             image_feature_size = get_clip_image_feature_size(hf_config)
         elif isinstance(image_data, torch.Tensor):
-            image_feature_size = image_data.shape[0]
+            num_images, image_feature_size, hidden_size = image_data.shape
         else:
             raise TypeError(f"Invalid image type: {type(image_data)}")
     else:
         image_feature_size = image_feature_size_override
 
-    new_prompt, new_token_ids = repeat_and_pad_image_tokens(
+    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
         tokenizer,
         llm_inputs.get("prompt"),
         llm_inputs["prompt_token_ids"],
-        image_token_id=image_token_id,
+        placeholder_token_id=image_token_id,
         repeat_count=image_feature_size,
     )
 
@@ -160,6 +185,78 @@ class CLIPVisionEmbeddings(nn.Module):
         return embeddings
 
 
+class CLIPParallelAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(
+        self,
+        config: CLIPVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        if self.head_dim * self.num_heads != self.embed_dim:
+            raise ValueError(
+                "embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f" {self.num_heads}).")
+        self.scale = self.head_dim**-0.5
+        self.dropout = config.attention_dropout
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=self.embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=self.num_heads,
+            quant_config=quant_config,
+        )
+
+        self.out_proj = RowParallelLinear(
+            input_size=self.embed_dim,
+            output_size=self.embed_dim,
+            quant_config=quant_config,
+        )
+
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
+
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+        return tensor.view(bsz, seq_len, self.num_heads,
+                           self.head_dim).transpose(1, 2).contiguous()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+    ):
+        """Input shape: Batch x Time x Channel"""
+        bsz, tgt_len, _ = hidden_states.size()
+
+        qkv_states, _ = self.qkv_proj(hidden_states)
+        query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
+
+        query_states = query_states.view(bsz, tgt_len,
+                                         self.num_heads_per_partition,
+                                         self.head_dim)
+        key_states = key_states.view(bsz, tgt_len,
+                                     self.num_heads_per_partition,
+                                     self.head_dim)
+        value_states = value_states.view(bsz, tgt_len,
+                                         self.num_heads_per_partition,
+                                         self.head_dim)
+
+        out = xops.memory_efficient_attention_forward(query_states,
+                                                      key_states,
+                                                      value_states,
+                                                      p=self.dropout,
+                                                      scale=self.scale)
+        out = out.view(bsz, tgt_len, -1)
+        attn_output, _ = self.out_proj(out)
+
+        return attn_output, None
+
+
 class CLIPMLP(nn.Module):
 
     def __init__(self,
@@ -192,7 +289,13 @@ class CLIPEncoderLayer(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
-        self.self_attn = CLIPAttention(config)
+        num_heads = config.num_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
+            self.self_attn = CLIPParallelAttention(config,
+                                                   quant_config=quant_config)
+        else:
+            self.self_attn = CLIPSdpaAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = CLIPMLP(config, quant_config=quant_config)
@@ -217,7 +320,7 @@ class CLIPEncoderLayer(nn.Module):
 
 class CLIPEncoder(nn.Module):
     """
-    Transformer encoder consisting of `config.num_hidden_layers` self 
+    Transformer encoder consisting of `config.num_hidden_layers` self
     attention layers. Each layer is a [`CLIPEncoderLayer`].
 
     Args:
@@ -269,6 +372,19 @@ class CLIPVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override)
 
+        if len(self.encoder.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {config.num_hidden_layers} "
+                f"layers, but you requested {len(self.encoder.layers)} layers."
+            )
+        elif len(self.encoder.layers) == config.num_hidden_layers:
+            self.post_layernorm = nn.LayerNorm(embed_dim,
+                                               eps=config.layer_norm_eps)
+        else:
+            # post_layernorm is unused when we extract intermediate features
+            # In this case, we can skip it to conserve memory
+            self.post_layernorm = None
+
     def forward(
         self,
         pixel_values: torch.Tensor,
@@ -278,7 +394,10 @@ class CLIPVisionTransformer(nn.Module):
         hidden_states = self.pre_layrnorm(hidden_states)
         hidden_states = self.encoder(inputs_embeds=hidden_states)
 
-        return hidden_states
+        if self.post_layernorm is None:
+            return hidden_states
+
+        return self.post_layernorm(hidden_states)
 
 
 class CLIPVisionModel(nn.Module):
@@ -291,34 +410,57 @@ class CLIPVisionModel(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  num_hidden_layers_override: Optional[int] = None):
         super().__init__()
+
+        tp_size = get_tensor_model_parallel_world_size()
+        num_heads = config.num_attention_heads
+        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
+
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override)
 
-    def forward(self, pixel_values: Optional[torch.Tensor] = None):
-
-        return self.vision_model(pixel_values=pixel_values)
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        return self.vision_model(pixel_values)
 
     @property
     def device(self):
         return next(self.parameters()).device
 
+    # (TODO) Add prefix argument for filtering out weights to be loaded
+    #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ] if self.shard_weight else []
         params_dict = dict(self.named_parameters())
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
             # post_layernorm is not needed in CLIPVisionModel
-            if "vision_model.post_layernorm" in name:
+            if (name.startswith("vision_model.post_layernorm")
+                    and self.vision_model.post_layernorm is None):
                 continue
+
             # omit layers when num_hidden_layers_override is set
-            if "vision_model.encoder.layers." in name:
+            if name.startswith("vision_model.encoder.layers"):
                 layer_idx = int(name.split(".")[3])
                 if layer_idx >= layer_count:
                     continue
 
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+
+                param = params_dict[name.replace(weight_name, param_name)]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)

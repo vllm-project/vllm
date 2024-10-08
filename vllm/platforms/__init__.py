@@ -8,8 +8,10 @@ current_platform: Platform
 
 is_tpu = False
 try:
-    import torch_xla.core.xla_model as xm
-    xm.xla_device(devkind="TPU")
+    # While it's technically possible to install libtpu on a non-TPU machine,
+    # this is a very uncommon scenario. Therefore, we assume that libtpu is
+    # installed if and only if the machine has TPUs.
+    import libtpu  # noqa: F401
     is_tpu = True
 except Exception:
     pass
@@ -40,6 +42,22 @@ try:
 except Exception:
     pass
 
+is_xpu = False
+
+try:
+    import torch
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        is_xpu = True
+except Exception:
+    pass
+
+is_cpu = False
+try:
+    from importlib.metadata import version
+    is_cpu = "cpu" in version("vllm")
+except Exception:
+    pass
+
 if is_tpu:
     # people might install pytorch built with cuda but run on tpu
     # so we need to check tpu first
@@ -51,6 +69,12 @@ elif is_cuda:
 elif is_rocm:
     from .rocm import RocmPlatform
     current_platform = RocmPlatform()
+elif is_xpu:
+    from .xpu import XPUPlatform
+    current_platform = XPUPlatform()
+elif is_cpu:
+    from .cpu import CpuPlatform
+    current_platform = CpuPlatform()
 else:
     current_platform = UnspecifiedPlatform()
 

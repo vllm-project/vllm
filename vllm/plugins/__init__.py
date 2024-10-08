@@ -1,4 +1,5 @@
 import logging
+from typing import Callable, Optional, Union
 
 import vllm.envs as envs
 
@@ -29,3 +30,15 @@ def load_general_plugins():
             except Exception:
                 logger.exception("Failed to load general plugin: %s",
                                  plugin.name)
+
+
+_torch_compile_backend: Optional[Union[Callable, str]] = None
+
+
+def set_torch_compile_backend(backend: Union[Callable, str]):
+    global _torch_compile_backend
+    _torch_compile_backend = backend
+
+
+def get_torch_compile_backend() -> Optional[Union[Callable, str]]:
+    return _torch_compile_backend
