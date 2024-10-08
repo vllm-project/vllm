@@ -116,7 +116,7 @@ mypy vllm/model_executor  --follow-imports skip
 mypy vllm/prompt_adapter --follow-imports skip
 mypy vllm/spec_decode --follow-imports skip
 #mypy vllm/transformers_utils  --follow-imports skip
-#mypy vllm/usage  --follow-imports skip
+mypy vllm/usage  --follow-imports skip
 #mypy vllm/vllm_flash_attn  --follow-imports skip
 mypy vllm/worker --follow-imports skip
 echo 'vLLM mypy: Done'
