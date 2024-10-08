@@ -5,6 +5,16 @@ Nginx Loadbalancer
 
 This document shows how to launch multiple vLLM serving containers and use Nginx to act as a load balancer between the servers. 
 
+Table of contents:
+
+#. :ref:`Build Nginx Container <nginxloadbalancer_nginx_build>`
+#. :ref:`Create Simple Nginx Config file <nginxloadbalancer_nginx_conf>`
+#. :ref:`Build vLLM Container <nginxloadbalancer_nginx_vllm_container>`
+#. :ref:`Create Docker Network <nginxloadbalancer_nginx_docker_network>`
+#. :ref:`Launch vLLM Containers <nginxloadbalancer_nginx_launch_container>`
+#. :ref:`Launch Nginx <nginxloadbalancer_nginx_launch_nginx>`
+#. :ref:`Verify That vLLM Servers Are Ready <nginxloadbalancer_nginx_verify_nginx>`
+
 .. _nginxloadbalancer_nginx_build:
 
 Build Nginx Container
@@ -34,6 +44,8 @@ Build the container:
 
     docker build . -f Dockerfile.nginx --tag nginx-lb
 
+.. _nginxloadbalancer_nginx_conf:
+
 Create Simple Nginx Config file
 -------------------------------
 
@@ -57,6 +69,8 @@ Create a file named ``nginx_conf/nginx.conf``. Note that you can add as many ser
         }
     }
 
+.. _nginxloadbalancer_nginx_vllm_container:
+
 Build vLLM Container
 --------------------
 
@@ -71,12 +85,17 @@ Notes:
     sed -i "s|ENTRYPOINT \[\"python3\", \"-m\", \"vllm.entrypoints.openai.api_server\"\]|ENTRYPOINT [\"python3\", \"-m\", \"vllm.entrypoints.openai.api_server\", \"--model\", \"$model\"]|" Dockerfile.cpu
     docker build -f Dockerfile.cpu . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
 
+.. _nginxloadbalancer_nginx_docker_network:
+
 Create Docker Network
 ---------------------
 
 .. code-block:: console
 
     docker network create vllm_nginx
+
+
+.. _nginxloadbalancer_nginx_launch_container:
 
 Launch vLLM Containers
 ----------------------
@@ -96,6 +115,8 @@ Notes:
     docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_0_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm
     docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_1_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm 
 
+.. _nginxloadbalancer_nginx_launch_nginx:
+
 Launch Nginx
 ------------
 
@@ -103,6 +124,8 @@ Launch Nginx
 
     docker run -itd -p 8000:80 --network vllm_nginx -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest
     
+.. _nginxloadbalancer_nginx_verify_nginx:
+
 Verify That vLLM Servers Are Ready
 ----------------------------------
 
