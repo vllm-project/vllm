@@ -125,7 +125,7 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
 
 .. tip::
 
-    Building from source requires a lot compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results. 
+    Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
     For example, you can install `ccache <https://github.com/ccache/ccache>`_ using ``conda install ccache`` or ``apt install ccache`` . 
     As long as ``which ccache`` command can find the ``ccache`` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
 
@@ -190,7 +190,7 @@ Developing on an unsupported OS
 
 vLLM can fully run only on Linux but for development purposes, you can still build it on other systems (for example, macOS), allowing for imports and a more convenient development environment. The binaries will not be compiled and won't work on non-Linux systems. 
 
-Simply disable the `VLLM_TARGET_DEVICE` environment variable before installing:
+Simply disable the ``VLLM_TARGET_DEVICE`` environment variable before installing:
 
 .. code-block:: console
 

@@ -28,7 +28,7 @@ mypy
 # Unit tests
 pytest tests/
 ```
-**Note:** Currently, the repository does not pass the `mypy` tests.
+**Note:** Currently, the repository does not pass the ``mypy`` tests.
 
 ## Contributing Guidelines
 
