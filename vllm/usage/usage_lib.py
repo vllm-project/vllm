@@ -204,7 +204,7 @@ class UsageMessage:
             self._write_to_file(data)
             self._send_to_server(data)
 
-    def _send_to_server(self, data):
+    def _send_to_server(self, data: Dict[str, Any]) -> None:
         try:
             global_http_client = global_http_connection.get_sync_client()
             global_http_client.post(_USAGE_STATS_SERVER, json=data)
@@ -212,7 +212,7 @@ class UsageMessage:
             # silently ignore unless we are using debug log
             logging.debug("Failed to send usage data to server")
 
-    def _write_to_file(self, data):
+    def _write_to_file(self, data: Dict[str, Any]) -> None:
         os.makedirs(os.path.dirname(_USAGE_STATS_JSON_PATH), exist_ok=True)
         Path(_USAGE_STATS_JSON_PATH).touch(exist_ok=True)
         with open(_USAGE_STATS_JSON_PATH, "a") as f:
