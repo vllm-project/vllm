@@ -103,7 +103,7 @@ run_mypy() {
 echo 'vLLM mypy:'
 run_mypy # Note that this is less strict than CI
 run_mypy tests
-#run_mypy vllm/assets
+run_mypy vllm/assets
 run_mypy vllm/attention
 #run_mypy vllm/compilation
 #run_mypy vllm/core
