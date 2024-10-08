@@ -16,7 +16,11 @@ def support_compile_llama_style(cls: type):
     decorator can be used to enable the compilation of the forward method.
     """
 
-    if envs.VLLM_TORCH_COMPILE_LEVEL == CompilationLevel.NO_COMPILATION:
+    # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
+    # will handle the compilation, so we don't need to do anything here.
+    if envs.VLLM_TORCH_COMPILE_LEVEL in [
+            CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
+    ]:
         return cls
 
     # take care of method resolution order
@@ -28,10 +32,7 @@ def support_compile_llama_style(cls: type):
 
     def __init__(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
-        self._use_torch_compile = \
-            envs.VLLM_TORCH_COMPILE_LEVEL > CompilationLevel.NO_COMPILATION
-        if self._use_torch_compile:
-            TorchCompileWrapperWithCustomDispatcher.__init__(self)
+        TorchCompileWrapperWithCustomDispatcher.__init__(self)
 
     cls.__init__ = __init__
 
@@ -47,7 +48,7 @@ def support_compile_llama_style(cls: type):
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
-        if not self._use_torch_compile or torch.compiler.is_compiling():
+        if torch.compiler.is_compiling():
             return self.forward(input_ids, positions, kv_caches, attn_metadata,
                                 intermediate_tensors, inputs_embeds)
 
