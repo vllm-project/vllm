@@ -3,6 +3,7 @@ from typing import List
 
 import pytest
 
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 
 from .conftest import get_text_from_llm_generator
@@ -10,6 +11,16 @@ from .conftest import get_text_from_llm_generator
 # relatively small model with 4k sliding window
 MODEL = "bigcode/starcoder2-3b"
 BLOCK_SIZE = 16
+
+
+@pytest.fixture(scope="module", autouse=False)
+def check_deprecated_block_manager():
+    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
+        "To allow the use of deprecated BlockSpaceManagerV1, set the "
+        "environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
+        "You can run the tests with: "
+        "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest tests/core/test_scheduler.py`"  #noqa
+    )
 
 
 @pytest.mark.parametrize(

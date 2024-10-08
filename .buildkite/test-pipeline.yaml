@@ -91,7 +91,8 @@ steps:
   - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core/test_scheduler.py
   - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/test_chunked_prefill_scheduler.py
   - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/block/e2e/test_correctness.py
-  - pytest -v -s core --ignore=core/block/e2e/test_correctness.py --ignore=core/test_scheduler.py --ignore=core/test_chunked_prefill_scheduler.py
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/block/e2e/test_correctness_sliding_window.py
+  - pytest -v -s core --ignore=core/block/e2e/test_correctness.py --ignore=core/test_scheduler.py --ignore=core/test_chunked_prefill_scheduler.py --ignore=core/block/e2e/test_correctness.py --ignore=core/block/e2e/test_correctness_sliding_window.py
 
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
