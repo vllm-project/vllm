@@ -28,7 +28,7 @@ from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import (WeightLoader, flatten_bn, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 # Result in the max possible feature size (2x2 grid of 336x336px tiles)
@@ -641,5 +641,5 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights)

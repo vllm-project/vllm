@@ -20,7 +20,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import WeightLoader, merge_multimodal_embeddings
+from .utils import AutoWeightsLoader, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -291,5 +291,5 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights)

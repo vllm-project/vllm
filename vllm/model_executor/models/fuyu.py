@@ -41,7 +41,7 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import WeightLoader, flatten_bn, merge_multimodal_embeddings
+from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -347,5 +347,5 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights)

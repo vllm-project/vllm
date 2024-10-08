@@ -25,7 +25,7 @@ from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
-from .utils import (WeightLoader, flatten_bn, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 
@@ -405,5 +405,5 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights)

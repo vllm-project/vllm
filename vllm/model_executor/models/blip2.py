@@ -20,7 +20,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (WeightLoader, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 # We use this internally as placeholders since there is no image token
@@ -686,5 +686,5 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights)

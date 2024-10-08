@@ -31,7 +31,7 @@ from vllm.utils import is_list_of
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (WeightLoader, flatten_bn, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 IMG_START = '<img>'
@@ -608,5 +608,5 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights)

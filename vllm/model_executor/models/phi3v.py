@@ -41,7 +41,7 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (WeightLoader, WeightsMapper, flatten_bn,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
@@ -290,7 +290,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights)
 
 
@@ -690,5 +690,5 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 "model.": "language_model.model.",
             })
 
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights, mapper=hf_to_vllm_mapper)

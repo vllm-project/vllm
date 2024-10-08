@@ -55,7 +55,7 @@ class WeightsMapper:
         return key
 
 
-class WeightLoader:
+class AutoWeightsLoader:
     """
     Helper class to load weights into a :class:`torch.nn.Module`.
 

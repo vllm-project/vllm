@@ -36,7 +36,7 @@ from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (WeightLoader, WeightsMapper, flatten_bn,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, merge_multimodal_embeddings)
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
@@ -498,5 +498,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         hf_to_vllm_mapper = WeightsMapper(
             orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
-        loader = WeightLoader(self, allow_missing_prefixes=["audio_tower."])
+        loader = AutoWeightsLoader(self,
+                                   allow_missing_prefixes=["audio_tower."])
         loader.load_weights(weights, mapper=hf_to_vllm_mapper)

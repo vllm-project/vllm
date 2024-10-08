@@ -21,7 +21,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsPP
 from .qwen2 import Qwen2Model
-from .utils import WeightLoader
+from .utils import AutoWeightsLoader
 
 
 class ReLU(nn.Module):
@@ -119,5 +119,5 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = WeightLoader(self)
+        loader = AutoWeightsLoader(self)
         loader.load_weights(weights)
