@@ -35,8 +35,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_executor.models.interfaces import (supports_lora,
-                                                   supports_multimodal)
+from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs, MultiModalRegistry)
@@ -641,7 +640,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if not mm_data:
             return
 
-        mm_kwargs = self.multi_modal_input_mapper(mm_data)
+        mm_kwargs = self.multi_modal_input_mapper(
+            mm_data,
+            mm_processor_kwargs=seq_group_metadata.mm_processor_kwargs)
         inter_data.multi_modal_inputs = mm_kwargs
 
         # special processing for mrope position deltas.

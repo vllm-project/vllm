@@ -9,6 +9,8 @@ from typing import Union
 from fastapi import Request
 
 from vllm.config import ModelConfig
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          apply_hf_chat_template,
@@ -33,6 +35,7 @@ from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
@@ -203,9 +206,15 @@ class OpenAIServingChat(OpenAIServing):
 
             assert prompt_inputs is not None
 
-            sampling_params = request.to_sampling_params(
-                default_max_tokens=self.max_model_len -
-                len(prompt_inputs["prompt_token_ids"]))
+            sampling_params: Union[SamplingParams, BeamSearchParams]
+            default_max_tokens = self.max_model_len - len(
+                prompt_inputs["prompt_token_ids"])
+            if request.use_beam_search:
+                sampling_params = request.to_beam_search_params(
+                    default_max_tokens)
+            else:
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens)
 
             self._log_inputs(request_id,
                              prompt_inputs,
@@ -227,15 +236,27 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
 
-            result_generator = self.engine_client.generate(
-                engine_inputs,
-                sampling_params,
-                request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=request.priority,
-            )
+            if isinstance(sampling_params, BeamSearchParams):
+                assert isinstance(self.engine_client,
+                                    (AsyncLLMEngine,
+                                    MQLLMEngineClient)), \
+                    "Beam search is only supported with" \
+                    "AsyncLLMEngine and MQLLMEngineClient."
+                result_generator = self.engine_client.beam_search(
+                    engine_inputs['prompt_token_ids'],
+                    request_id,
+                    sampling_params,
+                )
+            else:
+                result_generator = self.engine_client.generate(
+                    engine_inputs,
+                    sampling_params,
+                    request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=request.priority,
+                )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -283,10 +304,6 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
 
-        tool_parsers: List[Optional[ToolParser]] = [
-            self.tool_parser(tokenizer) if self.tool_parser else None
-        ] * num_choices
-
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
         else:
@@ -304,6 +321,21 @@ class OpenAIServingChat(OpenAIServing):
             all_previous_token_ids = [[]] * num_choices
         else:
             previous_texts, all_previous_token_ids = None, None
+
+        # Prepare the tool parser if it's needed
+        try:
+            if tool_choice_auto and self.tool_parser:
+                tool_parsers: List[Optional[ToolParser]] = [
+                    self.tool_parser(tokenizer)
+                ] * num_choices
+            else:
+                tool_parsers = [None] * num_choices
+        except RuntimeError as e:
+            logger.error("Error in tool parser creation: %s", e)
+            data = self.create_streaming_error_response(str(e))
+            yield f"data: {data}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
         try:
             async for res in result_generator:
@@ -685,7 +717,12 @@ class OpenAIServingChat(OpenAIServing):
                     or request.tool_choice is None) and self.enable_auto_tools \
                     and self.tool_parser:
 
-                tool_parser = self.tool_parser(tokenizer)
+                try:
+                    tool_parser = self.tool_parser(tokenizer)
+                except RuntimeError as e:
+                    logger.error("Error in tool parser creation: %s", e)
+                    return self.create_error_response(str(e))
+
                 tool_call_info = tool_parser.extract_tool_calls(
                     output.text, request=request)
                 tools_called = tool_call_info.tools_called

@@ -6,10 +6,9 @@ Using VLMs
 vLLM provides experimental support for Vision Language Models (VLMs). See the :ref:`list of supported VLMs here <supported_vlms>`.
 This document shows you how to run and serve these models using vLLM.
 
-.. important::
-    We are actively iterating on VLM support. Expect breaking changes to VLM usage and development in upcoming releases without prior deprecation.
-
-    We are continuously improving user & developer experience for VLMs. Please `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
+.. note::
+    We are actively iterating on VLM support. See `this RFC <https://github.com/vllm-project/vllm/issues/4194>`_ for upcoming changes,
+    and `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
 
 Offline Inference
 -----------------
@@ -22,10 +21,6 @@ The :class:`~vllm.LLM` class can be instantiated in much the same way as languag
 .. code-block:: python
 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf")
-
-.. note::
-    We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
-    the above snippet. Specifically, ``image_feature_size`` can no longer be specified as we now calculate that internally for each model.
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptType`:
 
@@ -139,6 +134,33 @@ Instead of passing in a single image, you can pass in a list of images.
         print(generated_text)
 
 A code example can be found in `examples/offline_inference_vision_language_multi_image.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language_multi_image.py>`_.
+
+Multi-image input can be extended to perform video captioning. We show this with `Qwen2-VL <https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct>`_ as it supports videos: 
+
+.. code-block:: python
+
+    # Specify the maximum number of frames per video to be 4. This can be changed. 
+    llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
+
+    # Create the request payload.
+    video_frames = ... # load your video making sure it only has the number of frames specified earlier.
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this set of frames. Consider the frames to be a part of the same video."},
+        ],
+    }
+    for i in range(len(video_frames)):
+        base64_image = encode_image(video_frames[i]) # base64 encoding.
+        new_image = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        message["content"].append(new_image)
+
+    # Perform inference and log output.
+    outputs = llm.chat([message])
+    
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
 
 Online Inference
 ----------------

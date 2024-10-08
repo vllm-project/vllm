@@ -146,7 +146,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
-    multi_step_stream_outputs: bool = False
+    multi_step_stream_outputs: bool = True
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
@@ -184,6 +184,8 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -607,13 +609,17 @@ class EngineArgs:
 
         parser.add_argument(
             '--multi-step-stream-outputs',
-            action='store_true',
-            help='If True, then multi-step will stream outputs for every step')
+            action=StoreBoolean,
+            default=EngineArgs.multi_step_stream_outputs,
+            nargs="?",
+            const="True",
+            help='If False, then multi-step will stream outputs at the end '
+            'of all steps')
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
             default=EngineArgs.scheduler_delay_factor,
-            help='Apply a delay (of delay factor multiplied by previous'
+            help='Apply a delay (of delay factor multiplied by previous '
             'prompt latency) before scheduling next prompt.')
         parser.add_argument(
             '--enable-chunked-prefill',
@@ -636,7 +642,7 @@ class EngineArgs:
             type=nullable_str,
             choices=[*QUANTIZATION_METHODS, None],
             default=EngineArgs.speculative_model_quantization,
-            help='Method used to quantize the weights of speculative model.'
+            help='Method used to quantize the weights of speculative model. '
             'If None, we first check the `quantization_config` '
             'attribute in the model config file. If that is '
             'None, we assume the model weights are not '
