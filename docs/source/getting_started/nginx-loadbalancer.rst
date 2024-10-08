@@ -8,7 +8,7 @@ This document shows how to launch multiple vLLM serving containers and use Nginx
 .. _nginxloadbalancer_nginx_build:
 
 Build Nginx Container
-------------
+---------------------
 
 This guide assumes that you have just cloned the vLLM project and you're currently in the vllm root directory.
 
@@ -35,7 +35,7 @@ Build the container:
     docker build . -f Dockerfile.nginx --tag nginx-lb
 
 Create Simple Nginx Config file
-------------
+-------------------------------
 
 Create a file named ``nginx_conf/nginx.conf``. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another ``server vllmN:8000 max_fails=3 fail_timeout=10000s;`` entry to ``upstream backend``.
 
@@ -58,7 +58,7 @@ Create a file named ``nginx_conf/nginx.conf``. Note that you can add as many ser
     }
 
 Build vLLM Container
-------------
+--------------------
 
 Notes:
 
@@ -72,14 +72,14 @@ Notes:
     docker build -f Dockerfile.cpu . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
 
 Create Docker Network
-------------
+---------------------
 
 .. code-block:: console
 
     docker network create vllm_nginx
 
 Launch vLLM Containers
-------------
+----------------------
 
 Notes:
 
@@ -104,7 +104,7 @@ Launch Nginx
     docker run -itd -p 8000:80 --network vllm_nginx -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest
     
 Verify That vLLM Servers Are Ready
------------
+----------------------------------
 
 .. code-block:: console
     
