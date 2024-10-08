@@ -112,7 +112,7 @@ run_mypy vllm/engine
 #run_mypy vllm/entrypoints
 run_mypy vllm/executor
 #run_mypy vllm/inputs
-#run_mypy vllm/logging
+run_mypy vllm/logging
 run_mypy vllm/lora
 run_mypy vllm/model_executor
 #run_mypy vllm/multimodal
