@@ -26,8 +26,8 @@ def test_compile_correctness(model_info, pp_size, tp_size):
     # inductor will change the output, so we cannot compare them.
     all_envs: List[Optional[Dict[str, str]]] = [{
         "VLLM_TORCH_COMPILE_LEVEL":
-        str(i)
-    } for i in [
+        str(level)
+    } for level in [
         CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_ONCE,
         CompilationLevel.DYNAMO_AS_IS
     ]]
