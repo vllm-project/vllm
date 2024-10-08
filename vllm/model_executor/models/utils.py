@@ -72,11 +72,13 @@ class AutoWeightsLoader:
         self,
         module: nn.Module,
         *,
+        ignore_prefixes: Optional[List[str]] = None,
         allow_unexpected_prefixes: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
 
         self.module = module
+        self.ignore_prefixes = ignore_prefixes or []
         self.allow_unexpected_prefixes = allow_unexpected_prefixes or []
 
     def _groupby_prefix(
@@ -112,6 +114,11 @@ class AutoWeightsLoader:
     ) -> None:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
+
+            ignore_weight = any(
+                weight_qualname.startswith(p) for p in self.ignore_prefixes)
+            if ignore_weight:
+                continue
 
             if weight_name != "":
                 allow_unexpected = any(

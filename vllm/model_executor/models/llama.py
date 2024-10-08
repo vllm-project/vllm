@@ -552,8 +552,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            allow_unexpected_prefixes=(None if self.config.tie_word_embeddings
-                                       else ["lm_head."]),
+            ignore_prefixes=(["lm_head."]
+                             if self.config.tie_word_embeddings else None),
         )
         loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
