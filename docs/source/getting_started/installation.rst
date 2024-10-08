@@ -85,7 +85,7 @@ Build from source
 ==================
 
 Python-only build (without compilation)
---------------------------------------
+----------------------------------------
 
 If you only need to change Python code, you can simply build vLLM without compilation.
 
