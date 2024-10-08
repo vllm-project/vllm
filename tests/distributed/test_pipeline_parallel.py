@@ -199,6 +199,7 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "meta-llama/Meta-Llama-3-8B",
     "ibm/PowerLM-3b",
+    "microsoft/Phi-3-mini-4k-instruct",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
