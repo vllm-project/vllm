@@ -134,7 +134,25 @@ Instead of passing in a single image, you can pass in a list of images.
         print(generated_text)
 
 A code example can be found in `examples/offline_inference_vision_language_multi_image.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language_multi_image.py>`_. Multi-image input can be extended to 
-perform video captioning. Refer to [this resource](https://github.com/vllm-project/vllm/issues/9128#issuecomment-2399642038) for a full example. 
+perform video captioning. We show this with [Qwen-VL2]https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos: 
+
+.. code-block:: python
+    # Specify the maximum number of frames per video to be 4. This can be changed. 
+    llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
+
+    # Create the request payload.
+    video_frames = ... # load your video making sure it only has the number of frames specified earlier.
+    messages = [{"role": "user", "content": []}]
+    messages[0]["content"].append({"type": "text", "text": "Describe this set of frames. Consider the frames to be a part of the same video."})
+    for i in range(len(video_frames)):
+        base64_image = encode_image(video_frames[i]) # base64 encoding.
+
+    # Perform inference and log output.
+    outputs = llm.chat(messages)
+    
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
 
 Online Inference
 ----------------
