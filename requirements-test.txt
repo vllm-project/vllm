@@ -1,6 +1,3 @@
-# Needed for Ray accelerated DAG tests
--r requirements-adag.txt
-
 # testing
 pytest
 tensorizer>=2.9.0
@@ -13,16 +10,18 @@ pytest-shard
 awscli
 einops # required for MPT, qwen-vl and Mamba
 httpx
-librosa # required for audio test
+librosa # required for audio tests
+opencv-python # required for video tests
 peft
 requests
-ray
+ray[adag]==2.35
 sentence-transformers # required for embedding
 soundfile # required for audio test
 compressed-tensors==0.4.0 # required for compressed-tensors
 timm # required for internvl test
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
+datamodel_code_generator # required for minicpm3 test
 
 # TODO: Add this after fully implementing llava(mantis)
 # git+https://github.com/TIGER-AI-Lab/Mantis.git # required for llava(mantis) test
@@ -31,5 +30,5 @@ matplotlib # required for qwen-vl test
 aiohttp
 
 # quantization
-bitsandbytes==0.42.0
+bitsandbytes>=0.44.0
 buildkite-test-collector==0.1.8

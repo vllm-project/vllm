@@ -1,4 +1,5 @@
 import dataclasses
+import itertools
 from typing import Any, Dict, List, Optional, Tuple, Type, cast
 
 import torch
@@ -13,18 +14,21 @@ from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
+from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
+                             MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
-                                      ModelInputForGPUWithSamplingMetadata)
+                                      ModelInputForGPUWithSamplingMetadata,
+                                      _get_graph_batch_size)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
@@ -50,6 +54,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
             "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -178,27 +183,43 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
 
-        model_executable = self.model
+        if (model_input.attn_metadata is not None
+                and model_input.attn_metadata.prefill_metadata is None
+                and model_input.attn_metadata.decode_metadata.use_cuda_graph):
+            assert model_input.input_tokens is not None
+            graph_batch_size = model_input.input_tokens.shape[0]
+            model_executable = self.graph_runners[
+                model_input.virtual_engine][graph_batch_size]
+        else:
+            model_executable = self.model
 
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
-        hidden_or_intermediate_states = model_executable(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            encoder_input_ids=model_input.encoder_input_tokens,
-            encoder_positions=model_input.encoder_input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=model_input.attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            **seqlen_agnostic_kwargs)
+
+        multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+        with set_forward_context(model_input.attn_metadata):
+            hidden_or_intermediate_states = model_executable(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                encoder_input_ids=model_input.encoder_input_tokens,
+                encoder_positions=model_input.encoder_input_positions,
+                kv_caches=kv_caches,
+                attn_metadata=model_input.attn_metadata,
+                intermediate_tensors=intermediate_tensors,
+                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                             device=self.device),
+                **seqlen_agnostic_kwargs)
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
 
         if not self.is_driver_worker:
             return []
+
+        if model_input.async_callback is not None:
+            model_input.async_callback()
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
@@ -231,14 +252,12 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
-
         (
             attn_metadata,
             encoder_input_tokens_tensor,
             encoder_input_positions_tensor,
         ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
                                                        model_input))
-
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
         # Frozen dataclass fields cannot be modified, so use
@@ -251,11 +270,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_input_positions=encoder_input_positions_tensor,
         )
 
+        generators = self.get_generators(finished_requests_ids)
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
                                                      model_input.seq_lens,
                                                      model_input.query_lens,
                                                      self.device,
-                                                     self.pin_memory)
+                                                     self.pin_memory,
+                                                     generators=generators)
         is_prompt = (seq_group_metadata_list[0].is_prompt
                      if seq_group_metadata_list else None)
         return dataclasses.replace(model_input,
@@ -277,8 +298,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config)
         if max_mm_tokens > 0:
-            raise NotImplementedError(
-                "Multi-modal encoder-decoder models are not supported yet")
+            logger.info("Starting profile run for multi-modal models.")
 
         batch_size = 0
         for group_id in range(max_num_seqs):
@@ -286,30 +306,52 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, _ = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
+            decoder_seq_data, decoder_dummy_multi_modal_data \
+                = self.input_registry.dummy_data_for_profiling(
+                    self.model_config,
                                           seq_len,
-                                          self.mm_registry)
+                                          self.mm_registry,
+                                          is_encoder_data=False)
+            encoder_seq_data, encoder_dummy_multi_modal_data \
+                = self.input_registry.dummy_data_for_profiling(
+                    self.model_config,
+                                         seq_len,
+                                         self.mm_registry,
+                                         is_encoder_data=True)
 
             # Having more tokens is over-conservative but otherwise fine
-            assert len(seq_data.prompt_token_ids) >= seq_len, (
+            assert len(decoder_seq_data.prompt_token_ids) >= seq_len, (
                 f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(seq_data.prompt_token_ids)}")
+                f"but got: {len(decoder_seq_data.prompt_token_ids)}")
+
+            assert decoder_dummy_multi_modal_data is None or \
+            encoder_dummy_multi_modal_data is None, (
+                "Multi-modal data can't be provided in both encoder and decoder"
+            )
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: seq_data},
+                seq_data={group_id: decoder_seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                encoder_seq_data=seq_data,
+                encoder_seq_data=encoder_seq_data,
                 cross_block_table=None,
+                multi_modal_data=decoder_dummy_multi_modal_data
+                or encoder_dummy_multi_modal_data,
             )
             seqs.append(seq)
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        kv_caches = [
+            torch.tensor([], dtype=torch.float32, device=self.device)
+            for _ in range(num_layers)
+        ]
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
@@ -424,24 +466,42 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_input_tokens_tensor = self._empty_long_tensor()
             encoder_input_positions_tensor = self._empty_long_tensor()
             cross_slot_mapping_tensor = self._empty_long_tensor()
-
             # Extract cross-attention block tables &
             # seq len from each sequence group metadata.
             # Cross-attention block tables are empty
             # during vLLM memory profiling.
             cross_block_tables = []
             for seq_group_metadata in seq_group_metadata_list:
-                encoder_seq_lens.append(
-                    seq_group_metadata.encoder_seq_data.get_len())
-                cross_block_table = seq_group_metadata.cross_block_table
-                cross_block_tables.append([] if (
-                    cross_block_table is None) else cross_block_table)
+                for _ in range(len(seq_group_metadata.seq_data)):
+                    encoder_seq_lens.append(
+                        seq_group_metadata.encoder_seq_data.get_len())
+                    cross_block_table = seq_group_metadata.cross_block_table
+                    cross_block_tables.append([] if (
+                        cross_block_table is None) else cross_block_table)
 
-            # Convert cross-attention block tables to encoder input tensor
+            if (model_input.attn_metadata is not None
+                    and model_input.attn_metadata.use_cuda_graph):
+                # We will be using CUDA graph replay for this decode.
+                max_len_of_block_table = self.get_max_block_per_batch()
+                batch_size = len(encoder_seq_lens)
+                graph_batch_size = _get_graph_batch_size(batch_size)
+                assert graph_batch_size >= batch_size
+                cuda_graph_pad_size = graph_batch_size - batch_size
+                # extend the cross_block_tables and encoder_seq_lens to match
+                # the graph_batch_size.
+                cross_block_tables.extend([[]
+                                           for _ in range(cuda_graph_pad_size)
+                                           ])
+                encoder_seq_lens.extend(
+                    itertools.repeat(1, cuda_graph_pad_size))
+
+            else:
+                max_len_of_block_table = max(
+                    len(block_table) for block_table in cross_block_tables)
+
             cross_block_tables = make_tensor_with_pad(
                 cross_block_tables,
-                max_len=max(
-                    len(block_table) for block_table in cross_block_tables),
+                max_len=max_len_of_block_table,
                 pad=0,
                 dtype=torch.int32,
                 device=self.device,

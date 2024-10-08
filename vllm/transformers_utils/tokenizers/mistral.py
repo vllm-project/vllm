@@ -16,7 +16,7 @@ from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.chat_utils import ConversationMessage
+    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
 @dataclass
@@ -45,26 +45,25 @@ class MistralTokenizer:
     def __init__(self, tokenizer: PublicMistralTokenizer) -> None:
         self.mistral = tokenizer
         self.instruct = tokenizer.instruct_tokenizer
-        self.tokenizer = tokenizer.instruct_tokenizer.tokenizer
 
-        self.vocab_size = len(self.tokenizer.vocab())
-
-        assert isinstance(self.tokenizer,
-                          (Tekkenizer, SentencePieceTokenizer)), type(
-                              self.tokenizer)
-
-        if (is_tekken := isinstance(self.tokenizer, Tekkenizer)):
+        tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
+        if isinstance(tokenizer_, Tekkenizer):
             # Make sure special tokens will not raise
-            self.tokenizer.special_token_policy = SpecialTokenPolicy.IGNORE
+            tokenizer_.special_token_policy = SpecialTokenPolicy.IGNORE
 
-        self._is_tekken = is_tekken
+            self._vocab = {
+                token: idx
+                for idx, token in enumerate(tokenizer_.vocab())
+            }
+        elif isinstance(tokenizer_, SentencePieceTokenizer):
+            self._vocab = {
+                token: idx
+                for idx, token in enumerate(tokenizer_.vocab())
+            }
+        else:
+            raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
 
-        # the following attributes are set to fit VLLM's design
-        self.is_fast = True
-        self.chat_template = True
-        self.all_special_ids: List[Any] = []
-        self.all_special_tokens: List[Any] = []
-        self.all_special_tokens_extended: List[Any] = []
+        self.tokenizer = tokenizer_
 
     @classmethod
     def from_pretrained(cls,
@@ -102,6 +101,38 @@ class MistralTokenizer:
                                          revision=revision)
         return tokenizer_file
 
+    # the following attributes are set to fit VLLM's design
+    @property
+    def all_special_tokens_extended(self) -> List[str]:
+        return []
+
+    @property
+    def all_special_tokens(self) -> List[str]:
+        return []
+
+    @property
+    def all_special_ids(self) -> List[int]:
+        return []
+
+    @property
+    def bos_token_id(self) -> int:
+        return self.tokenizer.bos_id
+
+    @property
+    def eos_token_id(self) -> int:
+        return self.tokenizer.eos_id
+
+    @property
+    def is_fast(self) -> bool:
+        return True
+
+    @property
+    def vocab_size(self) -> int:
+        return len(self._vocab)
+
+    def __len__(self) -> int:
+        return self.vocab_size
+
     def __call__(
         self,
         prompt: str,
@@ -117,48 +148,67 @@ class MistralTokenizer:
 
         return Encoding(input_ids=input_ids)
 
-    def get_added_vocab(self) -> List[str]:
+    def get_vocab(self) -> Dict[str, int]:
+        return self._vocab
+
+    def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
-        return []
+        return {}
 
     def encode(self, prompt: str) -> List[int]:
-        # `encode ` should only be used for prompt completion
+        # `encode` should only be used for prompt completion
         # it should never be used for chat_completion.
         # For chat completion use `apply_chat_template`
         return self.tokenizer.encode(prompt, bos=True, eos=False)
 
     def apply_chat_template(self,
-                            conversation: List["ConversationMessage"],
+                            messages: List["ChatCompletionMessageParam"],
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
-        assert tools is None, "`tools` are not yet supported."
 
-        request = ChatCompletionRequest(
-            messages=conversation)  # type: ignore[type-var]
+        request = ChatCompletionRequest(messages=messages,
+                                        tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt
         return encoded.tokens
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
-        if self._is_tekken:
-            return "".join(tokens)
+        if isinstance(self.tokenizer, Tekkenizer):
+            tokens = [
+                t for t in tokens
+                if t not in self.tokenizer._all_special_tokens
+            ]
+
+            if any(isinstance(t, bytes) for t in tokens):
+                # we need to encode and decode all tokens again
+                shift = self.tokenizer.num_special_tokens
+                byte_tokens = [
+                    t.encode("utf-8") if not isinstance(t, bytes) else t
+                    for t in tokens
+                ]
+                ids = [
+                    self.tokenizer._tekken_token2id_nospecial[t] + shift
+                    for t in byte_tokens
+                ]
+                decoded = self.tokenizer.decode(ids)
+            else:
+                decoded = "".join(tokens)
         else:
-            return self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+            decoded = self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+
+        return decoded
 
     def decode(self, ids: Union[List[int], int]) -> str:
         if isinstance(ids, int):
             ids = [ids]
         return self.tokenizer.decode(ids)
 
-    @property
-    def eos_token_id(self):
-        return self.tokenizer.eos_id
-
     def convert_ids_to_tokens(
-            self,
-            ids: List[int],
-            skip_special_tokens: Optional[bool] = True) -> List[str]:
+        self,
+        ids: List[int],
+        skip_special_tokens: bool = True,
+    ) -> List[str]:
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
@@ -169,7 +219,11 @@ class MistralTokenizer:
                               self.tokenizer)
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
-        return tokens
 
-    def __len__(self):
-        return self.vocab_size
+        if any(t.strip() == "�" for t in tokens):
+            # if any stripped decoded token is undefined
+            # because it's invalid unicode then pass bytes
+            # See: https://github.com/vllm-project/vllm/pull/8640
+            tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
+
+        return tokens

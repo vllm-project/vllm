@@ -2,9 +2,9 @@
 within a vision language model."""
 
 import math
-from array import array
 from typing import Iterable, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from PIL import Image
 from torch import nn
@@ -24,7 +24,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.sequence import SequenceData
 
 try:
     from xformers import ops as xops
@@ -67,11 +67,10 @@ def dummy_seq_data_for_siglip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [image_token_id]) * image_feature_size
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                       [0]) * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
+    return SequenceData.from_token_counts(
+        (image_token_id, image_feature_size * num_images),
+        (0, seq_len - image_feature_size * num_images),
+    )
 
 
 def dummy_image_for_siglip(
@@ -89,6 +88,24 @@ def dummy_image_for_siglip(
 
     image = Image.new("RGB", (width, height), color=0)
     return {"image": image if num_images == 1 else [image] * num_images}
+
+
+def dummy_video_for_siglip(
+    hf_config: SiglipVisionConfig,
+    num_frames: int,
+    *,
+    image_width_override: Optional[int] = None,
+    image_height_override: Optional[int] = None,
+):
+    pil_frame = dummy_image_for_siglip(
+        hf_config,
+        num_images=1,
+        image_width_override=image_width_override,
+        image_height_override=image_height_override)
+    np_frame = np.array(pil_frame["image"])
+    mm_data_per_video = np.repeat([np_frame], num_frames, axis=0)
+    mm_data = {"video": mm_data_per_video}
+    return mm_data
 
 
 def input_processor_for_siglip(
@@ -110,7 +127,7 @@ def input_processor_for_siglip(
         if isinstance(image_data, Image.Image):
             image_feature_size = get_siglip_image_feature_size(hf_config)
         elif isinstance(image_data, torch.Tensor):
-            image_feature_size = image_data.shape[0]
+            num_images, image_feature_size, hidden_size = image_data.shape
         else:
             raise TypeError(f"Invalid image type: {type(image_data)}")
     else:
@@ -229,7 +246,7 @@ class SiglipParallelAttention(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -295,7 +312,7 @@ class SiglipMLP(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -449,8 +466,20 @@ class SiglipVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-        self.post_layernorm = nn.LayerNorm(embed_dim,
-                                           eps=config.layer_norm_eps)
+
+        if len(self.encoder.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {config.num_hidden_layers} "
+                f"layers, but you requested {len(self.encoder.layers)} layers."
+            )
+        elif len(self.encoder.layers) == config.num_hidden_layers:
+            self.post_layernorm = nn.LayerNorm(embed_dim,
+                                               eps=config.layer_norm_eps)
+        else:
+            # post_layernorm is unused when we extract intermediate features
+            # In this case, we can skip it to conserve memory
+            self.post_layernorm = None
+
         self.use_head = (True if not hasattr(config, "vision_use_head") else
                          config.vision_use_head)
         if self.use_head:
@@ -469,8 +498,10 @@ class SiglipVisionTransformer(nn.Module):
 
         encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
-        last_hidden_state = self.post_layernorm(encoder_outputs)
+        if self.post_layernorm is None:
+            return encoder_outputs
 
+        last_hidden_state = self.post_layernorm(encoder_outputs)
         # TODO: add this back when pooled_output is used in inference
         # if self.use_head:
         # pooled_output = self.head(last_hidden_state)
@@ -489,6 +520,7 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
     ):
         super().__init__()
+
         num_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
         self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
@@ -513,17 +545,37 @@ class SiglipVisionModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ] if self.shard_weight else []
         params_dict = dict(self.named_parameters())
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
+            # post_layernorm is optional in SiglipVisionModel
+            if (name.startswith("vision_model.post_layernorm")
+                    and self.vision_model.post_layernorm is None):
+                continue
+
             # omit layers when num_hidden_layers_override is set
-            if "vision_model.encoder.layers." in name:
+            if name.startswith("vision_model.encoder.layers"):
                 layer_idx = int(name.split(".")[3])
                 if layer_idx >= layer_count:
                     continue
 
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+
+                param = params_dict[name.replace(weight_name, param_name)]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)

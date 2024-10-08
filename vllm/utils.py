@@ -4,7 +4,10 @@ import contextlib
 import datetime
 import enum
 import gc
+import inspect
+import ipaddress
 import os
+import random
 import socket
 import subprocess
 import sys
@@ -12,6 +15,7 @@ import tempfile
 import threading
 import uuid
 import warnings
+import weakref
 from asyncio import FIRST_COMPLETED, ensure_future
 from functools import lru_cache, partial, wraps
 from platform import uname
@@ -31,6 +35,7 @@ from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -70,10 +75,6 @@ STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
                                  "currently supported with encoder/"
                                  "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_CUDAGRAPH = ("CUDAGraph is not "
-                                  "currently supported with encoder/"
-                                  "decoder models.")
-
 STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers is the only backend "
                                 "currently supported with encoder/"
                                 "decoder models.")
@@ -81,6 +82,9 @@ STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers is the only backend "
 STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
                                        "currently supported with encoder/"
                                        "decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_CPU = ("CPU is not currently supported with "
+                            "encoder/decoder models.")
 
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
@@ -94,9 +98,9 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
     "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
-    "STR_NOT_IMPL_ENC_DEC_CUDA_GRAPH": STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
     "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
+    "STR_NOT_IMPL_ENC_DEC_CPU": STR_NOT_IMPL_ENC_DEC_CPU
 }
 
 # Constants related to forcing the attention backend selection
@@ -114,6 +118,9 @@ STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+GB_bytes = 1_000_000_000
+"""The number of bytes in one gigabyte (GB)."""
 
 GiB_bytes = 1 << 30
 """The number of bytes in one gibibyte (GiB)."""
@@ -265,7 +272,7 @@ class LRUCache(Generic[T]):
 
 
 class PyObjectCache:
-    """Used to cache python objects to avoid object allocations 
+    """Used to cache python objects to avoid object allocations
     across scheduler iterations.
     """
 
@@ -284,7 +291,7 @@ class PyObjectCache:
             self._obj_cache.append(self._obj_builder())
 
     def get_object(self):
-        """Returns a pre-allocated cached object. If there is not enough 
+        """Returns a pre-allocated cached object. If there is not enough
         objects, then the cache size will double.
         """
         if self._index >= len(self._obj_cache):
@@ -371,6 +378,22 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
+
+
+def seed_everything(seed: int) -> None:
+    """
+    Set the seed of each random module.
+
+    Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    if current_platform.is_cuda_alike():
+        torch.cuda.manual_seed_all(seed)
+
+    if is_xpu():
+        torch.xpu.manual_seed_all(seed)
 
 
 def random_uuid() -> str:
@@ -481,6 +504,15 @@ async def merge_async_iterators(
                 await it.aclose()
 
 
+async def collect_from_async_generator(
+        iterator: AsyncGenerator[T, None]) -> List[T]:
+    """Collect all items from an async generator into a list."""
+    items = []
+    async for item in iterator:
+        items.append(item)
+    return items
+
+
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
     if host_ip:
@@ -512,6 +544,14 @@ def get_ip() -> str:
         " VLLM_HOST_IP or HOST_IP.",
         stacklevel=2)
     return "0.0.0.0"
+
+
+def is_valid_ipv6_address(address: str) -> bool:
+    try:
+        ipaddress.IPv6Address(address)
+        return True
+    except ValueError:
+        return False
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
@@ -634,9 +674,7 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -678,9 +716,7 @@ def create_kv_caches_with_random(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
 
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -720,7 +756,8 @@ def create_kv_caches_with_random(
 
 @lru_cache
 def print_warning_once(msg: str) -> None:
-    logger.warning(msg)
+    # Set the stacklevel to 2 to print the caller's line info
+    logger.warning(msg, stacklevel=2)
 
 
 @lru_cache(maxsize=None)
@@ -743,14 +780,14 @@ def is_pin_memory_available() -> bool:
     return True
 
 
-class CudaMemoryProfiler:
+class DeviceMemoryProfiler:
 
     def __init__(self, device: Optional[torch.types.Device] = None):
         self.device = device
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        if torch.cuda.is_available():
+        if current_platform.is_cuda_alike():
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
         elif is_xpu():
@@ -830,15 +867,6 @@ def async_tensor_h2d(
     """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
     return t.to(device=target_device, non_blocking=True)
-
-
-def maybe_expand_dim(tensor: torch.Tensor,
-                     target_dims: int,
-                     size: int = 1) -> torch.Tensor:
-    """Expand the tensor to the target_dims."""
-    if tensor.ndim < target_dims:
-        tensor = tensor.view(-1, *([size] * (target_dims - tensor.ndim)))
-    return tensor
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
@@ -1065,7 +1093,7 @@ def _cuda_device_count_stateless(
 def cuda_device_count_stateless() -> int:
     """Get number of CUDA devices, caching based on the value of
     CUDA_VISIBLE_DEVICES at the time of call.
-    
+
     This should be used instead of torch.cuda.device_count()
     unless CUDA_VISIBLE_DEVICES has already been set to the desired
     value."""
@@ -1073,6 +1101,27 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+def cuda_is_initialized() -> bool:
+    """Check if CUDA is initialized."""
+    if not torch.cuda._is_compiled():
+        return False
+    return torch.cuda.is_initialized()
+
+
+def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
+    """Make an instance method that weakly references
+    its associated instance and no-ops once that
+    instance is collected."""
+    ref = weakref.ref(bound_method.__self__)  # type: ignore[attr-defined]
+    unbound = bound_method.__func__  # type: ignore[attr-defined]
+
+    def weak_bound(*args, **kwargs) -> None:
+        if inst := ref():
+            unbound(inst, *args, **kwargs)
+
+    return weak_bound
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
@@ -1117,10 +1166,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
     def _pull_args_from_config(args: List[str]) -> List[str]:
         """Method to pull arguments specified in the config file
         into the command-line args variable.
-        
-        The arguments in config file will be inserted between 
+
+        The arguments in config file will be inserted between
         the argument list.
-        
+
         example:
         ```yaml
             port: 12323
@@ -1131,21 +1180,21 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             --config config.yaml -tp 2
         $: args = [
             "serve,chat,complete",
-            "facebook/opt-12B", 
-            '--config', 'config.yaml', 
+            "facebook/opt-12B",
+            '--config', 'config.yaml',
             '-tp', '2'
         ]
         $: args = [
             "serve,chat,complete",
-            "facebook/opt-12B", 
-            '--port', '12323', 
-            '--tensor-parallel-size', '4', 
+            "facebook/opt-12B",
+            '--port', '12323',
+            '--tensor-parallel-size', '4',
             '-tp', '2'
             ]
         ```
 
         Please note how the config args are inserted after the sub command.
-        this way the order of priorities is maintained when these are args 
+        this way the order of priorities is maintained when these are args
         parsed by super().
         """
         assert args.count(
@@ -1161,17 +1210,27 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = FlexibleArgumentParser._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
+        # followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+        if args[0] == "serve":
+            if index == 1:
+                raise ValueError(
+                    "No model_tag specified! Please check your command-line"
+                    " arguments.")
+            args = [args[0]] + [
+                args[1]
+            ] + config_args + args[2:index] + args[index + 2:]
+        else:
+            args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
         return args
 
     @staticmethod
     def _load_config_file(file_path: str) -> List[str]:
-        """Loads a yaml file and returns the key value pairs as a 
+        """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
             port: 12323
@@ -1182,7 +1241,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 '--port': '12323',
                 '--tensor-parallel-size': '4'
             ]
-        
+
         """
 
         extension: str = file_path.split('.')[-1]
@@ -1218,9 +1277,96 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+def supports_kw(callable: Callable[..., object], kw_name: str) -> bool:
+    params = inspect.signature(callable).parameters
+    if kw_name in params:
+        return True
+
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD
+               for param in params.values())
+
+
+def get_allowed_kwarg_only_overrides(
+    callable: Callable[..., object],
+    overrides: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Given a callable which has one or more keyword only params and a dict
+    mapping param names to values, drop values that can be not be kwarg
+    expanded to overwrite one or more keyword-only args. This is used in a
+    few places to handle custom processor overrides for multimodal models,
+    e.g., for profiling when processor options provided by the user
+    may affect the number of mm tokens per instance.
+
+    Args:
+        callable: Callable which takes 0 or more keyword only arguments.
+        overrides: Potential overrides to be used when invoking the callable.
+
+    Returns:
+        Dictionary containing the kwargs to be leveraged which may be used
+        to overwrite one or more keyword only arguments when invoking the
+        callable.
+    """
+    if not overrides:
+        return {}
+
+    allowed_override_names = [
+        name for name, param in inspect.signature(callable).parameters.items()
+        if param.kind == inspect.Parameter.KEYWORD_ONLY
+    ]
+
+    # Drop any mm_processor_kwargs provided by the user that are
+    # not kwarg names accepted by the provided input processor.
+    filtered_overrides = {
+        kwarg_name: val
+        for kwarg_name, val in overrides.items()
+        if kwarg_name in allowed_override_names
+    }
+
+    # If anything is dropped, log a warning
+    dropped_keys = overrides.keys() - filtered_overrides.keys()
+    if dropped_keys:
+        logger.warning(
+            "The following intended overrides are not keyword-only args "
+            "and and will be dropped: %s", dropped_keys)
+
+    return filtered_overrides
+
+
 # Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
 # In particular, the FakeScalarType is not supported for earlier versions of
 # PyTorch which breaks dynamo for any ops registered using ScalarType.
 def supports_dynamo() -> bool:
     base_torch_version = Version(Version(torch.__version__).base_version)
     return base_torch_version >= Version("2.4.0")
+
+
+# Some backends use pytorch version < 2.4.0 which doesn't
+# support `torch.library.custom_op`.
+def supports_custom_op() -> bool:
+    return hasattr(torch.library, "custom_op")
+
+
+class AtomicCounter:
+    """An atomic, thread-safe counter"""
+
+    def __init__(self, initial=0):
+        """Initialize a new atomic counter to given initial value"""
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def inc(self, num=1):
+        """Atomically increment the counter by num and return the new value"""
+        with self._lock:
+            self._value += num
+            return self._value
+
+    def dec(self, num=1):
+        """Atomically decrement the counter by num and return the new value"""
+        with self._lock:
+            self._value -= num
+            return self._value
+
+    @property
+    def value(self):
+        return self._value

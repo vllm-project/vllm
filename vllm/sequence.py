@@ -5,12 +5,15 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
-                    Optional, Set, Tuple, Union, cast)
+from functools import cached_property, reduce
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
+from typing import Sequence as GenericSequence
+from typing import Set, Tuple, Union, cast
 
 import msgspec
 import torch
 
+from vllm.inputs import EncoderDecoderLLMInputs, LLMInputs
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -19,10 +22,11 @@ from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
-    from vllm.inputs import LLMInputs
     from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
+
+VLLM_INVALID_TOKEN_ID = -1
 
 
 # We use dataclass for now because it is used for
@@ -165,6 +169,38 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
+    # It is used to compute mrope_position_ids.
+    _mrope_position_delta: Optional[int] = None
+
+    @staticmethod
+    def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+        if len(token_counts) == 0:
+            return SequenceData.from_seqs([])
+
+        arrs = [
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
+            for token_id, count in token_counts
+        ]
+
+        return SequenceData(reduce(array.__add__, arrs))
+
+    @staticmethod
+    def from_seqs(
+        prompt_token_ids: GenericSequence[int],
+        output_token_ids: Optional[GenericSequence[int]] = None,
+    ) -> "SequenceData":
+        prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                     prompt_token_ids)
+
+        if output_token_ids is None:
+            return SequenceData(prompt_token_ids_arr)
+
+        output_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                     output_token_ids)
+
+        return SequenceData(prompt_token_ids_arr,
+                            _output_token_ids=output_token_ids_arr)
+
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
         assert self._output_token_ids.typecode == "l"
@@ -218,6 +254,14 @@ class SequenceData(msgspec.Struct,
         """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
+
+    @property
+    def mrope_position_delta(self) -> Optional[int]:
+        return self._mrope_position_delta
+
+    @mrope_position_delta.setter
+    def mrope_position_delta(self, new_mrope_position_delta):
+        self._mrope_position_delta = new_mrope_position_delta
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
@@ -358,8 +402,6 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
         self.from_decoder_prompt = from_decoder_prompt
-        self._prompt: Optional[str] = None
-        self._prompt_token_ids: Optional[List[int]] = None
 
         # For decoder-only models, a Sequence is constructed
         # from an LLMInputs instance (the `inputs` arg.)
@@ -388,13 +430,16 @@ class Sequence:
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
 
-        self.data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids))
+        self.data = SequenceData.from_seqs(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
         self.status = SequenceStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
+
+        # These are used to keep track of delta outputs
+        self._last_output_token_ids_offset: int = 0
+        self._last_output_text_offset: int = 0
 
         # Used for incremental detokenization
         self.prefix_offset = 0
@@ -406,41 +451,35 @@ class Sequence:
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
 
-    @property
+    @cached_property
     def prompt(self) -> Optional[str]:
-        if self._prompt is not None:
-            # Reuse precomputed prompt string
-            return self._prompt
-
-        # Select decoder or encoder input prompt str,
-        # as appropriate
+        # Select decoder or encoder input prompt str, as appropriate
         prompt_key: str = ("prompt"
                            if self.from_decoder_prompt else "encoder_prompt")
 
-        # Cache prompt
-        self._prompt = cast(Optional[str], self.inputs.get(prompt_key))
-        return self._prompt
+        return cast(Optional[str], self.inputs.get(prompt_key))
 
-    @property
+    @cached_property
     def prompt_token_ids(self) -> List[int]:
-        if self._prompt_token_ids is not None:
-            # Reuse precomputed prompt token ids
-            return self._prompt_token_ids
-
-        # Select decoder or encoder input prompt
-        # token ids, as appropriate
+        # Select decoder or encoder input prompt token ids, as appropriate
         prompt_token_ids_key: str = ("prompt_token_ids"
                                      if self.from_decoder_prompt else
                                      "encoder_prompt_token_ids")
 
         # Cache computed prompt token ids
-        self._prompt_token_ids = cast(List[int],
-                                      self.inputs.get(prompt_token_ids_key))
-        return self._prompt_token_ids
+        return cast(List[int], self.inputs.get(prompt_token_ids_key))
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        return self.inputs.get("multi_modal_data") or {}
+        if self.inputs.get("multi_modal_data") and self.inputs.get(
+                "encoder_multi_modal_data"):
+            raise ValueError(
+                "Multi-modal data in both encoder and decoder is not supported."
+            )
+        inputs = self.inputs
+        return self.inputs.get("multi_modal_data") or (cast(
+            EncoderDecoderLLMInputs,
+            inputs).get("encoder_multi_modal_data")) or {}
 
     @property
     def lora_int_id(self) -> int:
@@ -451,11 +490,45 @@ class Sequence:
         return self.prompt_adapter_request.prompt_adapter_id \
                         if self.prompt_adapter_request else 0
 
-    def get_output_text_to_return(self, buffer_length: int):
+    def get_output_text_to_return(self, buffer_length: int,
+                                  delta: bool) -> str:
+        """If delta is True, only new text since the last call to
+        this method is returned"""
+
         # We return the full output text if the sequence is finished.
         truncate = buffer_length and not self.is_finished()
-        return self.output_text[:-buffer_length] if truncate else (
-            self.output_text)
+        if not delta:
+            return self.output_text[:-buffer_length] if truncate else (
+                self.output_text)
+        length = len(self.output_text)
+        if truncate:
+            length -= buffer_length
+        last_offset = self._last_output_text_offset
+        if last_offset < length:
+            self._last_output_text_offset = length
+            return self.output_text[last_offset:length]
+        return ""
+
+    def get_output_token_ids_to_return(
+            self, delta: bool) -> Union[GenericSequence[int], int]:
+        """If delta is True, only new tokens since the last call to
+        this method are returned"""
+        if not delta:
+            return self.get_output_token_ids()
+
+        output_len = self.get_output_len()
+
+        # Get the number of new tokens
+        num_new_tokens = output_len - self._last_output_token_ids_offset
+        self._last_output_token_ids_offset = output_len
+
+        # Return new tokens
+        if num_new_tokens == 1:
+            # Optimization for single decode token case
+            # (which is what we have most of the time)
+            return self.data._cached_all_token_ids[-1]
+
+        return self.data._cached_all_token_ids[-num_new_tokens:]
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
@@ -503,25 +576,6 @@ class Sequence:
 
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
-
-    def get_beam_search_score(self,
-                              length_penalty: float = 1.0,
-                              seq_len: Optional[int] = None,
-                              eos_token_id: Optional[int] = None) -> float:
-        """Calculate the beam search score with length penalty.
-
-        Adapted from
-
-        https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
-        """
-        if seq_len is None:
-            seq_len = self.get_len()
-            # NOTE: HF implementation does not count the EOS token
-            # towards the length, we align with that here for testing.
-            if (eos_token_id is not None
-                    and self.get_last_token_id() == eos_token_id):
-                seq_len -= 1
-        return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
     def is_finished(self) -> bool:
         return SequenceStatus.is_finished(self.status)
@@ -581,6 +635,7 @@ class SequenceGroup:
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
+        priority: User-defined priority of the request.
     """
 
     def __init__(
@@ -595,9 +650,11 @@ class SequenceGroup:
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
+        self.arrival_time = arrival_time
         self.is_single_seq = len(seqs) == 1
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
 
@@ -615,6 +672,9 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+        self.priority = priority
+
+        self.cached_request_output = None
 
     @property
     def prompt(self) -> Optional[str]:
@@ -664,9 +724,34 @@ class SequenceGroup:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
                          if self.prompt_adapter_request else 0
 
-    def init_multi_step(self, num_scheduler_steps: int) -> None:
-        self.state.num_steps = num_scheduler_steps
+    def init_multi_step(self, num_steps: int) -> None:
+        self.state.num_steps = num_steps
         self.state.current_step = 0
+
+    def init_multi_step_from_lookahead_slots(self, num_lookahead_slots: int,
+                                             num_scheduler_steps: int,
+                                             is_multi_step: bool,
+                                             enable_chunking: bool) -> None:
+
+        if not is_multi_step:
+            self.init_multi_step(num_steps=num_scheduler_steps)
+            return
+
+        # Multi-Step case
+        is_prefill = self.is_prefill()
+
+        # The asserts below reflect the expectations of the current system.
+        if is_prefill and enable_chunking:
+            assert num_lookahead_slots == num_scheduler_steps
+            self.init_multi_step(num_steps=num_lookahead_slots)
+        else:
+            is_decode: bool = not is_prefill
+            # If it is a prefill, num_lookahead_slots must be 0
+            assert num_lookahead_slots == 0 or is_decode
+            # If it is a decode, num_lookahead_slots + 1 must match
+            # the scheduler steps.
+            assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
+            self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
@@ -705,25 +790,18 @@ class SequenceGroup:
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
-        if self.sampling_params and self.sampling_params.use_beam_search:
-            # For beam search, maximally there will always be `best_of` beam
-            # candidates running in the future.
+        if self.sampling_params:
             best_of = self.sampling_params.best_of
             assert isinstance(best_of, int)
-            return best_of
-        else:
-            if self.sampling_params:
-                best_of = self.sampling_params.best_of
-                assert isinstance(best_of, int)
-                if best_of > self.num_seqs():
-                    # At prompt stage, the sequence group is not yet filled up
-                    # and only have one sequence running. However, in the
-                    # generation stage, we will have `best_of` sequences
-                    # running.
-                    return best_of
-            # At sampling stages, return the number of actual sequences
-            # that are not finished yet.
-            return self.num_unfinished_seqs()
+            if best_of > self.num_seqs():
+                # At prompt stage, the sequence group is not yet filled up
+                # and only have one sequence running. However, in the
+                # generation stage, we will have `best_of` sequences
+                # running.
+                return best_of
+        # At sampling stages, return the number of actual sequences
+        # that are not finished yet.
+        return self.num_unfinished_seqs()
 
     def get_seqs(
         self,
@@ -931,6 +1009,20 @@ class SequenceGroupMetadata(
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
 
+    # Multi-Step Chunked-Prefill property
+    @property
+    def is_single_step_prompt(self) -> bool:
+        # do_sample is true, only when the token_chunk_size matches the
+        # num_uncomputed_tokens of the sequence. This indicates that
+        # the prompt will finish processing in a single `execute_model`
+        # step.
+        return self.is_prompt and self.do_sample
+
+    def get_first_seq_id(self) -> int:
+        # This is an efficient way of fetching the seq_id when
+        # we know this SequenceGroup has only one sequence.
+        return next(iter(self.seq_data))
+
     def apply_delta(self,
                     sequence_group_metadata_delta: SequenceGroupMetadataDelta):
         for id, delta in sequence_group_metadata_delta.seq_data_delta.items():
@@ -943,7 +1035,8 @@ class SequenceGroupMetadata(
 
     def finish_step(self) -> None:
         assert self.state is not None
-        assert self.state.current_step < self.state.num_steps
+        assert self.state.current_step < self.state.num_steps, \
+            f"current step {self.state.current_step}, num_steps {self.state.num_steps}" # noqa
         self.state.current_step += 1
 
 
