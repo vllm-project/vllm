@@ -10,6 +10,7 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          apply_hf_chat_template,
@@ -236,15 +237,16 @@ class OpenAIServingChat(OpenAIServing):
                 log_tracing_disabled_warning()
 
             if isinstance(sampling_params, BeamSearchParams):
-                if not isinstance(self.engine_client, AsyncLLMEngine):
-                    raise ValueError(
-                        "Beam search in the API server is only supported with"
-                        " AsyncLLMEngine. please add "
-                        "`--disable-frontend-multiprocessing` to "
-                        "use beam search.")
+                assert isinstance(self.engine_client,
+                                    (AsyncLLMEngine,
+                                    MQLLMEngineClient)), \
+                    "Beam search is only supported with" \
+                    "AsyncLLMEngine and MQLLMEngineClient."
                 result_generator = self.engine_client.beam_search(
-                    engine_inputs['prompt_token_ids'], request_id,
-                    sampling_params)
+                    engine_inputs['prompt_token_ids'],
+                    request_id,
+                    sampling_params,
+                )
             else:
                 result_generator = self.engine_client.generate(
                     engine_inputs,
