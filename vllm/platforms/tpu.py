@@ -2,12 +2,13 @@ import os
 
 import torch
 
+from vllm.compilation.levels import CompilationLevel
 from vllm.plugins import set_torch_compile_backend
 
 from .interface import Platform, PlatformEnum
 
 if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
-    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = "2"
+    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.DYNAMO_ONCE)
 
 set_torch_compile_backend("openxla")
 
