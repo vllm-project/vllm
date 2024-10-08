@@ -44,7 +44,10 @@ def support_compile_llama_style(cls: type):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if not self._use_torch_compile:
+        # torch.compile.is_compiling() means we are inside the compilation
+        # e.g. TPU has the compilation logic in model runner, so we don't
+        # need to compile the model inside.
+        if not self._use_torch_compile or torch.compile.is_compiling():
             return self.forward(input_ids, positions, kv_caches, attn_metadata,
                                 intermediate_tensors, inputs_embeds)
 
@@ -58,23 +61,22 @@ def support_compile_llama_style(cls: type):
             if intermediate_tensors is not None:
                 for tensors in intermediate_tensors.tensors.values():
                     torch._dynamo.mark_dynamic(tensors, 0)
-            return self.compiled_callable(input_ids, positions, kv_caches,
-                                          attn_metadata, intermediate_tensors,
-                                          inputs_embeds)
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
-        if not self.use_custom_dispatcher:
+        if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
             return self.compiled_callable(input_ids, positions, kv_caches,
-                                          attn_metadata, intermediate_tensors)
+                                          attn_metadata, intermediate_tensors,
+                                          inputs_embeds)
 
         # usually, capturing the model once is enough, and then we can
         # dispatch to the compiled code directly, without going through
         # the Dynamo guard mechanism.
         with self.dispatch_to_code(0):
             model_output = self.forward(input_ids, positions, kv_caches,
-                                        attn_metadata, intermediate_tensors)
+                                        attn_metadata, intermediate_tensors,
+                                        inputs_embeds)
             return model_output
 
     cls.__call__ = __call__
