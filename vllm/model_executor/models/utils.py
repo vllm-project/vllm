@@ -35,6 +35,9 @@ class WeightsGroups(UserDict):
 
 
 class WeightsGroup:
+    """
+    Wraps an iterable of `(name, tensor)` weights.
+    """
 
     def __init__(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
         super().__init__()
@@ -52,7 +55,7 @@ class WeightsGroup:
     ) -> None:
         for name, loaded_weight in self.weights:
             if strict:
-                assert name == ""
+                assert name == "", f"Invalid nested parameter: {name}"
 
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
@@ -86,10 +89,9 @@ def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]],
         :ref:`init_vllm_registered_model`
     """
     for name, loaded_weight in weights:
-        name = name.split(".")
-        if prefix == name.pop(0):
-            name = ".".join(name)
-            yield name, loaded_weight
+        name_prefix, *rest = name.split(".", 1)
+        if prefix == name_prefix:
+            yield ".".join(rest), loaded_weight
 
 
 def group_weights_with_prefix(
@@ -98,7 +100,7 @@ def group_weights_with_prefix(
     Helper function to group weights with prefix
     """
     init_weights, repeated_weights = itertools.tee(weights, 2)
-    weights_prefix = {name.split(".")[0] for name, _ in init_weights}
+    weights_prefix = {name.split(".", 1)[0] for name, _ in init_weights}
     repeated_weights = itertools.tee(repeated_weights, len(weights_prefix))
 
     return WeightsGroups({
