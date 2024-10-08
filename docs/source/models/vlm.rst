@@ -142,10 +142,13 @@ perform video captioning. We show this with `Qwen2-VL <https://huggingface.co/Qw
 
     # Create the request payload.
     video_frames = ... # load your video making sure it only has the number of frames specified earlier.
-    messages = [{"role": "user", "content": []}]
-    messages[0]["content"].append({"type": "text", "text": "Describe this set of frames. Consider the frames to be a part of the same video."})
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "Describe this set of frames. Consider the frames to be a part of the same video."}]}
+    ]
     for i in range(len(video_frames)):
         base64_image = encode_image(video_frames[i]) # base64 encoding.
+        new_image = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        messages[0]["content"].append(new_image)
 
     # Perform inference and log output.
     outputs = llm.chat(messages)
