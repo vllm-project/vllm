@@ -28,7 +28,8 @@ def test_compile_correctness(model_info, pp_size, tp_size):
         "VLLM_TORCH_COMPILE_LEVEL":
         str(level)
     } for level in [
-        CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_ONCE,
-        CompilationLevel.DYNAMO_AS_IS
+        CompilationLevel.NO_COMPILATION,
+        CompilationLevel.DYNAMO_AS_IS,
+        CompilationLevel.DYNAMO_ONCE,
     ]]
     compare_all_settings(model, all_args, all_envs)
