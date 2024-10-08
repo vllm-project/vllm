@@ -168,12 +168,14 @@ def paged_attention_rocm(
     kv_cache_dtype: str,
     k_scale: float,
     v_scale: float,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
                                       block_size, max_seq_len, alibi_slopes,
-                                      kv_cache_dtype, k_scale, v_scale)
+                                      kv_cache_dtype, k_scale, v_scale,
+                                      fp8_out_scale)
 
 
 # pos encoding ops

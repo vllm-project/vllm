@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_USE_ROCM_SKINNY_GEMM: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN: bool = True
+    VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = False
     RANK: int = 0
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -250,6 +251,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_ROCM_CUSTOM_PAGED_ATTN":
     lambda: (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
              ("true", "1") != "0"),
+
+    # have custom paged attention implemented for MI3* cards write out fp8
+    "VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT":
+    lambda:
+    (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT", "False").lower() in
+     ("true", "1") != "0"),
 
     # rank of the process in the distributed setting, used to determine
     # the driver worker

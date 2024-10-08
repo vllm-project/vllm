@@ -330,10 +330,17 @@ int main(int argc, char** argv) {
   //     run<half>(myRank, nRanks, comm, threads, block_limit, 4096 * 1024);
   //   }
   // }
+#ifdef USE_ROCM
+  for (int sz = 512; sz <= (8 << 20); sz *= 2) {
+    run<half>(myRank, nRanks, comm, 512, 16, sz + 8 * 47, performance_test);
+  }
+#else
   for (int sz = 512; sz <= (8 << 20); sz *= 2) {
     run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 47, performance_test);
   }
+#endif
 
   cudaProfilerStop();
+  MPICHECK(MPI_Finalize());
   return EXIT_SUCCESS;
 }

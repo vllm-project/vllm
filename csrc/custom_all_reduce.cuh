@@ -43,7 +43,12 @@ struct __align__(16) RankData { const void* ptrs[8]; };
 struct __align__(16) RankData { const void* __restrict__ ptrs[8]; };
 #endif
 
-struct __align__(16) RankSignals { volatile Signal* signals[8]; };
+struct __align__(16) RankSignals {
+#ifndef USE_ROCM
+  volatile
+#endif
+      Signal* signals[8];
+};
 
 // like std::array, but aligned
 template <typename T, int sz>
@@ -138,18 +143,23 @@ DINLINE O downcast(array_t<float, O::size> val) {
 // prior memory accesses. Note: volatile writes will not be reordered against
 // other volatile writes.
 template <int ngpus>
-DINLINE void start_sync(const RankSignals& sg, volatile Signal* self_sg,
+DINLINE void start_sync(const RankSignals& sg,
+#ifndef USE_ROCM
+                        volatile
+#endif
+                        Signal* self_sg,
                         int rank) {
 #ifdef USE_ROCM
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
-    __atomic_store_n(&sg.signals[threadIdx.x]->start[blockIdx.x][rank], flag,
-                     __ATOMIC_RELAXED);
+    __scoped_atomic_store_n(&sg.signals[threadIdx.x]->start[blockIdx.x][rank],
+                            flag, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
     // wait until we got true from all ranks
-    while (__atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
-                           __ATOMIC_RELAXED) < flag);
+    while (__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
+                                  __ATOMIC_RELAXED,
+                                  __MEMORY_SCOPE_DEVICE) < flag);
   }
   __syncthreads();
   // use one thread to update flag
@@ -172,7 +182,11 @@ DINLINE void start_sync(const RankSignals& sg, volatile Signal* self_sg,
 // barrier in the all reduce kernel. If it's the final synchronization barrier,
 // we don't need to make any visibility guarantees for prior memory accesses.
 template <int ngpus, bool final_sync = false>
-DINLINE void end_sync(const RankSignals& sg, volatile Signal* self_sg,
+DINLINE void end_sync(const RankSignals& sg,
+#ifndef USE_ROCM
+                      volatile
+#endif
+                      Signal* self_sg,
                       int rank) {
 #ifdef USE_ROCM
   __syncthreads();
@@ -184,12 +198,15 @@ DINLINE void end_sync(const RankSignals& sg, volatile Signal* self_sg,
   if (threadIdx.x < ngpus) {
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
-    __atomic_store_n(&sg.signals[threadIdx.x]->end[blockIdx.x][rank], flag,
-                     final_sync ? __ATOMIC_RELAXED : __ATOMIC_RELEASE);
+    __scoped_atomic_store_n(&sg.signals[threadIdx.x]->end[blockIdx.x][rank],
+                            flag,
+                            final_sync ? __ATOMIC_RELAXED : __ATOMIC_RELEASE,
+                            __MEMORY_SCOPE_SYSTEM);
     // wait until we got true from all ranks
-    while (__atomic_load_n(&self_sg->end[blockIdx.x][threadIdx.x],
-                           final_sync ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE) <
-           flag);
+    while (
+        __scoped_atomic_load_n(&self_sg->end[blockIdx.x][threadIdx.x],
+                               final_sync ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
+                               __MEMORY_SCOPE_DEVICE) < flag);
   }
   __syncthreads();
   // use one thread to update flag
@@ -227,8 +244,11 @@ DINLINE P packed_reduce(const P* ptrs[], int idx) {
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_1stage(RankData* _dp, RankSignals sg,
-                               volatile Signal* self_sg, T* __restrict__ result,
-                               int rank, int size) {
+#ifndef USE_ROCM
+                               volatile
+#endif
+                               Signal* self_sg,
+                               T* __restrict__ result, int rank, int size) {
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
   // note: we don't reorder the address so the accumulation order is the same
@@ -244,15 +264,22 @@ __global__ void __launch_bounds__(512, 1)
 }
 
 template <typename P>
+#ifdef USE_ROCM
+DINLINE P* get_tmp_buf(Signal* sg) {
+#else
 DINLINE P* get_tmp_buf(volatile Signal* sg) {
+#endif
   return (P*)(((Signal*)sg) + 1);
 }
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_2stage(RankData* _dp, RankSignals sg,
-                               volatile Signal* self_sg, T* __restrict__ result,
-                               int rank, int size) {
+#ifndef USE_ROCM
+                               volatile
+#endif
+                               Signal* self_sg,
+                               T* __restrict__ result, int rank, int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
@@ -455,37 +482,41 @@ class CustomAllreduce {
    */
   template <typename T>
   void allreduce(cudaStream_t stream, T* input, T* output, int size,
-                 int threads = 512, int block_limit = 36) {
-    auto d = packed_t<T>::P::size;
-    if (size % d != 0)
+#ifndef USE_ROCM
+                 int threads = 512, int block_limit = 36){
+#else
+                 int threads = 512, int block_limit = 16) {
+#endif
+      auto d = packed_t<T>::P::size;
+  if (size % d != 0)
+    throw std::runtime_error(
+        "custom allreduce currently requires input length to be multiple "
+        "of " +
+        std::to_string(d));
+  if (block_limit > kMaxBlocks)
+    throw std::runtime_error("max supported block limit is " +
+                             std::to_string(kMaxBlocks) + ". Got " +
+                             std::to_string(block_limit));
+
+  RankData* ptrs;
+  cudaStreamCaptureStatus status;
+  CUDACHECK(cudaStreamIsCapturing(stream, &status));
+  if (status == cudaStreamCaptureStatusActive) {
+    ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
+    graph_unreg_buffers_.push_back(input);
+  } else {
+    auto it = buffers_.find(input);
+    if (it == buffers_.end())
       throw std::runtime_error(
-          "custom allreduce currently requires input length to be multiple "
-          "of " +
-          std::to_string(d));
-    if (block_limit > kMaxBlocks)
-      throw std::runtime_error("max supported block limit is " +
-                               std::to_string(kMaxBlocks) + ". Got " +
-                               std::to_string(block_limit));
+          "buffer address " +
+          std::to_string(reinterpret_cast<uint64_t>(input)) +
+          " is not registered!");
+    ptrs = it->second;
+  }
 
-    RankData* ptrs;
-    cudaStreamCaptureStatus status;
-    CUDACHECK(cudaStreamIsCapturing(stream, &status));
-    if (status == cudaStreamCaptureStatusActive) {
-      ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
-      graph_unreg_buffers_.push_back(input);
-    } else {
-      auto it = buffers_.find(input);
-      if (it == buffers_.end())
-        throw std::runtime_error(
-            "buffer address " +
-            std::to_string(reinterpret_cast<uint64_t>(input)) +
-            " is not registered!");
-      ptrs = it->second;
-    }
-
-    size /= d;
-    auto bytes = size * sizeof(typename packed_t<T>::P);
-    int blocks = std::min(block_limit, (size + threads - 1) / threads);
+  size /= d;
+  auto bytes = size * sizeof(typename packed_t<T>::P);
+  int blocks = std::min(block_limit, (size + threads - 1) / threads);
 #define KL(ngpus, name)                                                       \
   name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
                                                  rank_, size);
@@ -504,27 +535,27 @@ class CustomAllreduce {
     break;                                            \
   }
 
-    switch (world_size_) {
-      REDUCE_CASE(2)
-      REDUCE_CASE(4)
-      REDUCE_CASE(6)
-      REDUCE_CASE(8)
-      default:
-        throw std::runtime_error(
-            "custom allreduce only supports num gpus in (2,4,6,8). Actual num "
-            "gpus = " +
-            std::to_string(world_size_));
-    }
+  switch (world_size_) {
+    REDUCE_CASE(2)
+    REDUCE_CASE(4)
+    REDUCE_CASE(6)
+    REDUCE_CASE(8)
+    default:
+      throw std::runtime_error(
+          "custom allreduce only supports num gpus in (2,4,6,8). Actual num "
+          "gpus = " +
+          std::to_string(world_size_));
+  }
 #undef REDUCE_CASE
 #undef KL
-  }
+}
 
-  ~CustomAllreduce() {
-    for (auto [_, ptr] : ipc_handles_) {
-      CUDACHECK(cudaIpcCloseMemHandle(ptr));
-    }
+~CustomAllreduce() {
+  for (auto [_, ptr] : ipc_handles_) {
+    CUDACHECK(cudaIpcCloseMemHandle(ptr));
   }
-};
+}
+};  // namespace vllm
 /**
  * To inspect PTX/SASS, copy paste this header file to compiler explorer and add
  a template instantiation:
