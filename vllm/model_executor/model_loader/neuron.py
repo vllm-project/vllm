@@ -6,7 +6,6 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import transformers
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
@@ -170,7 +169,8 @@ def _get_default_neuron_config(model_config: ModelConfig,
         attention_layout=LAYOUT_BSH,
         cache_layout=LAYOUT_BSH,
         fuse_qkv=True,
-        quant=neuron_quantization_config_builder(model_config.quantization) if model_config.quantization else None,
+        quant=neuron_quantization_config_builder(model_config.quantization)
+        if model_config.quantization else None,
         continuous_batching=continuous_batching_config,
         weight_tiling=bool(model_config.quantization),
         on_device_generation=_get_neuron_on_device_generation_config(

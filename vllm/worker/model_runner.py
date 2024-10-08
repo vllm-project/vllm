@@ -1126,9 +1126,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
         elif self.model_config.quantization_param_path is not None:
-            logger.warn("KV cache scaling factors provided, "
-                        "but the KV cache data type is not FP8. "
-                        "KV cache scaling factors will not be used.")
+            logger.warning("KV cache scaling factors provided, "
+                           "but the KV cache data type is not FP8. "
+                           "KV cache scaling factors will not be used.")
 
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
             from vllm.compilation.backends import vllm_backend

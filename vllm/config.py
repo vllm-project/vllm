@@ -1499,6 +1499,7 @@ class SpeculativeConfig:
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
 
+
 @dataclass
 class LoRAConfig:
     max_lora_rank: int

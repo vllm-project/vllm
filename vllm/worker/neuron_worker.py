@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
@@ -45,7 +45,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             init_cached_hf_modules()
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
-            model_config, parallel_config, cache_config, scheduler_config, device_config)
+            model_config, parallel_config, cache_config, scheduler_config,
+            device_config)
         self.is_driver_worker = True
 
     def init_device(self) -> None:
@@ -62,11 +63,14 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         Swapping is not yet supported, so always return num_cpu_blocks=0.
         """
-        total_gpu_memory = 16 * 1e9 # 16GiB per NeuronCore
-        cache_block_size = CacheEngine.get_cache_block_size(self.cache_config, self.model_config, self.parallel_config)
-        num_gpu_blocks = int((total_gpu_memory * self.cache_config.gpu_memory_utilization) // cache_block_size)
+        total_gpu_memory = 16 * 1e9  # 16GiB per NeuronCore
+        cache_block_size = CacheEngine.get_cache_block_size(
+            self.cache_config, self.model_config, self.parallel_config)
+        num_gpu_blocks = int(
+            (total_gpu_memory * self.cache_config.gpu_memory_utilization) //
+            cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
-        assert num_gpu_blocks > 0, f"insufficient K/V cache space."
+        assert num_gpu_blocks > 0, "insufficient K/V cache space."
 
         # Swap not yet supported with Neuron backend.
         num_cpu_blocks = 0
@@ -91,8 +95,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         neuron_config = self.model_runner.model.model.neuron_config
         neuron_config.continuous_batching.init_cache_engine(
             block_size=self.cache_config.block_size,
-            num_blocks=self.cache_config.num_gpu_blocks
-        )
+            num_blocks=self.cache_config.num_gpu_blocks)
 
         self.model_runner.set_block_size(self.cache_config.block_size)
         self.model_runner.compile_model()

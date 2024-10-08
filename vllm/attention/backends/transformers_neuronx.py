@@ -1,26 +1,24 @@
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple
 
 import torch
-from torch.nn.functional import scaled_dot_product_attention
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
+from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 
 
-class NeuronFlashAttentionBackend(AttentionBackend):
+class NeuronAttentionBackend(AttentionBackend):
 
     @staticmethod
-    def get_impl_cls() -> Type["NeuronFlashAttentionBackendImpl"]:
+    def get_impl_cls():
         raise NotImplementedError
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "NeuronFlashAttentionMetadata":
-        return NeuronFlashAttentionMetadata(*args, **kwargs)
+    def make_metadata(*args, **kwargs) -> "NeuronAttentionMetadata":
+        return NeuronAttentionMetadata(*args, **kwargs)
 
     @staticmethod
     def get_kv_cache_shape(
@@ -48,8 +46,8 @@ class NeuronFlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class NeuronFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
-    """Metadata for NeuronFlashAttentionBackend.
+class NeuronAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
+    """Metadata for NeuronAttentionBackend.
     """
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.

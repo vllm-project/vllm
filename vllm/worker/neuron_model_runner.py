@@ -1,30 +1,25 @@
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
 from transformers_neuronx.config import GenerationConfig
 
-from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+from vllm.attention import get_attn_backend
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-# from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 from vllm.worker.model_runner_base import (
-    ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
-    _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict,
-    _init_attn_metadata_from_tensor_dict,
-    _init_sampling_metadata_from_tensor_dict)
+    ModelRunnerBase, ModelRunnerInputBase,
+    _init_attn_metadata_from_tensor_dict)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -47,10 +42,8 @@ class ModelInputForNeuron(ModelRunnerInputBase):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
-            "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
-            "finished_requests_ids": self.finished_requests_ids,
+            "input_block_ids": self.input_block_ids,
         }
-        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
 
     @classmethod
@@ -93,7 +86,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.pin_memory = is_pin_memory_available()
 
         self.kv_cache_dtype = "bfloat16"
-        self.block_size = cache_config.block_size
 
         num_attn_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
@@ -104,8 +96,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             self.model_config.get_sliding_window(),
             self.model_config.dtype if model_config is not None else None,
             kv_cache_dtype=self.kv_cache_dtype,
-            block_size=self.block_size,
-            )
+            block_size=cache_config.block_size,
+        )
 
         # Multi-modal data support
         self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
@@ -170,11 +162,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         prompt_lens: List[int] = []
         context_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        seq_lens: List[int] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
-
-        if len(seq_group_metadata_list) == 0:
-            return PreparePromptMetadata.empty()
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -216,46 +203,14 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, prefill_end)))
 
-            if seq_group_metadata.block_tables is None:
-                # During memory profiling, the block tables are not initialized
-                # yet. In this case, we just use a dummy slot mapping.
-                slot_mapping.extend([_PAD_SLOT_ID] * prompt_len)
-                continue
-
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
-            # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
-            # where start_idx is max(0, prompt_len - sliding_window).
-            # For example, if the prompt len is 10, sliding window is 8, and
-            # block size is 4, the first two tokens are masked and the slot
-            # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
-            start_idx = 0
 
             for i in range(computed_len, prefill_end):
-                if i < start_idx:
-                    slot_mapping.append(_PAD_SLOT_ID)
-                    continue
-
                 block_number = block_table[i // self.block_size]
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
-
-        max_prompt_len = max(prompt_lens)
-
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device=self.device)
-
-        # Prepare prefix block tables
-        max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
-        block_tables = make_tensor_with_pad(
-            prefix_block_tables,
-            max_len=max_prompt_block_table_len,
-            pad=0,
-            dtype=torch.int,
-            device=self.device,
-        )
 
         prompt_lens_tensor = torch.tensor(prompt_lens,
                                           dtype=torch.long,
@@ -263,7 +218,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         seq_start_loc = torch.zeros(prompt_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=self.device)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=self.device)
+        slot_mapping = torch.tensor(slot_mapping,
+                                    dtype=torch.long,
+                                    device=self.device)
 
         torch.cumsum(prompt_lens_tensor,
                      dim=0,
@@ -282,11 +239,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             num_decode_tokens=0,
             context_lens=None,
             block_tables=torch.tensor([]),
-            # kv_cache_dtype=self.kv_cache_dtype, # "auto", # "auto" means use model weight data type
         )
-        input_tokens_tensor = torch.tensor(input_tokens, dtype=torch.long, device=self.device).unsqueeze(0)
-        input_positions_tensor = torch.tensor(input_positions, dtype=torch.long, device=self.device).unsqueeze(0)
-        return (input_tokens_tensor, input_positions_tensor, attn_metadata, prompt_lens)
+        input_tokens_tensor = torch.tensor(input_tokens,
+                                           dtype=torch.long,
+                                           device=self.device).unsqueeze(0)
+        input_positions_tensor = torch.tensor(input_positions,
+                                              dtype=torch.long,
+                                              device=self.device).unsqueeze(0)
+        return (input_tokens_tensor, input_positions_tensor, attn_metadata,
+                prompt_lens)
 
     def _prepare_decode(
         self,
@@ -329,8 +290,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                              self.block_size)
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
-
-        max_context_len = max(context_lens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
@@ -391,8 +350,12 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         is_prompt = seq_group_metadata_list[0].is_prompt
         # Prepare input tensors.
         if is_prompt:
-            (input_tokens, input_positions, input_block_ids, seq_lens,
-             ) = self._prepare_prompt(seq_group_metadata_list)
+            (
+                input_tokens,
+                input_positions,
+                input_block_ids,
+                seq_lens,
+            ) = self._prepare_prompt(seq_group_metadata_list)
         else:
             (input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
