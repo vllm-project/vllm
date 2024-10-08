@@ -303,6 +303,28 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder(placeholder)
 
 
+def validate_chat_template(chat_template: Optional[Union[Path, str]]):
+    """Raises if the provided chat template appears invalid."""
+    if chat_template is None:
+        return
+
+    elif isinstance(chat_template, Path) and not chat_template.exists():
+        raise FileNotFoundError(
+            "the supplied chat template path doesn't exist")
+
+    elif isinstance(chat_template, str):
+        JINJA_CHARS = "{}\n"
+        if not any(c in chat_template
+                   for c in JINJA_CHARS) and not Path(chat_template).exists():
+            raise ValueError(
+                f"The supplied chat template string ({chat_template}) "
+                f"appears path-like, but doesn't exist!")
+
+    else:
+        raise TypeError(
+            f"{type(chat_template)} is not a valid chat template type")
+
+
 def load_chat_template(
         chat_template: Optional[Union[Path, str]]) -> Optional[str]:
     if chat_template is None:
