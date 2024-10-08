@@ -495,30 +495,25 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
         assert len(batch.choices) == 2
         assert batch.choices[0].text == batch.choices[1].text
 
-        try:
-            # test n = 2
-            batch = await client.completions.create(
-                model=model_name,
-                prompt=prompts,
-                n=2,
-                max_tokens=5,
-                temperature=0.0,
-                extra_body=dict(
-                    # NOTE: this has to be true for n > 1 in vLLM, but
-                    # not necessary for official client.
-                    use_beam_search=True),
-            )
-            assert len(batch.choices) == 4
-            assert batch.choices[0].text != batch.choices[
-                1].text, "beam search should be different"
-            assert batch.choices[0].text == batch.choices[
-                2].text, "two copies of the same prompt should be the same"
-            assert batch.choices[1].text == batch.choices[
-                3].text, "two copies of the same prompt should be the same"
-        except BadRequestError as e:
-            # the only allowed exception is when beam search is not supported
-            # in the default mqllmengine
-            assert "--disable-frontend-multiprocessing" in str(e)
+        # test n = 2
+        batch = await client.completions.create(
+            model=model_name,
+            prompt=prompts,
+            n=2,
+            max_tokens=5,
+            temperature=0.0,
+            extra_body=dict(
+                # NOTE: this has to be true for n > 1 in vLLM, but
+                # not necessary for official client.
+                use_beam_search=True),
+        )
+        assert len(batch.choices) == 4
+        assert batch.choices[0].text != batch.choices[
+            1].text, "beam search should be different"
+        assert batch.choices[0].text == batch.choices[
+            2].text, "two copies of the same prompt should be the same"
+        assert batch.choices[1].text == batch.choices[
+            3].text, "two copies of the same prompt should be the same"
 
         # test streaming
         batch = await client.completions.create(
