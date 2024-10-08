@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from torch import Use  # noqa
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler, SchedulingBudget
@@ -15,6 +16,16 @@ from vllm.sequence import SequenceGroup, SequenceStatus
 from .utils import (append_new_token, append_new_token_seq_group,
                     create_dummy_prompt, get_sequence_groups,
                     schedule_and_update_computed_tokens)
+
+
+@pytest.fixture(scope="module", autouse=False)
+def check_deprecated_block_manager():
+    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
+        "To allow the use of deprecated BlockSpaceManagerV1, set the "
+        "environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
+        "You can run the tests with: "
+        "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest tests/core/test_scheduler.py`"  #noqa
+    )
 
 
 @pytest.mark.parametrize('use_v2_block_manager', [True, False])

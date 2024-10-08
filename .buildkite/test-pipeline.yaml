@@ -88,7 +88,7 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
-  - pytest -v -s core
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core
 
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
