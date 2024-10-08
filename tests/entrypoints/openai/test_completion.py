@@ -503,8 +503,8 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
             max_tokens=5,
             temperature=0.0,
             extra_body=dict(
-                # NOTE: this has to be true for n > 1 in vLLM, but not necessary
-                # for official client.
+                # NOTE: this has to be true for n > 1 in vLLM, but
+                # not necessary for official client.
                 use_beam_search=True),
         )
         assert len(batch.choices) == 4

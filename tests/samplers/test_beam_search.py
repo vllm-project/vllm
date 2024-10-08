@@ -33,8 +33,8 @@ def test_beam_search_single_input(
                                                    max_tokens)
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.generate_beam_search_new(
-            example_prompts, beam_width, max_tokens)
+        vllm_outputs = vllm_model.generate_beam_search(example_prompts,
+                                                       beam_width, max_tokens)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_texts = hf_outputs[i]

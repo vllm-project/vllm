@@ -7,12 +7,13 @@ import partial_json_parser
 from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
                                                         is_complete_json,
                                                         partial_json_loads)
@@ -22,6 +23,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+@ToolParserManager.register_module("llama3_json")
 class Llama3JsonToolParser(ToolParser):
     """
     Tool call parser for Llama 3.1 models intended for use with the
@@ -45,8 +47,9 @@ class Llama3JsonToolParser(ToolParser):
                                              add_special_tokens=False)[0]
         self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
 
-    def extract_tool_calls(self,
-                           model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         """
@@ -106,6 +109,7 @@ class Llama3JsonToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         if not (current_text.startswith(self.bot_token)

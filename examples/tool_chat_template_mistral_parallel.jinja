@@ -6,8 +6,7 @@
 {%- endif %}
 {%- if not tools is defined %}
     {%- set tools = none %}
-{%- endif %}
-{%- if tools is defined %}
+{%- elif tools is not none %}
     {%- set parallel_tool_prompt = "You are a helpful assistant that can call tools. If you call one or more tools, format them in a single JSON array or objects, where each object is a tool call, not as separate objects outside of an array or multiple arrays. Use the format [{\"name\": tool call name, \"arguments\": tool call arguments}, additional tool calls] if you call more than one tool. If you call tools, do not attempt to interpret them or otherwise provide a response until you receive a tool call result that you can interpret for the user." %}
     {%- if system_message is defined %}
         {%- set system_message = parallel_tool_prompt + "\n\n" + system_message %}

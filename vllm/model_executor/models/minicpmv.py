@@ -45,7 +45,6 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -59,7 +58,8 @@ from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .utils import is_pp_missing_parameter
 
 _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
@@ -337,7 +337,7 @@ def input_mapper_for_minicpmv(ctx: InputContext, data: object):
     return MultiModalInputs(batch_data)
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
@@ -373,6 +373,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+
+        self.make_empty_intermediate_tensors = (
+            self.llm.make_empty_intermediate_tensors)
 
     def get_embedding(
         self,
@@ -498,9 +501,12 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        image_inputs = self._parse_and_validate_inputs(input_ids, **kwargs)
+        if intermediate_tensors is not None:
+            vlm_embeddings = None
+        else:
+            image_inputs = self._parse_and_validate_inputs(input_ids, **kwargs)
 
-        vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs)
+            vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs)
 
         output = self.llm(
             input_ids=None,
@@ -557,6 +563,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
                 for param_name, weight_name, shard_id in stacked_params_mapping:
                     if weight_name not in name:
                         continue
+                    if is_pp_missing_parameter(
+                            name.replace(weight_name, param_name), self):
+                        continue
                     param = params_dict[name.replace(weight_name, param_name)]
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
@@ -564,6 +573,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
                 else:
                     use_default_weight_loading = True
             if use_default_weight_loading:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

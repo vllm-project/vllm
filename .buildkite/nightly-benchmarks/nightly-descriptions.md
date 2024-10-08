@@ -1,45 +1,39 @@
 
 # Nightly benchmark
 
-The main goal of this benchmarking is two-fold:
-- Performance clarity: Provide clarity on which one (vllm, tensorrt-llm, lmdeploy and tgi) leads in performance in what workload.
-- Reproducible: one can run the exact same set of benchmarking commands inside the exact same docker by following reproducing instructions in [reproduce.md]().
+This benchmark aims to:
+- Provide performance clarity: Provide clarity on which one (vllm, tensorrt-llm, lmdeploy and SGLang) leads in performance in what workload.
+- Be reproducible: one can run the exact same set of benchmarking commands inside the exact same docker by following reproducing instructions.
+
+Latest results: [results link](https://blog.vllm.ai/2024/09/05/perf-update.html), scroll to the end.
+
+Latest reproduction guilde: [github issue link](https://github.com/vllm-project/vllm/issues/8176)
 
 
-## Docker images
+## Setup
 
-We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following docker images:
-- vllm/vllm-openai:v0.5.0.post1
-- nvcr.io/nvidia/tritonserver:24.04-trtllm-python-py3
-- openmmlab/lmdeploy:v0.5.0
-- ghcr.io/huggingface/text-generation-inference:2.1
+- Docker images:
+  - vLLM: `vllm/vllm-openai:v0.6.2`
+  - SGLang: `lmsysorg/sglang:v0.3.2-cu121`
+  - LMDeploy: `openmmlab/lmdeploy:v0.6.1-cu12`
+  - TensorRT-LLM: `nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3`
+    - *NOTE: we uses r24.07 as the current implementation only works for this version. We are going to bump this up.*
+  - Check [nightly-pipeline.yaml](nightly-pipeline.yaml) for the concrete docker images, specs and commands we use for the benchmark.
+- Hardware
+  - 8x Nvidia A100 GPUs
+- Workload:
+  - Dataset
+    - ShareGPT dataset
+    - Prefill-heavy dataset (in average 462 input tokens, 16 tokens as output)
+    - Decode-heavy dataset (in average 462 input tokens, 256 output tokens)
+    - Check [nightly-tests.json](tests/nightly-tests.json) for the concrete configuration of datasets we use.
+  - Models: llama-3 8B, llama-3 70B.
+    - We do not use llama 3.1 as it is incompatible with trt-llm r24.07. ([issue](https://github.com/NVIDIA/TensorRT-LLM/issues/2105)).
+  - Average QPS (query per second): 2, 4, 8, 16, 32 and inf.
+    - Queries are randomly sampled, and arrival patterns are determined via Poisson process, but all with fixed random seed.
+  - Evaluation metrics: Throughput (higher the better), TTFT (time to the first token, lower the better), ITL (inter-token latency, lower the better).
 
-<!-- Please check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.buildkite/nightly-benchmarks/nightly-pipeline.yaml">nightly-pipeline.yaml</a> artifact for more details on how we deploy the docker images. -->
+# Known issues
 
-
-## Hardware
-
-One AWS node with 8x NVIDIA A100 GPUs.
-
-
-## Workload description
-
-We benchmark vllm, tensorrt-llm, lmdeploy and tgi using the following workload:
-
-- Input length: randomly sample 500 prompts from ShareGPT dataset (with fixed random seed).
-- Output length: the corresponding output length of these 500 prompts.
-- Models: llama-3 8B, llama-3 70B, mixtral 8x7B.
-- Average QPS (query per second): 4 for the small model (llama-3 8B) and 2 for other two models. For each QPS, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
-- Evaluation metrics: Throughput (higher the better), TTFT (time to the first token, lower the better), ITL (inter-token latency, lower the better).
-
-<!-- Check <a href="artifact://workspace/build/buildkite/vllm/performance-benchmark/.buildkite/nightly-benchmarks/tests/nightly-tests.json">nightly-tests.json</a> artifact for more details. -->
-
-## Plots
-
-In the following plots, the dot shows the mean and the error bar shows the standard error of the mean. Value 0 means that the corresponding benchmark crashed.
-
-<img src="artifact://nightly_results.png" alt="Benchmarking results" height=250 >
-
-## Results
-
-{nightly_results_benchmarking_table}
+- TRT-LLM crashes with Llama 3.1 8B [issue](https://github.com/NVIDIA/TensorRT-LLM/issues/2105).
+- TGI does not support `ignore-eos` flag.

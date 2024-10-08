@@ -18,9 +18,6 @@ def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
                         temperature=0.8,
                         top_p=0.95,
                         frequency_penalty=0.1)),
-        ("It is only with the heart that one can see rightly",
-         SamplingParams(n=3, best_of=3, use_beam_search=True,
-                        temperature=0.0)),
     ]
 
 

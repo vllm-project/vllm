@@ -29,7 +29,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import AtomicCounter
@@ -371,7 +371,8 @@ class OpenAIServing:
         self,
         request_id: str,
         inputs: Union[str, List[int], TextTokensPrompt],
-        params: Optional[Union[SamplingParams, PoolingParams]],
+        params: Optional[Union[SamplingParams, PoolingParams,
+                               BeamSearchParams]],
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> None:
