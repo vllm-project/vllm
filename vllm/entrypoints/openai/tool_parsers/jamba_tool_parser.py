@@ -8,8 +8,8 @@ from partial_json_parser.core.options import Allow
 from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
-from vllm.entrypoints.openai.tool_parsers import ToolParser
+                                              FunctionCall, ToolCall, ChatCompletionRequest)
+from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
@@ -20,6 +20,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+@ToolParserManager.register_module("jamba")
 class JambaToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):
@@ -68,8 +69,10 @@ class JambaToolParser(ToolParser):
         # Anyway, these are all fallbacks if json.loads fails
         pass
 
-    def extract_tool_calls(self,
-                           model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(
+            self,
+            model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
         if self.tool_calls_start_token not in model_output:
@@ -127,6 +130,7 @@ class JambaToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         # if the tool call token is not in the tokens generated so far, append
