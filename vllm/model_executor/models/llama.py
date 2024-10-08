@@ -27,6 +27,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
@@ -180,6 +181,9 @@ class LlamaAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
+        self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
+                            and is_hip() \
+                            and isinstance(quant_config, Fp8Config)
 
     def forward(
         self,
@@ -191,7 +195,13 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q,
+                                k,
+                                v,
+                                kv_cache,
+                                attn_metadata,
+                                fp8_out_scale=self.o_proj.input_scale
+                                if self.attn_fp8_out else None)
         output, _ = self.o_proj(attn_output)
         return output
 

@@ -20,4 +20,5 @@ void paged_attention(torch::Tensor& out, torch::Tensor& exp_sums,
                      int64_t max_context_len,
                      const c10::optional<torch::Tensor>& alibi_slopes,
                      const std::string& kv_cache_dtype, double k_scale,
-                     double v_scale);
+                     double v_scale,
+                     const c10::optional<torch::Tensor>& fp8_out_scale);
