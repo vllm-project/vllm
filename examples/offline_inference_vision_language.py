@@ -105,6 +105,7 @@ def run_phi3v(question: str, modality: str):
         trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=2,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"num_crops": 16},
     )
     stop_token_ids = None

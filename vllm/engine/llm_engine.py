@@ -811,6 +811,13 @@ class LLMEngine:
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
 
+        # This is a bit of a hack - copy the mm_processor_kwargs that were
+        # used in the input processor to the processed output, since these
+        # kwargs are presumed to be immutable and the values should be aligned
+        # between the input processor (here) and the input mapper.
+        processed_inputs["mm_processor_kwargs"] = preprocessed_inputs.get(
+            "mm_processor_kwargs")
+
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,

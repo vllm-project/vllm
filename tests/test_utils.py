@@ -7,7 +7,7 @@ from typing import AsyncIterator, Tuple
 import pytest
 
 from vllm.utils import (FlexibleArgumentParser, deprecate_kwargs,
-                        get_open_port, merge_async_iterators)
+                        get_open_port, merge_async_iterators, supports_kw)
 
 from .utils import error_on_warning
 
@@ -236,3 +236,33 @@ def test_no_model_tag(parser_with_config):
     with pytest.raises(ValueError):
         parser_with_config.parse_args(
             ['serve', '--config', './data/test_config.yaml'])
+
+
+# yapf: enable
+@pytest.mark.parametrize(
+    "callable,kw_name,requires_kw_only,allow_var_kwargs,is_supported",
+    [
+        # Tests for positional argument support
+        (lambda foo: None, "foo", True, True, False),
+        (lambda foo: None, "foo", False, True, True),
+        # Tests for positional or keyword / keyword only
+        (lambda foo=100: None, "foo", True, True, False),
+        (lambda *, foo: None, "foo", False, True, True),
+        # Tests to make sure the names of variadic params are NOT supported
+        (lambda *args: None, "args", False, True, False),
+        (lambda **kwargs: None, "kwargs", False, True, False),
+        # Tests for if we allow var kwargs to add support
+        (lambda foo: None, "something_else", False, True, False),
+        (lambda foo, **kwargs: None, "something_else", False, True, True),
+        (lambda foo, **kwargs: None, "kwargs", True, True, False),
+        (lambda foo, **kwargs: None, "foo", True, True, False),
+    ])
+# yapf: disable
+def test_supports_kw(callable,kw_name,requires_kw_only,
+                     allow_var_kwargs,is_supported):
+    assert supports_kw(
+        callable=callable,
+        kw_name=kw_name,
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs
+    ) == is_supported

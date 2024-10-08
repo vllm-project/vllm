@@ -9,7 +9,8 @@ from transformers import PretrainedConfig
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.utils import get_allowed_kwarg_only_overrides, print_warning_once
+from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
+                        resolve_mm_processor_kwargs)
 
 from .data import LLMInputs
 
@@ -293,8 +294,14 @@ class InputRegistry:
         model_cls, _ = get_model_architecture(model_config)
         processor = self._get_model_input_processor(model_cls)
 
-        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-            processor, overrides=model_config.mm_processor_kwargs)
+        # Handle multimodal processor kwargs with priority:
+        #     Inference kwargs -> Init kwargs -> {}
+        # If it's empty, it'll fall back to the default kwarg values
+        mm_processor_kwargs = resolve_mm_processor_kwargs(
+            model_config.mm_processor_kwargs,
+            inputs.get("mm_processor_kwargs"),
+            processor,
+        )
 
         return processor(InputContext(model_config), inputs,
                          **mm_processor_kwargs)
