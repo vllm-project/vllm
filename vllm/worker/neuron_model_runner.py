@@ -17,9 +17,10 @@ from vllm.model_executor.model_loader.neuron import get_neuron_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.worker.model_runner_base import (
-    ModelRunnerBase, ModelRunnerInputBase,
-    _init_attn_metadata_from_tensor_dict)
+from vllm.worker.model_runner_base import (ModelRunnerBase,
+                                           ModelRunnerInputBase,
+                                           _init_attn_metadata_from_tensor_dict
+                                           )
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
