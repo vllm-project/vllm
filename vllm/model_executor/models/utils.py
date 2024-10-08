@@ -57,7 +57,9 @@ class WeightsMapper:
 
 class AutoWeightsLoader:
     """
-    Helper class to load weights into a :class:`torch.nn.Module`.
+    Helper class to load weights into a :class:`torch.nn.Module`. It is able
+    to automatically detect child modules and parameters while iterating over
+    the weights only once.
 
     The weight loading logic for individual modules can be overridden
     by defining a ``load_weights`` method.
@@ -144,7 +146,8 @@ class AutoWeightsLoader:
                                                key=lambda x: x[0][0]):
             yield (
                 prefix,
-                # Because maxsplit=1, the length of `rest` can either be 0 or 1
+                # Because maxsplit=1 in weight_name.split(...),
+                # the length of `rest` must either be 0 or 1
                 (("" if len(rest) == 0 else rest[0], weights_data)
                  for (_, *rest), weights_data in group),
             )
