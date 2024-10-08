@@ -44,10 +44,10 @@ def support_compile_llama_style(cls: type):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # torch.compile.is_compiling() means we are inside the compilation
+        # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
-        if not self._use_torch_compile or torch.compile.is_compiling():
+        if not self._use_torch_compile or torch.compiler.is_compiling():
             return self.forward(input_ids, positions, kv_caches, attn_metadata,
                                 intermediate_tensors, inputs_embeds)
 
