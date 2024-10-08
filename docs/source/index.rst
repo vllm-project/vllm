@@ -71,6 +71,7 @@ Documentation
    getting_started/xpu-installation
    getting_started/quickstart
    getting_started/debugging
+   getting_started/nginx-loadbalancer
    getting_started/examples/examples_index
 
 .. toctree::
