@@ -9,6 +9,8 @@ import torch
 
 import vllm.envs as envs
 
+from .levels import CompilationLevel
+
 
 class TorchCompileWrapperWithCustomDispatcher:
     """
@@ -52,7 +54,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
-            envs.VLLM_TORCH_COMPILE_LEVEL >= 2
+            envs.VLLM_TORCH_COMPILE_LEVEL >= CompilationLevel.DYNAMO_ONCE
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
