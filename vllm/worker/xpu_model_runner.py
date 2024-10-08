@@ -15,6 +15,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
+from vllm.model_executor import SamplingMetadataCache
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
@@ -136,7 +137,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             (input_tokens, input_positions,
              attn_metadata) = self._prepare_decode(
                  self.seq_group_metadata_list)
-            seq_lens = []
+            seq_lens = None
             multi_modal_kwargs = None
 
         return self.model_input_cls(
@@ -390,6 +391,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
 
+        self.sampling_metadata_cache: SamplingMetadataCache = \
+              SamplingMetadataCache() \
+                if self.parallel_config.pipeline_parallel_size == 1 else None
+
     def load_model(self) -> None:
         with DeviceMemoryProfiler() as m:
             self.model = get_model(
@@ -464,7 +469,13 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        kv_caches = [
+            torch.tensor([], dtype=torch.float32, device=self.device)
+        ] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
@@ -518,12 +529,14 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             seq_group_metadata_list, finished_requests_ids)
         # Sampling metadata is only required for the final pp group
         generators = self.get_generators(finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     model_input.seq_lens,
-                                                     model_input.query_lens,
-                                                     self.device,
-                                                     pin_memory=False,
-                                                     generators=generators)
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            model_input.seq_lens,
+            model_input.query_lens,
+            self.device,
+            pin_memory=False,
+            generators=generators,
+            cache=self.sampling_metadata_cache)
 
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
