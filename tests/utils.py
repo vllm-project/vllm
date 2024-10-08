@@ -356,6 +356,11 @@ def compare_all_settings(model: str,
     token_ids = tokenizer(prompt).input_ids
     ref_results: List = []
     for i, (args, env) in enumerate(zip(all_args, all_envs)):
+        assert "--load-format" not in args, \
+            "comparison experiments should not specify --load-format"
+        # we are comparing the results
+        # and we don't need real weights
+        args = args + ["--load-format", "dummy"]
         compare_results: List = []
         results = ref_results if i == 0 else compare_results
         with RemoteOpenAIServer(model,
