@@ -67,7 +67,7 @@ class RequestOutput:
         # TODO: Support `n` > 1.
         completion_output = CompletionOutput(
             index=0,
-            text="",
+            text=request.output_text,
             token_ids=request.output_token_ids,
             logprobs=None,
             finish_reason=request.get_finished_reason(),
