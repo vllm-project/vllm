@@ -1,6 +1,7 @@
 import inspect
 import json
 import sys
+import os
 from argparse import RawTextHelpFormatter
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -31,6 +32,7 @@ class ProfileContext:
     dtype: str
     tensor_parallel_size: int
     allow_cuda_graphs: bool
+    save_traces_folder: Optional[str]
 
 
 def get_dtype(dtype: str):
@@ -98,25 +100,40 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             f"prompt_len or output_len, or increase --max-model-len")
         sys.exit(-1)
 
-    for i in range(batch_size):
-        prompt_token_ids = torch.randint(
-            llm.llm_engine.model_config.get_vocab_size(),
-            size=(prompt_len, )).tolist()
+    def add_requests():
+        for i in range(batch_size):
+            prompt_token_ids = torch.randint(
+                llm.llm_engine.model_config.get_vocab_size(),
+                size=(prompt_len, )).tolist()
 
-        llm.llm_engine.add_request(
-            request_id=f"seq{i}",
-            inputs={'prompt_token_ids': prompt_token_ids},
-            params=sampling_params)
+            llm.llm_engine.add_request(
+                request_id=f"seq{i}",
+                inputs={'prompt_token_ids': prompt_token_ids},
+                params=sampling_params)
+    def abort_requests():
+        for i in range(batch_size):
+            llm.llm_engine.abort_request(f"seq{i}")
+    
+    # Warm up run
+    print("Warm up run ...")
+    add_requests()
+    llm.llm_engine.step() # Prefill
+    llm.llm_engine.step() # Decode
+    abort_requests()
+    
+    print("Profile run ...")
+    add_requests()
 
     with layerwise_profile() as prefill_prof:
         llm.llm_engine.step()  # First step is prefill
 
-    decode_results_list = []
+    decode_profs = []
     for x in range(args.output_len - 1):
         with layerwise_profile() as decode_prof:
             llm.llm_engine.step()
-        decode_results_list.append(decode_prof.results)
+        decode_profs.append(decode_prof)
 
+    decode_results_list = [prof.results for prof in decode_profs]
     prefill_results = prefill_prof.results
     has_decode = len(decode_results_list) > 0
 
@@ -195,6 +212,17 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
         pass
 
 
+    if context.save_traces_folder is not None:
+        os.makedirs(context.save_traces_folder, exist_ok=True)
+        prefill_prof.profiler.export_chrome_trace(
+            context.save_traces_folder + "/prefill.json")
+        for idx, decode_prof in enumerate(decode_profs):
+            decode_prof.profiler.export_chrome_trace(
+                context.save_traces_folder + f"/decode_{idx + 1}.json")
+        print("Traces saved as prefill.json and decode_1.json, etc."
+              f" in folder {context.save_traces_folder}")
+
+
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="""
 Profile a model
@@ -247,6 +275,11 @@ Profile a model
         type=str,
         default=None,
         help="Export the results as a json file. This should be the filename")
+    parser.add_argument("--save-traces-folder",
+                        type=str,
+                        help="Save chrome traces for the prefill and decode "
+                        "will save traces as prefill.json and decode_1.json, "
+                        "etc. inside this folder")
     parser.add_argument("--quantization",
                         "-q",
                         type=str,
