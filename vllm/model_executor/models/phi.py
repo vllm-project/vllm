@@ -260,6 +260,22 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "fc1",
         "fc2",
     ]
+
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+    }
+
+    default_bitsandbytes_target_modules = [
+        ".q_proj.", ".k_proj.", ".v_proj.", ".fc1.", ".fc2.", ".dense."
+    ]
+
+    # BitandBytes specific attributes
+    # in TP, these weights are partitioned along the column dimension (dim=-1)
+    column_parallel_weights_modules = [".fc2.", ".dense."]
+
     embedding_modules = {}
     embedding_padding_modules = []
 

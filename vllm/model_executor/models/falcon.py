@@ -391,6 +391,19 @@ class FalconModel(nn.Module):
 
 class FalconForCausalLM(nn.Module, SupportsPP):
 
+    bitsandbytes_stacked_params_mapping = {}
+
+    default_bitsandbytes_target_modules = [
+        ".query_key_value.",
+        ".dense.",
+        ".dense_h_to_4h.",
+        ".dense_4h_to_h.",
+    ]
+
+    # BitandBytes specific attributes
+    # in TP, these weights are partitioned along the column dimension (dim=-1)
+    column_parallel_weights_modules = [".dense_4h_to_h.", ".dense."]
+
     def __init__(
         self,
         config: FalconConfig,
