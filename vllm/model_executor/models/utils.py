@@ -147,9 +147,9 @@ class AutoWeightsLoader:
             yield (
                 prefix,
                 # Because maxsplit=1 in weight_name.split(...),
-                # the length of `rest` must either be 0 or 1
-                (("" if len(rest) == 0 else rest[0], weights_data)
-                 for (_, *rest), weights_data in group),
+                # the length of `parts` must either be 1 or 2
+                (("" if len(parts) == 1 else parts[1], weights_data)
+                 for parts, weights_data in group),
             )
 
     def load_weights(
