@@ -1277,6 +1277,15 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+def supports_kw(callable: Callable[..., object], kw_name: str) -> bool:
+    params = inspect.signature(callable).parameters
+    if kw_name in params:
+        return True
+
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD
+               for param in params.values())
+
+
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
     overrides: Optional[Dict[str, Any]],
@@ -1361,3 +1370,22 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
+
+def get_beam_search_score(
+    tokens: List[int],
+    cumulative_logprob: float,
+    eos_token_id: int,
+    length_penalty: float = 1.0,
+) -> float:
+    """Calculate the beam search score with length penalty.
+
+    Adapted from
+
+    https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
+    """
+    seq_len = len(tokens)
+    if tokens[-1] == eos_token_id:
+        seq_len -= 1
+
+    return cumulative_logprob / (seq_len**length_penalty)

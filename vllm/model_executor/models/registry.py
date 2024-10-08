@@ -12,10 +12,13 @@ from vllm.logger import init_logger
 from vllm.utils import is_hip
 
 from .interfaces import supports_multimodal, supports_pp
+from .interfaces_base import is_embedding_model, is_text_generation_model
 
 logger = init_logger(__name__)
 
-_GENERATION_MODELS = {
+# yapf: disable
+_TEXT_GENERATION_MODELS = {
+    # [Decoder-only]
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
@@ -66,18 +69,15 @@ _GENERATION_MODELS = {
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
-    "Qwen2VLForConditionalGeneration":
-    ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
-    # NOTE: The below models are for speculative decoding only
-    "MedusaModel": ("medusa", "Medusa"),
-    "EAGLEModel": ("eagle", "EAGLE"),
-    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
+    # [Encoder-decoder]
+    "BartModel": ("bart", "BartForConditionalGeneration"),
+    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
 }
 
 _EMBEDDING_MODELS = {
@@ -87,43 +87,39 @@ _EMBEDDING_MODELS = {
 }
 
 _MULTIMODAL_MODELS = {
-    "Blip2ForConditionalGeneration":
-    ("blip2", "Blip2ForConditionalGeneration"),
-    "ChameleonForConditionalGeneration":
-    ("chameleon", "ChameleonForConditionalGeneration"),
+    # [Decoder-only]
+    "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
+    "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
-    "LlavaForConditionalGeneration": ("llava",
-                                      "LlavaForConditionalGeneration"),
-    "LlavaNextForConditionalGeneration": ("llava_next",
-                                          "LlavaNextForConditionalGeneration"),
-    "LlavaNextVideoForConditionalGeneration":
-    ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),
-    "LlavaOnevisionForConditionalGeneration":
-    ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),
+    "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
+    "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
+    "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
+    "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
-    "PaliGemmaForConditionalGeneration": ("paligemma",
-                                          "PaliGemmaForConditionalGeneration"),
+    "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
+    "PaliGemmaForConditionalGeneration": ("paligemma", "PaliGemmaForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
-    "PixtralForConditionalGeneration": ("pixtral",
-                                        "PixtralForConditionalGeneration"),
+    "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
-    "Qwen2VLForConditionalGeneration": ("qwen2_vl",
-                                        "Qwen2VLForConditionalGeneration"),
+    "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
-    "MllamaForConditionalGeneration": ("mllama",
-                                       "MllamaForConditionalGeneration"),
-}
-_CONDITIONAL_GENERATION_MODELS = {
-    "BartModel": ("bart", "BartForConditionalGeneration"),
-    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+    # [Encoder-decoder]
+    "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
 }
 
+_SPECULATIVE_DECODING_MODELS = {
+    "EAGLEModel": ("eagle", "EAGLE"),
+    "MedusaModel": ("medusa", "Medusa"),
+    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
+}
+# yapf: enable
+
 _MODELS = {
-    **_GENERATION_MODELS,
+    **_TEXT_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
     **_MULTIMODAL_MODELS,
-    **_CONDITIONAL_GENERATION_MODELS,
+    **_SPECULATIVE_DECODING_MODELS,
 }
 
 # Architecture -> type or (module, class).
@@ -318,13 +314,30 @@ class ModelRegistry:
         return result.returncode == 0
 
     @staticmethod
+    def is_text_generation_model(architectures: Union[str, List[str]]) -> bool:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        is_txt_gen = partial(ModelRegistry._check_stateless,
+                             is_text_generation_model,
+                             default=False)
+
+        return any(is_txt_gen(arch) for arch in architectures)
+
+    @staticmethod
     def is_embedding_model(architectures: Union[str, List[str]]) -> bool:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        return any(arch in _EMBEDDING_MODELS for arch in architectures)
+        is_emb = partial(ModelRegistry._check_stateless,
+                         is_embedding_model,
+                         default=False)
+
+        return any(is_emb(arch) for arch in architectures)
 
     @staticmethod
     def is_multimodal_model(architectures: Union[str, List[str]]) -> bool:

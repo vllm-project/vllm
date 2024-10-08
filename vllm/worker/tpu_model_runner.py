@@ -453,9 +453,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     f"Best of > {_MAX_NUM_SAMPLES} is not supported by the TPU "
                     "backend.")
             best_of.append(sampling_params.best_of)
-            if sampling_params.use_beam_search:
-                raise NotImplementedError(
-                    "Beam search is not supported by the TPU backend.")
             if sampling_params.logprobs is not None:
                 raise NotImplementedError(
                     "logprobs is not currently supported by the TPU backend.")
