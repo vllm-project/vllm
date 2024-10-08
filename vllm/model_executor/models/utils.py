@@ -132,8 +132,8 @@ class AutoWeightsLoader:
                     for p in self.allow_unexpected_prefixes)
                 if not allow_unexpected:
                     raise ValueError(
-                        f"Attempted to load nested weight ({weight_qualname}) "
-                        f"into a single parameter ({base_prefix})")
+                        f"Attempted to load nested weight '{weight_qualname}' "
+                        f"into a single parameter '{base_prefix}'")
 
                 continue
 
@@ -170,7 +170,7 @@ class AutoWeightsLoader:
                 self._load_param(prefix, child_params[child_prefix],
                                  child_weights)
             else:
-                msg = f"There is no child module or parameter named {prefix}"
+                msg = f"There is no module or parameter named '{prefix}'"
                 raise ValueError(msg)
 
     def load_weights(
