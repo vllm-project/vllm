@@ -108,7 +108,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
 
             llm.llm_engine.add_request(
                 request_id=f"seq{i}",
-                inputs={'prompt_token_ids': prompt_token_ids},
+                prompt={'prompt_token_ids': prompt_token_ids},
                 params=sampling_params)
     def abort_requests():
         for i in range(batch_size):
