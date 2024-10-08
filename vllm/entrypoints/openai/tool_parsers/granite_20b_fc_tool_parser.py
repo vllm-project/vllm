@@ -6,12 +6,13 @@ from typing import Dict, Sequence, Union
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (consume_space,
                                                         find_common_prefix,
                                                         is_complete_json,
@@ -23,6 +24,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+@ToolParserManager.register_module("granite-20b-fc")
 class Granite20bFCToolParser(ToolParser):
     """
     Tool call parser for the granite-20b-functioncalling model intended
@@ -40,8 +42,9 @@ class Granite20bFCToolParser(ToolParser):
         self.tool_start_token = self.bot_token
         self.tool_call_regex = re.compile(r"<function_call>\s*")
 
-    def extract_tool_calls(self,
-                           model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         if self.tool_start_token not in model_output:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -102,6 +105,7 @@ class Granite20bFCToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         if len(current_text) < len(

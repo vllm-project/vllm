@@ -4,12 +4,13 @@ from typing import Dict, Sequence, Union
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (consume_space,
                                                         find_common_prefix,
                                                         is_complete_json,
@@ -21,6 +22,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+@ToolParserManager.register_module("granite")
 class GraniteToolParser(ToolParser):
     """
     Tool call parser for the granite models. Intended
@@ -34,8 +36,9 @@ class GraniteToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
-    def extract_tool_calls(self,
-                           model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         stripped = model_output.strip()
         if not stripped or stripped[0] != '[':
             return ExtractedToolCallInformation(tools_called=False,
@@ -83,6 +86,7 @@ class GraniteToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         start_idx = consume_space(0, current_text)
