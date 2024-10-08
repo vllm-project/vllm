@@ -8,6 +8,7 @@ import torch.fx as fx
 from vllm.logger import init_logger
 
 from .compile_context import get_compile_context
+from .levels import CompilationLevel
 
 logger = init_logger(__name__)
 
@@ -240,20 +241,23 @@ def vllm_backend(
 
 
 def select_default_backend(level: int) -> Union[str, Callable]:
-    if level in [1, 2]:
+    if level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
         backend = "eager"
         return backend
-    assert level in [3, 4], f"Invalid level {level}"
+    assert level in [
+        CompilationLevel.INDUCTOR, CompilationLevel.INDUCTOR_MAX_AUTOTUNE
+    ], f"Invalid level {level}"
 
     from vllm.compilation.backends import vllm_backend
     from vllm.plugins import get_inductor_additional_configs
     additional_configs = get_inductor_additional_configs()
 
-    if level == 4:
+    if level == CompilationLevel.INDUCTOR_MAX_AUTOTUNE:
         if "max_autotune" in additional_configs and not additional_configs[
                 "max_autotune"]:
             logger.warning(
-                "max_autotune is disabled, but is overridden by level 4")
+                "max_autotune is disabled, but is overridden by level %s",
+                CompilationLevel.INDUCTOR_MAX_AUTOTUNE)
         additional_configs['max_autotune'] = True
 
     from functools import partial
