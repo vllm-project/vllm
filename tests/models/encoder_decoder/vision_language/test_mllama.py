@@ -7,22 +7,31 @@ from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
-                          _ImageAssets)
+from ....conftest import HfRunner, PromptImageInput, VllmRunner, _ImageAssets
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
-_LIMIT_IMAGE_PER_PROMPT = 1
+_LIMIT_IMAGE_PER_PROMPT = 2
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    "<|image|><|begin_of_text|>The meaning of the image is",
-    "cherry_blossom":
-    "<|image|><|begin_of_text|>The city is",
-})
-
-text_only_prompts = [
-    "The color of the sky is blue but sometimes it can also be",
+# ("prompt", [image indices])
+# image-0: stop sign, image-1: cherry blossom
+# For each entry, we will generate a batch of
+# samples with different image sizes.
+PROMPTS = [
+    # Single leading image.
+    ("<|image|><|begin_of_text|>The meaning of the image is", [0]),
+    ("<|image|><|begin_of_text|>The city is", [1]),
+    # Single interleaved image.
+    ("<|begin_of_text|>The meaning of the image<|image|> is", [0]),
+    # Multi leading images.
+    ("<|image|><|image|><|begin_of_text|>Between the first and second image, "
+     "which is stop sign and which is cherry blossom?", [0, 1]),
+    # Multi interleaved images.
+    ("<|begin_of_text|>Between the first image<|image|> and second "
+     "image<|image|>, which is stop sign and which is cherry blossom?", [0,
+                                                                         1]),
+    # Text only.
+    ("The color of the sky is blue but sometimes it can also be", []),
 ]
 
 models = [
@@ -59,32 +68,49 @@ def _get_inputs(
     *,
     size_factors: Optional[List[float]] = None,
     sizes: Optional[List[Tuple[int, int]]] = None,
-) -> List[Tuple[List[str], PromptImageInput]]:
-    images = [asset.pil_image for asset in image_assets]
+) -> List[Tuple[List[str], List[Optional[PromptImageInput]]]]:
+    assets = [asset.pil_image for asset in image_assets]
+    assert len(assets) >= 2
 
-    if size_factors is not None:
-        inputs_per_image = [(
-            [prompt for _ in size_factors],
-            [rescale_image_size(image, factor) for factor in size_factors],
-        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-    elif sizes is not None:
-        inputs_per_image = [(
-            [
-                prompt if size is not None else text_only_prompts[0]
-                for size in sizes
-            ],
-            [
-                image.resize(size) if size is not None else None
-                for size in sizes
-            ],
-        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-        if len(sizes) == 0:
-            inputs_per_image.append(
-                (text_only_prompts, [None] * len(text_only_prompts)))
-    else:
-        raise ValueError("You must provide either `size_factors` or `sizes`")
-
-    return inputs_per_image
+    # Inputs is a list of batches, a batch is a tuple of
+    # (prompts, images), prompts is a list of strings,
+    # images is a nested list of PIL images.
+    # len(prompts) == len(images)
+    # A batch will trigger a generate run.
+    inputs = []
+    for entry in PROMPTS:
+        prompt, image_indices = entry
+        images = [assets[i] for i in image_indices]
+        batch_prompts = []
+        batch_images = []
+        if size_factors is not None:
+            for factor in size_factors:
+                if factor is None:
+                    batch_prompts.append(PROMPTS[-1][0])
+                    batch_images.append(None)
+                else:
+                    batch_prompts.append(prompt)
+                    resized_images = [
+                        rescale_image_size(image, factor) for image in images
+                    ]
+                    batch_images.append(
+                        resized_images if resized_images else None)
+        elif sizes is not None:
+            for size in sizes:
+                if size is None:
+                    batch_prompts.append(PROMPTS[-1][0])
+                    batch_images.append(None)
+                else:
+                    batch_prompts.append(prompt)
+                    resized_images = [image.resize(size) for image in images]
+                    batch_images.append(
+                        resized_images if resized_images else None)
+        else:
+            raise ValueError(
+                "You must provide either `size_factors` or `sizes`")
+        assert len(batch_prompts) == len(batch_images)
+        inputs.append((batch_prompts, batch_images))
+    return inputs
 
 
 @overload
@@ -151,7 +177,7 @@ def run_test(
 def _run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], PromptImageInput]],
+    inputs: List[Tuple[List[str], List[Optional[PromptImageInput]]]],
     model: str,
     *,
     dtype: str,
@@ -226,8 +252,6 @@ def _run_test(
 @pytest.mark.parametrize(
     "sizes",
     [
-        # Text only
-        [],
         # Single-size
         [(512, 512)],
         # Single-size, batched

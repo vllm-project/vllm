@@ -136,7 +136,6 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
     assert hf_config.vision_config.image_size % 14 == 0, \
         "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
-    print(f"vllm num_tiles: {num_tiles}")
     num_tokens = num_tiles * token_per_chunk
     llm_inputs["encoder_prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
     llm_inputs["encoder_prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID
@@ -1151,7 +1150,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # NOTE: llama's reference implementation runs vision model on CPU
         pixel_values = image_inputs['data']
-        print(f"pixel_values={pixel_values.shape}")
         aspect_ratio_ids = image_inputs['aspect_ratio_ids']
         aspect_ratio_mask = image_inputs['aspect_ratio_mask']
         cross_attention_states = self.vision_model(pixel_values,
@@ -1189,7 +1187,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             get_cross_attention_token_mask(t, MLLAMA_IMAGE_TOKEN_ID)
             for t in batch_token_ids
         ]
-        print(f"sparse_mask={sparse_mask}")
 
         # Skip generating cross-attention mask if all samples
         # are text-only or have only 1 leading image.
