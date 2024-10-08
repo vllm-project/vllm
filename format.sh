@@ -120,7 +120,7 @@ run_mypy vllm/model_executor
 run_mypy vllm/plugins
 run_mypy vllm/prompt_adapter
 run_mypy vllm/spec_decode
-#run_mypy vllm/transformers_utils
+run_mypy vllm/transformers_utils
 run_mypy vllm/usage
 #run_mypy vllm/vllm_flash_attn
 run_mypy vllm/worker
