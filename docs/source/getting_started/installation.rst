@@ -138,8 +138,7 @@ Use an existing PyTorch installation
 There are scenarios where the PyTorch dependency cannot be easily installed via pip, e.g.:
 
 * Building vLLM with PyTorch nightly or a custom PyTorch build.
-* Building vLLM with aarch64 and CUDA (GH200), where the PyTorch wheels are not available on PyPI. Currently, only the PyTorch nightly has wheels for aarch64 with CUDA. 
-    * You can run ``pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124`` to `install PyTorch nightly <https://pytorch.org/get-started/locally/>`_, and then build vLLM on top of it.
+* Building vLLM with aarch64 and CUDA (GH200), where the PyTorch wheels are not available on PyPI. Currently, only the PyTorch nightly has wheels for aarch64 with CUDA. You can run ``pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124`` to `install PyTorch nightly <https://pytorch.org/get-started/locally/>`_, and then build vLLM on top of it.
 
 To build vLLM using an existing PyTorch installation:
 
