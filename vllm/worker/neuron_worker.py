@@ -9,7 +9,7 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,

@@ -163,13 +163,14 @@ def _get_default_neuron_config(model_config: ModelConfig,
     quant_config = dict(
         dequant_dtype=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
         quantize_method="vector_dynamic")
-    quantization_config = get_quantization_config(
-        model_config.quantization).from_config(quant_config).get_quant_method(None, "")
+    neuron_quantization_config_builder = lambda quant: get_quantization_config(
+        quant).from_config(quant_config).get_quant_method(None, "")
     default_neuron_args = dict(
         collectives_layout=LAYOUT_BSH,
         attention_layout=LAYOUT_BSH,
+        cache_layout=LAYOUT_BSH,
         fuse_qkv=True,
-        quant=quantization_config if model_config.quantization else None,
+        quant=neuron_quantization_config_builder(model_config.quantization) if model_config.quantization else None,
         continuous_batching=continuous_batching_config,
         weight_tiling=bool(model_config.quantization),
         on_device_generation=_get_neuron_on_device_generation_config(

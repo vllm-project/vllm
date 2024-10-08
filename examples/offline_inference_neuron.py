@@ -1,11 +1,4 @@
-import os
-
 from vllm import LLM, SamplingParams
-
-# creates XLA hlo graphs for all the context length buckets.
-os.environ['NEURON_CONTEXT_LENGTH_BUCKETS'] = "128,512,1024,2048"
-# creates XLA hlo graphs for all the token gen buckets.
-os.environ['NEURON_TOKEN_GEN_BUCKETS'] = "128,512,1024,2048"
 
 # Sample prompts.
 prompts = [
@@ -19,17 +12,17 @@ sampling_params = SamplingParams()
 
 # Create an LLM.
 llm = LLM(
-    model="meta-llama/Llama-3.2-1B-Instruct",
+    model="meta-llama/Llama-3.2-1B",
     max_num_seqs=8,
-    max_model_len=2048,
-    max_num_batched_tokens=2048,
+    max_model_len=128,
+    max_num_batched_tokens=128,
     block_size=32,
 
     # The device argument can be either unspecified for automated detection,
     # or explicitly assigned.
     device="neuron",
     tensor_parallel_size=2,
-    gpu_memory_utilization=0.2)
+    num_gpu_blocks_override=60)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
