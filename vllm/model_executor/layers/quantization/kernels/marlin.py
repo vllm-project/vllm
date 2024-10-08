@@ -38,10 +38,11 @@ class MarlinLinearKernel(MPLinearKernel):
                             "Marlin, supported group sizes are: "\
                             f"{MARLIN_SUPPORTED_GROUP_SIZES}"
 
-        return check_marlin_supports_shape(c.partition_weight_shape[0],
-                                           c.partition_weight_shape[1],
-                                           c.full_weight_shape[1],
-                                           c.group_size)
+        return check_marlin_supports_shape(
+            c.partition_weight_shape[1],  # out_features
+            c.partition_weight_shape[0],  # in_features
+            c.full_weight_shape[0],  # in_features
+            c.group_size)
 
     # note assumes that
     #  `weight_packed` is: {input_dim = 0, output_dim = 1, packed_dim = 0}

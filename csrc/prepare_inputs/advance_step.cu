@@ -17,6 +17,17 @@ __global__ void advance_step_flashattn_kernel(
     long const* sampled_token_ids_ptr, long* input_positions_ptr,
     int* seq_lens_ptr, long* slot_mapping_ptr, int const* block_tables_ptr,
     int64_t const block_tables_stride) {
+  int const n_pad = num_seqs - num_queries;
+  if (n_pad && blockIdx.x == 0) {
+    // Handle cuda graph padding
+    int const offset = num_queries;
+    for (int i = threadIdx.x; i < n_pad; i += blockDim.x) {
+      input_tokens_ptr[offset + i] = 0;
+      input_positions_ptr[offset + i] = 0;
+      slot_mapping_ptr[offset + i] = -1;
+    }
+  }
+
   int num_query_blocks = div_ceil(num_queries, num_threads);
 
   if (blockIdx.x >= num_query_blocks) {
@@ -52,7 +63,7 @@ __global__ void advance_step_flashattn_kernel(
   slot_mapping_ptr[cur_query_id] = slot_num;
 }
 
-inline void verify_tensor(std::string const& name, torch::Tensor& t,
+inline void verify_tensor(std::string const& name, torch::Tensor const& t,
                           int64_t const size_0, int64_t const size_1,
                           c10::ScalarType const type) {
   bool size_0_cond = true;
@@ -211,7 +222,7 @@ void advance_step_flashinfer(
     printf("  num_seqs = %d\n", num_seqs);
     printf("  num_queries = %d\n", num_queries);
     printf("  block_size = %d\n", block_size);
-    printf("  block_tables.stride(0) = %d\n", block_tables.stride(0));
+    printf("  block_tables.stride(0) = %zu\n", block_tables.stride(0));
   }
   // Verify all tensors
   verify_tensor("input_tokens", input_tokens, num_seqs, -1, at::kLong);

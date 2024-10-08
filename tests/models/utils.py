@@ -1,9 +1,12 @@
 import warnings
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
+import torch
+
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.utils import is_cpu
 
 TokensText = Tuple[List[int], str]
 
@@ -247,6 +250,7 @@ def check_logprobs_close(
 def build_model_context(model_name: str,
                         tokenizer_name: Optional[str] = None,
                         trust_remote_code: bool = False,
+                        dtype: Optional[Union[str, torch.dtype]] = None,
                         mm_processor_kwargs: Optional[Dict] = None,
                         limit_mm_per_prompt: Optional[Dict] = None):
     """Creates an InputContext for a given model.
@@ -264,12 +268,15 @@ def build_model_context(model_name: str,
     """
     if tokenizer_name is None:
         tokenizer_name = model_name
+    if dtype is None:
+        dtype = "bfloat16" if is_cpu() else "half"
+
     model_config = ModelConfig(
         model_name,
         tokenizer_name,
         tokenizer_mode="auto",
         trust_remote_code=trust_remote_code,
-        dtype="float32",
+        dtype=dtype,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
