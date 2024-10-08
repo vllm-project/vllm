@@ -58,6 +58,15 @@ class JambaToolParser(ToolParser):
                 "Jamba Tool parser could not locate tool calls start/end "
                 "tokens in the tokenizer!")
 
+    def adjust_request(
+            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        if request.tools and request.tool_choice != 'none':
+            # do not skip special tokens because jamba use the special
+            # tokens to indicate the start and end of the tool calls
+            # information.
+            request.skip_special_tokens = False
+        return request
+
     def load_tool_string(self):
         # TODO: maybe we want to implement a function that allows
         #  the model to make some mistakes
