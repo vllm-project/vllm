@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import os
+from functools import cached_property
 from typing import Callable, Dict, List, Optional, Sequence, Type, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -28,6 +29,12 @@ class ToolParser:
         self.streamed_args_for_tool: List[str] = []
 
         self.model_tokenizer = tokenizer
+
+    @cached_property
+    def vocab(self) -> Dict[str, int]:
+        # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
+        # whereas all tokenizers have .get_vocab()
+        return self.model_tokenizer.get_vocab()
 
     def adjust_request(
             self, request: ChatCompletionRequest) -> ChatCompletionRequest:
