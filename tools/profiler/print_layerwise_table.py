@@ -65,7 +65,7 @@ if __name__ == "__main__":
                              pct_cuda_time=12,
                              trace=60)
 
-    # ident entry names based on the depth
+    # indent entry names based on the depth
     entries = []
     for entry, depth in entries_and_depths:
         entry.name = indent_string(

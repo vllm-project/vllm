@@ -138,36 +138,37 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
     prefill_results = prefill_prof.results
     has_decode = len(decode_results_list) > 0
 
-    print("=" * 80)
+    LINE_WIDTH = 80
+    print("=" * LINE_WIDTH)
     print(f"= Prefill Model Table "
           f"(prompt_len={prompt_len}, batch_size={batch_size})")
-    print("=" * 80)
+    print("=" * LINE_WIDTH)
     print()
     prefill_results.print_model_table()
 
     if has_decode:
         print()
-        print("=" * 80)
+        print("=" * LINE_WIDTH)
         print(f"= First Decode Step Model Table "
               f"(prompt_len={prompt_len}, batch_size={batch_size})")
-        print("=" * 80)
+        print("=" * LINE_WIDTH)
         print()
         decode_results_list[0].print_model_table()
 
     print()
-    print("=" * 80)
+    print("=" * LINE_WIDTH)
     print(f"= Prefill Summary Table "
           f"(prompt_len={prompt_len}, batch_size={batch_size})")
-    print("=" * 80)
+    print("=" * LINE_WIDTH)
     print()
     prefill_results.print_summary_table()
 
     if has_decode:
         print()
-        print("=" * 80)
+        print("=" * LINE_WIDTH)
         print(f"= First Decode Step Summary Table "
               f"(prompt_len={prompt_len}, batch_size={batch_size})")
-        print("=" * 80)
+        print("=" * LINE_WIDTH)
         print()
         decode_results_list[0].print_summary_table()
 
@@ -321,9 +322,10 @@ Profile a model
     parser.add_argument(
         "--allow-cuda-graphs",
         action='store_true',
-        help="Enables cuda graphs to be used, well remove a lot of the module "
-        "level info in the profiler results since almost everything runs in "
-        "the graph where we do not have access to an informative stack trace")
+        help="Enables cuda graphs to be used. This wo; remove a lot of the "
+        "module level info in the profiler results since almost everything "
+        "runs in the graph where we do not have access to an informative stack "
+        "trace")
     parser.add_argument(
         "--output-len",
         type=int,
