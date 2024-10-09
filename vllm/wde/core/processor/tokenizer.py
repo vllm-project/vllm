@@ -1,0 +1,162 @@
+from typing import Optional, Union
+
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
+
+from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+class Tokenizer:
+
+    def __init__(self, tokenizer_name: str, **kwargs):
+        self.tokenizer_name = tokenizer_name
+        self.tokenizer_kwargs = kwargs
+
+        self.tokenizer = get_tokenizer(tokenizer_name=self.tokenizer_name,
+                                       **self.tokenizer_kwargs)
+
+    @classmethod
+    def from_engine(cls, engine):
+        init_kwargs = dict(
+            tokenizer_name=engine.engine_config.model_config.tokenizer,
+            tokenizer_mode=engine.engine_config.model_config.tokenizer_mode,
+            trust_remote_code=engine.engine_config.model_config.
+            trust_remote_code,
+            revision=engine.engine_config.model_config.tokenizer_revision)
+
+        return cls(**init_kwargs)
+
+    def __call__(self, *args, **kwargs):
+        return self.tokenizer(*args, **kwargs)
+
+    def encode(self, *args, **kwargs):
+        return self.tokenizer.encode(*args, **kwargs)
+
+    @property
+    def eos_token_id(self):
+        return self.tokenizer.eos_token_id
+
+
+def get_cached_tokenizer(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    """Get tokenizer with cached properties.
+
+    This will patch the tokenizer object in place.
+
+    By default, transformers will recompute multiple tokenizer properties
+    each time they are called, leading to a significant slowdown. This
+    function caches these properties for faster access."""
+
+    tokenizer_all_special_ids = set(tokenizer.all_special_ids)
+    tokenizer_all_special_tokens_extended = (
+        tokenizer.all_special_tokens_extended)
+    tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
+    tokenizer_len = len(tokenizer)
+
+    class CachedTokenizer(tokenizer.__class__):  # type: ignore
+
+        @property
+        def all_special_ids(self):
+            return tokenizer_all_special_ids
+
+        @property
+        def all_special_tokens(self):
+            return tokenizer_all_special_tokens
+
+        @property
+        def all_special_tokens_extended(self):
+            return tokenizer_all_special_tokens_extended
+
+        def __len__(self):
+            return tokenizer_len
+
+    CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
+
+    tokenizer.__class__ = CachedTokenizer
+    return tokenizer
+
+
+def get_tokenizer(
+    tokenizer_name: str,
+    *args,
+    tokenizer_mode: str = "auto",
+    trust_remote_code: bool = False,
+    revision: Optional[str] = None,
+    download_dir: Optional[str] = None,
+    **kwargs,
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
+    """
+    if VLLM_USE_MODELSCOPE:
+        # download model from ModelScope hub,
+        # lazy import so that modelscope is not required for normal use.
+        # pylint: disable=C.
+        import os
+
+        import huggingface_hub
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        # Only set the tokenizer here, model will be downloaded on the workers.
+        if not os.path.exists(tokenizer_name):
+            tokenizer_path = snapshot_download(
+                model_id=tokenizer_name,
+                cache_dir=download_dir,
+                revision=revision,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                # Ignore weights - we only need the tokenizer.
+                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
+            tokenizer_name = tokenizer_path
+
+    if tokenizer_mode == "slow":
+        if kwargs.get("use_fast", False):
+            raise ValueError(
+                "Cannot use the fast tokenizer in slow tokenizer mode.")
+        kwargs["use_fast"] = False
+
+    if "truncation_side" not in kwargs:
+        kwargs["truncation_side"] = "left"
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name,
+            *args,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            **kwargs)
+    except ValueError as e:
+        # If the error pertains to the tokenizer class not existing or not
+        # currently being imported, suggest using the --trust-remote-code flag.
+        if (not trust_remote_code and
+            ("does not exist or is not currently imported." in str(e)
+             or "requires you to execute the tokenizer file" in str(e))):
+            err_msg = (
+                "Failed to load the tokenizer. If the tokenizer is a custom "
+                "tokenizer not yet available in the HuggingFace transformers "
+                "library, consider setting `trust_remote_code=True` in LLM "
+                "or using the `--trust-remote-code` flag in the CLI.")
+            raise RuntimeError(err_msg) from e
+        else:
+            raise e
+    except AttributeError as e:
+        if "BaichuanTokenizer" in str(e):
+            # This is for the error "'BaichuanTokenizer' object has no
+            # attribute 'sp_model'".
+            from vllm.transformers_utils.tokenizers import BaichuanTokenizer
+            tokenizer = BaichuanTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+                **kwargs)
+        else:
+            raise e
+
+    if not isinstance(tokenizer, PreTrainedTokenizerFast):
+        logger.warning(
+            "Using a slow tokenizer. This might cause a significant "
+            "slowdown. Consider using a fast tokenizer instead.")
+    return get_cached_tokenizer(tokenizer)
