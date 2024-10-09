@@ -287,9 +287,12 @@ class ModelRegistry:
             # `cloudpickle` allows pickling lambda functions directly
             input_bytes = cloudpickle.dumps(
                 (mod_name, cls_name, func, output_file.name))
-            returned = subprocess.run([sys.executable, __file__],
-                                      input=input_bytes,
-                                      capture_output=True)
+            # cannot use `sys.executable __file__` here because the script
+            # contains relative imports
+            returned = subprocess.run(
+                [sys.executable, "-m", "vllm.model_executor.models.registry"],
+                input=input_bytes,
+                capture_output=True)
 
             # check if the subprocess is successful
             try:
