@@ -17,7 +17,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -47,12 +46,11 @@ class MambaCacheParams:
     conv_state: torch.Tensor = torch.Tensor()
     ssm_state: torch.Tensor = torch.Tensor()
     state_indices_tensor: torch.Tensor = torch.Tensor()
-    
-    def at_layer_idx(self,layer_idx):
+
+    def at_layer_idx(self, layer_idx):
         return MambaCacheParams(self.conv_state[layer_idx],
                                 self.ssm_state[layer_idx],
                                 self.state_indices_tensor)
-
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -67,10 +65,9 @@ class JambaMambaMixer(nn.Module):
     **selective** state spaces)
     """
 
-    def __init__(self, config: JambaConfig, layer_idx):
+    def __init__(self, config: JambaConfig):
         super().__init__()
         self.config = config
-        self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
         self.ssm_state_size = config.mamba_d_state
         self.conv_kernel_size = config.mamba_d_conv
@@ -90,8 +87,8 @@ class JambaMambaMixer(nn.Module):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         self.in_proj = ColumnParallelLinear(self.hidden_size,
-                                                  self.intermediate_size * 2,
-                                                  bias=self.use_bias)
+                                            self.intermediate_size * 2,
+                                            bias=self.use_bias)
         # selective projection used to make dt, B and C input dependent
         self.x_proj = RowParallelLinear(
             self.intermediate_size,
@@ -179,8 +176,7 @@ class JambaMambaMixer(nn.Module):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=mamba_cache_params.state_indices_tensor
-            )
+                conv_state_indices=mamba_cache_params.state_indices_tensor)
             hidden_states = hidden_states.transpose(0, 1)
 
         # 3. State Space Model sequence transformation
@@ -229,8 +225,7 @@ class JambaMambaMixer(nn.Module):
                 gate.transpose(0, 1),
                 time_proj_bias,
                 dt_softplus=True,
-                state_batch_indices=mamba_cache_params.state_indices_tensor
-            )
+                state_batch_indices=mamba_cache_params.state_indices_tensor)
             scan_outputs = scan_outputs.transpose(0, 1)
 
         # 4. Final linear projection
@@ -311,7 +306,7 @@ class JambaMambaDecoderLayer(nn.Module):
         super().__init__()
         self.layer_idx = layer_idx
         self.config = config
-        self.mamba = JambaMambaMixer(config, layer_idx)
+        self.mamba = JambaMambaMixer(config)
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
@@ -336,11 +331,8 @@ class JambaMambaDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        hidden_states = self.mamba(
-            hidden_states,
-            attn_metadata,
-            mamba_cache_params
-        )
+        hidden_states = self.mamba(hidden_states, attn_metadata,
+                                   mamba_cache_params)
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
             hidden_states, residual)
@@ -513,8 +505,7 @@ class JambaModel(nn.Module):
                                            (i - self.config.attn_layer_offset)
                                            // self.config.attn_layer_period)
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
-                    current_state_layer
-                )
+                    current_state_layer)
 
             hidden_states, residual = layer(
                 positions=positions,
@@ -522,8 +513,7 @@ class JambaModel(nn.Module):
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
                 residual=residual,
-                mamba_cache_params=layer_mamba_cache_params
-            )
+                mamba_cache_params=layer_mamba_cache_params)
         hidden_states, _ = self.final_layernorm(hidden_states, residual)
         return hidden_states
 
@@ -606,22 +596,17 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             finished_requests_ids = kwargs["finished_requests_ids"]
             state_indices = self._release_finished_and_prepare_mamba_cache(
                 finished_requests_ids, request_ids_to_seq_ids)
-            state_indices_tensor = torch.as_tensor(
-                state_indices,
-                dtype=torch.int32,
-                device="cuda"
-            )
+            state_indices_tensor = torch.as_tensor(state_indices,
+                                                   dtype=torch.int32,
+                                                   device="cuda")
             mamba_cache = self.mamba_cache
         else:
             # CUDA graph capturing runs
-            ( mamba_cache, state_indices_tensor
-            ) = kwargs["seqlen_agnostic_capture_inputs"]
+            (mamba_cache,
+             state_indices_tensor) = kwargs["seqlen_agnostic_capture_inputs"]
 
-        mamba_cache_params = MambaCacheParams(
-            mamba_cache[0],
-            mamba_cache[1],
-            state_indices_tensor
-        )
+        mamba_cache_params = MambaCacheParams(mamba_cache[0], mamba_cache[1],
+                                              state_indices_tensor)
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, mamba_cache_params)
         return hidden_states
@@ -632,12 +617,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             cache_t[:, to_index].copy_(cache_t[:, from_index],
                                        non_blocking=True)
 
-    def _assign_seq_id_to_cache_index(
-        self,
-        cur_rid: str,
-        seq_id: int,
-        finished_requests_ids
-    ) -> int:
+    def _assign_seq_id_to_cache_index(self, cur_rid: str, seq_id: int,
+                                      finished_requests_ids) -> int:
         """
         Assign (req_id,seq_id) pair to a `destination_index` index, if
         already occupied, move the occupying index to a free index.
@@ -647,7 +628,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             return PAD_SLOT_ID
         elif cur_rid not in self.cache_indices_mapping:
             destination_index = self.free_indices.pop()
-            self.cache_indices_mapping[cur_rid] = {seq_id : destination_index}
+            self.cache_indices_mapping[cur_rid] = {seq_id: destination_index}
             return destination_index
         elif seq_id not in (seq_ids2indices :=
                             self.cache_indices_mapping[cur_rid]):
@@ -659,31 +640,24 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             destination_index = self.free_indices.pop()
             self._copy_mamba_cache(from_index=index_exists,
                                    to_index=destination_index)
-            self.cache_indices_mapping[cur_rid][
-                seq_id] = destination_index
+            self.cache_indices_mapping[cur_rid][seq_id] = destination_index
             return destination_index
         else:
             # already exists
-            return self.cache_indices_mapping[
-                cur_rid][seq_id]
+            return self.cache_indices_mapping[cur_rid][seq_id]
 
     def _prepare_current_run_mamba_cache(
             self, request_ids_to_seq_ids: Dict[str, list[int]],
-            finished_requests_ids: List[str]
-    ) -> List[int]:
+            finished_requests_ids: List[str]) -> List[int]:
         return [
-            self._assign_seq_id_to_cache_index(
-                req_id,
-                seq_id,
-                finished_requests_ids
-            )
+            self._assign_seq_id_to_cache_index(req_id, seq_id,
+                                               finished_requests_ids)
             for req_id, seq_ids in request_ids_to_seq_ids.items()
             for seq_id in seq_ids
         ]
 
     def _release_finished_and_prepare_mamba_cache(
-            self, finished_requests_ids,
-            request_ids_to_seq_ids) -> List[int]:
+            self, finished_requests_ids, request_ids_to_seq_ids) -> List[int]:
         self._release_mamba_cache(finished_requests_ids)
         return self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
                                                      finished_requests_ids)
@@ -698,14 +672,9 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         state_indices = self._release_finished_and_prepare_mamba_cache(
             kwargs["finished_requests_ids"], kwargs["request_ids_to_seq_ids"])
         cuda_graph_pad_len = gc_state_indices_t.shape[0] - len(state_indices)
-        state_indices.extend([PAD_SLOT_ID] * cuda_graph_pad_len) 
-        gc_state_indices_t.copy_(torch.as_tensor(
-            state_indices,
-            dtype=torch.int32,
-            device="cuda"
-        ))
-                                         
-
+        state_indices.extend([PAD_SLOT_ID] * cuda_graph_pad_len)
+        gc_state_indices_t.copy_(
+            torch.as_tensor(state_indices, dtype=torch.int32, device="cuda"))
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size):
         """
@@ -713,11 +682,9 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         The buffer is used to maintain the Mamba Cache during the CUDA graph 
         replay runs.
         """
-        state_indices_tensor = torch.as_tensor(
-            [-1] * batch_size,
-            dtype=torch.int32,
-            device="cuda"
-        )
+        state_indices_tensor = torch.as_tensor([-1] * batch_size,
+                                               dtype=torch.int32,
+                                               device="cuda")
         return (self.mamba_cache, state_indices_tensor)
 
     def _release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
@@ -725,10 +692,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             if req_id in self.cache_indices_mapping:
                 for seq_id in self.cache_indices_mapping[req_id]:
                     self.free_indices.append(
-                        self.cache_indices_mapping[req_id][seq_id]
-                    )
+                        self.cache_indices_mapping[req_id][seq_id])
                 self.cache_indices_mapping.pop(req_id)
-
 
     def _get_mamba_cache_shape(
             self
