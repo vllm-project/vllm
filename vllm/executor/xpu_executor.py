@@ -57,7 +57,10 @@ class XPUExecutor(GPUExecutor):
     def _get_worker_module_and_class(
             self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
         worker_class_fn = None
-        if self.speculative_config is not None:
+        if self.scheduler_config.is_multi_step:
+            worker_module_name = "vllm.worker.xpu_multi_step_worker"
+            worker_class_name = "XPUMultiStepWorker"
+        elif self.speculative_config is not None:
             raise NotImplementedError(
                 "XPU does not support speculative decoding")
         else:
