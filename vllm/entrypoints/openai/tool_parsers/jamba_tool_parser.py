@@ -49,10 +49,10 @@ class JambaToolParser(ToolParser):
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction.")
-        self.tool_calls_start_token_id: int = self.model_tokenizer.vocab.get(
-            self.tool_calls_start_token, None)
-        self.tool_calls_end_token_id: int = self.model_tokenizer.vocab.get(
-            self.tool_calls_end_token, None)
+        self.tool_calls_start_token_id = self.vocab.get(
+            self.tool_calls_start_token)
+        self.tool_calls_end_token_id = self.vocab.get(
+            self.tool_calls_end_token)
         if (self.tool_calls_start_token_id is None
                 or self.tool_calls_end_token_id is None):
             raise RuntimeError(
