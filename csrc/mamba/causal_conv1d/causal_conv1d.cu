@@ -338,7 +338,7 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         : reinterpret_cast<int *>(params.cache_indices_ptr);
     int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
     
-    // cache_index == -1 is defined as padding and cache should'nt been written/read
+    // cache_index == -1 is defined as padding and cache shouldn't been written/read
     input_t *conv_states = params.conv_states_ptr == nullptr || cache_index == -1 ? nullptr
         : reinterpret_cast<input_t *>(params.conv_states_ptr) + cache_index * params.conv_states_batch_stride + channel_id * params.conv_states_c_stride;
 
