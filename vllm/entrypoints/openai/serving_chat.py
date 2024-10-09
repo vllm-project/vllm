@@ -539,11 +539,12 @@ class OpenAIServingChat(OpenAIServing):
                         #   matched by partial json parsing
                         # only happens if we are NOT using guided decoding
                         if tool_parser:
-                            index = len(
-                                tool_parser.prev_tool_call_arr) - 1 if len(
-                                    tool_parser.prev_tool_call_arr) > 0 else 0
+                            tools_called = len(tool_parser.prev_tool_call_arr) > 0
+                            index = len(tool_parser.prev_tool_call_arr) - 1 if tools_called else 0
+                            tools_called = index > 0
                         else:
                             index = 0
+                            tools_called = tool_choice_function_name is not None
 
                         if self._should_check_for_unstreamed_tool_arg_tokens(
                                 delta_message, output) and tool_parser:
@@ -576,8 +577,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=output.finish_reason
-                            if not (tool_parser
-                                    and len(tool_parser.prev_tool_call_arr))
+                            if not tools_called
                             else "tool_calls",
                             stop_reason=output.stop_reason)
                         chunk = ChatCompletionStreamResponse(
