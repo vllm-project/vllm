@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     VLLM_DYNAMO_USE_CUSTOM_DISPATCHER: bool = True
     VLLM_TEST_COMPILE_NO_CUSTOM_OPS: int = 0
     VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE: bool = True
+    VLLM_TORCH_COMPILE_FUSION: bool = True
     VLLM_TORCH_COMPILE_FUSION_DUMP: List[str] = []
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -220,6 +221,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+
+    # Internal flag to enable fusion in torch.compile
+    "VLLM_TORCH_COMPILE_FUSION": lambda: bool(
+        os.environ.get("VLLM_TORCH_COMPILE_FUSION", "1") != "0"),
 
     # Internal flag for dumping the model graph before and after fusion
     "VLLM_TORCH_COMPILE_FUSION_DUMP":

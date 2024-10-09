@@ -151,7 +151,8 @@ def process_matches(matches, graph: torch.fx.Graph):
         nodes = list(graph.nodes)
         # TODO this is an expensive check
         if not all(node in nodes for node in match.nodes):
-            raise ValueError(f"Broken match: not all nodes in graph: {[node for node in match.nodes if node not in nodes]}")
+            raise ValueError(
+                f"Broken match: not all nodes in graph: {[node for node in match.nodes if node not in nodes]}")
         last_node_in_match = max(match.nodes, key=lambda x: nodes.index(x))
         with graph.inserting_after(last_node_in_match):
             kwargs = match.kwargs
@@ -199,7 +200,14 @@ def process_matches(matches, graph: torch.fx.Graph):
     assert all(node not in graph.nodes for node in (match for match in matches))
 
 
+def noop_pass(graph: torch.fx.Graph):
+    pass
+
+
 def get_fusion_pass():
+    if not envs.VLLM_TORCH_COMPILE_FUSION:
+        return noop_pass
+
     patterns, matches = get_patterns()
 
     def dump_graph(graph: torch.fx.Graph, stage: str):
