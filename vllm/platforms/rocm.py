@@ -88,12 +88,17 @@ class RocmPlatform(Platform):
                         return False
         return True
 
-    @staticmethod
+    @classmethod
     @with_amdsmi_context
     @lru_cache(maxsize=8)
-    def get_device_name(device_id: int = 0) -> str:
+    def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         # Note: this may not be exactly the same as the torch device name
         # E.g. `AMD Instinct MI300X OAM` vs `AMD Instinct MI300X`
         return amdsmi_get_gpu_board_info(handle)["product_name"]
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        device_props = torch.cuda.get_device_properties(device_id)
+        return device_props.total_memory

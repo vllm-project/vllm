@@ -186,6 +186,12 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+    # Number of query tokens for each request in the batch.
+    # Currently, we require that all requests have the same number of query
+    # tokens during the decoding phase. When speculavie decoding is enabled,
+    # decode_query_len might be greater than 1. In all other cases, it is 1.
+    decode_query_len: Optional[int] = None
+
     _cached_prefill_metadata: Optional[
         "BlocksparseFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional[
@@ -358,6 +364,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -374,7 +382,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
@@ -400,7 +408,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
 
-            assert kv_cache is None \
+            assert kv_cache.numel() == 0 \
                     or prefill_meta.block_tables is None \
                     or prefill_meta.block_tables.numel() == 0, \
                 "Does not support prefix-enabled attention."

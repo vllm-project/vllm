@@ -32,8 +32,6 @@ from vllm.entrypoints.openai.protocol import (
     ErrorResponse, ModelCard, ModelList, ModelPermission, UsageInfo)
 from vllm.entrypoints.openai.serving_chat import ConversationMessage
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import FlexibleArgumentParser, random_uuid
 
@@ -173,17 +171,6 @@ async def _check_model(request: Union[CompletionRequest,
     return None
 
 
-async def _guided_decode_logits_processor(request, tokenizer):
-    decoding_config = runner.engine_config.decoding_config
-    if request.guided_decoding_backend:
-        guided_decoding_backend = request.guided_decoding_backend
-    else:
-        assert decoding_config is not None
-        guided_decoding_backend = decoding_config.guided_decoding_backend
-    return await get_guided_decoding_logits_processor(guided_decoding_backend,
-                                                      request, tokenizer)
-
-
 async def completion_generator(model, result_queue, choices, created_time,
                                ids):
     completed = 0
@@ -232,11 +219,8 @@ async def completions(request: CompletionRequest, raw_request: Request):
     if error_check_ret is not None:
         return JSONResponse(content=error_check_ret.model_dump(),
                             status_code=error_check_ret.code)
-    guided_decode_logits_processor = (await _guided_decode_logits_processor(
-        request, runner.tokenizer))
     sampling_params = request.to_sampling_params(
-        runner.tokenizer, guided_decode_logits_processor,
-        runner.engine_config.model_config.max_model_len
+        default_max_tokens=runner.engine_config.model_config.max_model_len
         # TODO: gshtras add - len(prompt_inputs["prompt_token_ids"])
     )
     ids, result_queue = await runner.add_request(request.prompt,
@@ -342,11 +326,8 @@ async def chat_completions(request: ChatCompletionRequest,
     if error_check_ret is not None:
         return JSONResponse(content=error_check_ret.model_dump(),
                             status_code=error_check_ret.code)
-    guided_decode_logits_processor = (await _guided_decode_logits_processor(
-        request, runner.tokenizer))
     sampling_params = request.to_sampling_params(
-        runner.tokenizer, guided_decode_logits_processor,
-        runner.engine_config.model_config.max_model_len
+        default_max_tokens=runner.engine_config.model_config.max_model_len
         # TODO: gshtras add len(prompt_inputs["prompt_token_ids"])
     )
     conversation: List[ConversationMessage] = []

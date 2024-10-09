@@ -246,7 +246,7 @@ class SiglipParallelAttention(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -312,7 +312,7 @@ class SiglipMLP(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()

@@ -9,7 +9,8 @@ from transformers import PretrainedConfig
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.utils import get_allowed_kwarg_only_overrides
+from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
+                        resolve_mm_processor_kwargs)
 
 from .data import LLMInputs
 
@@ -185,16 +186,8 @@ class InputRegistry:
         return wrapper
 
     def _get_dummy_encoder_data_factory(self, model_cls: Type[nn.Module]):
-        if model_cls in self._dummy_encoder_factories_by_model_type:
-            dummy_factory = self._dummy_encoder_factories_by_model_type[
-                model_cls]
-        else:
-            logger.warning(
-                "No dummy encoder data factory registered to %s. "
-                "Using the dummy data factory for the model instead.",
-                model_cls)
-            dummy_factory = self._get_dummy_data_factory(model_cls)
-        return dummy_factory
+        return self._dummy_encoder_factories_by_model_type \
+            .get(model_cls, self._default_dummy_data_factory)
 
     def dummy_data_for_profiling(
         self,
@@ -235,9 +228,9 @@ class InputRegistry:
         num_tokens = seq_data.prompt_token_ids
         if len(num_tokens) < seq_len:
             if is_encoder_data:
-                logger.warning(
-                    "Expected at least %d dummy encoder tokens for profiling, "
-                    "but found %d tokens instead.", seq_len, len(num_tokens))
+                print_warning_once(
+                    f"Expected at least {seq_len} dummy encoder tokens for "
+                    f"profiling, but found {len(num_tokens)} tokens instead.")
             else:
                 raise AssertionError(
                     f"Expected at least {seq_len} dummy tokens for profiling, "
@@ -301,8 +294,14 @@ class InputRegistry:
         model_cls, _ = get_model_architecture(model_config)
         processor = self._get_model_input_processor(model_cls)
 
-        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-            processor, overrides=model_config.mm_processor_kwargs)
+        # Handle multimodal processor kwargs with priority:
+        #     Inference kwargs -> Init kwargs -> {}
+        # If it's empty, it'll fall back to the default kwarg values
+        mm_processor_kwargs = resolve_mm_processor_kwargs(
+            model_config.mm_processor_kwargs,
+            inputs.get("mm_processor_kwargs"),
+            processor,
+        )
 
         return processor(InputContext(model_config), inputs,
                          **mm_processor_kwargs)
