@@ -218,7 +218,7 @@ def _compare_tp(
     tokenizer_mode: Optional[str],
     num_gpus_available: int,
     *,
-    method: Literal["generate", "encode"] = "encode",
+    method: Literal["generate", "encode"],
 ):
     tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
 
