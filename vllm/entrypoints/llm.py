@@ -370,7 +370,7 @@ class LLM:
         penalty, and stopping criteria, etc.?
         """
 
-        assert not self.llm_engine.scheduler_config.is_multi_step, (
+        assert not self.llm_engine.scheduler_config.user_is_multi_step, (
             "Currently beam search is not supported in combination with "
             "multi-step scheduling.")
 
