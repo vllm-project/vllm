@@ -75,8 +75,8 @@ def rms_pattern_static(result: torch.Tensor, result_rms: torch.Tensor, input: to
 
 def rms_replacement_static(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
                            scale: torch.Tensor):
-    at = auto_functionalized(torch.ops.vllm.fused_rms_norm_quant_static.default, result=result, input=input,
-                             weight=weight, epsilon=1e-5, scale=scale)
+    at = auto_functionalized(torch.ops._C.rms_norm_static_fp8_quant.default, result=result, input=input,
+                             weight=weight, scale=scale, epsilon=1e-5)
 
     # result
     return at[1]
@@ -108,10 +108,10 @@ def rms_pattern_residual_static(result: torch.Tensor, input: torch.Tensor, resid
 
 def rms_replacement_residual_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
                                     weight: torch.Tensor, scale: torch.Tensor):
-    at = auto_functionalized(torch.ops.vllm.fused_rms_norm_residual_quant_static.default, result=result, input=input,
-                             residual=residual, weight=weight, epsilon=1e-5, scale=scale)
+    at = auto_functionalized(torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, result=result, input=input,
+                             residual=residual, weight=weight, scale=scale, epsilon=1e-5)
     # result, residual
-    return at[1], at[3]
+    return at[1], at[2]
 
 
 my_patterns = PatternMatcherPass()
@@ -158,12 +158,12 @@ def process_matches(matches, graph: torch.fx.Graph):
             kwargs["epsilon"] = 1e-5
 
             fused_node = graph.call_function(auto_functionalized,
-                                             (torch.ops.vllm.fused_rms_norm_residual_quant_static.default,),
+                                             (torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,),
                                              kwargs=kwargs)
 
             graph.inserting_after(fused_node)
             result_node_new = graph.call_function(operator.getitem, (fused_node, 1))
-            residual_node_new = graph.call_function(operator.getitem, (fused_node, 3))
+            residual_node_new = graph.call_function(operator.getitem, (fused_node, 2))
 
         # find the output and the residual
         def find_auto_fn(op):
