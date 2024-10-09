@@ -225,10 +225,10 @@ torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
     TORCH_CHECK(false, "Unsupported dtype for compressed matrix in current version of cuSPARSELt.");
 }
 
-at::Tensor cslt_mm_fp8_semi_structured(
+torch::Tensor cslt_mm_fp8_semi_structured(
     const Tensor& compressed_A,
     const Tensor& dense_B,
-    const std::optional<Tensor>& bias_opt,
+    const c10::optional<Tensor>& bias_opt,
     bool transpose_result,
 )
 {
