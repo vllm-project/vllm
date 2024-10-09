@@ -230,13 +230,14 @@ def _compare_tp(
     method: Literal["generate", "encode"],
 ):
     tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
+    multi_node_only, trust_remote_code, tokenizer_mode = test_settings
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
-    if test_options.multi_node_only and not VLLM_MULTI_NODE:
+    if multi_node_only and not VLLM_MULTI_NODE:
         pytest.skip("Not in multi-node setting")
 
     common_args = [
@@ -252,9 +253,9 @@ def _compare_tp(
         common_args.append("--enable-chunked-prefill")
     if eager_mode:
         common_args.append("--enforce-eager")
-    if test_options.trust_remote_code:
+    if trust_remote_code:
         common_args.append("--trust-remote-code")
-    if test_options.tokenizer_mode:
+    if tokenizer_mode:
         common_args.extend(["--tokenizer-mode", tokenizer_mode])
 
     if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
