@@ -1,10 +1,12 @@
+import dataclasses
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
 
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.worker.model_runner_base import BroadcastableModelInput
 from vllm.worker.multi_step_model_runner import (MultiStepModelRunner,
                                                  StatefulModelInput)
@@ -61,6 +63,11 @@ class MultiStepWorker(Worker):
                     execute_model_req.seq_group_metadata_list,
                     execute_model_req.virtual_engine,
                     execute_model_req.finished_requests_ids))
+
+            if execute_model_req.async_callback:
+                model_input.frozen_model_input = dataclasses.replace(  # type: ignore
+                    model_input.frozen_model_input,
+                    async_callback=execute_model_req.async_callback)
         else:
             # on subsequent steps we reuse the worker input and model input
             multi_step_state = self.multi_step_states[virtual_engine]
@@ -69,8 +76,9 @@ class MultiStepWorker(Worker):
             frozen_model_input = model_input.frozen_model_input
             assert frozen_model_input is not None
             assert frozen_model_input.attn_metadata is not None
-            # clear the cached decode metadata so that it can be recomputed on
-            # the workers
+            # clear the cached metadata so that it can be recomputed on
+            # the workers.
+            frozen_model_input.attn_metadata._cached_prefill_metadata = None
             frozen_model_input.attn_metadata._cached_decode_metadata = None
 
         model_input.is_first_multi_step = is_first_multi_step

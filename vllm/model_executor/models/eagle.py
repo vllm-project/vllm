@@ -5,12 +5,13 @@ import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
 
@@ -43,7 +44,7 @@ class EAGLE(nn.Module):
         self.model = model_cls(self.config.model, *args, **kwargs)
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
-                            bias=False)
+                            bias=getattr(self.config, "bias", False))
 
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size
@@ -135,10 +136,18 @@ class EAGLE(nn.Module):
                 if self.config.truncated_vocab_size < self.config.vocab_size:
                     self.token_map = nn.Parameter(loaded_weight,
                                                   requires_grad=False)
-            elif name.startswith("fc."):
+            elif name.startswith("fc.weight"):
                 weight_loader = getattr(self.fc.weight, "weight_loader",
                                         default_weight_loader)
                 weight_loader(self.fc.weight, loaded_weight)
+            elif name.startswith("fc.bias"):
+                if self.fc.bias is not None:
+                    weight_loader = getattr(self.fc.bias, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(self.fc.bias, loaded_weight)
+                else:
+                    raise ValueError("Found bias in the loaded weights "
+                                     "but the model config doesn't have bias")
             elif name.startswith("model.lm_head.") or name.startswith(
                     "model.model."):
                 model_weights[name.split("model.", 1)[-1]] = loaded_weight

@@ -2,11 +2,17 @@ import pytest
 
 from .conftest import run_equality_correctness_test
 
+# main model
+MAIN_MODEL = "JackFram/llama-68m"
+
+# speculative model
+SPEC_MODEL = "JackFram/llama-160m"
+
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "model": "JackFram/llama-68m",
+        "model_name": "JackFram/llama-68m",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
@@ -31,26 +37,34 @@ from .conftest import run_equality_correctness_test
         # Use smaller output len for fast test.
         20,
     ])
-@pytest.mark.parametrize("seed", [None])
-def test_seeded_consistency(baseline_llm_generator, test_llm_generator,
-                            batch_size: int, temperature: float,
-                            output_len: int):
+def test_seeded_consistency(vllm_runner, common_llm_kwargs,
+                            per_test_common_llm_kwargs, baseline_llm_kwargs,
+                            test_llm_kwargs, batch_size: int,
+                            temperature: float, output_len: int):
     """Verify outputs are consistent across multiple runs with same seed
     """
-    run_equality_correctness_test(baseline_llm_generator,
-                                  test_llm_generator,
-                                  batch_size,
-                                  max_output_len=output_len,
-                                  temperature=temperature,
-                                  seeded=True,
-                                  force_output_len=True)
+    run_equality_correctness_test(
+        vllm_runner,
+        common_llm_kwargs,
+        per_test_common_llm_kwargs,
+        baseline_llm_kwargs,
+        test_llm_kwargs,
+        batch_size,
+        max_output_len=output_len,
+        temperature=temperature,
+        disable_seed=False,
+    )
 
     # Ensure this same test does fail if we _don't_ include per-request seeds
     with pytest.raises(AssertionError):
-        run_equality_correctness_test(baseline_llm_generator,
-                                      test_llm_generator,
-                                      batch_size,
-                                      max_output_len=output_len,
-                                      temperature=temperature,
-                                      seeded=False,
-                                      force_output_len=True)
+        run_equality_correctness_test(
+            vllm_runner,
+            common_llm_kwargs,
+            per_test_common_llm_kwargs,
+            baseline_llm_kwargs,
+            test_llm_kwargs,
+            batch_size,
+            max_output_len=output_len,
+            temperature=temperature,
+            disable_seed=True,
+        )

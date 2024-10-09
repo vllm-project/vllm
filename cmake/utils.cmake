@@ -134,9 +134,180 @@ macro(string_to_ver OUT_VER IN_STR)
 endmacro()
 
 #
+# Clear all `-gencode` flags from `CMAKE_CUDA_FLAGS` and store them in
+# `CUDA_ARCH_FLAGS`.
+#
+# Example:
+#   CMAKE_CUDA_FLAGS="-Wall -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75"
+#   clear_cuda_arches(CUDA_ARCH_FLAGS)
+#   CUDA_ARCH_FLAGS="-gencode arch=compute_70,code=sm_70;-gencode arch=compute_75,code=sm_75"
+#   CMAKE_CUDA_FLAGS="-Wall"
+#
+macro(clear_cuda_arches CUDA_ARCH_FLAGS)
+    # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
+    string(REGEX MATCHALL "-gencode arch=[^ ]+" CUDA_ARCH_FLAGS
+      ${CMAKE_CUDA_FLAGS})
+
+    # Remove all `-gencode` flags from `CMAKE_CUDA_FLAGS` since they will be modified
+    # and passed back via the `CUDA_ARCHITECTURES` property.
+    string(REGEX REPLACE "-gencode arch=[^ ]+ *" "" CMAKE_CUDA_FLAGS
+      ${CMAKE_CUDA_FLAGS})
+endmacro()
+
+#
+# Extract unique CUDA architectures from a list of compute capabilities codes in 
+# the form `<major><minor>[<letter>]`, convert them to the form sort 
+# `<major>.<minor>`, dedupes them and then sorts them in ascending order and 
+# stores them in `OUT_ARCHES`.
+#
+# Example:
+#   CUDA_ARCH_FLAGS="-gencode arch=compute_75,code=sm_75;...;-gencode arch=compute_90a,code=sm_90a" 
+#   extract_unique_cuda_archs_ascending(OUT_ARCHES CUDA_ARCH_FLAGS)
+#   OUT_ARCHES="7.5;...;9.0"
+function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
+  set(_CUDA_ARCHES)
+  foreach(_ARCH ${CUDA_ARCH_FLAGS})
+    string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
+    if (_COMPUTE)
+      set(_COMPUTE ${CMAKE_MATCH_1})
+    endif()
+
+    string_to_ver(_COMPUTE_VER ${_COMPUTE})
+    list(APPEND _CUDA_ARCHES ${_COMPUTE_VER})
+  endforeach()
+
+  list(REMOVE_DUPLICATES _CUDA_ARCHES)
+  list(SORT _CUDA_ARCHES COMPARE NATURAL ORDER ASCENDING)
+  set(${OUT_ARCHES} ${_CUDA_ARCHES} PARENT_SCOPE)
+endfunction()
+
+#
+# For a specific file set the `-gencode` flag in compile options conditionally 
+# for the CUDA language. 
+#
+# Example:
+#   set_gencode_flag_for_srcs(
+#     SRCS "foo.cu"
+#     ARCH "compute_75"
+#     CODE "sm_75")
+#   adds: "-gencode arch=compute_75,code=sm_75" to the compile options for 
+#    `foo.cu` (only for the CUDA language).
+#
+macro(set_gencode_flag_for_srcs)
+  set(options)
+  set(oneValueArgs ARCH CODE)
+  set(multiValueArgs SRCS)
+  cmake_parse_arguments(arg "${options}" "${oneValueArgs}"
+                        "${multiValueArgs}" ${ARGN} )
+  set(_FLAG -gencode arch=${arg_ARCH},code=${arg_CODE})
+  set_property(
+    SOURCE ${arg_SRCS}
+    APPEND PROPERTY
+    COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:${_FLAG}>"
+  )
+
+  message(DEBUG "Setting gencode flag for ${arg_SRCS}: ${_FLAG}")
+endmacro(set_gencode_flag_for_srcs)
+
+#
+# For a list of source files set the `-gencode` flags in the files specific 
+#  compile options (specifically for the CUDA language).
+#
+# arguments are:
+#  SRCS: list of source files
+#  CUDA_ARCHS: list of CUDA architectures in the form `<major>.<minor>[letter]`
+#  BUILD_PTX_FOR_ARCH: if set to true, then the PTX code will be built
+#    for architecture `BUILD_PTX_FOR_ARCH` if there is a CUDA_ARCH in CUDA_ARCHS 
+#    that is larger than BUILD_PTX_FOR_ARCH.
+#
+macro(set_gencode_flags_for_srcs)
+  set(options)
+  set(oneValueArgs BUILD_PTX_FOR_ARCH)
+  set(multiValueArgs SRCS CUDA_ARCHS)
+  cmake_parse_arguments(arg "${options}" "${oneValueArgs}"
+                        "${multiValueArgs}" ${ARGN} )
+
+  foreach(_ARCH ${arg_CUDA_ARCHS})
+    string(REPLACE "." "" _ARCH "${_ARCH}")
+    set_gencode_flag_for_srcs(
+      SRCS ${arg_SRCS}
+      ARCH "compute_${_ARCH}"
+      CODE "sm_${_ARCH}")
+  endforeach()
+
+  if (${arg_BUILD_PTX_FOR_ARCH})
+    list(SORT arg_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
+    list(GET arg_CUDA_ARCHS -1 _HIGHEST_ARCH)
+    if (_HIGHEST_ARCH VERSION_GREATER_EQUAL ${arg_BUILD_PTX_FOR_ARCH})
+      string(REPLACE "." "" _PTX_ARCH "${arg_BUILD_PTX_FOR_ARCH}")
+      set_gencode_flag_for_srcs(
+        SRCS ${arg_SRCS}
+        ARCH "compute_${_PTX_ARCH}"
+        CODE "compute_${_PTX_ARCH}")
+    endif()
+  endif()
+endmacro()
+
+#
+# For the given `SRC_CUDA_ARCHS` list of gencode versions in the form 
+#  `<major>.<minor>[letter]` compute the "loose intersection" with the 
+#  `TGT_CUDA_ARCHS` list of gencodes. 
+# The loose intersection is defined as:
+#   { max{ x \in tgt | x <= y } | y \in src, { x \in tgt | x <= y } != {} }
+#  where `<=` is the version comparison operator.
+# In other words, for each version in `TGT_CUDA_ARCHS` find the highest version
+#  in `SRC_CUDA_ARCHS` that is less or equal to the version in `TGT_CUDA_ARCHS`.
+# We have special handling for 9.0a, if 9.0a is in `SRC_CUDA_ARCHS` and 9.0 is
+#  in `TGT_CUDA_ARCHS` then we should remove 9.0a from `SRC_CUDA_ARCHS` and add
+#  9.0a to the result. 
+# The result is stored in `OUT_CUDA_ARCHS`.
+#
+# Example:
+#   SRC_CUDA_ARCHS="7.5;8.0;8.6;9.0;9.0a"
+#   TGT_CUDA_ARCHS="8.0;8.9;9.0"
+#   cuda_archs_loose_intersection(OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
+#   OUT_CUDA_ARCHS="8.0;8.6;9.0;9.0a"
+#
+function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_ARCHS)
+  list(REMOVE_DUPLICATES SRC_CUDA_ARCHS)
+
+  # if 9.0a is in SRC_CUDA_ARCHS and 9.0 is in CUDA_ARCHS then we should
+  # remove 9.0a from SRC_CUDA_ARCHS and add 9.0a to _CUDA_ARCHS
+  set(_CUDA_ARCHS)
+  if ("9.0a" IN_LIST SRC_CUDA_ARCHS)
+    list(REMOVE_ITEM SRC_CUDA_ARCHS "9.0a")
+    if ("9.0" IN_LIST TGT_CUDA_ARCHS)
+      set(_CUDA_ARCHS "9.0a")
+    endif()
+  endif()
+
+  list(SORT SRC_CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
+
+  # for each ARCH in CUDA_ARCHS find the highest arch in SRC_CUDA_ARCHS that is 
+  # less or eqault to ARCH
+  foreach(_ARCH ${CUDA_ARCHS})
+  set(_TMP_ARCH)
+  foreach(_SRC_ARCH ${SRC_CUDA_ARCHS})
+    if (_SRC_ARCH VERSION_LESS_EQUAL _ARCH)
+      set(_TMP_ARCH ${_SRC_ARCH})
+    else()
+      break()
+    endif()
+  endforeach()
+  if (_TMP_ARCH)
+    list(APPEND _CUDA_ARCHS ${_TMP_ARCH})
+  endif()
+  endforeach()
+
+  list(REMOVE_DUPLICATES _CUDA_ARCHS)
+  set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
+endfunction()
+
+#
 # Override the GPU architectures detected by cmake/torch and filter them by
 # `GPU_SUPPORTED_ARCHES`. Sets the final set of architectures in
-# `GPU_ARCHES`.
+# `GPU_ARCHES`. This only applies to the HIP language since for CUDA we set 
+# the architectures on a per file basis.
 #
 # Note: this is defined as a macro since it updates `CMAKE_CUDA_FLAGS`.
 #
@@ -174,109 +345,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
         "None of the detected ROCm architectures: ${HIP_ARCHITECTURES} is"
         " supported. Supported ROCm architectures are: ${_GPU_SUPPORTED_ARCHES_LIST}.")
     endif()
-
-  elseif(${GPU_LANG} STREQUAL "CUDA")
-    #
-    # Setup/process CUDA arch flags.
-    #
-    # The torch cmake setup hardcodes the detected architecture flags in
-    # `CMAKE_CUDA_FLAGS`.  Since `CMAKE_CUDA_FLAGS` is a "global" variable, it
-    # can't modified on a per-target basis.
-    # So, all the `-gencode` flags need to be extracted and removed from
-    # `CMAKE_CUDA_FLAGS` for processing so they can be passed by another method.
-    # Since it's not possible to use `target_compiler_options` for adding target
-    # specific `-gencode` arguments, the target's `CUDA_ARCHITECTURES` property
-    # must be used instead.  This requires repackaging the architecture flags
-    # into a format that cmake expects for `CUDA_ARCHITECTURES`.
-    #
-    # This is a bit fragile in that it depends on torch using `-gencode` as opposed
-    # to one of the other nvcc options to specify architectures.
-    #
-    # Note: torch uses the `TORCH_CUDA_ARCH_LIST` environment variable to override
-    # detected architectures.
-    #
-    message(DEBUG "initial CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
-
-    # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
-    string(REGEX MATCHALL "-gencode arch=[^ ]+" _CUDA_ARCH_FLAGS
-      ${CMAKE_CUDA_FLAGS})
-
-    # Remove all `-gencode` flags from `CMAKE_CUDA_FLAGS` since they will be modified
-    # and passed back via the `CUDA_ARCHITECTURES` property.
-    string(REGEX REPLACE "-gencode arch=[^ ]+ *" "" CMAKE_CUDA_FLAGS
-      ${CMAKE_CUDA_FLAGS})
-
-    # If this error is triggered, it might mean that torch has changed how it sets
-    # up nvcc architecture code generation flags.
-    if (NOT _CUDA_ARCH_FLAGS)
-      message(FATAL_ERROR
-        "Could not find any architecture related code generation flags in "
-        "CMAKE_CUDA_FLAGS. (${CMAKE_CUDA_FLAGS})")
-    endif()
-
-    message(DEBUG "final CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
-    message(DEBUG "arch flags: ${_CUDA_ARCH_FLAGS}")
-
-    # Initialize the architecture lists to empty.
-    set(${GPU_ARCHES})
-
-    # Process each `gencode` flag.
-    foreach(_ARCH ${_CUDA_ARCH_FLAGS})
-      # For each flag, extract the version number and whether it refers to PTX
-      # or native code.
-      # Note: if a regex matches then `CMAKE_MATCH_1` holds the binding
-      # for that match.
-
-      string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
-      if (_COMPUTE)
-        set(_COMPUTE ${CMAKE_MATCH_1})
-      endif()
-
-      string(REGEX MATCH "code=sm_\([0-9]+a?\)" _SM ${_ARCH})
-      if (_SM)
-        set(_SM ${CMAKE_MATCH_1})
-      endif()
-
-      string(REGEX MATCH "code=compute_\([0-9]+a?\)" _CODE ${_ARCH})
-      if (_CODE)
-        set(_CODE ${CMAKE_MATCH_1})
-      endif()
-
-      # Make sure the virtual architecture can be matched.
-      if (NOT _COMPUTE)
-        message(FATAL_ERROR
-          "Could not determine virtual architecture from: ${_ARCH}.")
-      endif()
-
-      # One of sm_ or compute_ must exist.
-      if ((NOT _SM) AND (NOT _CODE))
-        message(FATAL_ERROR
-          "Could not determine a codegen architecture from: ${_ARCH}.")
-      endif()
-
-      if (_SM)
-        # -real suffix let CMake to only generate elf code for the kernels.
-        # we want this, otherwise the added ptx (default) will increase binary size.
-        set(_VIRT "-real")
-        set(_CODE_ARCH ${_SM})
-      else()
-        # -virtual suffix let CMake to generate ptx code for the kernels.
-        set(_VIRT "-virtual")
-        set(_CODE_ARCH ${_CODE})
-      endif()
-
-      # Check if the current version is in the supported arch list.
-      string_to_ver(_CODE_VER ${_CODE_ARCH})
-      if (NOT _CODE_VER IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
-        message(STATUS "discarding unsupported CUDA arch ${_VER}.")
-        continue()
-      endif()
-
-      # Add it to the arch list.
-      list(APPEND ${GPU_ARCHES} "${_CODE_ARCH}${_VIRT}")
-    endforeach()
   endif()
-  message(STATUS "${GPU_LANG} target arches: ${${GPU_ARCHES}}")
 endmacro()
 
 #
@@ -350,17 +419,19 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
     ${GPU_INCLUDE_DIRECTORIES})
 
-  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${torch_python_LIBRARY}
-    ${GPU_LIBRARIES})
+  target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
 
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
   if (GPU_LANGUAGE STREQUAL "CUDA")
+    if ("${CUDA_CUDA_LIB}" STREQUAL "")
+      set(CUDA_CUDA_LIB "${CUDA_CUDA_LIBRARY}")
+    endif()
     target_link_libraries(${GPU_MOD_NAME} PRIVATE ${CUDA_CUDA_LIB}
       ${CUDA_LIBRARIES})
   else()
     target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
   endif()
 
-  install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION})
+  install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION} COMPONENT ${GPU_MOD_NAME})
 endfunction()

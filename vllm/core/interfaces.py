@@ -44,7 +44,9 @@ class BlockSpaceManager(ABC):
         raise ValueError(f"Unknown version {version=}")
 
     @abstractmethod
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+    def can_allocate(self,
+                     seq_group: SequenceGroup,
+                     num_lookahead_slots: int = 0) -> AllocStatus:
         pass
 
     @abstractmethod
@@ -115,7 +117,8 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
         pass
 
     @abstractmethod

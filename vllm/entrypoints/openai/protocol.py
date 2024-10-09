@@ -5,15 +5,15 @@ from argparse import Namespace
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
+from openai.types.chat import ChatCompletionContentPartParam
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from typing_extensions import Annotated
+from typing_extensions import Annotated, Required, TypedDict
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
+                                  RequestOutputKind, SamplingParams)
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 # torch is mocked during docs generation,
@@ -33,6 +33,26 @@ except ModuleNotFoundError:
 
 assert _LONG_INFO.min == _MOCK_LONG_INFO.min
 assert _LONG_INFO.max == _MOCK_LONG_INFO.max
+
+
+class CustomChatCompletionMessageParam(TypedDict, total=False):
+    """Enables custom roles in the Chat Completion API."""
+    role: Required[str]
+    """The role of the message's author."""
+
+    content: Union[str, List[ChatCompletionContentPartParam]]
+    """The contents of the message."""
+
+    name: str
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the
+    same role.
+    """
+
+    tool_call_id: Optional[str]
+
+    tool_calls: Optional[List[dict]]
 
 
 class OpenAIBaseModel(BaseModel):
@@ -83,6 +103,11 @@ class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
+
+
+class RequestResponseMetadata(BaseModel):
+    request_id: str
+    final_usage_info: Optional[UsageInfo] = None
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):
@@ -145,8 +170,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[ChatCompletionToolsParam]] = None
-    tool_choice: Optional[Union[Literal["none"],
+    tool_choice: Optional[Union[Literal["none"], Literal["auto"],
                                 ChatCompletionNamedToolChoiceParam]] = "none"
+
+    # NOTE this will be ignored by VLLM -- the model determines the behavior
+    parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
@@ -156,7 +184,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -180,6 +207,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description=
+        ("If this is set, the chat will be formatted so that the final "
+         "message in the chat is open-ended, without any EOS tokens. The "
+         "model will continue this message rather than starting a new one. "
+         "This allows you to \"prefill\" part of the model's response for it. "
+         "Cannot be used at the same time as `add_generation_prompt`."),
     )
     add_special_tokens: bool = Field(
         default=False,
@@ -242,13 +278,33 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
 
     # doc: end-chat-completion-extra-params
 
-    def to_sampling_params(
-            self, tokenizer: AnyTokenizer,
-            guided_decode_logits_processor: Optional[LogitsProcessor],
-            default_max_tokens: int) -> SamplingParams:
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+        )
+
+    def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
@@ -257,14 +313,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        # We now allow logprobs being true without top_logrobs.
-        logits_processors = get_logits_processors(
-            logit_bias=self.logit_bias,
-            allowed_token_ids=None,
-            tokenizer=tokenizer,
-        )
-        if guided_decode_logits_processor:
-            logits_processors.append(guided_decode_logits_processor)
+        guided_json_object = None
+        if (self.response_format is not None
+                and self.response_format.type == "json_object"):
+            guided_json_object = True
+
+        guided_decoding = GuidedDecodingParams.from_optional(
+            json=self._get_guided_json_from_tool() or self.guided_json,
+            regex=self.guided_regex,
+            choice=self.guided_choice,
+            grammar=self.guided_grammar,
+            json_object=guided_json_object,
+            backend=self.guided_decoding_backend,
+            whitespace_pattern=self.guided_whitespace_pattern)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -284,15 +345,32 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
-            logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-        )
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
+            guided_decoding=guided_decoding,
+            logit_bias=self.logit_bias)
+
+    def _get_guided_json_from_tool(
+            self) -> Optional[Union[str, dict, BaseModel]]:
+        # user has chosen to not use any tool
+        if self.tool_choice == "none" or self.tools is None:
+            return None
+
+        # user has chosen to use a named tool
+        if type(self.tool_choice) is ChatCompletionNamedToolChoiceParam:
+            tool_name = self.tool_choice.function.name
+            tools = {tool.function.name: tool.function for tool in self.tools}
+            if tool_name not in tools:
+                raise ValueError(
+                    f"Tool '{tool_name}' has not been passed in `tools`.")
+            tool = tools[tool_name]
+            return tool.parameters
+
+        return None
 
     @model_validator(mode="before")
     @classmethod
@@ -328,6 +406,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
+        if isinstance(data, ValueError):
+            raise data
+
         guide_count = sum([
             "guided_json" in data and data["guided_json"] is not None,
             "guided_regex" in data and data["guided_regex"] is not None,
@@ -339,21 +420,70 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         # you can only either use guided decoding or tools, not both
-        if guide_count > 1 and "tool_choice" in data and data[
-                "tool_choice"] != "none":
+        if guide_count > 1 and data.get("tool_choice",
+                                        "none") not in ("none", "auto"):
             raise ValueError(
                 "You can only either use guided decoding or tools, not both.")
         return data
 
     @model_validator(mode="before")
     @classmethod
-    def check_tool_choice(cls, data):
-        if "tool_choice" in data and data["tool_choice"] != "none":
-            if not isinstance(data["tool_choice"], dict):
-                raise ValueError("Currently only named tools are supported.")
+    def check_tool_usage(cls, data):
+
+        # if "tool_choice" is not specified but tools are provided,
+        # default to "auto" tool_choice
+        if "tool_choice" not in data and data.get("tools"):
+            data["tool_choice"] = "auto"
+
+        # if "tool_choice" is specified -- validation
+        if "tool_choice" in data:
+
+            # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
                 raise ValueError(
                     "When using `tool_choice`, `tools` must be set.")
+
+            # make sure that tool choice is either a named tool
+            # OR that it's set to "auto"
+            if data["tool_choice"] != "auto" and not isinstance(
+                    data["tool_choice"], dict):
+                raise ValueError(
+                    "`tool_choice` must either be a named tool or \"auto\". "
+                    "`tool_choice=\"none\" is not supported.")
+
+            # ensure that if "tool_choice" is specified as an object,
+            # it matches a valid tool
+            if isinstance(data["tool_choice"], dict):
+                valid_tool = False
+                specified_function = data["tool_choice"]["function"]
+                if not specified_function:
+                    raise ValueError(
+                        "Incorrectly formatted `tool_choice`. Should be like "
+                        "`{\"type\": \"function\","
+                        " \"function\": {\"name\": \"my_function\"}}`")
+                specified_function_name = specified_function["name"]
+                if not specified_function_name:
+                    raise ValueError(
+                        "Incorrectly formatted `tool_choice`. Should be like "
+                        "`{\"type\": \"function\", "
+                        "\"function\": {\"name\": \"my_function\"}}`")
+                for tool in data["tools"]:
+                    if tool["function"]["name"] == specified_function_name:
+                        valid_tool = True
+                        break
+                if not valid_tool:
+                    raise ValueError(
+                        "The tool specified in `tool_choice` does not match any"
+                        " of the specified `tools`")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
         return data
 
 
@@ -385,7 +515,6 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -413,7 +542,7 @@ class CompletionRequest(OpenAIBaseModel):
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
-        description=("If specified, the output will follow the JSON schema."),
+        description="If specified, the output will follow the JSON schema.",
     )
     guided_regex: Optional[str] = Field(
         default=None,
@@ -441,13 +570,33 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
 
     # doc: end-completion-extra-params
 
-    def to_sampling_params(
-            self, tokenizer: AnyTokenizer,
-            guided_decode_logits_processor: Optional[LogitsProcessor],
-            default_max_tokens: int) -> SamplingParams:
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+        )
+
+    def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
@@ -458,13 +607,19 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        logits_processors = get_logits_processors(
-            logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids,
-            tokenizer=tokenizer,
-        )
-        if guided_decode_logits_processor:
-            logits_processors.append(guided_decode_logits_processor)
+        guided_json_object = None
+        if (self.response_format is not None
+                and self.response_format.type == "json_object"):
+            guided_json_object = True
+
+        guided_decoding = GuidedDecodingParams.from_optional(
+            json=self.guided_json,
+            regex=self.guided_regex,
+            choice=self.guided_choice,
+            grammar=self.guided_grammar,
+            json_object=guided_json_object,
+            backend=self.guided_decoding_backend,
+            whitespace_pattern=self.guided_whitespace_pattern)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -483,16 +638,16 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
             prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
-            logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-        )
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
+            guided_decoding=guided_decoding,
+            logit_bias=self.logit_bias,
+            allowed_token_ids=self.allowed_token_ids)
 
     @model_validator(mode="before")
     @classmethod
@@ -542,11 +697,22 @@ class EmbeddingRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
 
     # doc: end-embedding-pooling-params
+
+    # doc: begin-embedding-extra-params
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+
+    # doc: end-embedding-extra-params
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
@@ -633,9 +799,34 @@ class ToolCall(OpenAIBaseModel):
     function: FunctionCall
 
 
+class DeltaFunctionCall(BaseModel):
+    name: Optional[str] = None
+    arguments: Optional[str] = None
+
+
+# a tool call delta where everything is optional
+class DeltaToolCall(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    type: Literal["function"] = "function"
+    index: int
+    function: Optional[DeltaFunctionCall] = None
+
+
+class ExtractedToolCallInformation(BaseModel):
+    # indicate if tools were called
+    tools_called: bool
+
+    # extracted tool calls
+    tool_calls: List[ToolCall]
+
+    # content - per OpenAI spec, content AND tool calls can be returned rarely
+    # But some models will do this intentionally
+    content: Optional[str] = None
+
+
 class ChatMessage(OpenAIBaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
     tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
@@ -657,7 +848,9 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[str] = None
+    # per OpenAI spec this is the default
+    finish_reason: Optional[str] = "stop"
+    # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
 
 
@@ -674,7 +867,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
-    tool_calls: List[ToolCall] = Field(default_factory=list)
+    tool_calls: List[DeltaToolCall] = Field(default_factory=list)
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -758,7 +951,17 @@ class TokenizeChatRequest(OpenAIBaseModel):
     messages: List[ChatCompletionMessageParam]
 
     add_generation_prompt: bool = Field(default=True)
+    continue_final_message: bool = Field(default=False)
     add_special_tokens: bool = Field(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
 
 
 TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
@@ -777,3 +980,13 @@ class DetokenizeRequest(OpenAIBaseModel):
 
 class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
+
+
+class LoadLoraAdapterRequest(BaseModel):
+    lora_name: str
+    lora_path: str
+
+
+class UnloadLoraAdapterRequest(BaseModel):
+    lora_name: str
+    lora_int_id: Optional[int] = Field(default=None)

@@ -12,15 +12,17 @@ from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
+from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
+from vllm.model_executor import SamplingMetadataCache
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs, MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
-from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.utils import DeviceMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -135,7 +137,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             (input_tokens, input_positions,
              attn_metadata) = self._prepare_decode(
                  self.seq_group_metadata_list)
-            seq_lens = []
+            seq_lens = None
             multi_modal_kwargs = None
 
         return self.model_input_cls(
@@ -389,8 +391,12 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
 
+        self.sampling_metadata_cache: SamplingMetadataCache = \
+              SamplingMetadataCache() \
+                if self.parallel_config.pipeline_parallel_size == 1 else None
+
     def load_model(self) -> None:
-        with CudaMemoryProfiler() as m:
+        with DeviceMemoryProfiler() as m:
             self.model = get_model(
                 model_config=self.model_config,
                 device_config=self.device_config,
@@ -439,9 +445,11 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                     "Setting it to the minimum value of 1.", expr)
                 max_num_seqs = 1
 
+        batch_size = 0
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
+            batch_size += seq_len
 
             seq_data, dummy_multi_modal_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
@@ -461,11 +469,23 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        kv_caches = [
+            torch.tensor([], dtype=torch.float32, device=self.device)
+        ] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
-        self.execute_model(model_input, kv_caches)
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=batch_size,
+                dtype=self.model_config.dtype,
+                device=self.device)
+        self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.xpu.synchronize()
         return
 
@@ -509,12 +529,14 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             seq_group_metadata_list, finished_requests_ids)
         # Sampling metadata is only required for the final pp group
         generators = self.get_generators(finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     model_input.seq_lens,
-                                                     model_input.query_lens,
-                                                     self.device,
-                                                     pin_memory=False,
-                                                     generators=generators)
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            model_input.seq_lens,
+            model_input.query_lens,
+            self.device,
+            pin_memory=False,
+            generators=generators,
+            cache=self.sampling_metadata_cache)
 
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
@@ -537,7 +559,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 and self.observability_config.collect_model_forward_time):
             model_forward_start_time = time.time()
 
-        hidden_states = model_executable(
+        hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             kv_caches=kv_caches,
@@ -545,12 +567,16 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             intermediate_tensors=intermediate_tensors,
             **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device))
+        # Compute the logits in the last pipeline stage.
+        if not get_pp_group().is_last_rank:
+            return hidden_or_intermediate_states
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end_time = time.time()
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
+        logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.

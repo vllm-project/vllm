@@ -11,10 +11,11 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.openvino import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import SequenceGroupMetadata
 
 logger = init_logger(__name__)
 
@@ -41,6 +42,7 @@ class OpenVINOModelRunner:
 
     def __init__(
         self,
+        ov_core: ov.Core,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
@@ -54,6 +56,7 @@ class OpenVINOModelRunner:
         *args,
         **kwargs,
     ):
+        self.ov_core = ov_core
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
@@ -88,11 +91,10 @@ class OpenVINOModelRunner:
         self.model: nn.Module  # Set after init_Model
 
     def load_model(self) -> None:
-        self.model = get_model(
-            model_config=self.model_config,
-            device_config=self.device_config,
-            kv_cache_dtype=self.kv_cache_dtype,
-        )
+        self.model = get_model(model_config=self.model_config,
+                               device_config=self.device_config,
+                               kv_cache_dtype=self.kv_cache_dtype,
+                               ov_core=self.ov_core)
 
     def _prepare_model_input(
         self,
@@ -170,7 +172,11 @@ class OpenVINOModelRunner:
 
                 mm_data = seq_group_metadata.multi_modal_data
                 if mm_data:
-                    mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                    mm_kwargs = self.multi_modal_input_mapper(
+                        mm_data,
+                        mm_processor_kwargs=seq_group_metadata.
+                        mm_processor_kwargs,
+                    )
                     multi_modal_inputs_list.append(mm_kwargs)
 
                 block_table = seq_group_metadata.block_tables[seq_id]

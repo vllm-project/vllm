@@ -3,8 +3,8 @@ from typing import List, Optional, Set, Tuple
 import torch
 
 from vllm.model_executor import SamplingMetadata
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 

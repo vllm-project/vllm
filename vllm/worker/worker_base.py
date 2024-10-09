@@ -11,9 +11,9 @@ from vllm.config import ObservabilityConfig
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
-from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
-                           SamplerOutput)
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
@@ -263,6 +263,11 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             broadcast_data.update(kwargs)
             broadcast_tensor_dict(broadcast_data, src=0)
 
+        if execute_model_req.async_callback:
+            model_input = dataclasses.replace(  # type: ignore
+                model_input,
+                async_callback=execute_model_req.async_callback)
+
         return model_input, worker_input, kwargs
 
     def prepare_input(
@@ -289,7 +294,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def execute_model(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""

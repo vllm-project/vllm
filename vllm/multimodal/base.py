@@ -1,9 +1,8 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import Callable, Dict, List, Mapping, Optional
-from typing import Sequence as GenericSequence
-from typing import Tuple, Type, TypedDict, TypeVar, Union, cast, final
+from typing import (Any, Callable, Dict, List, Mapping, Optional, Tuple, Type,
+                    TypedDict, TypeVar, Union, cast, final)
 
 import numpy as np
 import torch
@@ -15,23 +14,17 @@ from typing_extensions import TypeAlias
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import JSONTree, json_map_leaves
+from vllm.utils import (JSONTree, get_allowed_kwarg_only_overrides, is_list_of,
+                        json_map_leaves, resolve_mm_processor_kwargs)
 
 logger = init_logger(__name__)
 
-NestedTensors = Union[GenericSequence[torch.Tensor], torch.Tensor]
+NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
 """
-Use a list instead of a tensor if the dimensions of each element do not match.
-Currently only supports up to singly nested list of tensors.
-"""
-
-BatchedTensors: TypeAlias = JSONTree[torch.Tensor]
-"""
-A nested JSON structure of tensors which have been batched via
-:meth:`MultiModalInputs.batch`.
+Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
-BatchedTensorInputs: TypeAlias = Dict[str, JSONTree[torch.Tensor]]
+BatchedTensorInputs: TypeAlias = Dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
 :meth:`MultiModalInputs.batch`.
@@ -54,26 +47,30 @@ class MultiModalInputs(_MultiModalInputsBase):
     """
 
     @staticmethod
-    def _try_concat(tensors: List[NestedTensors]) -> BatchedTensors:
+    def _try_stack(nested_tensors: NestedTensors) -> NestedTensors:
         """
-        If each input tensor in the batch has the same shape, return a single
-        batched tensor; otherwise, return a list of :class:`NestedTensors` with
-        one element per item in the batch.
+        Recursively stacks lists of tensors when they all have the same shape.
         """
-        # may be list rather than tensors
-        if isinstance(tensors[0], list):
-            return [[t for t in tensor[0]]
-                    for tensor in cast(List[List[torch.Tensor]], tensors)]
+        if isinstance(nested_tensors, torch.Tensor):
+            return nested_tensors
 
-        tensors_ = cast(List[torch.Tensor], tensors)
+        if isinstance(nested_tensors, np.ndarray):
+            return torch.from_numpy(nested_tensors)
 
-        unbatched_shape = tensors_[0].shape[1:]
+        if isinstance(nested_tensors, (int, float)):
+            return torch.tensor(nested_tensors)
 
-        for tensor in tensors_:
-            if tensor.shape[1:] != unbatched_shape:
-                return [tensor.squeeze(0) for tensor in tensors_]
+        stacked = [MultiModalInputs._try_stack(t) for t in nested_tensors]
+        if not is_list_of(stacked, torch.Tensor, check="all"):
+            # Only tensors (not lists) can be stacked.
+            return stacked
 
-        return torch.cat(tensors_, dim=0)
+        tensors_ = cast(List[torch.Tensor], stacked)
+        if any(t.shape != tensors_[0].shape for t in tensors_):
+            # The tensors have incompatible shapes and can't be stacked.
+            return tensors_
+
+        return torch.stack(tensors_)
 
     @staticmethod
     def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:
@@ -89,20 +86,18 @@ class MultiModalInputs(_MultiModalInputsBase):
         if len(inputs_list) == 0:
             return {}
 
-        keys = inputs_list[0].keys()
-
         item_lists: Dict[str, List[NestedTensors]] = defaultdict(list)
 
         for inputs in inputs_list:
-            if inputs.keys() != keys:
-                msg = f"Inputs do not share the same keys ({keys})"
-                raise ValueError(msg)
+            # For models that supports multiple modalities (e.g. Qwen2-VL),
+            # different modalities will return different data keys,
+            # so batch() should skip the same key check.
 
             for k, v in inputs.items():
                 item_lists[k].append(v)
 
         return {
-            k: MultiModalInputs._try_concat(item_list)
+            k: MultiModalInputs._try_stack(item_list)
             for k, item_list in item_lists.items()
         }
 
@@ -112,8 +107,14 @@ class MultiModalInputs(_MultiModalInputsBase):
         *,
         device: torch.types.Device,
     ) -> BatchedTensorInputs:
-        return json_map_leaves(lambda x: x.to(device, non_blocking=True),
-                               batched_inputs)
+        json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
+
+        json_mapped = json_map_leaves(
+            lambda x: x.to(device, non_blocking=True),
+            json_inputs,
+        )
+
+        return cast(BatchedTensorInputs, json_mapped)
 
 
 _T = TypeVar("_T")
@@ -199,6 +200,7 @@ class MultiModalPlugin(ABC):
         self,
         ctx: InputContext,
         data: MultiModalData[object],
+        **mm_processor_kwargs,
     ) -> MultiModalInputs:
         """
         Return a dictionary to be passed as keyword arguments to
@@ -242,7 +244,8 @@ class MultiModalPlugin(ABC):
         return wrapper
 
     def map_input(self, model_config: ModelConfig,
-                  data: MultiModalData[object]) -> MultiModalInputs:
+                  data: MultiModalData[object],
+                  mm_processor_kwargs: Dict[str, Any]) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.
@@ -262,11 +265,27 @@ class MultiModalPlugin(ABC):
         model_cls, _ = get_model_architecture(model_config)
 
         mapper = self._input_mappers.get(model_cls)
+
         if mapper is None:
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
 
-        return mapper(InputContext(model_config), data)
+        # In the case of the default mapper, we have to get resource
+        # processor through its HuggingFace autoclass; since this goes
+        # through **kwargs, we can't inspect it the same way, so we allow
+        # drop mm_processor_kwargs based on signature inspection
+        # if we're using the default mapper.
+        #
+        # This should be safe in general due to the sanitation, since the
+        # transformers resource should filter unused kwargs anyway.
+        uses_default_mapper = mapper == self._default_input_mapper
+        mm_processor_kwargs = resolve_mm_processor_kwargs(
+            model_config.mm_processor_kwargs,
+            mm_processor_kwargs,
+            callable=mapper,
+            allow_var_kwargs=uses_default_mapper,
+        )
+        return mapper(InputContext(model_config), data, **mm_processor_kwargs)
 
     @abstractmethod
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
@@ -339,7 +358,10 @@ class MultiModalPlugin(ABC):
                            f"for model class {model_cls.__name__} in {self}.")
 
         if callable(max_mm_tokens):
-            max_mm_tokens = max_mm_tokens(InputContext(model_config))
+            mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+                max_mm_tokens, overrides=model_config.mm_processor_kwargs)
+            max_mm_tokens = max_mm_tokens(InputContext(model_config),
+                                          **mm_processor_kwargs)
 
         self._validate_max_multimodal_tokens(max_mm_tokens)
 

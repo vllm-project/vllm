@@ -31,9 +31,11 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: bool = False
+    VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
@@ -56,10 +58,12 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
-    VLLM_RPC_GET_DATA_TIMEOUT_MS: int = 5000
-    VLLM_ALLOW_ENGINE_USE_RAY: bool = False
+    VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_USE_TRITON_AWQ: bool = False
+    VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+    VLLM_SKIP_P2P_CHECK: bool = False
 
 
 def get_default_cache_root():
@@ -196,6 +200,20 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Internal flag to enable Dynamo graph capture
     "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
     lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
+    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
+    lambda:
+    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
+     ("true", "1")),
+
+    # Internal flag to control whether we use custom op,
+    # or use the native pytorch implementation
+    "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
+    lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
+
+    # Internal flag to enable Dynamo fullgraph capture
+    "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
+    lambda: bool(
+        os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -280,6 +298,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_CPU_OMP_THREADS_BIND":
     lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
 
+    # OpenVINO device selection
+    # default is CPU
+    "VLLM_OPENVINO_DEVICE":
+    lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
+
     # OpenVINO key-value cache space
     # default is 4GB
     "VLLM_OPENVINO_KVCACHE_SPACE":
@@ -348,7 +371,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
-    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
@@ -374,19 +397,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
+    "VLLM_TEST_FORCE_LOAD_FORMAT":
+    lambda: os.getenv("VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"),
 
     # Time in ms for the zmq client to wait for a response from the backend
     # server for simple data operations
-    "VLLM_RPC_GET_DATA_TIMEOUT_MS":
-    lambda: int(os.getenv("VLLM_RPC_GET_DATA_TIMEOUT_MS", "5000")),
-
-    # If set, allow running the engine as a separate ray actor,
-    # which is a deprecated feature soon to be removed.
-    # See https://github.com/vllm-project/vllm/issues/7045
-    "VLLM_ALLOW_ENGINE_USE_RAY":
-    lambda:
-    (os.environ.get("VLLM_ALLOW_ENGINE_USE_RAY", "0").strip().lower() in
-     ("1", "true")),
+    "VLLM_RPC_TIMEOUT":
+    lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
@@ -400,6 +417,23 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+
+    # If set, vLLM will use Triton implementations of AWQ.
+    "VLLM_USE_TRITON_AWQ":
+    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+
+    # If set, allow loading or unloading lora adapters in runtime,
+    "VLLM_ALLOW_RUNTIME_LORA_UPDATING":
+    lambda:
+    (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
+     ("1", "true")),
+
+    # By default, vLLM will check the peer-to-peer capability itself,
+    # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
+    # If this env var is set to 1, vLLM will skip the peer-to-peer check,
+    # and trust the driver's peer-to-peer capability report.
+    "VLLM_SKIP_P2P_CHECK":
+    lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
 }
 
 # end-env-vars-definition

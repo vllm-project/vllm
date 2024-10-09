@@ -5,9 +5,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, Logprob,
-                           SamplerOutput, get_all_seq_ids)
+                           get_all_seq_ids)
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
@@ -172,7 +173,6 @@ def test_same_output_for_multi_step():
         block_size,
         num_gpu_blocks,
         seed,
-        model_runner_cls=TP1DraftModelRunner,
     )
 
     worker = create_worker(
@@ -672,7 +672,10 @@ def test_use_draft_model_runner_advance_step():
     worker.model_runner._gpu_advance_step.side_effect = ValueError(
         exception_secret)
 
-    seq_group_metadata_list, _, _ = create_batch(batch_size, k)
+    seq_group_metadata_list, _, _ = create_batch(batch_size,
+                                                 k,
+                                                 block_size=block_size,
+                                                 num_gpu_blocks=num_gpu_blocks)
 
     # Fallback (should not call) when num_steps=1.
     execute_model_req = ExecuteModelRequest(

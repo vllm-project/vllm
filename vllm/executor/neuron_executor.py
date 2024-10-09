@@ -3,7 +3,8 @@ from typing import List, Set, Tuple
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 

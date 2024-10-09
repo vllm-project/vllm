@@ -1,9 +1,10 @@
-import itertools
+from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import CLIPVisionConfig, LlavaConfig, SiglipVisionConfig
 
 from vllm.attention import AttentionMetadata
@@ -11,32 +12,33 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
+from vllm.utils import is_list_of
 
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_max_clip_image_tokens,
                    input_processor_for_clip)
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
-from .utils import (filter_weights, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 
 class LlavaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: `(batch_size, num_channels, height, width)`"""
+    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
 
 
 class LlavaImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -132,7 +134,18 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
     hf_config = ctx.get_hf_config(LlavaConfig)
     vision_config = hf_config.vision_config
 
-    image_feature_size = get_max_llava_image_tokens(ctx)
+    image_data = multi_modal_data["image"]
+    if isinstance(image_data, Image.Image):
+        image_feature_size = get_max_llava_image_tokens(ctx)
+    elif is_list_of(image_data, Image.Image):
+        image_feature_size = [get_max_llava_image_tokens(ctx)
+                              ] * len(image_data)
+    elif isinstance(image_data, torch.Tensor):
+        num_images, image_feature_size, hidden_size = image_data.shape
+    elif is_list_of(image_data, torch.Tensor):
+        image_feature_size = [item.shape[1] for item in image_data]
+    else:
+        raise TypeError(f"Invalid image type: {type(image_data)}")
 
     if isinstance(vision_config, CLIPVisionConfig):
         return input_processor_for_clip(
@@ -185,7 +198,7 @@ def _init_vision_tower(hf_config: LlavaConfig):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
-class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
+class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self,
                  config: LlavaConfig,
@@ -206,6 +219,16 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
+
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return Sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -229,21 +252,24 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, torch.Tensor):
+            if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
+
             return LlavaImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
+                data=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True)),
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
+            if not isinstance(image_embeds, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
             return LlavaImageEmbeddingInputs(
                 type="image_embeds",
-                data=image_embeds,
+                data=flatten_bn(image_embeds, concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -299,7 +325,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for LLaVA-1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -335,26 +361,30 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
         See also:
             :class:`LlavaImageInputs`
         """
-        image_input = self._parse_and_validate_image_input(**kwargs)
-
-        if image_input is not None:
-            vision_embeddings = self._process_image_input(image_input)
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
-                self.config.image_token_index)
-
+        if intermediate_tensors is not None:
             input_ids = None
-        else:
             inputs_embeds = None
+        else:
+            image_input = self._parse_and_validate_image_input(**kwargs)
+
+            if image_input is not None:
+                vision_embeddings = self._process_image_input(image_input)
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, vision_embeddings,
+                    self.config.image_token_index)
+
+                input_ids = None
+            else:
+                inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   kv_caches,
                                                   attn_metadata,
-                                                  None,
+                                                  intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -375,22 +405,5 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        vit_weights, mlp_weights, llm_weights = itertools.tee(weights, 3)
-
-        # load vision encoder
-        vit_weights = filter_weights(vit_weights, "vision_tower")
-        self.vision_tower.load_weights(vit_weights)
-
-        # load mlp projector
-        mlp_weights = filter_weights(mlp_weights, "multi_modal_projector")
-        mlp_params_dict = dict(self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in mlp_weights:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load llm backbone
-        llm_weights = filter_weights(llm_weights, "language_model")
-        self.language_model.load_weights(llm_weights)
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(weights)
