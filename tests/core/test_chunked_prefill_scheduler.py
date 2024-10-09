@@ -3,12 +3,12 @@ from unittest.mock import MagicMock
 
 import pytest  # noqa
 
-import vllm.envs as envs
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import Logprob, SequenceGroup
 
+from ..utils import check_deprecated_block_manager_usage
 from .utils import create_dummy_prompt
 
 
@@ -28,14 +28,10 @@ def schedule_and_update_computed_tokens(scheduler):
     return metas, out
 
 
-@pytest.fixture(scope="module", autouse=False)
+@pytest.fixture(scope="module", autouse=True)
 def check_deprecated_block_manager():
-    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
-        "To allow the use of deprecated BlockSpaceManagerV1, set the "
-        "environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
-        "You can run the tests with: "
-        "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest tests/core/test_chunked_prefill_scheduler.py`"  #noqa
-    )
+    check_deprecated_block_manager_usage(
+        'tests/core/test_chunked_prefill_scheduler.py')
 
 
 @pytest.mark.parametrize('use_v2_block_manager', [True, False])

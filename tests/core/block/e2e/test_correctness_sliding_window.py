@@ -3,7 +3,7 @@ from typing import List
 
 import pytest
 
-import vllm.envs as envs
+from tests.utils import check_deprecated_block_manager_usage
 from vllm import LLM, SamplingParams
 
 from .conftest import get_text_from_llm_generator
@@ -15,12 +15,8 @@ BLOCK_SIZE = 16
 
 @pytest.fixture(scope="module", autouse=False)
 def check_deprecated_block_manager():
-    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
-        "To allow the use of deprecated BlockSpaceManagerV1, set the "
-        "environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
-        "You can run the tests with: "
-        "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest tests/core/block/e2e/test_correctness_sliding_window.py`"  #noqa
-    )
+    check_deprecated_block_manager_usage(
+        'tests/core/block/e2e/test_correctness_sliding_window.py')
 
 
 @pytest.mark.parametrize(
