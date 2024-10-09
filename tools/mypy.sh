@@ -19,7 +19,7 @@ run_mypy vllm/attention
 #run_mypy vllm/core
 run_mypy vllm/distributed
 run_mypy vllm/engine
-#run_mypy vllm/entrypoints
+run_mypy vllm/entrypoints
 run_mypy vllm/executor
 #run_mypy vllm/inputs
 run_mypy vllm/logging
