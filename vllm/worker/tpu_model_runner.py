@@ -11,7 +11,6 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
@@ -152,7 +151,11 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             )
         model = model.eval()
         xm.wait_device_ops()
-        self.model = ModelWrapper(model)
+        model = ModelWrapper(model)
+        self.model = torch.compile(model,
+                                   backend="openxla",
+                                   fullgraph=True,
+                                   dynamic=False)
 
     def _dummy_run(
         self,
@@ -239,15 +242,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
-        self.model(token_ids,
-                   position_ids,
-                   attn_metadata,
-                   input_lens,
-                   t,
-                   p,
-                   num_samples,
-                   kv_caches,
-                   is_prompt=is_prompt)
+        self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
+                   num_samples, kv_caches)
 
     def warmup_model(
         self,
@@ -582,15 +578,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 input_lens = model_input.input_lens[i:i + 1].to(self.device)
                 t = model_input.t[i:i + 1].to(self.device)
                 p = model_input.p[i:i + 1].to(self.device)
-                output_token_ids = self.model(token_ids,
-                                              position_ids,
-                                              attn_metadata,
-                                              input_lens,
-                                              t,
-                                              p,
+                output_token_ids = self.model(token_ids, position_ids,
+                                              attn_metadata, input_lens, t, p,
                                               model_input.num_samples,
-                                              kv_caches,
-                                              is_prompt=True)
+                                              kv_caches)
                 next_token_ids.append(output_token_ids[0])
                 start_idx = end_idx
 
@@ -635,15 +626,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             input_lens = model_input.input_lens.to(self.device)
             for i in range(num_steps):
                 slot_mapping = attn_metadata.slot_mapping
-                output_token_ids = self.model(token_ids,
-                                              position_ids,
-                                              attn_metadata,
-                                              input_lens,
-                                              t,
-                                              p,
+                output_token_ids = self.model(token_ids, position_ids,
+                                              attn_metadata, input_lens, t, p,
                                               model_input.num_samples,
-                                              kv_caches,
-                                              is_prompt=False)
+                                              kv_caches)
                 self.cached_step_outputs.append(output_token_ids)
 
                 if i < num_steps - 1:
@@ -678,32 +664,11 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             return [sampler_output]
 
 
-class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
+class ModelWrapper(nn.Module):
 
     def __init__(self, model: nn.Module):
+        super().__init__()
         self.model = model
-        compiled_callable = torch.compile(self.forward,
-                                          backend="openxla",
-                                          fullgraph=True,
-                                          dynamic=False)
-        super().__init__(compiled_callable)
-
-    def __call__(self, *args, is_prompt: bool, **kwargs):
-        if len(self.compiled_codes) < 3 or not self.use_custom_dispatcher:
-            # not fully compiled yet, or not using the custom dispatcher,
-            # let PyTorch handle it
-            return self.compiled_callable(*args, **kwargs)
-        # the 3 compiled codes are:
-        # 0: for profiling
-        # 1: for prompt
-        # 2: for decode
-        # dispatch to the compiled code directly, skip PyTorch
-        if is_prompt:
-            with self.dispatch_to_code(1):
-                return self.forward(*args, **kwargs)
-        else:
-            with self.dispatch_to_code(2):
-                return self.forward(*args, **kwargs)
 
     def forward(
         self,
