@@ -25,18 +25,14 @@ def test_cpu_offload_fp8():
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
 def test_cpu_offload_gptq():
-    # FIXME: why this test does not work with dummy weights?
     # Test GPTQ Marlin
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
-                         ["--load-format", "auto"],
-                         ["--cpu-offload-gb", "1", "--load-format", "auto"],
+    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
+                         ["--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
     # Test GPTQ
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
-                         ["--quantization", "gptq", "--load-format", "auto"], [
-                             "--quantization", "gptq", "--cpu-offload-gb", "1",
-                             "--load-format", "auto"
-                         ],
+                         ["--quantization", "gptq"],
+                         ["--quantization", "gptq", "--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
 
 
@@ -57,20 +53,16 @@ def test_cpu_offload_awq():
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
 def test_cpu_offload_compressed_tensors():
-    # FIXME: why this test does not work with dummy weights?
     # Test wNa16
-    compare_two_settings("nm-testing/tinyllama-oneshot-w4a16-channel-v2",
-                         ["--load-format", "auto"],
-                         ["--cpu-offload-gb", "1", "--load-format", "auto"],
+    compare_two_settings("nm-testing/tinyllama-oneshot-w4a16-channel-v2", [],
+                         ["--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
     # Test w4a16_marlin24
     compare_two_settings("nm-testing/llama7b-one-shot-2_4-w4a16-marlin24-t",
-                         ["--load-format", "auto"],
-                         ["--cpu-offload-gb", "1", "--load-format", "auto"],
+                         [], ["--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
     # Test w8a8
     compare_two_settings(
-        "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
-        ["--load-format", "auto"],
-        ["--cpu-offload-gb", "1", "--load-format", "auto"],
+        "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", [],
+        ["--cpu-offload-gb", "1"],
         max_wait_seconds=480)
