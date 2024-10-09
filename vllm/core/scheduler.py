@@ -841,6 +841,31 @@ class Scheduler:
         self.running = running_queue
         return force_preemption_count
 
+    def _configure_multi_step_accounting_for_best_of(self) -> None:
+        """Configure per-step multi-step scheduling, accounting for best_of>1
+
+        This method must be called each step in order to update scheduler config
+        `is_multi_step` member.
+
+        Default behavior: `is_multi_step = user_is_multi_step`
+        (i.e. match user-requested behavior.)
+        
+        But `is_multi_step = False` if any state queues contain
+        :class:`SequenceGroup`'s with `best_of>1` which is not
+        supported by multi-step.
+        """
+        if self.scheduler_config.user_is_multi_step:
+            self.scheduler_config.is_multi_step = all([
+                (sg.sampling_params is None
+                 or sg.sampling_params.best_of is None
+                 or sg.sampling_params.best_of < 2)
+                for state_queue in [self.waiting, self.running, self.swapped]
+                for sg in state_queue
+            ])
+            return
+        self.scheduler_config.is_multi_step = (
+            self.scheduler_config.user_is_multi_step)
+
     def _schedule_prefills(
         self,
         budget: SchedulingBudget,
@@ -990,6 +1015,7 @@ class Scheduler:
         decodes. If there's a pressure on GPU memory, decode requests can
         be swapped or preempted.
         """
+
         # Include running requests to the budget.
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
@@ -1172,6 +1198,9 @@ class Scheduler:
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
+        # Configure the (non-)use of multi-step scheduling
+        # in this step
+        self._configure_multi_step_accounting_for_best_of()
         if self.scheduler_config.chunked_prefill_enabled:
             return self._schedule_chunked_prefill()
         else:

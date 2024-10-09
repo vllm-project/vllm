@@ -1006,6 +1006,11 @@ class SchedulerConfig:
         self.multi_step_stream_outputs = multi_step_stream_outputs
         self.send_delta_data = send_delta_data
         self.policy = policy
+
+        # `user_is_multi_step` reflects the user-specified multi-step
+        # config. `is_multi_step` may be modified to override
+        # `user_is_multi_step` in any given call to `schedule()`
+        self.is_multi_step = self.user_is_multi_step
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1038,7 +1043,11 @@ class SchedulerConfig:
                 "equal to 1.")
 
     @property
-    def is_multi_step(self) -> bool:
+    def user_is_multi_step(self) -> bool:
+        """Base multi-step setting, configured by user.
+
+        Can be overridden by scheduler.
+        """
         return self.num_scheduler_steps > 1
 
 
