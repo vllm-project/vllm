@@ -41,7 +41,8 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, row_parallel_weight_loader)
+    default_weight_loader, maybe_remap_kv_scale_name,
+    row_parallel_weight_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
@@ -426,6 +427,11 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
