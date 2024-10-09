@@ -58,9 +58,11 @@ class VideoPlugin(ImagePlugin):
     ) -> MultiModalInputs:
         model_config = ctx.model_config
 
+        if isinstance(data, list) and len(data) == 1:
+            data = data[0]
+
         # single video input as np.ndarray
-        if isinstance(data, np.ndarray) or (is_list_of(data, np.ndarray)
-                                            and len(data) == 1):
+        if isinstance(data, np.ndarray):
             video_processor = self._get_hf_video_processor(
                 model_config,
                 mm_processor_kwargs,

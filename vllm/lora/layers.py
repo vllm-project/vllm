@@ -39,6 +39,9 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # unquantizedLinear
     if hasattr(base_layer, "weight"):
         return base_layer.weight.device
+    # Compressed Tensor
+    elif hasattr(base_layer, "weight_packed"):
+        return base_layer.weight_packed.device
     # GPTQ/AWQ
     elif hasattr(base_layer, "qweight"):
         return base_layer.qweight.device

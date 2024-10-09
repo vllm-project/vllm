@@ -330,8 +330,8 @@ class SamplingParams(
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
         if not isinstance(self.best_of, int):
-            raise ValueError(f'best_of must be an int, but is of '
-                             f'type {type(self.best_of)}')
+            raise ValueError(f"best_of must be an int, but is of "
+                             f"type {type(self.best_of)}")
         if self.best_of < self.n:
             raise ValueError(f"best_of must be greater than or equal to n, "
                              f"got n={self.n} and best_of={self.best_of}.")
@@ -390,10 +390,13 @@ class SamplingParams(
             raise ValueError("best_of must equal n to use output_kind=DELTA")
 
     def _verify_greedy_sampling(self) -> None:
+        if self.n > 1:
+            raise ValueError("n must be 1 when using greedy sampling, "
+                             f"got {self.n}.")
         assert isinstance(self.best_of, int)
         if self.best_of > 1:
-            raise ValueError("best_of must be 1 when using greedy sampling."
-                             f"Got {self.best_of}.")
+            raise ValueError("best_of must be 1 when using greedy sampling, "
+                             f"got {self.best_of}.")
 
     def update_from_generation_config(
             self,

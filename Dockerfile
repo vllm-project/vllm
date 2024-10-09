@@ -182,6 +182,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /etc/environment && \
     python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.6/flashinfer-0.1.6+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
+COPY examples examples
 #################### vLLM installation IMAGE ####################
 
 

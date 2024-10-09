@@ -22,6 +22,7 @@ timm # required for internvl test
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 datamodel_code_generator # required for minicpm3 test
+lm-eval[api]==0.4.4 # required for model evaluation test
 
 # TODO: Add this after fully implementing llava(mantis)
 # git+https://github.com/TIGER-AI-Lab/Mantis.git # required for llava(mantis) test
