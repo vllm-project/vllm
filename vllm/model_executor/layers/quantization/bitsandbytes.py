@@ -108,7 +108,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         return None
 
     def get_scaled_act_names(self) -> List[str]:
-        return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
+        return []
 
 
 class BitsAndBytesLinearMethod(LinearMethodBase):
@@ -236,7 +236,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             if generation == 0 or generation == 1:
                 matmul_states[i] = MatmulLtState()
                 matmul_states[i].CB = qweight[offsets[i]:offsets[i + 1]]
-                matmul_states[i].SCB = quant_states[i]
+                matmul_states[i].SCB = quant_states[i].to(x.device)
                 matmul_states[i].threshold = (
                     self.quant_config.llm_int8_threshold)
                 matmul_states[i].has_fp16_weights = (
