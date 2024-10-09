@@ -104,6 +104,23 @@ __device__ __forceinline__ float to_float(const T& inp) {
 }
 
 template <typename T>
+__device__ __forceinline__ float to_float_b16(const bit16_t& inp) {
+  union tmpcvt {
+    bit16_t u;
+    _Float16 f;
+    __hip_bfloat16 b;
+  } t16;
+  t16.u = inp;
+  if constexpr (std::is_same<T, _Float16>::value) {
+    return (float)t16.f;
+  } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
+    return __bfloat162float(t16.b);
+  } else {
+    static_assert(false, "unsupported 16b dtype");
+  }
+}
+
+template <typename T>
 __device__ __forceinline__ T from_float(const float& inp) {
   if constexpr (std::is_same<T, _Float16>::value) {
     return (_Float16)inp;
@@ -722,8 +739,8 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_kernel(
             if (head_idx < GQA_RATIO) {
               if constexpr (std::is_same<OUTT, bit8_t>::value) {
                 const float tmpf =
-                    out_scale * to_float<scalar_t>(vout[qh][vh][i]);
-                const OUTT tmp = vllm::fp8::vec_conversion<bit8_t, float>(tmpf);
+                    out_scale * to_float_b16<scalar_t>(vout[qh][vh][i]);
+                const OUTT tmp = hip_fp8(tmpf).data;
                 final_out_ptr_b8[(wg_start_head_idx + head_idx) * HEAD_SIZE +
                                  head_size_elem] = tmp;
               } else {
@@ -935,7 +952,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   acc *= out_scale;
   OUTT* out_ptr = out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
   if constexpr (std::is_same<OUTT, bit8_t>::value) {
-    out_ptr[threadIdx.x] = vllm::fp8::vec_conversion<bit8_t, float>(acc);
+    out_ptr[threadIdx.x] = hip_fp8(acc).data;
   } else {
     out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
   }
