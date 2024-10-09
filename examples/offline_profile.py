@@ -9,7 +9,7 @@ from typing import Optional
 import torch
 
 from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.engine.arg_utils import EngineArgs
 from vllm.profiler import layerwise_profile
 from vllm.utils import FlexibleArgumentParser
 
@@ -20,18 +20,10 @@ OUTPUT_LEN_DEFAULT = 2
 
 @dataclass
 class ProfileContext:
-    model: str
-    tokenizer: str
-    model_revision: str
-    quantization: str
-    max_model_len: int
-    max_num_batched_tokens: int
+    engine_args: EngineArgs
     prompt_len: int
     output_len: int
     batch_size: int
-    dtype: str
-    tensor_parallel_size: int
-    allow_cuda_graphs: bool
     save_traces_folder: Optional[str]
 
 
@@ -55,18 +47,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
                                      ignore_eos=True)
 
     # Create LLM
-    llm = LLM(model=context.model,
-              tokenizer=context.tokenizer
-              if context.tokenizer is not None else context.model,
-              revision=context.model_revision,
-              enforce_eager=not context.allow_cuda_graphs,
-              tensor_parallel_size=context.tensor_parallel_size,
-              gpu_memory_utilization=0.9,
-              max_model_len=context.max_model_len,
-              quantization=context.quantization,
-              dtype=get_dtype(context.dtype),
-              max_num_batched_tokens=context.max_num_batched_tokens)
-
+    llm = LLM(**asdict(context.engine_args))
     batch_size = context.batch_size
     prompt_len = context.prompt_len
     output_len = context.output_len
@@ -232,8 +213,8 @@ Profile a model
     ```
     python examples/offline_profile.py \\
         --model neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8 --batch-size 4 \\
-        --prompt-len 512 --max-num-batched-tokens 8196 --json Llama31-8b-FP8
-                
+        --prompt-len 512 --max-num-batched-tokens 8196 --json Llama31-8b-FP8 \\
+        --enforce-eager
     ```
 
     then you can use various tools to analyze the json output
@@ -250,18 +231,6 @@ Profile a model
         ```
 """,
                                     formatter_class=RawTextHelpFormatter)
-
-    parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help='The name or path of a HuggingFace Transformers model.')
-    parser.add_argument("--tokenizer",
-                        type=str,
-                        default=None,
-                        help="path to the tokenizer")
-
-    parser.add_argument("--model-revision", type=str, default=None)
     parser.add_argument(
         "--csv",
         type=str,
@@ -281,27 +250,6 @@ Profile a model
                         help="Save chrome traces for the prefill and decode "
                         "will save traces as prefill.json and decode_1.json, "
                         "etc. inside this folder")
-    parser.add_argument("--quantization",
-                        "-q",
-                        type=str,
-                        choices=[*QUANTIZATION_METHODS, None],
-                        default=None)
-    parser.add_argument("--dtype",
-                        type=str,
-                        default='auto',
-                        help="model dtype")
-    parser.add_argument(
-        "--max-model-len",
-        type=int,
-        default=None,
-        help="Maximum length of a sequence (including prompt and output)")
-    parser.add_argument(
-        "--max-num-batched-tokens",
-        type=int,
-        default=None,
-        help="Maximum number of tokens to be processed in a single iteration. "
-        " Should be greater than batch-size * prompt-len so the prefill can "
-        " run in a single iteration.")
     parser.add_argument(
         "--prompt-len",
         type=int,
@@ -313,19 +261,6 @@ Profile a model
                         default=BATCH_SIZE_DEFAULT,
                         help=f"Number of requests to run as a single batch, "
                         f"default={BATCH_SIZE_DEFAULT}")
-    parser.add_argument("--tensor-parallel-size",
-                        "-tp",
-                        type=int,
-                        default=1,
-                        help="Number of GPUs to use i.e. tensor parallelism, "
-                        "default=1")
-    parser.add_argument(
-        "--allow-cuda-graphs",
-        action='store_true',
-        help="Enables cuda graphs to be used. This wo; remove a lot of the "
-        "module level info in the profiler results since almost everything "
-        "runs in the graph where we do not have access to an informative stack "
-        "trace")
     parser.add_argument(
         "--output-len",
         type=int,
@@ -333,9 +268,12 @@ Profile a model
         help="Number of llm steps to run (includes prefill and decode) "
         "- default={OUTPUT_LEN_DEFAULT}")
 
+    EngineArgs.add_cli_args(parser)
+
     args = parser.parse_args()
 
     context = ProfileContext(
+        engine_args=EngineArgs.from_cli_args(args),
         **{
             k: v
             for k, v in vars(args).items()
