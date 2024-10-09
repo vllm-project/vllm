@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.tool_parsers import JambaToolParser
 from vllm.transformers_utils.detokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
-MODEL = "ai21labs/Jamba-tiny-dev"
+MODEL = "ai21labs/Jamba-tiny-devv"
 
 
 @pytest.fixture(scope="module")
