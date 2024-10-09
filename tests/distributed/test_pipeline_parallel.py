@@ -230,7 +230,7 @@ def _compare_tp(
     method: Literal["generate", "encode"],
 ):
     tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
-    multi_node_only, trust_remote_code, tokenizer_mode = test_settings
+    multi_node_only, trust_remote_code, tokenizer_mode = test_options
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
