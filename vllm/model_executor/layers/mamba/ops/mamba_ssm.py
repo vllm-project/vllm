@@ -144,9 +144,14 @@ def _selective_scan_update_kernel(
         z_ptrs = z_ptr + offs_m * stride_z_dim
     out_ptrs = out_ptr + offs_m * stride_out_dim
 
-    state = tl.load(state_ptrs,
-                    mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate),
-                    other=0.0)
+    if HAS_STATE_BATCH_INDICES:
+        state = tl.load(state_ptrs,
+                        mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate) & (state_batch_idx != -1),
+                        other=0.0)
+    else:
+        state = tl.load(state_ptrs,
+                        mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate),
+                        other=0.0)
     x = tl.load(x_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
     if not TIE_HDIM:
         dt = tl.load(dt_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
@@ -177,9 +182,14 @@ def _selective_scan_update_kernel(
 
     dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
     state = state * dA + dB * x[:, None]
-    tl.store(state_ptrs,
-             state,
-             mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate))
+    if HAS_STATE_BATCH_INDICES:
+        tl.store(state_ptrs,
+                 state,
+                 mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate) & (state_batch_idx != -1))
+    else:
+        tl.store(state_ptrs,
+                 state,
+                 mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate))
     out = tl.sum(state * C[None, :], axis=1)
     if HAS_D:
         out += x * D
