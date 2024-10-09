@@ -1,0 +1,62 @@
+# This file list all external hardware tests that run on vLLM CI pipeline.
+# Each test is a separate job in the pipeline.
+
+steps:
+
+- label: "Neuron Test"
+  key: neuron-test
+  agents:
+    queue: neuron
+  commands:
+  - bash .buildkite/run-neuron-test.sh
+  soft_fail: false
+
+- label: "Intel CPU Test"
+  key: intel-cpu-test
+  agents:
+    queue: intel-cpu
+  commands:
+  - bash .buildkite/run-cpu-test.sh
+
+- label: "Intel GPU Test"
+  key: intel-gpu-test
+  soft_fail: true
+  agents:
+    queue: intel-gpu
+  commands: 
+  - bash .buildkite/run-xpu-test.sh
+
+- label: "IBM Power(ppc64le) CPU Test"
+  key: ppc64le-cpu-test
+  soft_fail: true
+  agents:
+    queue: ppc64le
+  commands:
+  - bash .buildkite/run-cpu-test-ppc64le.sh
+
+- label: "TPU Test"
+  key: tpu-test
+  agents:
+    queue: tpu
+  commands: 
+  - if [[ -f ".buildkite/run-tpu-test.sh" ]]; then bash .buildkite/run-tpu-test.sh; fi 
+  - yes | docker system prune -a
+
+- label: "AMD: :docker: build image"
+  commands:
+    - "docker build --build-arg max_jobs=16 --tag DOCKER_IMAGE_AMD -f Dockerfile.rocm --progress plain ."
+    - "docker push DOCKER_IMAGE_AMD"
+  plugins:
+    - docker-login#v3.0.0:
+        username: rocmshared
+  key: amd-build
+  env:
+    DOCKER_BUILDKIT: "1"
+  retry:
+    automatic:
+      - exit_status: -1  # Agent was lost
+        limit: 2
+      - exit_status: -10  # Agent was lost
+        limit: 2
+  agents:
+    queue: amd-cpu
