@@ -27,18 +27,24 @@ class ParallelSetup(NamedTuple):
     chunked_prefill: bool
 
 
+class PPTestOptions(NamedTuple):
+    multi_node_only: bool
+    trust_remote_code: bool
+    tokenizer_mode: Optional[str]
+
+
 @dataclass
 class PPTestSettings:
     parallel_setups: List[ParallelSetup]
     distributed_backends: List[str]
-    trust_remote_code: bool
-    tokenizer_mode: Optional[str]
+    test_options: PPTestOptions
 
     @staticmethod
     def detailed(
         *,
         tp_base: int = 1,
         pp_base: int = 2,
+        multi_node_only: bool = False,
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
     ):
@@ -66,8 +72,9 @@ class PPTestSettings:
                               chunked_prefill=False),
             ],
             distributed_backends=["mp", "ray"],
-            trust_remote_code=trust_remote_code,
-            tokenizer_mode=tokenizer_mode,
+            test_options=PPTestOptions(multi_node_only=multi_node_only,
+                                       trust_remote_code=trust_remote_code,
+                                       tokenizer_mode=tokenizer_mode),
         )
 
     @staticmethod
@@ -75,6 +82,7 @@ class PPTestSettings:
         *,
         tp_base: int = 1,
         pp_base: int = 2,
+        multi_node_only: bool = False,
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
     ):
@@ -86,15 +94,17 @@ class PPTestSettings:
                               chunked_prefill=False),
             ],
             distributed_backends=["mp"],
-            trust_remote_code=trust_remote_code,
-            tokenizer_mode=tokenizer_mode,
+            test_options=PPTestOptions(multi_node_only=multi_node_only,
+                                       trust_remote_code=trust_remote_code,
+                                       tokenizer_mode=tokenizer_mode),
         )
 
     def iter_params(self, model_name: str):
+        opts = self.test_options
+     
         for parallel_setup in self.parallel_setups:
             for distributed_backend in self.distributed_backends:
-                yield (model_name, parallel_setup, distributed_backend,
-                       self.trust_remote_code, self.tokenizer_mode)
+                yield (model_name, parallel_setup, distributed_backend, opts)
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -214,8 +224,7 @@ def _compare_tp(
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    trust_remote_code: bool,
-    tokenizer_mode: Optional[str],
+    test_options: PPTestOptions,
     num_gpus_available: int,
     *,
     method: Literal["generate", "encode"],
@@ -227,6 +236,8 @@ def _compare_tp(
     if VLLM_MULTI_NODE and distributed_backend == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
+    if test_options.multi_node_only and not VLLM_MULTI_NODE:
+        pytest.skip("Not in multi-node setting")
 
     common_args = [
         # use half precision for speed and memory savings in CI environment
@@ -241,9 +252,9 @@ def _compare_tp(
         common_args.append("--enable-chunked-prefill")
     if eager_mode:
         common_args.append("--enforce-eager")
-    if trust_remote_code:
+    if test_options.trust_remote_code:
         common_args.append("--trust-remote-code")
-    if tokenizer_mode:
+    if test_options.tokenizer_mode:
         common_args.extend(["--tokenizer-mode", tokenizer_mode])
 
     if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
@@ -298,8 +309,7 @@ def _compare_tp(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend",
-     "trust_remote_code", "tokenizer_mode"),
+    ("model_name", "parallel_setup", "distributed_backend", "test_options"),
     [
         params for model_name, settings in GENERATION_MODEL_SETTINGS.items()
         for params in settings.iter_params(model_name)
@@ -311,22 +321,19 @@ def test_tp_language_generation(
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    trust_remote_code: bool,
-    tokenizer_mode: Optional[str],
+    test_options: PPTestOptions,
     num_gpus_available,
 ):
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
-                trust_remote_code,
-                tokenizer_mode,
+                test_options,
                 num_gpus_available,
                 method="generate")
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend",
-     "trust_remote_code", "tokenizer_mode"),
+    ("model_name", "parallel_setup", "distributed_backend", "test_options"),
     [
         params for model_name, settings in EMBEDDING_MODEL_SETTINGS.items()
         for params in settings.iter_params(model_name)
@@ -338,22 +345,19 @@ def test_tp_language_embedding(
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    trust_remote_code: bool,
-    tokenizer_mode: Optional[str],
+    test_options: PPTestOptions,
     num_gpus_available,
 ):
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
-                trust_remote_code,
-                tokenizer_mode,
+                test_options,
                 num_gpus_available,
                 method="encode")
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend",
-     "trust_remote_code", "tokenizer_mode"),
+    ("model_name", "parallel_setup", "distributed_backend", "test_options"),
     [
         params for model_name, settings in MULTIMODAL_MODEL_SETTINGS.items()
         for params in settings.iter_params(model_name)
@@ -365,14 +369,12 @@ def test_tp_multimodal_generation(
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    trust_remote_code: bool,
-    tokenizer_mode: Optional[str],
+    test_options: PPTestOptions,
     num_gpus_available,
 ):
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
-                trust_remote_code,
-                tokenizer_mode,
+                test_options,
                 num_gpus_available,
                 method="generate")
