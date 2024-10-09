@@ -332,7 +332,7 @@ def get_neuronxcc_version():
         # Return the version string
         return match.group(1)
     else:
-        raise RuntimeError("Could not find HIP version in the output")
+        raise RuntimeError("Could not find Neuron version in the output")
 
 
 def get_nvcc_cuda_version() -> Version:
