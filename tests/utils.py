@@ -352,15 +352,22 @@ def compare_all_settings(model: str,
         tokenizer_mode=tokenizer_mode,
     )
 
+    # we are comparing the results and we don't need real weights
+    # this should work for most models by default
+    # if not, we can add `--load-format auto` to the args
+    force_dummy_weights = True
+
+    for args in all_args:
+        if "--load-format" in args:
+            force_dummy_weights = False
+            break
+
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt).input_ids
     ref_results: List = []
     for i, (args, env) in enumerate(zip(all_args, all_envs)):
-        assert "--load-format" not in args, \
-            "comparison experiments should not specify --load-format"
-        # we are comparing the results
-        # and we don't need real weights
-        args = args + ["--load-format", "dummy"]
+        if force_dummy_weights:
+            args = args + ["--load-format", "dummy"]
         compare_results: List = []
         results = ref_results if i == 0 else compare_results
         with RemoteOpenAIServer(model,
