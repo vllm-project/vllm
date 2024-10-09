@@ -148,8 +148,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         )
 
     def _compute_multi_modal_input(self, seq_data: SequenceData, mm_data,
-                                   computed_len: int):
-        mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                                   computed_len: int,
+                                   mm_processor_kwargs: Dict[str, Any]):
+        mm_kwargs = self.multi_modal_input_mapper(mm_data, mm_processor_kwargs)
 
         # special processing for mrope position deltas.
         mrope_positions = None
@@ -210,7 +211,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             mrope_positions = None
             if (mm_data := seq_group_metadata.multi_modal_data):
                 mm_kwargs, mrope_positions = self._compute_multi_modal_input(
-                    seq_data, mm_data, computed_len)
+                    seq_data, mm_data, computed_len,
+                    seq_group_metadata.mm_processor_kwargs)
                 multi_modal_inputs_list.append(mm_kwargs)
 
             # Token position ids
