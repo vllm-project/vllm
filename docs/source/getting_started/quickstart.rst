@@ -11,12 +11,22 @@ This guide shows how to use vLLM to:
 
 Be sure to complete the :ref:`installation instructions <installation>` before continuing with this guide.
 
+.. note::
+
+    By default, vLLM downloads model from `HuggingFace <https://huggingface.co/>`_. If you would like to use models from `ModelScope <https://www.modelscope.cn>`_ in the following examples, please set the environment variable:
+
+    .. code-block:: shell
+
+        export VLLM_USE_MODELSCOPE=True
+
 Offline Batched Inference
 -------------------------
 
 We first show an example of using vLLM for offline batched inference on a dataset. In other words, we use vLLM to generate texts for a list of input prompts.
 
-Import ``LLM`` and ``SamplingParams`` from vLLM. The ``LLM`` class is the main class for running offline inference with vLLM engine. The ``SamplingParams`` class specifies the parameters for the sampling process.
+Import :class:`~vllm.LLM` and :class:`~vllm.SamplingParams` from vLLM.
+The :class:`~vllm.LLM` class is the main class for running offline inference with vLLM engine.
+The :class:`~vllm.SamplingParams` class specifies the parameters for the sampling process.
 
 .. code-block:: python
 
@@ -34,7 +44,7 @@ Define the list of input prompts and the sampling parameters for generation. The
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-Initialize vLLM's engine for offline inference with the ``LLM`` class and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_. The list of supported models can be found at :ref:`supported models <supported_models>`.
+Initialize vLLM's engine for offline inference with the :class:`~vllm.LLM` class and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_. The list of supported models can be found at :ref:`supported models <supported_models>`.
 
 .. code-block:: python
 
@@ -55,53 +65,34 @@ Call ``llm.generate`` to generate the outputs. It adds the input prompts to vLLM
 
 The code example can also be found in `examples/offline_inference.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`_.
 
-
-API Server
-----------
-
-vLLM can be deployed as an LLM service. We provide an example `FastAPI <https://fastapi.tiangolo.com/>`_ server. Check `vllm/entrypoints/api_server.py <https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/api_server.py>`_ for the server implementation. The server uses ``AsyncLLMEngine`` class to support asynchronous processing of incoming requests.
-
-Start the server:
-
-.. code-block:: console
-
-    $ python -m vllm.entrypoints.api_server
-
-By default, this command starts the server at ``http://localhost:8000`` with the OPT-125M model.
-
-Query the model in shell:
-
-.. code-block:: console
-
-    $ curl http://localhost:8000/generate \
-    $     -d '{
-    $         "prompt": "San Francisco is a",
-    $         "use_beam_search": true,
-    $         "n": 4,
-    $         "temperature": 0
-    $     }'
-
-See `examples/api_client.py <https://github.com/vllm-project/vllm/blob/main/examples/api_client.py>`_ for a more detailed client example.
-
 OpenAI-Compatible Server
 ------------------------
 
-vLLM can be deployed as a server that mimics the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
+vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
+By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the command below) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_, `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_, and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
 
 Start the server:
 
 .. code-block:: console
 
-    $ python -m vllm.entrypoints.openai.api_server \
-    $     --model facebook/opt-125m
+    $ vllm serve facebook/opt-125m
 
-By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (OPT-125M in the above command) and implements `list models <https://platform.openai.com/docs/api-reference/models/list>`_ and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. We are actively adding support for more endpoints.
+By default, the server uses a predefined chat template stored in the tokenizer. You can override this template by using the ``--chat-template`` argument:
+
+.. code-block:: console
+
+    $ vllm serve facebook/opt-125m --chat-template ./examples/template_chatml.jinja
 
 This server can be queried in the same format as OpenAI API. For example, list the models:
 
 .. code-block:: console
 
     $ curl http://localhost:8000/v1/models
+
+You can pass in the argument ``--api-key`` or environment variable ``VLLM_API_KEY`` to enable the server to check for API key in the header.
+
+Using OpenAI Completions API with vLLM
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Query the model with input prompts:
 
@@ -120,12 +111,65 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
 
 .. code-block:: python
 
-    import openai
+    from openai import OpenAI
+
     # Modify OpenAI's API key and API base to use vLLM's API server.
-    openai.api_key = "EMPTY"
-    openai.api_base = "http://localhost:8000/v1"
-    completion = openai.Completion.create(model="facebook/opt-125m",
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+    completion = client.completions.create(model="facebook/opt-125m",
                                           prompt="San Francisco is a")
     print("Completion result:", completion)
 
 For a more detailed client example, refer to `examples/openai_completion_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>`_.
+
+Using OpenAI Chat API with vLLM
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The vLLM server is designed to support the OpenAI Chat API, allowing you to engage in dynamic conversations with the model. The chat interface is a more interactive way to communicate with the model, allowing back-and-forth exchanges that can be stored in the chat history. This is useful for tasks that require context or more detailed explanations.
+
+Querying the model using OpenAI Chat API:
+
+You can use the `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_ endpoint to communicate with the model in a chat-like interface:
+
+.. code-block:: console
+
+    $ curl http://localhost:8000/v1/chat/completions \
+    $     -H "Content-Type: application/json" \
+    $     -d '{
+    $         "model": "facebook/opt-125m",
+    $         "messages": [
+    $             {"role": "system", "content": "You are a helpful assistant."},
+    $             {"role": "user", "content": "Who won the world series in 2020?"}
+    $         ]
+    $     }'
+
+Python Client Example:
+
+Using the `openai` python package, you can also communicate with the model in a chat-like manner:
+
+.. code-block:: python
+
+    from openai import OpenAI
+    # Set OpenAI's API key and API base to use vLLM's API server.
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
+
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+
+    chat_response = client.chat.completions.create(
+        model="facebook/opt-125m",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Tell me a joke."},
+        ]
+    )
+    print("Chat response:", chat_response)
+
+For more in-depth examples and advanced features of the chat API, you can refer to the official OpenAI documentation.

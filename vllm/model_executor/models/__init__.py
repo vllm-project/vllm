@@ -1,31 +1,23 @@
-from vllm.model_executor.models.aquila import AquilaForCausalLM
-from vllm.model_executor.models.baichuan import (BaiChuanForCausalLM,
-                                                 BaichuanForCausalLM)
-from vllm.model_executor.models.bloom import BloomForCausalLM
-from vllm.model_executor.models.falcon import FalconForCausalLM
-from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
-from vllm.model_executor.models.gpt_bigcode import GPTBigCodeForCausalLM
-from vllm.model_executor.models.gpt_j import GPTJForCausalLM
-from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
-from vllm.model_executor.models.internlm import InternLMForCausalLM
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.mpt import MPTForCausalLM
-from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.models.qwen import QWenLMHeadModel
+from .interfaces import (HasInnerState, SupportsLoRA, SupportsMultiModal,
+                         SupportsPP, has_inner_state, supports_lora,
+                         supports_multimodal, supports_pp)
+from .interfaces_base import (VllmModelForEmbedding,
+                              VllmModelForTextGeneration, is_embedding_model,
+                              is_text_generation_model)
+from .registry import ModelRegistry
 
 __all__ = [
-    "AquilaForCausalLM",
-    "BaiChuanForCausalLM",
-    "BaichuanForCausalLM",
-    "BloomForCausalLM",
-    "FalconForCausalLM",
-    "GPT2LMHeadModel",
-    "GPTBigCodeForCausalLM",
-    "GPTJForCausalLM",
-    "GPTNeoXForCausalLM",
-    "InternLMForCausalLM",
-    "LlamaForCausalLM",
-    "MPTForCausalLM",
-    "OPTForCausalLM",
-    "QWenLMHeadModel",
+    "ModelRegistry",
+    "VllmModelForEmbedding",
+    "is_embedding_model",
+    "VllmModelForTextGeneration",
+    "is_text_generation_model",
+    "HasInnerState",
+    "has_inner_state",
+    "SupportsLoRA",
+    "supports_lora",
+    "SupportsMultiModal",
+    "supports_multimodal",
+    "SupportsPP",
+    "supports_pp",
 ]

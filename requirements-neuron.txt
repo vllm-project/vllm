@@ -1,0 +1,7 @@
+# Common dependencies
+-r requirements-common.txt
+
+# Dependencies for Neuron devices
+transformers-neuronx >= 0.12.0
+torch-neuronx >= 2.1.2
+neuronx-cc

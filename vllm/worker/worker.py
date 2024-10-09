@@ -1,22 +1,38 @@
 """A GPU worker class."""
+import gc
 import os
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
-from vllm.model_executor import get_model, InputMetadata, set_random_seed
-from vllm.model_executor.parallel_utils.parallel_state import (
-    initialize_model_parallel)
-from vllm.sampling_params import SamplingParams
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+import vllm.envs as envs
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
+from vllm.distributed import (ensure_model_parallel_initialized,
+                              init_distributed_environment,
+                              set_custom_all_reduce)
+from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
+from vllm.model_executor import set_random_seed
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.platforms import current_platform
+from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
-from vllm.utils import get_gpu_memory, get_max_shared_memory_bytes
+from vllm.worker.embedding_model_runner import EmbeddingModelRunner
+from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
+from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
+from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
+
+logger = init_logger(__name__)
 
 
-class Worker:
+class Worker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
 
     Each worker is associated with a single GPU. The worker is responsible for
@@ -29,345 +45,444 @@ class Worker:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
-        rank: Optional[int] = None,
-        distributed_init_method: Optional[str] = None,
+        device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        load_config: LoadConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        lora_config: Optional[LoRAConfig] = None,
+        speculative_config: Optional[SpeculativeConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
+        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
+        self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.lora_config = lora_config
+        self.load_config = load_config
+        self.prompt_adapter_config = prompt_adapter_config
+        self.is_driver_worker = is_driver_worker
+        if parallel_config and is_driver_worker:
+            assert rank % parallel_config.tensor_parallel_size == 0, \
+                   "Driver worker should be rank 0 of tensor parallel group."
+        if self.model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
+        self.observability_config = observability_config
 
+        # Return hidden states from target model if the draft model is an
+        # mlp_speculator
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.model ==
+                model_config.model) \
+            or (speculative_config.draft_model_config.hf_config.model_type
+                not in ["medusa", "mlp_speculator", "eagle"]) \
+                    else {"return_hidden_states": True}
+
+        ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
+        if model_runner_cls is not None:
+            ModelRunnerClass = model_runner_cls
+        elif self._is_embedding_model():
+            ModelRunnerClass = EmbeddingModelRunner
+        elif self._is_encoder_decoder_model():
+            ModelRunnerClass = EncoderDecoderModelRunner
+        self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            cache_config,
+            load_config=load_config,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
+            is_driver_worker=is_driver_worker,
+            prompt_adapter_config=prompt_adapter_config,
+            observability_config=observability_config,
+            **speculative_args,
+        )
         # Uninitialized cache engine. Will be initialized by
-        # self.init_cache_engine().
-        self.cache_config = None
-        self.block_size = None
-        self.cache_engine = None
-        self.cache_events = None
-        self.gpu_cache = None
+        # initialize_cache.
+        self.cache_engine: List[CacheEngine]
+        # Initialize gpu_cache as embedding models don't initialize kv_caches
+        self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
-    def init_model(self):
-        # This env var set by Ray causes exceptions with graph building.
-        os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        # Env vars will be set by Ray.
-        self.rank = self.rank if self.rank is not None else int(
-            os.getenv("RANK", "-1"))
-        local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        self.device = torch.device(f"cuda:{local_rank}")
-        if self.rank < 0:
-            raise ValueError("Invalid or unspecified rank.")
-        torch.cuda.set_device(self.device)
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir, use_gzip=True))
+        else:
+            self.profiler = None
 
+    def start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.start()
+
+    def stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.stop()
+
+    def _is_encoder_decoder_model(self):
+        return self.model_config.is_encoder_decoder_model
+
+    def _is_embedding_model(self):
+        return self.model_config.is_embedding_model
+
+    def init_device(self) -> None:
+        if self.device_config.device.type == "cuda":
+            # torch.distributed.all_reduce does not free the input tensor until
+            # the synchronization point. This causes the memory usage to grow
+            # as the number of all_reduce calls increases. This env var disables
+            # this behavior.
+            # Related issue:
+            # https://discuss.pytorch.org/t/cuda-allocation-lifetime-for-inputs-to-distributed-all-reduce/191573
+            os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
+
+            # This env var set by Ray causes exceptions with graph building.
+            os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            self.device = torch.device(f"cuda:{self.local_rank}")
+            torch.cuda.set_device(self.device)
+
+            _check_if_gpu_supports_dtype(self.model_config.dtype)
+            gc.collect()
+            torch.cuda.empty_cache()
+            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+        else:
+            raise RuntimeError(
+                f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        _init_distributed_environment(self.parallel_config, self.rank,
-                                      self.distributed_init_method)
-
-        # Initialize the model.
+        init_worker_distributed_environment(self.parallel_config, self.rank,
+                                            self.distributed_init_method,
+                                            self.local_rank)
+        # Set random seed.
         set_random_seed(self.model_config.seed)
-        self.model = get_model(self.model_config)
+
+    def load_model(self):
+        self.model_runner.load_model()
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.model_runner.save_sharded_state(
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
+    def save_tensorized_model(
+        self,
+        tensorizer_config: TensorizerConfig,
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
-    def profile_num_available_blocks(
-        self,
-        block_size: int,
-        gpu_memory_utilization: float,
-        cpu_swap_space: int,
-    ) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        """Profiles the peak memory usage of the model to determine how many
+        KV blocks may be allocated without OOMs.
+
+        The engine will first conduct a profiling of the existing memory usage.
+        Then, it calculate the maximum possible number of GPU and CPU blocks
+        that can be allocated with the remaining free memory.
+
+        .. tip::
+            You may limit the usage of GPU memory
+            by adjusting the `gpu_memory_utilization` parameter.
+        """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
 
-        # Profile memory usage with max_num_sequences sequences and the total
-        # number of tokens equal to max_num_batched_tokens.
-
-        # Enable top-k sampling to reflect the accurate memory usage.
-        vocab_size = self.model.config.vocab_size
-        sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
-        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
-        max_num_seqs = self.scheduler_config.max_num_seqs
-        seqs = []
-        for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data = SequenceData([0] * seq_len)
-            seq = SequenceGroupMetadata(
-                request_id=str(group_id),
-                is_prompt=True,
-                seq_data={group_id: seq_data},
-                sampling_params=sampling_params,
-                block_tables=None,
-            )
-            seqs.append(seq)
-
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
-            seqs)
-
-        # Execute the model.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        self.model(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=[(None, None)] * num_layers,
-            input_metadata=input_metadata,
-            cache_events=None,
-        )
+        # Execute a forward pass with dummy inputs to profile the memory usage
+        # of the model.
+        self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         torch.cuda.synchronize()
-        peak_memory = torch.cuda.max_memory_allocated()
-        total_gpu_memory = get_gpu_memory()
-        cache_block_size = CacheEngine.get_cache_block_size(
-            block_size, self.model_config, self.parallel_config)
+        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        # NOTE(woosuk): Here we assume that the other processes using the same
+        # GPU did not change their memory usage during the profiling.
+        peak_memory = self.init_gpu_memory - free_gpu_memory
+        assert peak_memory > 0, (
+            "Error in memory profiling. "
+            f"Initial free memory {self.init_gpu_memory}, current free memory"
+            f" {free_gpu_memory}. This happens when the GPU memory was "
+            "not properly cleaned up before initializing the vLLM instance.")
+
+        cache_block_size = self.get_cache_block_size_bytes()
         num_gpu_blocks = int(
-            (total_gpu_memory * gpu_memory_utilization - peak_memory) //
-            cache_block_size)
-        num_cpu_blocks = int(cpu_swap_space // cache_block_size)
+            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
+             peak_memory) // cache_block_size)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                             cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+        if self.model_runner.lora_manager:
+            self.model_runner.remove_all_loras()
+        gc.collect()
         torch.cuda.empty_cache()
+        return num_gpu_blocks, num_cpu_blocks
 
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        """Allocate GPU and CPU KV cache with the specified number of blocks.
+
+        This also warms up the model, which may record CUDA graphs.
+        """
+        raise_if_cache_size_invalid(num_gpu_blocks,
+                                    self.cache_config.block_size,
+                                    self.model_config.max_model_len)
+
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        self._init_cache_engine()
+        self._warm_up_model()
+
+    def _init_cache_engine(self):
+        assert self.cache_config.num_gpu_blocks is not None
+        self.cache_engine = [
+            CacheEngine(self.cache_config, self.model_config,
+                        self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.gpu_cache = [
+            self.cache_engine[ve].gpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
+
+    def _warm_up_model(self) -> None:
+        if not self.model_config.enforce_eager:
+            self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        return num_gpu_blocks, num_cpu_blocks
 
-    def init_cache_engine(self, cache_config: CacheConfig) -> None:
-        self.cache_config = cache_config
-        self.block_size = cache_config.block_size
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
 
-        _check_if_can_support_max_seq_len(self.scheduler_config.max_model_len,
-                                          self.block_size)
-
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config)
-        self.cache_events = self.cache_engine.events
-        self.gpu_cache = self.cache_engine.gpu_cache
-
-    def _prepare_inputs(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata]:
-        seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        input_tokens: List[int] = []
-        input_positions: List[int] = []
-        slot_mapping: List[int] = []
-
-        # Add prompt tokens.
-        prompt_lens: List[int] = []
-        for seq_group_metadata in seq_group_metadata_list:
-            if not seq_group_metadata.is_prompt:
-                continue
-
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-
-            # Use any sequence in the group.
-            seq_id = seq_ids[0]
-
-            seq_data = seq_group_metadata.seq_data[seq_id]
-            prompt_tokens = seq_data.get_token_ids()
-            prompt_len = len(prompt_tokens)
-            prompt_lens.append(prompt_len)
-
-            input_tokens.extend(prompt_tokens)
-            # NOTE(woosuk): Here we assume that the first token in the prompt
-            # is always the first token in the sequence.
-            input_positions.extend(range(len(prompt_tokens)))
-
-            if seq_group_metadata.block_tables is None:
-                # During memory profiling, the block tables are not initialized
-                # yet. In this case, we just use a dummy slot mapping.
-                slot_mapping.extend([0] * prompt_len)
-                continue
-
-            # Compute the slot mapping.
-            block_table = seq_group_metadata.block_tables[seq_id]
-            for i in range(prompt_len):
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
-
-        # Add generation tokens.
-        max_context_len = 0
-        max_num_blocks_per_seq = 0
-        context_lens: List[int] = []
-        generation_block_tables: List[List[int]] = []
-        for seq_group_metadata in seq_group_metadata_list:
-            if seq_group_metadata.is_prompt:
-                continue
-
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-
-            for seq_id in seq_ids:
-                seq_data = seq_group_metadata.seq_data[seq_id]
-                generation_token = seq_data.get_last_token_id()
-                input_tokens.append(generation_token)
-
-                context_len = seq_data.get_len()
-                position = context_len - 1
-                input_positions.append(position)
-
-                block_table = seq_group_metadata.block_tables[seq_id]
-                generation_block_tables.append(block_table)
-
-                max_context_len = max(max_context_len, context_len)
-                max_num_blocks_per_seq = max(max_num_blocks_per_seq,
-                                             len(block_table))
-                context_lens.append(context_len)
-
-                block_number = block_table[position // self.block_size]
-                block_offset = position % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
-
-        # Optimization: Pad the input length to be a multiple of 8.
-        # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
-        input_tokens = _pad_to_alignment(input_tokens, multiple_of=8)
-        input_positions = _pad_to_alignment(input_positions, multiple_of=8)
-
-        # Convert to tensors.
-        tokens_tensor = torch.tensor(input_tokens,
-                                     dtype=torch.long,
-                                     device="cuda")
-        positions_tensor = torch.tensor(input_positions,
-                                        dtype=torch.long,
-                                        device="cuda")
-        slot_mapping_tensor = torch.tensor(slot_mapping,
-                                           dtype=torch.int,
-                                           device="cuda")
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.int,
-                                           device="cuda")
-        padded_block_tables = [
-            _pad_to_max(block_table, max_num_blocks_per_seq)
-            for block_table in generation_block_tables
-        ]
-        block_tables_tensor = torch.tensor(padded_block_tables,
-                                           dtype=torch.int,
-                                           device="cuda")
-
-        seq_data: Dict[int, SequenceData] = {}
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_data.update(seq_group_metadata.seq_data)
-
-        input_metadata = InputMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
-            prompt_lens=prompt_lens,
-            slot_mapping=slot_mapping_tensor,
-            context_lens=context_lens_tensor,
-            max_context_len=max_context_len,
-            block_tables=block_tables_tensor,
-        )
-        return tokens_tensor, positions_tensor, input_metadata
+    @property
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+        return self.gpu_cache
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> SamplerOutput:
-        # Issue cache operations.
-        issued_cache_op = False
-        if blocks_to_swap_in:
-            self.cache_engine.swap_in(blocks_to_swap_in)
-            issued_cache_op = True
-        if blocks_to_swap_out:
-            self.cache_engine.swap_out(blocks_to_swap_out)
-            issued_cache_op = True
-        if blocks_to_copy:
-            self.cache_engine.copy(blocks_to_copy)
-            issued_cache_op = True
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        virtual_engine = execute_model_req.virtual_engine
+        num_steps = execute_model_req.num_steps
+        num_seq_groups = len(execute_model_req.seq_group_metadata_list)
+        # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
+        # they contain parameters to launch cudamemcpyasync.
+        blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
+                                         device="cpu",
+                                         dtype=torch.int64).view(-1, 2)
+        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
+                                          device="cpu",
+                                          dtype=torch.int64).view(-1, 2)
+        # `blocks_to_copy` is a gpu tensor. The src and tgt of
+        # blocks to copy are in the same device, and `blocks_to_copy`
+        # can be used directly within cuda kernels.
+        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device=self.device,
+                                      dtype=torch.int64).view(-1, 2)
 
-        if issued_cache_op:
-            cache_events = self.cache_events
-        else:
-            cache_events = None
-
-        # If there is no input, we don't need to execute the model.
-        if not seq_group_metadata_list:
-            if cache_events is not None:
-                for event in cache_events:
-                    event.wait()
-            return {}
-
-        # Prepare input tensors.
-        input_tokens, input_positions, input_metadata = self._prepare_inputs(
-            seq_group_metadata_list)
-
-        # Execute the model.
-        output = self.model(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=self.gpu_cache,
-            input_metadata=input_metadata,
-            cache_events=cache_events,
+        return WorkerInput(
+            num_seq_groups=num_seq_groups,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+            virtual_engine=virtual_engine,
+            num_steps=num_steps,
         )
+
+    @torch.inference_mode()
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        virtual_engine = worker_input.virtual_engine
+        # Issue cache operations.
+        if (worker_input.blocks_to_swap_in is not None
+                and worker_input.blocks_to_swap_in.numel() > 0):
+            self.cache_engine[virtual_engine].swap_in(
+                worker_input.blocks_to_swap_in)
+        if (worker_input.blocks_to_swap_out is not None
+                and worker_input.blocks_to_swap_out.numel() > 0):
+            self.cache_engine[virtual_engine].swap_out(
+                worker_input.blocks_to_swap_out)
+        if (worker_input.blocks_to_copy is not None
+                and worker_input.blocks_to_copy.numel() > 0):
+            self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+
+    def _get_cached_seq_group_metadata(
+            self,
+            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+                                                SequenceGroupMetadataDelta]],
+            finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
+        """Return a list of cached Sequence Group Metadata after updating its
+        state.
+
+        It is used because scheduler only sends delta to workers to reduce
+        the data payload size. The function also cleans up cache based on
+        a given `finished_request_ids`.
+        """
+        new_seq_group_metadata_list = []
+        for metadata_or_delta in seq_group_metadata_list:
+            request_id = metadata_or_delta.request_id
+            if request_id not in self._seq_group_metadata_cache:
+                # The first prefill.
+                assert isinstance(metadata_or_delta, SequenceGroupMetadata)
+                self._seq_group_metadata_cache[request_id] = metadata_or_delta
+            else:
+                # The first prefill is already cached.
+                if isinstance(metadata_or_delta, SequenceGroupMetadataDelta):
+                    self._seq_group_metadata_cache[request_id].apply_delta(
+                        metadata_or_delta)
+                else:
+                    # If metadata snapshot is sent again, it is
+                    # preempted. Reset the cache because we need to start
+                    # from scratch.
+                    assert isinstance(metadata_or_delta, SequenceGroupMetadata)
+                    self._seq_group_metadata_cache[
+                        request_id] = metadata_or_delta
+
+            new_seq_group_metadata_list.append(
+                self._seq_group_metadata_cache[request_id])
+
+        # Clean up finished ids
+        for finished_id in finished_request_ids:
+            del self._seq_group_metadata_cache[finished_id]
+
+        return new_seq_group_metadata_list
+
+    def _execute_model_spmd(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Optional[List[SamplerOutput]]:
+        if execute_model_req is not None:
+            new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
+                execute_model_req.seq_group_metadata_list,
+                execute_model_req.finished_requests_ids)
+
+            execute_model_req.seq_group_metadata_list = (
+                new_seq_group_metadata_list)
+        output = super()._execute_model_spmd(execute_model_req,
+                                             intermediate_tensors)
         return output
 
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
 
-def _init_distributed_environment(
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.model_runner.list_loras()
+
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        return self.model_runner.add_prompt_adapter(prompt_adapter_request)
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.model_runner.remove_lora(prompt_adapter_id)
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.model_runner.pin_prompt_adapter(prompt_adapter_id)
+
+    def list_prompt_adapters(self) -> Set[int]:
+        return self.model_runner.list_prompt_adapters()
+
+    @property
+    def max_model_len(self) -> int:
+        return self.model_config.max_model_len
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_runner.vocab_size
+
+    def get_cache_block_size_bytes(self) -> int:
+        """Get the size of the KV cache block size in bytes.
+        """
+        return CacheEngine.get_cache_block_size(self.cache_config,
+                                                self.model_config,
+                                                self.parallel_config)
+
+
+def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
+    local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
-    if torch.distributed.is_initialized():
-        torch_world_size = torch.distributed.get_world_size()
-        if torch_world_size != parallel_config.world_size:
-            raise RuntimeError(
-                "torch.distributed is already initialized but the torch world "
-                "size does not match parallel_config.world_size "
-                f"({torch_world_size} vs. {parallel_config.world_size}).")
-    elif not distributed_init_method:
+    set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+
+    init_distributed_environment(parallel_config.world_size, rank,
+                                 distributed_init_method, local_rank)
+
+    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                      parallel_config.pipeline_parallel_size)
+
+
+def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
+    # Check if the GPU supports the dtype.
+    if torch_dtype == torch.bfloat16:  # noqa: SIM102
+        if not current_platform.has_device_capability(80):
+            capability = current_platform.get_device_capability()
+            gpu_name = current_platform.get_device_name()
+
+            if capability is None:
+                compute_str = "does not have a compute capability"
+            else:
+                version_str = capability.as_version_str()
+                compute_str = f"has compute capability {version_str}"
+
+            raise ValueError(
+                "Bfloat16 is only supported on GPUs with compute capability "
+                f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
+                "You can use float16 instead by explicitly setting the"
+                "`dtype` flag in CLI, for example: --dtype=half.")
+
+
+def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
+                                max_model_len) -> None:
+    if num_gpu_blocks <= 0:
+        raise ValueError("No available memory for the cache blocks. "
+                         "Try increasing `gpu_memory_utilization` when "
+                         "initializing the engine.")
+    max_seq_len = block_size * num_gpu_blocks
+    if max_model_len > max_seq_len:
         raise ValueError(
-            "distributed_init_method must be set if torch.distributed "
-            "is not already initialized")
-    else:
-        torch.distributed.init_process_group(
-            backend="nccl",
-            world_size=parallel_config.world_size,
-            rank=rank,
-            init_method=distributed_init_method,
-        )
-
-    # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
-    initialize_model_parallel(parallel_config.tensor_parallel_size,
-                              parallel_config.pipeline_parallel_size)
-
-
-def _pad_to_alignment(x: List[int], multiple_of: int) -> List[int]:
-    return x + [0] * ((-len(x)) % multiple_of)
-
-
-def _pad_to_max(x: List[int], max_len: int) -> List[int]:
-    return x + [0] * (max_len - len(x))
-
-
-def _check_if_can_support_max_seq_len(max_seq_len: int,
-                                      block_size: int) -> None:
-    # Follows the logic in
-    # attention_kernels.cu::single_query_cached_kv_attention_launcher
-    max_shared_mem = get_max_shared_memory_bytes()
-    float32_bytes = torch.finfo(torch.float).bits // 8
-    padded_max_seq_len = (
-        (max_seq_len + block_size - 1) / block_size) * block_size
-    # padded_max_seq_len + extra buffer
-    required_shared_mem = (padded_max_seq_len + 512) * float32_bytes
-    if padded_max_seq_len * float32_bytes > max_shared_mem:
-        raise RuntimeError(
-            f"vLLM cannot currently support max_model_len={max_seq_len} "
-            f"with block_size={block_size} on GPU with compute "
-            f"capability {torch.cuda.get_device_capability()} "
-            f"(required shared memory {required_shared_mem} > "
-            f"available shared memory {max_shared_mem}). "
-            "This will be fixed in a future release.")
+            f"The model's max seq len ({max_model_len}) "
+            "is larger than the maximum number of tokens that can be "
+            f"stored in KV cache ({max_seq_len}). Try increasing "
+            "`gpu_memory_utilization` or decreasing `max_model_len` when "
+            "initializing the engine.")

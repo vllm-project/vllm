@@ -1,0 +1,11 @@
+# Common dependencies
+-r requirements-common.txt
+
+# Dependencies for AMD GPUs
+awscli
+boto3
+botocore
+ray >= 2.10.0
+peft
+pytest-asyncio
+tensorizer>=2.9.0

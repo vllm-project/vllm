@@ -15,50 +15,61 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GPT-J model compatible with HuggingFace weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
-from typing import List, Optional, Tuple
+"""Inference-only GPT-J model compatible with HuggingFace weights."""
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import GPTJConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
-                                              load_tensor_parallel_weights)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding, ColumnParallelLinear, RowParallelLinear)
-from vllm.sequence import SamplerOutput
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import IntermediateTensors
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from .interfaces import SupportsPP
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class GPTJAttention(nn.Module):
 
-    def __init__(self, config: GPTJConfig):
+    def __init__(
+        self,
+        config: GPTJConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
 
-        self.qkv_proj = ColumnParallelLinear(config.hidden_size,
-                                             3 * config.hidden_size,
-                                             bias=False,
-                                             gather_output=False,
-                                             perform_initialization=False)
-        self.out_proj = RowParallelLinear(config.hidden_size,
-                                          config.hidden_size,
-                                          bias=False,
-                                          input_is_parallel=True,
-                                          perform_initialization=False)
+        self.qkv_proj = QKVParallelLinear(
+            config.hidden_size,
+            self.head_size,
+            self.total_num_heads,
+            bias=False,
+            quant_config=quant_config,
+        )
+        self.out_proj = RowParallelLinear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+        )
 
         tp_world_size = get_tensor_model_parallel_world_size()
         assert self.total_num_heads % tp_world_size == 0
@@ -70,47 +81,56 @@ class GPTJAttention(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        self.attn = PagedAttentionWithRoPE(
-            self.num_heads,
+        self.rotary_emb = get_rope(
             self.head_size,
-            scaling,
-            config.rotary_dim,
-            base=rope_theta,
+            rotary_dim=config.rotary_dim,
             max_position=max_position_embeddings,
-            is_neox_style=False)
-        self.warmup = False
+            base=rope_theta,
+            is_neox_style=False,
+        )
+        self.attn = Attention(self.num_heads,
+                              self.head_size,
+                              scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(position_ids, q, k, v, k_cache, v_cache,
-                                input_metadata, cache_event)
+        q, k = self.rotary_emb(position_ids, q, k)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
 
 class GPTJMLP(nn.Module):
 
-    def __init__(self, intermediate_size: int, config: GPTJConfig):
+    def __init__(
+        self,
+        intermediate_size: int,
+        config: GPTJConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         hidden_size = config.n_embd
-        self.fc_in = ColumnParallelLinear(hidden_size,
-                                          intermediate_size,
-                                          gather_output=False,
-                                          perform_initialization=False)
-        self.fc_out = RowParallelLinear(intermediate_size,
-                                        hidden_size,
-                                        input_is_parallel=True,
-                                        perform_initialization=False)
-        self.act = get_act_fn(config.activation_function)
+        self.fc_in = ColumnParallelLinear(
+            hidden_size,
+            intermediate_size,
+            quant_config=quant_config,
+        )
+        self.fc_out = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            quant_config=quant_config,
+        )
+        self.act = get_act_fn(config.activation_function, quant_config,
+                              intermediate_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc_in(hidden_states)
@@ -121,23 +141,25 @@ class GPTJMLP(nn.Module):
 
 class GPTJBlock(nn.Module):
 
-    def __init__(self, config: GPTJConfig):
+    def __init__(
+        self,
+        config: GPTJConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
-        if config.n_inner is None:
-            inner_dim = 4 * config.n_embd
-        else:
-            inner_dim = config.n_inner
+        inner_dim = (4 * config.n_embd
+                     if config.n_inner is None else config.n_inner)
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.attn = GPTJAttention(config)
-        self.mlp = GPTJMLP(inner_dim, config)
+        self.attn = GPTJAttention(config, cache_config, quant_config)
+        self.mlp = GPTJMLP(inner_dim, config, quant_config)
 
     def forward(
         self,
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -145,8 +167,7 @@ class GPTJBlock(nn.Module):
             position_ids=position_ids,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
-            cache_event=cache_event,
+            attn_metadata=attn_metadata,
         )
         mlp_output = self.mlp(hidden_states)
         hidden_states = attn_output + mlp_output + residual
@@ -155,107 +176,142 @@ class GPTJBlock(nn.Module):
 
 class GPTJModel(nn.Module):
 
-    def __init__(self, config: GPTJConfig):
+    def __init__(
+        self,
+        config: GPTJConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.config = config
         self.embed_dim = config.n_embd
-        self.wte = VocabParallelEmbedding(config.vocab_size,
-                                          self.embed_dim,
-                                          perform_initialization=False)
-        self.h = nn.ModuleList(
-            [GPTJBlock(config) for _ in range(config.n_layer)])
+        self.wte = VocabParallelEmbedding(
+            config.vocab_size,
+            self.embed_dim,
+        )
+        self.start_layer, self.end_layer, self.h = make_layers(
+            config.n_layer,
+            lambda prefix: GPTJBlock(config, cache_config, quant_config),
+            prefix=f"{prefix}.h",
+        )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.n_embd))
 
     def forward(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-    ) -> torch.Tensor:
-        hidden_states = self.wte(input_ids)
-        for i in range(len(self.h)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            hidden_states = self.wte(input_ids)
+        else:
+            hidden_states = intermediate_tensors["hidden_states"]
+        for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
             hidden_states = layer(
                 position_ids,
                 hidden_states,
-                kv_caches[i],
-                input_metadata,
-                cache_event,
+                kv_caches[i - self.start_layer],
+                attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
 
-class GPTJForCausalLM(nn.Module):
+class GPTJForCausalLM(nn.Module, SupportsPP):
 
-    def __init__(self, config: GPTJConfig):
+    def __init__(
+        self,
+        config: GPTJConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         self.config = config
+        self.quant_config = quant_config
         assert not config.tie_word_embeddings
-        self.transformer = GPTJModel(config)
-        self.lm_head = ColumnParallelLinear(config.n_embd,
-                                            config.vocab_size,
-                                            gather_output=False,
-                                            perform_initialization=False)
-        self.sampler = Sampler(config.vocab_size)
+        self.transformer = GPTJModel(config, cache_config, quant_config)
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.n_embd,
+            bias=True,
+            quant_config=quant_config,
+        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-    ) -> SamplerOutput:
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata, cache_events)
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   input_metadata, self.lm_head.bias)
+                                         attn_metadata, intermediate_tensors)
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata, self.lm_head.bias)
+        return logits
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    _column_parallel_weights = [
-        "wte.weight", "fc_in.weight", "fc_in.bias", "lm_head.weight",
-        "lm_head.bias"
-    ]
-    _row_parallel_weights = ["out_proj.weight", "fc_out.weight"]
-
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
-        tp_rank = get_tensor_model_parallel_rank()
-        state_dict = self.state_dict()
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
-
-            is_attention_weight = False
-            for stride_id, att_weight_name in enumerate(
-                ["q_proj", "k_proj", "v_proj"]):
-                if att_weight_name not in name:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
                     continue
-                param = state_dict[name.replace(att_weight_name, "qkv_proj")]
-                shard_size = param.shape[1]
-                loaded_weight = loaded_weight[shard_size * tp_rank:shard_size *
-                                              (tp_rank + 1)]
-                param_slice = param.data[shard_size * stride_id:shard_size *
-                                         (stride_id + 1)]
-                assert param_slice.shape == loaded_weight.shape
-                param_slice.copy_(loaded_weight)
-                is_attention_weight = True
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
                 break
-            if is_attention_weight:
-                continue
-
-            param = state_dict[name]
-            load_tensor_parallel_weights(param, loaded_weight, name,
-                                         self._column_parallel_weights,
-                                         self._row_parallel_weights, tp_rank)
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)

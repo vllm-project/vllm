@@ -1,6 +1,8 @@
 /*
- * Adapted from https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
- * and https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h
+ * Adapted from
+ * https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
+ * and
+ * https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h
  * Copyright (c) 2023, The vLLM team.
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -21,8 +23,17 @@
 #include "attention_generic.cuh"
 #include "dtype_float32.cuh"
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#ifndef USE_ROCM
+  #include <cuda_bf16.h>
+  #include <cuda_fp16.h>
+#else
+  #include <hip/hip_bf16.h>
+  #include <hip/hip_fp16.h>
+
+typedef __hip_bfloat162 __nv_bfloat162;
+typedef __hip_bfloat16 __nv_bfloat16;
+#endif
+
 #include <stdint.h>
 
 namespace vllm {
@@ -41,37 +52,37 @@ struct bf16_8_t {
 };
 
 // BF16 vector types for Q, K, V.
-template<>
+template <>
 struct Vec<__nv_bfloat16, 1> {
   using Type = __nv_bfloat16;
 };
-template<>
+template <>
 struct Vec<__nv_bfloat16, 2> {
   using Type = __nv_bfloat162;
 };
-template<>
+template <>
 struct Vec<__nv_bfloat16, 4> {
   using Type = bf16_4_t;
 };
-template<>
+template <>
 struct Vec<__nv_bfloat16, 8> {
   using Type = bf16_8_t;
 };
 
 // FP32 accumulator vector types corresponding to Vec.
-template<>
+template <>
 struct FloatVec<__nv_bfloat16> {
   using Type = float;
 };
-template<>
+template <>
 struct FloatVec<__nv_bfloat162> {
   using Type = float2;
 };
-template<>
+template <>
 struct FloatVec<bf16_4_t> {
   using Type = Float4_;
 };
-template<>
+template <>
 struct FloatVec<bf16_8_t> {
   using Type = Float8_;
 };
@@ -83,6 +94,7 @@ inline __device__ float2 bf1622float2(const __nv_bfloat162 val) {
 #else
   return __bfloat1622float2(val);
 #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 inline __device__ __nv_bfloat162 bf162bf162(const __nv_bfloat16 val) {
@@ -91,6 +103,7 @@ inline __device__ __nv_bfloat162 bf162bf162(const __nv_bfloat16 val) {
 #else
   return __bfloat162bfloat162(val);
 #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 // Vector addition.
@@ -98,8 +111,13 @@ inline __device__ __nv_bfloat16 add(__nv_bfloat16 a, __nv_bfloat16 b) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
+  #ifndef USE_ROCM
   return a + b;
+  #else
+  return __hadd(a, b);
+  #endif
 #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 inline __device__ __nv_bfloat162 add(__nv_bfloat162 a, __nv_bfloat162 b) {
@@ -108,6 +126,7 @@ inline __device__ __nv_bfloat162 add(__nv_bfloat162 a, __nv_bfloat162 b) {
 #else
   return __hadd2(a, b);
 #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 inline __device__ bf16_4_t add(bf16_4_t a, bf16_4_t b) {
@@ -148,30 +167,32 @@ inline __device__ Float8_ add(bf16_8_t a, Float8_ fb) {
 }
 
 // Vector multiplication.
-template<>
+template <>
 inline __device__ __nv_bfloat16 mul(__nv_bfloat16 a, __nv_bfloat16 b) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
   return __hmul(a, b);
 #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
-template<>
+template <>
 inline __device__ __nv_bfloat162 mul(__nv_bfloat162 a, __nv_bfloat162 b) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
   return __hmul2(a, b);
 #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
-template<>
+template <>
 inline __device__ __nv_bfloat162 mul(__nv_bfloat16 a, __nv_bfloat162 b) {
   return mul<__nv_bfloat162, __nv_bfloat162, __nv_bfloat162>(bf162bf162(a), b);
 }
 
-template<>
+template <>
 inline __device__ bf16_4_t mul(bf16_4_t a, bf16_4_t b) {
   bf16_4_t c;
   c.x = mul<__nv_bfloat162, __nv_bfloat162, __nv_bfloat162>(a.x, b.x);
@@ -179,7 +200,7 @@ inline __device__ bf16_4_t mul(bf16_4_t a, bf16_4_t b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ bf16_4_t mul(__nv_bfloat16 a, bf16_4_t b) {
   __nv_bfloat162 s = bf162bf162(a);
   bf16_4_t c;
@@ -188,7 +209,7 @@ inline __device__ bf16_4_t mul(__nv_bfloat16 a, bf16_4_t b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ bf16_8_t mul(bf16_8_t a, bf16_8_t b) {
   bf16_8_t c;
   c.x = mul<__nv_bfloat162, __nv_bfloat162, __nv_bfloat162>(a.x, b.x);
@@ -198,7 +219,7 @@ inline __device__ bf16_8_t mul(bf16_8_t a, bf16_8_t b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ bf16_8_t mul(__nv_bfloat16 a, bf16_8_t b) {
   __nv_bfloat162 s = bf162bf162(a);
   bf16_8_t c;
@@ -209,26 +230,26 @@ inline __device__ bf16_8_t mul(__nv_bfloat16 a, bf16_8_t b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ float mul(__nv_bfloat16 a, __nv_bfloat16 b) {
   float fa = __bfloat162float(a);
   float fb = __bfloat162float(b);
   return fa * fb;
 }
 
-template<>
+template <>
 inline __device__ float2 mul(__nv_bfloat162 a, __nv_bfloat162 b) {
   float2 fa = bf1622float2(a);
   float2 fb = bf1622float2(b);
   return mul<float2, float2, float2>(fa, fb);
 }
 
-template<>
+template <>
 inline __device__ float2 mul(__nv_bfloat16 a, __nv_bfloat162 b) {
   return mul<float2, __nv_bfloat162, __nv_bfloat162>(bf162bf162(a), b);
 }
 
-template<>
+template <>
 inline __device__ Float4_ mul(bf16_4_t a, bf16_4_t b) {
   Float4_ fc;
   fc.x = mul<float2, __nv_bfloat162, __nv_bfloat162>(a.x, b.x);
@@ -236,7 +257,7 @@ inline __device__ Float4_ mul(bf16_4_t a, bf16_4_t b) {
   return fc;
 }
 
-template<>
+template <>
 inline __device__ Float4_ mul(__nv_bfloat16 a, bf16_4_t b) {
   __nv_bfloat162 s = bf162bf162(a);
   Float4_ fc;
@@ -245,7 +266,7 @@ inline __device__ Float4_ mul(__nv_bfloat16 a, bf16_4_t b) {
   return fc;
 }
 
-template<>
+template <>
 inline __device__ Float8_ mul(bf16_8_t a, bf16_8_t b) {
   Float8_ fc;
   fc.x = mul<float2, __nv_bfloat162, __nv_bfloat162>(a.x, b.x);
@@ -255,7 +276,7 @@ inline __device__ Float8_ mul(bf16_8_t a, bf16_8_t b) {
   return fc;
 }
 
-template<>
+template <>
 inline __device__ Float8_ mul(__nv_bfloat16 a, bf16_8_t b) {
   __nv_bfloat162 s = bf162bf162(a);
   Float8_ fc;
@@ -267,20 +288,24 @@ inline __device__ Float8_ mul(__nv_bfloat16 a, bf16_8_t b) {
 }
 
 // Vector fused multiply-add.
-inline __device__ __nv_bfloat162 fma(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bfloat162 c) {
+inline __device__ __nv_bfloat162 fma(__nv_bfloat162 a, __nv_bfloat162 b,
+                                     __nv_bfloat162 c) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
   return __hfma2(a, b, c);
 #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
-inline __device__ __nv_bfloat162 fma(__nv_bfloat16 a, __nv_bfloat162 b, __nv_bfloat162 c) {
+inline __device__ __nv_bfloat162 fma(__nv_bfloat16 a, __nv_bfloat162 b,
+                                     __nv_bfloat162 c) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
   return __hfma2(bf162bf162(a), b, c);
 #endif
+  __builtin_unreachable();  // Suppress missing return statement warning
 }
 
 inline __device__ bf16_4_t fma(bf16_4_t a, bf16_4_t b, bf16_4_t c) {
@@ -366,23 +391,23 @@ inline __device__ Float8_ fma(__nv_bfloat16 a, bf16_8_t b, Float8_ fc) {
 }
 
 // Vector sum.
-template<>
+template <>
 inline __device__ float sum(__nv_bfloat16 v) {
   return __bfloat162float(v);
 }
 
-template<>
+template <>
 inline __device__ float sum(__nv_bfloat162 v) {
   float2 vf = bf1622float2(v);
   return vf.x + vf.y;
 }
 
-template<>
+template <>
 inline __device__ float sum(bf16_4_t v) {
   return sum(v.x) + sum(v.y);
 }
 
-template<>
+template <>
 inline __device__ float sum(bf16_8_t v) {
   return sum(v.x) + sum(v.y) + sum(v.z) + sum(v.w);
 }
@@ -420,6 +445,11 @@ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
 #endif
 }
 
+// From bfloat16 to float32.
+inline __device__ float to_float(__nv_bfloat16 u) {
+  return __bfloat162float(u);
+}
+
 // Zero-out a variable.
 inline __device__ void zero(__nv_bfloat16& dst) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
@@ -430,4 +460,4 @@ inline __device__ void zero(__nv_bfloat16& dst) {
 #endif
 }
 
-} // namespace vllm
+}  // namespace vllm

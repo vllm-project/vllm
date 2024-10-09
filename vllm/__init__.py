@@ -3,21 +3,34 @@
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
-from vllm.engine.ray_utils import initialize_cluster
 from vllm.entrypoints.llm import LLM
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.executor.ray_utils import initialize_ray_cluster
+from vllm.inputs import PromptType, TextPrompt, TokensPrompt
+from vllm.model_executor.models import ModelRegistry
+from vllm.outputs import (CompletionOutput, EmbeddingOutput,
+                          EmbeddingRequestOutput, RequestOutput)
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
-__version__ = "0.1.7"
+from .version import __version__, __version_tuple__
 
 __all__ = [
+    "__version__",
+    "__version_tuple__",
     "LLM",
+    "ModelRegistry",
+    "PromptType",
+    "TextPrompt",
+    "TokensPrompt",
     "SamplingParams",
     "RequestOutput",
     "CompletionOutput",
+    "EmbeddingOutput",
+    "EmbeddingRequestOutput",
     "LLMEngine",
     "EngineArgs",
     "AsyncLLMEngine",
     "AsyncEngineArgs",
-    "initialize_cluster",
+    "initialize_ray_cluster",
+    "PoolingParams",
 ]

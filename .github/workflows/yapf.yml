@@ -14,11 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10"]
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v3
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -28,4 +28,4 @@ jobs:
         pip install toml==0.10.2
     - name: Running yapf
       run: |
-        yapf --diff --recursive vllm --exclude 'vllm/model_executor/parallel_utils/**'
+        yapf --diff --recursive .

@@ -26,7 +26,7 @@ jobs:
       - name: Extract branch info
         shell: bash
         run: |
-          echo "release_tag=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+          echo "release_tag=${GITHUB_REF#refs/*/}" >> "$GITHUB_ENV"
 
       - name: Create Release
         id: create_release
@@ -43,17 +43,24 @@ jobs:
     name: Build Wheel
     runs-on: ${{ matrix.os }}
     needs: release
-    
+
     strategy:
       fail-fast: false
       matrix:
           os: ['ubuntu-20.04']
-          python-version: ['3.8', '3.9', '3.10', '3.11']
-          cuda-version: ['11.8'] # Github runner can't build anything older than 11.8
+          python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']
+          pytorch-version: ['2.4.0']  # Must be the most recent version that meets requirements-cuda.txt.
+          cuda-version: ['11.8', '12.1']
 
     steps:
       - name: Checkout
         uses: actions/checkout@v3
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          create-symlink: true
+          key: ${{ github.job }}-${{ matrix.python-version }}-${{ matrix.cuda-version }}
 
       - name: Set up Linux Env
         if: ${{ runner.os == 'Linux' }}
@@ -69,19 +76,21 @@ jobs:
         run: |
           bash -x .github/workflows/scripts/cuda-install.sh ${{ matrix.cuda-version }} ${{ matrix.os }}
 
-      - name: Install PyTorch-cu${{ matrix.cuda-version }}
+      - name: Install PyTorch ${{ matrix.pytorch-version }} with CUDA ${{ matrix.cuda-version }}
         run: |
-          bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
+          bash -x .github/workflows/scripts/pytorch-install.sh ${{ matrix.python-version }} ${{ matrix.pytorch-version }} ${{ matrix.cuda-version }}
 
       - name: Build wheel
         shell: bash
+        env:
+          CMAKE_BUILD_TYPE: Release # do not compile with debug symbol to reduce wheel size
         run: |
           bash -x .github/workflows/scripts/build.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
-          wheel_name=$(ls dist/*whl | xargs -n 1 basename)
+          wheel_name=$(find dist -name "*whl" -print0 | xargs -0 -n 1 basename)
           asset_name=${wheel_name//"linux"/"manylinux1"}
-          echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
-          echo "asset_name=${asset_name}" >> $GITHUB_ENV
-      
+          echo "wheel_name=${wheel_name}" >> "$GITHUB_ENV"
+          echo "asset_name=${asset_name}" >> "$GITHUB_ENV"
+
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
         env:

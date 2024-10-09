@@ -1,9 +1,13 @@
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           PackedvLLMParameter)
+from vllm.model_executor.sampling_metadata import (SamplingMetadata,
+                                                   SamplingMetadataCache)
 from vllm.model_executor.utils import set_random_seed
 
 __all__ = [
-    "InputMetadata",
-    "get_model",
+    "SamplingMetadata",
+    "SamplingMetadataCache",
     "set_random_seed",
+    "BasevLLMParameter",
+    "PackedvLLMParameter",
 ]
