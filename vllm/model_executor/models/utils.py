@@ -78,14 +78,14 @@ class AutoWeightsLoader:
         self,
         module: nn.Module,
         *,
-        ignore_prefixes: Optional[List[str]] = None,
-        allow_unexpected_prefixes: Optional[List[str]] = None,
+        skip_prefixes: Optional[List[str]] = None,
+        ignore_unexpected_prefixes: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
 
         self.module = module
-        self.ignore_prefixes = ignore_prefixes or []
-        self.allow_unexpected_prefixes = allow_unexpected_prefixes or []
+        self.skip_prefixes = skip_prefixes or []
+        self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
 
     def _groupby_prefix(
         self,
@@ -112,12 +112,12 @@ class AutoWeightsLoader:
 
         return ".".join((prefix, rest))
 
-    def _ignore(self, qualname: str) -> bool:
-        return any(qualname.startswith(p) for p in self.ignore_prefixes)
+    def _can_skip(self, qualname: str) -> bool:
+        return any(qualname.startswith(p) for p in self.skip_prefixes)
 
-    def _allow_unexpected(self, qualname: str) -> bool:
+    def _can_ignore_unexpected(self, qualname: str) -> bool:
         return any(
-            qualname.startswith(p) for p in self.allow_unexpected_prefixes)
+            qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
 
     def _load_param(
         self,
@@ -128,11 +128,11 @@ class AutoWeightsLoader:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
 
-            if self._ignore(weight_qualname):
+            if self._can_skip(weight_qualname):
                 continue
 
             if weight_name != "":
-                if not self._allow_unexpected(weight_qualname):
+                if not self._can_ignore_unexpected(weight_qualname):
                     raise ValueError(
                         f"Attempted to load nested weight '{weight_qualname}' "
                         f"into a single parameter '{base_prefix}'")
@@ -166,7 +166,7 @@ class AutoWeightsLoader:
         for child_prefix, child_weights in self._groupby_prefix(weights):
             prefix = self._get_qualname(base_prefix, child_prefix)
 
-            if self._ignore(prefix):
+            if self._can_skip(prefix):
                 continue
 
             if child_prefix in child_modules:
@@ -176,7 +176,7 @@ class AutoWeightsLoader:
                 self._load_param(prefix, child_params[child_prefix],
                                  child_weights)
             else:
-                if not self._allow_unexpected(prefix):
+                if not self._can_ignore_unexpected(prefix):
                     msg = f"There is no module or parameter named '{prefix}'"
                     raise ValueError(msg)
 

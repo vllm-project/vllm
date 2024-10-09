@@ -436,7 +436,7 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            ignore_prefixes=(["lm_head."]
-                             if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
         )
         loader.load_weights(weights)

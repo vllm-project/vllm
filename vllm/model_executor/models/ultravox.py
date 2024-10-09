@@ -499,5 +499,5 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
         loader = AutoWeightsLoader(self,
-                                   allow_unexpected_prefixes=["audio_tower."])
+                                   ignore_unexpected_prefixes=["audio_tower."])
         loader.load_weights(weights, mapper=hf_to_vllm_mapper)
