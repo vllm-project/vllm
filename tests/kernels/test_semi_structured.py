@@ -1,49 +1,46 @@
 import pytest
 import torch
 
+from tests.quantization.utils import is_quant_method_supported
 from vllm.model_executor.layers.sparsity.utils.cusparse_2_4_utils import (
-    generate_pruned_semi_structured_mat,
-    semi_structured_sparse_dense_gemm, 
-    semi_structured_dense_sparse_T_gemm, 
-    compress_to_torch_sparse_semi_structured_mat, 
+    compress_to_torch_sparse_semi_structured_mat,
     decompress_torch_sparse_semi_structured_mat,
-    get_random_mat,
-    is_semi_structured_supported
-)
+    generate_pruned_semi_structured_mat, get_random_mat,
+    is_semi_structured_supported, semi_structured_dense_sparse_T_gemm,
+    semi_structured_sparse_dense_gemm,
+    dense_matmul)
 
-from vllm import _custom_ops as ops
-
-DTYPES = [torch.float16, torch.bfloat16, torch.int8]
-SIZES=[(128, 128), (1024, 8192)]
-MNK = [
-    (128, 128, 128),
-    (128, 512, 1024),
-    (512, 512, 512),
-    (1024, 2048, 4096)
-]
-
-def dense_matmul(A, B, dtype):
-    if dtype is torch.int8:
-        scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-        scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-        return ops.cutlass_scaled_mm(A, B, scale_a, scale_b, torch.bfloat16).to(torch.int8)
-    else:
-        return A @ B
+# DTYPES = [torch.float16, torch.bfloat16, torch.int8, torch.float8_e4m3fn]
+DTYPES = [torch.float8_e4m3fn]
+SIZES = [(128, 128), (1024, 8192)]
+MNK = [(128, 128, 128), (128, 512, 1024), (512, 512, 512), (1024, 2048, 4096)]
 
 
-@pytest.mark.skipif(not is_semi_structured_supported(),
-                    reason="Semi structured matmul is not supported on this GPU type.")
+@pytest.mark.skipif(
+    not is_semi_structured_supported(),
+    reason="Semi structured matmul is not supported on this GPU type.")
 @pytest.mark.parametrize("size", SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_semi_structured_compress(size, dtype):
+    if dtype == torch.float8_e4m3fn and not is_quant_method_supported("fp8"):
+        pytest.skip("fp8 is not supported on this device")
     input_pruned = generate_pruned_semi_structured_mat(*size, dtype)
     output_pruned = decompress_torch_sparse_semi_structured_mat(
-        compress_to_torch_sparse_semi_structured_mat(input_pruned)
-    )
+        compress_to_torch_sparse_semi_structured_mat(input_pruned))
     torch.testing.assert_close(input_pruned, output_pruned)
 
-@pytest.mark.skipif(not is_semi_structured_supported(),
-                    reason="Semi structured matmul is not supported on this GPU type.")
+
+# @pytest.mark.skipif(
+#  not is_semi_structured_supported() or not is_quant_method_supported("fp8"),
+#     reason="Semi structured matmul is not supported on this GPU type.")
+# @pytest.mark.parametrize("size", SIZES)
+# def test_torch_fp8_compress(size):
+#     x = generate_pruned_semi_structured_mat(*size, torch.float8_e4m3fn)
+
+
+@pytest.mark.skipif(
+    not is_semi_structured_supported(),
+    reason="Semi structured matmul is not supported on this GPU type.")
 @pytest.mark.parametrize("mnk", MNK)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_torch_semi_structured_sparse_dense_matmul(mnk, dtype):
@@ -57,8 +54,10 @@ def test_torch_semi_structured_sparse_dense_matmul(mnk, dtype):
     C = dense_matmul(A_pruned, B, dtype)
     torch.testing.assert_close(C, C_sparse)
 
-@pytest.mark.skipif(not is_semi_structured_supported(),
-                    reason="Semi structured matmul is not supported on this GPU type.")
+
+@pytest.mark.skipif(
+    not is_semi_structured_supported(),
+    reason="Semi structured matmul is not supported on this GPU type.")
 @pytest.mark.parametrize("mnk", MNK)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_torch_semi_structured_sparse_dense_T_matmul(mnk, dtype):
@@ -71,8 +70,10 @@ def test_torch_semi_structured_sparse_dense_T_matmul(mnk, dtype):
     C = dense_matmul(A_pruned, B.t(), dtype)
     torch.testing.assert_close(C, C_sparse)
 
-@pytest.mark.skipif(not is_semi_structured_supported(),
-                    reason="Semi structured matmul is not supported on this GPU type.")
+
+@pytest.mark.skipif(
+    not is_semi_structured_supported(),
+    reason="Semi structured matmul is not supported on this GPU type.")
 @pytest.mark.parametrize("mnk", MNK)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_torch_semi_structured_dense_sparse_T_matmul(mnk, dtype):

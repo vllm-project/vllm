@@ -216,3 +216,12 @@ std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
 #endif
+
+#ifndef USE_ROCM
+torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input);
+
+torch::Tensor cslt_mm_fp8_semi_structured(
+    const torch::Tensor& compressed_A, const torch::Tensor& dense_B,
+    const std::optional<torch::Tensor>& bias_opt, bool transpose_result);
+
+#endif

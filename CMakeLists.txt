@@ -196,6 +196,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fp8/common.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
+  "csrc/quantization/fp8_semi_structured/cusparseLt.h"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
