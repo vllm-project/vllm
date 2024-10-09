@@ -235,12 +235,15 @@ class OpenVINOModelRunner:
                     mm_data, placeholder_maps = MultiModalPlaceholderMap \
                         .from_seq_group(seq_group_metadata, positions_range)
 
-                    mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                    mm_kwargs = self.multi_modal_input_mapper(
+                        mm_data,
+                        mm_processor_kwargs=seq_group_metadata.
+                        mm_processor_kwargs)
                     multi_modal_inputs_list.append(mm_kwargs)
 
                     for key, placeholder_map in placeholder_maps.items():
                         multi_modal_placeholder_maps[key].extend(
-                            placeholder_map)
+                            placeholder_map, )
 
         max_query_len = max(query_lens)
         assert max_query_len > 0, "query_lens: {}".format(query_lens)

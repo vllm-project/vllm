@@ -484,6 +484,10 @@ class Sequence:
         return self.inputs.get("multi_modal_placeholders") or {}
 
     @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        return self.inputs.get("mm_processor_kwargs") or {}
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -715,6 +719,14 @@ class SequenceGroup:
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
         return self.seqs[0].multi_modal_placeholders
+
+    @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        # As with multi-modal data, all sequences in the group should have the
+        # same processor kwargs (i.e., mm_processor_kwargs are optionally
+        # provided per request; note that are independent of whether the model
+        # decoder-only or an encoder-decoder).
+        return self.seqs[0].mm_processor_kwargs
 
     @property
     def lora_int_id(self) -> int:
@@ -955,6 +967,7 @@ class SequenceGroupMetadata(
             used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
+        mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None 
                           unless you are working with an encoder/decoder
@@ -982,6 +995,7 @@ class SequenceGroupMetadata(
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None

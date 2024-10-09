@@ -1,5 +1,5 @@
 import asyncio
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from typing_extensions import assert_never
 
@@ -20,9 +20,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 PromptComponents = Tuple[Optional[str], List[int],
-                         Optional["MultiModalDataDict"]]
+                         Optional["MultiModalDataDict"], Optional[Dict[str,
+                                                                       Any]]]
 DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
-                                Optional["MultiModalDataDict"]]
+                                Optional["MultiModalDataDict"],
+                                Optional[Dict[str, Any]]]
 
 
 class InputPreprocessor:
@@ -227,6 +229,7 @@ class InputPreprocessor:
         * prompt
         * prompt_token_ids
         * multi_modal_data
+        * mm_processor_kwargs (request-level input processor/mapper overrides)
         '''
 
         parsed = parse_singleton_prompt(prompt)
@@ -239,10 +242,12 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
             multi_modal_data = None
+            mm_processor_kwargs = None
         elif parsed["type"] == "tokens":
             prompt_text = None
             prompt_token_ids = parsed["content"]["prompt_token_ids"]
             multi_modal_data = parsed["content"].get("multi_modal_data")
+            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
         elif parsed["type"] == "text":
             prompt_text = parsed["content"]["prompt"]
             prompt_token_ids = self._tokenize_prompt(
@@ -251,10 +256,12 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
             multi_modal_data = parsed["content"].get("multi_modal_data")
+            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
         else:
             assert_never(parsed)
 
-        return prompt_text, prompt_token_ids, multi_modal_data
+        return (prompt_text, prompt_token_ids, multi_modal_data,
+                mm_processor_kwargs)
 
     async def _extract_prompt_components_async(
         self,
@@ -273,10 +280,12 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
             multi_modal_data = None
+            mm_processor_kwargs = None
         elif parsed["type"] == "tokens":
             prompt_text = None
             prompt_token_ids = parsed["content"]["prompt_token_ids"]
             multi_modal_data = parsed["content"].get("multi_modal_data")
+            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
         elif parsed["type"] == "text":
             prompt_text = parsed["content"]["prompt"]
             prompt_token_ids = await self._tokenize_prompt_async(
@@ -285,18 +294,21 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
             multi_modal_data = parsed["content"].get("multi_modal_data")
+            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
         else:
             assert_never(parsed)
 
-        return prompt_text, prompt_token_ids, multi_modal_data
+        return (prompt_text, prompt_token_ids, multi_modal_data,
+                mm_processor_kwargs)
 
     def _build_enc_dec_llm_inputs(
         self,
         encoder_comps: PromptComponents,
         decoder_comps: DecoderPromptComponents,
+        mm_processor_kwargs: Dict[str, Any],
     ) -> EncoderDecoderLLMInputs:
-        encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
-        decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
+        encoder_prompt, encoder_prompt_ids, encoder_mm_data, _ = encoder_comps
+        decoder_prompt, decoder_prompt_ids, decoder_mm_data, _ = decoder_comps
 
         if decoder_mm_data is not None:
             raise ValueError(
@@ -314,6 +326,7 @@ class InputPreprocessor:
             prompt_token_ids=decoder_prompt_ids,
             prompt=decoder_prompt,
             multi_modal_data=decoder_mm_data,
+            mm_processor_kwargs=mm_processor_kwargs,
             encoder_prompt_token_ids=encoder_prompt_ids,
             encoder_prompt=encoder_prompt,
             encoder_multi_modal_data=encoder_mm_data,
@@ -367,21 +380,30 @@ class InputPreprocessor:
             )
 
             if (decoder_input := prompt["decoder_prompt"]) is None:
-                decoder_comps = None, None, None
+                decoder_comps = None, None, None, None
             else:
                 decoder_comps = self._extract_prompt_components(
                     decoder_input,
                     request_id=request_id,
                 )
+            # Handle this carefully in case it was directly initialized by user
+            mm_processor_kwargs = prompt.get("mm_processor_kwargs", {})
         else:
             encoder_comps = self._extract_prompt_components(
                 prompt,
                 request_id=request_id,
             )
+            # If there are no decoder components, we assume the
+            # mm_processor_kwargs are in the encoder prompt
+            mm_processor_kwargs = encoder_comps[-1] if encoder_comps[
+                -1] is not None else {}
+            decoder_comps = None, None, None, None
 
-            decoder_comps = None, None, None
-
-        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
+        return self._build_enc_dec_llm_inputs(
+            encoder_comps,
+            decoder_comps,
+            mm_processor_kwargs,
+        )
 
     async def _process_encoder_decoder_prompt_async(
         self,
@@ -400,7 +422,7 @@ class InputPreprocessor:
 
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 encoder_comps = await encoder_task
-                decoder_comps = None, None, None
+                decoder_comps = None, None, None, None
             else:
                 decoder_task = self._extract_prompt_components_async(
                     decoder_input,
@@ -409,29 +431,39 @@ class InputPreprocessor:
 
                 encoder_comps, decoder_comps = await asyncio.gather(
                     encoder_task, decoder_task)
+            mm_processor_kwargs = prompt["mm_processor_kwargs"]
         else:
             encoder_comps = await self._extract_prompt_components_async(
                 prompt,
                 request_id=request_id,
             )
+            # If there are no decoder components, we assume the
+            # mm_processor_kwargs are in the encoder prompt
+            mm_processor_kwargs = encoder_comps[-1] if encoder_comps[
+                -1] is not None else {}
+            decoder_comps = None, None, None, None
 
-            decoder_comps = None, None, None
-
-        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
+        return self._build_enc_dec_llm_inputs(
+            encoder_comps,
+            decoder_comps,
+            mm_processor_kwargs,
+        )
 
     def _build_decoder_only_llm_inputs(
         self,
         prompt_comps: PromptComponents,
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> LLMInputs:
-        prompt, prompt_token_ids, multi_modal_data = prompt_comps
+        (prompt, prompt_token_ids, multi_modal_data,
+         mm_processor_kwargs) = prompt_comps
 
         prompt_token_ids = self._apply_prompt_adapter(
             prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=prompt,
-                         multi_modal_data=multi_modal_data)
+                         multi_modal_data=multi_modal_data,
+                         mm_processor_kwargs=mm_processor_kwargs)
 
     def _process_decoder_only_prompt(
         self,

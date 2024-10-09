@@ -149,7 +149,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         )
 
     def _compute_multi_modal_input(self, seq_group: SequenceGroupMetadata,
-                                   seq_data: SequenceData, computed_len: int):
+                                   seq_data: SequenceData, computed_len: int,
+                                   mm_processor_kwargs: Dict[str, Any]):
 
         mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
             seq_group, range(computed_len, len(seq_data.get_token_ids())))
@@ -157,7 +158,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         if not mm_data:
             return
 
-        mm_kwargs = self.multi_modal_input_mapper(mm_data)
+        mm_kwargs = self.multi_modal_input_mapper(mm_data, mm_processor_kwargs)
 
         # special processing for mrope position deltas.
         mrope_positions = None
@@ -222,7 +223,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             if seq_group_metadata.multi_modal_data:
                 mm_kwargs, placeholder_maps, mrope_positions = self \
                     ._compute_multi_modal_input(
-                        seq_group_metadata, seq_data, computed_len)
+                        seq_group_metadata, seq_data, computed_len,
+                    seq_group_metadata.mm_processor_kwargs)
                 multi_modal_inputs_list.append(mm_kwargs)
                 for key, placeholder_map in placeholder_maps.items():
                     multi_modal_placeholder_maps[key].extend(placeholder_map)
