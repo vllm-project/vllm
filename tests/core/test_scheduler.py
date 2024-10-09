@@ -17,6 +17,7 @@ from .utils import (append_new_token, append_new_token_seq_group,
                     create_dummy_prompt, get_sequence_groups,
                     schedule_and_update_computed_tokens)
 
+
 @pytest.fixture(scope="module", autouse=False)
 def check_deprecated_block_manager():
     assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
