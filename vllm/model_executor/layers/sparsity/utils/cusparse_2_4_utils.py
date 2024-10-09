@@ -147,6 +147,17 @@ def dense_matmul(A, B, dtype):
         return A @ B
 
 
+# test utils
+def dense_matmul(A, B, dtype):
+    if dtype in [torch.int8, torch.float8_e4m3fn]:
+        scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+        scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+        return ops.cutlass_scaled_mm(A, B, scale_a, scale_b,
+                                     torch.bfloat16).to(dtype)
+    else:
+        return A @ B
+
+
 def is_semi_structured_supported() -> bool:
     if not (current_platform.is_cuda() or current_platform.is_rocm()):
         return False

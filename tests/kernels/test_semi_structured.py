@@ -36,6 +36,8 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 @pytest.mark.parametrize("size", SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_semi_structured_compress(size, dtype):
+    if dtype == torch.float8_e4m3fn and not is_quant_method_supported("fp8"):
+        pytest.skip("fp8 is not supported on this device")
     input_pruned = generate_pruned_semi_structured_mat(*size, dtype)
     output_pruned = decompress_torch_sparse_semi_structured_mat(
         compress_to_torch_sparse_semi_structured_mat(input_pruned))
