@@ -134,8 +134,13 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         )
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
+        # NOTE(woosuk): Here, `bytes_used` does not seem to include the memory
+        # used by the model weights.
         m = xm.get_memory_info(self.device)
         max_activation_size = m["bytes_used"]
+        # NOTE(woosuk): We have to double the activation size because the
+        # activation tensor does not seem to be reused between different XLA
+        # graphs.
         profiled = weight_size + 2 * max_activation_size
 
         # Calculate the TPU KV cache size based on profiling.
