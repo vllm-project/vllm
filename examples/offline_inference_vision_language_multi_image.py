@@ -234,12 +234,37 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
+    model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    llm = LLM(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    question = "Between the two images, " \
+               "which one is a lion and which one is a duck?"
+    prompt = f"<|image|><|image|><|begin_of_text|>{question}"
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 model_example_map = {
     "phi3_v": load_phi3v,
     "internvl_chat": load_internvl,
     "NVLM_D": load_nvlm_d,
     "qwen2_vl": load_qwen2_vl,
     "qwen_vl_chat": load_qwenvl_chat,
+    "mllama": load_mllama,
 }
 
 
