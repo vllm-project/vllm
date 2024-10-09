@@ -4,12 +4,11 @@
 #include <cusparseLt.h>
 #include <cuda_fp8.h>
 
-namespace vllm {
-
+// namespace vllm {
 
 cusparseLtHandle_t handle;
 bool handle_initialized = false;
-#if not (defined(CUSPARSELT_VERSION) && CUSPARSELT_VERSION >= 602)
+#if defined(CUSPARSELT_VERSION) && CUSPARSELT_VERSION >= 602
 
 torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
     
@@ -241,4 +240,4 @@ at::Tensor cslt_mm_fp8_semi_structured(
 #endif
 
 
-} // namespace vllm
+// } // namespace vllm
