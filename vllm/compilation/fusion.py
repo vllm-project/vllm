@@ -197,7 +197,7 @@ def process_matches(matches, graph: torch.fx.Graph):
 
     # Finally, remove matched nodes
     graph.eliminate_dead_code()
-    assert all(node not in graph.nodes for node in (match for match in matches))
+    assert all(node not in graph.nodes for match in matches for node in match.nodes)
 
 
 def noop_pass(graph: torch.fx.Graph):
