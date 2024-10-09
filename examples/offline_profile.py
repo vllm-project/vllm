@@ -24,7 +24,7 @@ class ProfileContext:
     prompt_len: int
     output_len: int
     batch_size: int
-    save_traces_folder: Optional[str]
+    save_chrome_traces_folder: Optional[str]
 
 
 def get_dtype(dtype: str):
@@ -194,15 +194,15 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             json.dump(json_dict, f, indent=2)
         pass
 
-    if context.save_traces_folder is not None:
-        os.makedirs(context.save_traces_folder, exist_ok=True)
-        prefill_prof.profiler.export_chrome_trace(context.save_traces_folder +
-                                                  "/prefill.json")
+    if context.save_chrome_traces_folder is not None:
+        os.makedirs(context.save_chrome_traces_folder, exist_ok=True)
+        prefill_prof.profiler.export_chrome_trace(
+            context.save_chrome_traces_folder + "/prefill.json")
         for idx, decode_prof in enumerate(decode_profs):
             decode_prof.profiler.export_chrome_trace(
-                context.save_traces_folder + f"/decode_{idx + 1}.json")
+                context.save_chrome_traces_folder + f"/decode_{idx + 1}.json")
         print("Traces saved as prefill.json and decode_1.json, etc."
-              f" in folder {context.save_traces_folder}")
+              f" in folder {context.save_chrome_traces_folder}")
 
 
 if __name__ == "__main__":
@@ -245,7 +245,7 @@ Profile a model
         type=str,
         default=None,
         help="Export the results as a json file. This should be the filename")
-    parser.add_argument("--save-traces-folder",
+    parser.add_argument("--save-chrome-traces-folder",
                         type=str,
                         help="Save chrome traces for the prefill and decode "
                         "will save traces as prefill.json and decode_1.json, "
