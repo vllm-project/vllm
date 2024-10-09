@@ -1354,6 +1354,9 @@ class LLMEngine:
                     virtual_engine, seq_group_metadata_list, scheduler_outputs,
                     allow_async_output_proc)
 
+        is_multi_step = self.scheduler_config.is_multi_step
+        user_is_multi_step = self.scheduler_config.user_is_multi_step
+
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
@@ -1378,7 +1381,8 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                force_single_step=(user_is_multi_step and (not is_multi_step)))
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
@@ -1389,7 +1393,7 @@ class LLMEngine:
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
-            if self.scheduler_config.is_multi_step:
+            if is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
             # Nothing scheduled => If there is pending async postprocessor,

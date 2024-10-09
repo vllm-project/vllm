@@ -81,6 +81,9 @@ class MultiStepWorker(Worker):
             frozen_model_input.attn_metadata._cached_prefill_metadata = None
             frozen_model_input.attn_metadata._cached_decode_metadata = None
 
+        if execute_model_req.force_single_step:
+            model_input.is_multi_step = False
+
         model_input.is_first_multi_step = is_first_multi_step
         model_input.is_last_step = execute_model_req.is_last_step
 
@@ -149,6 +152,7 @@ class MultiStepWorker(Worker):
         this method may skip the normal _prepare_model_input and
         _prepare_worker_input methods and instead used cached values.
         """
+
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
