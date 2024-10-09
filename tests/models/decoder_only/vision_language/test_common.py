@@ -1,11 +1,13 @@
 """Common tests for testing .generate() functionality for single / multiple
 image support for different VLMs in vLLM.
 """
+import itertools
 import re
 import pytest
-from typing import NamedTuple, Callable, Union, List, Tuple, Optional
+from typing import NamedTuple, Callable, Union, List, Tuple, Optional, Dict
 from transformers import AutoTokenizer, AutoConfig
 from vllm.sequence import SampleLogprobs
+from vllm.utils import is_cpu
 from vllm.multimodal.utils import rescale_image_size
 
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
@@ -14,25 +16,17 @@ from ...utils import check_logprobs_close
 
 ### Test Info / Common Configuration
 class VLMTestInfo(NamedTuple):
-    models: Union[str, List[str]]
+    models: Union[Tuple[str], str]
     prompt_formatter: Callable
     supports_multi_image: bool = False
     img_idx_to_prompt: Callable = lambda idx: "<image>\n"
     sanitizer: Optional[Callable] = None
-
-
-### Defaults
-SIZE_FACTORS = [
-    # No image
-    [],
-    # # Single-scale
-    [1.0],
-    # # Single-scale, batched
-    [1.0, 1.0, 1.0],
-    # # Multi-scale
-    # [0.25, 0.5, 1.0],
-]
-
+    # Default expandable params per test; these defaults can be overridden in
+    # instances of this object; the complete set of test cases for the model
+    # is all combinations of .models + all fields below 
+    max_tokens: Union[int, Tuple[int]]=128
+    num_logprobs: Union[int, Tuple[int]]=5
+    target_dtype: Union[Tuple[int]]="half"
 
 ### Base prompts / Common formatting utils
 TEST_IMG_PLACEHOLDER= "<image>"
@@ -42,7 +36,16 @@ SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"
-
+SIZE_FACTORS = (
+    # No image
+    (),
+    # # Single-scale
+    (1.0,),
+    # # Single-scale, batched
+    (1.0, 1.0, 1.0),
+    # # Multi-scale
+    (0.25, 0.5, 1.0),
+)
 
 def replace_test_img_placeholders(prompt: str, img_idx_to_prompt: Callable) -> str:
     """Given a prompt, replaces each TEST_IMG_PLACEHOLDER with the
@@ -55,8 +58,10 @@ def replace_test_img_placeholders(prompt: str, img_idx_to_prompt: Callable) -> s
         img_prompt += next_seg
     return img_prompt
 
+
 def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
-                      test_info: VLMTestInfo) -> List[str]:
+                      img_idx_to_prompt: Callable,
+                      prompt_formatter: Callable) -> List[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
     to be tested, update the image placeholders and apply the prompt formatting
     to get the test prompt string for this model.
@@ -74,14 +79,47 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
         # the correct ones for the model that we are testing
         base_prompt_with_imgs = replace_test_img_placeholders(
             base_prompt,
-            test_info.img_idx_to_prompt
+            img_idx_to_prompt
         )
         # Apply the prompt formatter to wrap the base prompt with
         # the correct img placeholders to get the model test prompt
-        model_prompt = test_info.prompt_formatter(base_prompt_with_imgs)
+        model_prompt = prompt_formatter(base_prompt_with_imgs)
         model_prompts.append(model_prompt)
     return model_prompts
 
+
+def get_parametrized_options(test_settings: Dict[str, VLMTestInfo], is_multi_image: bool):
+    """Converts all of our VLMTestInfo into an expanded list of parameters."""
+    if is_multi_image:
+        test_settings = {
+            model_type: test_info
+            for model_type, test_info 
+            in test_settings.items() 
+            if test_info.supports_multi_image
+        }
+
+    # Ensure that something is wrapped as an iterable it's not already
+    ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e,)
+
+    def get_model_type_cases(model_type: str, test_info:VLMTestInfo):
+        # This is essentially the same as nesting a bunch of mark.parametrize
+        # decorators, but we do it programatically to allow overrides for on
+        # a per-model basis, while still being able to execute each of these
+        # as individual test cases in pytest.
+        return list(itertools.product(
+            ensure_wrapped(model_type),
+            ensure_wrapped(test_info.models),
+            ensure_wrapped(test_info.max_tokens),
+            ensure_wrapped(test_info.num_logprobs),
+            ensure_wrapped(test_info.target_dtype),
+        ))
+    # Get a list per model type, where each entry contains a tuple of all of
+    # that model type's cases, then flatten them into the top level so that
+    # we can consume them in one mark.parametrize call.
+    cases_by_model_type = [
+        get_model_type_cases(model_type, test_info)
+        for model_type, test_info in test_settings.items()]
+    return list(itertools.chain(*cases_by_model_type))
 
 ### Sanitation utilities for different models
 def blip2_vllm_to_hf_output(
@@ -158,7 +196,7 @@ def phi3v_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 # models have tests.
 VLM_TEST_SETTINGS = {
     "blip2": VLMTestInfo(
-        models="Salesforce/blip2-opt-2.7b",
+        models=["Salesforce/blip2-opt-2.7b"],
         img_idx_to_prompt=lambda idx: "",
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
         sanitizer=blip2_vllm_to_hf_output,
@@ -166,17 +204,22 @@ VLM_TEST_SETTINGS = {
     "chameleon": VLMTestInfo(
         models="facebook/chameleon-7b",
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        target_dtype="bfloat16",
     ),
     "fuyu": VLMTestInfo(
         models="adept/fuyu-8b",
         img_idx_to_prompt=lambda idx: "",
         prompt_formatter=lambda img_prompt: img_prompt,
         sanitizer=fuyu_vllm_to_hf_output,
+        target_dtype="bfloat16" if is_cpu() else "half",
+        num_logprobs=10,
     ),
     "intern_vl": VLMTestInfo(
         models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
         supports_multi_image=True,
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",
+        target_dtype="bfloat16" if is_cpu() else "half",
+        num_logprobs=10,
     ),
     "llava": VLMTestInfo(
         models="llava-hf/llava-1.5-7b-hf",
@@ -195,6 +238,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n",
         sanitizer=phi3v_vllm_to_hf_output,
+        num_logprobs=10,
     ),
     "qwen": VLMTestInfo(
         models="Qwen/Qwen-VL",
@@ -205,22 +249,29 @@ VLM_TEST_SETTINGS = {
 }
 
 
-### Single image generation tests [runs on all VLMs]
-@pytest.mark.parametrize(
-    ("model_type", "test_info"),
-    [(model_type, test_info)
-     for model_type, test_info in VLM_TEST_SETTINGS.items()
-     if test_info is not None],
-)
 @pytest.mark.parametrize("size_factors", SIZE_FACTORS)
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,target_dtype",
+    get_parametrized_options(VLM_TEST_SETTINGS, is_multi_image=False)
+)
 def test_single_image_generation(model_type: str,
-                                 test_info: VLMTestInfo,
-                                 image_assets: _ImageAssets,
-                                 size_factors: List[float]):
-    # Get images & prompts with model-specific placeholders
-    images = [asset.pil_image for asset in image_assets]
-    model_prompts = get_model_prompts(SINGLE_IMAGE_BASE_PROMPTS, test_info)
+                                 model: str,
+                                 max_tokens: int,
+                                 num_logprobs: str,
+                                 target_dtype: str,
+                                 size_factors: List[float],
+                                 hf_runner,
+                                 vllm_runner,
+                                 image_assets: _ImageAssets):
+    # Grab the model type's global model config to leverage callables
+    test_info = VLM_TEST_SETTINGS[model_type]
+    model_prompts = get_model_prompts(
+        SINGLE_IMAGE_BASE_PROMPTS,
+        test_info.img_idx_to_prompt,
+        test_info.prompt_formatter
+    )
 
+    images = [asset.pil_image for asset in image_assets]
     assert len(images) == len(model_prompts)
 
     # For every image / prompt pair, get a pair containing two lists of
@@ -233,23 +284,33 @@ def test_single_image_generation(model_type: str,
         [prompt for _ in size_factors],
         [rescale_image_size(image, factor) for factor in size_factors],
     ) for image, prompt in zip(images, model_prompts)]
+    # TODO - port the actual test
 
-    raise NotImplementedError("TODO: Port single image test")
 
 ### Multi-image generation tests [only for VLMs that support it]
-@pytest.mark.parametrize(
-    ("model_type", "test_info"),
-    [(model_type, test_info)
-     for model_type, test_info in VLM_TEST_SETTINGS.items()
-     if test_info is not None and test_info.supports_multi_image],
-)
+
 @pytest.mark.parametrize("size_factors", SIZE_FACTORS)
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,target_dtype",
+    get_parametrized_options(VLM_TEST_SETTINGS, is_multi_image=True)
+)
 def test_multi_image_generation(model_type: str,
-                                test_info: VLMTestInfo,
-                                image_assets: _ImageAssets,
-                                size_factors: List[float]):
+                                 model: str,
+                                 max_tokens: int,
+                                 num_logprobs: str,
+                                 target_dtype: str,
+                                 size_factors: List[float],
+                                 hf_runner,
+                                 vllm_runner,
+                                 image_assets: _ImageAssets):
+    test_info = VLM_TEST_SETTINGS[model_type]
+    model_prompt = get_model_prompts(
+        [MULTI_IMAGE_BASE_PROMPT],
+        test_info.img_idx_to_prompt,
+        test_info.prompt_formatter
+    )[0]
+
     images = [asset.pil_image for asset in image_assets]
-    model_prompt = get_model_prompts([MULTI_IMAGE_BASE_PROMPT], test_info)[0]
 
     # This is similar to the single image case, but we rescale each of the
     # images in the multi-image prompt; currently we only have one model prompt
@@ -259,11 +320,11 @@ def test_multi_image_generation(model_type: str,
           for factor in size_factors])
     ]
 
-    raise NotImplementedError("TODO: Port multi image test")
 
-"""
-TODO  port the actual tests
-TODO  port dtype/max tokens/num logprobs
-TODO  port overrides for vllm runner for stuff like num seqs etc
-TODO  port custom logic stuff that has to happen on the prompt for models like Qwen-VL to run HF
-"""
+
+
+# """
+# TODO  port the actual tests
+# TODO  port overrides for vllm runner for stuff like num seqs etc
+# TODO  port custom logic stuff that has to happen on the prompt for models like Qwen-VL to run HF
+# """
