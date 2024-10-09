@@ -334,15 +334,16 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         + channel_id * params.out_c_stride;
     float bias_val = params.bias_ptr == nullptr ? 0.f : float(reinterpret_cast<weight_t *>(params.bias_ptr)[channel_id]);
 
-    bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
-        : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
-
     int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
     int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
-
-    input_t *conv_states = params.conv_states_ptr == nullptr ? nullptr
+    
+    // cache_index == -1 is defined as padding and cache should'nt been written/read
+    input_t *conv_states = params.conv_states_ptr == nullptr || cache_index == -1 ? nullptr
         : reinterpret_cast<input_t *>(params.conv_states_ptr) + cache_index * params.conv_states_batch_stride + channel_id * params.conv_states_c_stride;
+
+    bool has_initial_state = params.has_initial_state_ptr == nullptr || conv_states == nullptr ? false
+        : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id] ;
 
     // Thread 0 will load the last elements of the previous chunk, so we initialize those to 0.
     if (tidx == 0) {
@@ -528,6 +529,7 @@ void causal_conv1d_update_kernel(ConvParamsBase params) {
     const int conv_state_batch_coord = params.conv_state_indices_ptr == nullptr
         ? batch_id
         : params.conv_state_indices_ptr[batch_id];
+    if (conv_state_batch_coord == -1) return;
     input_t *conv_state = reinterpret_cast<input_t *>(params.conv_state_ptr) 
         + conv_state_batch_coord * params.conv_state_batch_stride
         + channel_id * params.conv_state_c_stride;

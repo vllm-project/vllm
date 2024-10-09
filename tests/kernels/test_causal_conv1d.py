@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.utils import seed_everything
@@ -271,6 +272,64 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation,
     ))
 
 
+@pytest.mark.parametrize("itype", [torch.bfloat16])
+@pytest.mark.parametrize("silu_activation", [True])
+@pytest.mark.parametrize("has_bias", [True])
+@pytest.mark.parametrize("seqlen", [1])
+@pytest.mark.parametrize("width", [4])
+@pytest.mark.parametrize("dim", [2048])
+def test_causal_conv1d_update_with_batch_gather_padding_unchanged(
+    dim,
+    width,
+    seqlen,
+    has_bias,
+    silu_activation,
+    itype
+):
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+
+    # set )seed
+    seed_everything(0)
+    batch = 64
+
+    x = torch.randn(batch, dim, 1, device=device, dtype=itype)
+
+    total_entries = 10 * batch
+    conv_state = torch.randn(total_entries,
+                             dim,
+                             width - 1,
+                             device=device,
+                             dtype=itype)
+    conv_state_before = conv_state.clone()
+    conv_state_indices = torch.as_tensor(
+        [PAD_SLOT_ID] * batch,
+        dtype=torch.int32,
+        device=device
+    )
+
+    weight = torch.randn(dim,
+                         width,
+                         device=device,
+                         dtype=itype,
+                         requires_grad=True)
+    if has_bias:
+        bias = torch.randn(dim, device=device, dtype=itype, requires_grad=True)
+    else:
+        bias = None
+    activation = None if not silu_activation else "silu"
+    out = causal_conv1d_update(x,
+                               conv_state,
+                               weight,
+                               bias,
+                               activation=activation,
+                               conv_state_indices=conv_state_indices)
+
+    assert torch.equal(conv_state, conv_state_before)
+
+
 @pytest.mark.parametrize("itype",
                          [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
@@ -422,3 +481,63 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation,
     causal_conv1d_opcheck_fn(x.squeeze(0), weight, bias, cumsum.cuda(),
                              cache_indices, has_initial_states, final_states,
                              activation)
+
+
+@pytest.mark.parametrize("itype", [torch.bfloat16])
+@pytest.mark.parametrize("silu_activation", [True])
+@pytest.mark.parametrize("has_bias", [True])
+@pytest.mark.parametrize("width", [4])
+@pytest.mark.parametrize('seqlen',
+                         [256])
+@pytest.mark.parametrize('dim', [64])
+def test_causal_conv1d_varlen_check_padding_unchanged(
+    dim,
+    seqlen,
+    width,
+    has_bias,
+    silu_activation,
+    itype
+):
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+    # set seed
+    seed_everything(0)
+    batch = 1
+    seqlens = []
+    nsplits = 3
+    eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
+    seqlens.append(
+        torch.diff(
+            torch.cat(
+                [torch.tensor([-1]), eos_pos,
+                 torch.tensor([seqlen - 1])])).tolist())
+    assert sum(seqlens[-1]) == seqlen
+    assert all(s > 0 for s in seqlens[-1])
+
+    cumsum = torch.cumsum(torch.tensor(seqlens[0]), dim=0).to(torch.int32)
+    cumsum = torch.concat([torch.tensor([0], dtype=torch.int32), cumsum],
+                          dim=0)
+    x = torch.randn(batch, 4096 + dim + 64, seqlen, device=device,
+                    dtype=itype)[:, 4096:4096 + dim, :]
+    weight = torch.randn(dim, width, device=device, dtype=itype)
+    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
+    activation = None if not silu_activation else "silu"
+    final_states = torch.randn(nsplits + 1,
+                               dim,
+                               width - 1,
+                               device=x.device,
+                               dtype=x.dtype)
+    final_states_before = final_states.clone()
+    has_initial_states = torch.randint(0,
+                                       2, (cumsum.shape[0] - 1, ),
+                                       dtype=torch.bool,
+                                       device=x.device)
+    cache_indices = torch.as_tensor([-1] * (cumsum.shape[0] - 1),
+                                   dtype=torch.int32,
+                                   device=x.device)
+    causal_conv1d_fn(x.squeeze(0), weight, bias, cumsum.cuda(),
+                           cache_indices, has_initial_states, final_states,
+                           activation)
+    assert torch.equal(final_states, final_states_before)

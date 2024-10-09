@@ -109,12 +109,14 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         sequence_start_index = query_start_loc[batch_id];
         seqlen = query_start_loc[batch_id + 1] - sequence_start_index;
     }
-    const bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
-        : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
-
     const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
     const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
+    const bool wr_cache = cache_index != -1;
+    const bool has_initial_state = params.has_initial_state_ptr == nullptr && wr_cache ? false
+        : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
+
+    
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + sequence_start_index * params.u_batch_stride
         + dim_id * kNRows * params.u_d_stride;
     input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + sequence_start_index * params.delta_batch_stride
@@ -250,7 +252,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
                 if (threadIdx.x == 0) {
                     smem_running_prefix[state_idx] = prefix_op.running_prefix;
-                    if (chunk == n_chunks - 1) {
+                    if (chunk == n_chunks - 1 && wr_cache) {
                         ssm_states[state_idx] = input_t(prefix_op.running_prefix.y);
                     }
                 }
@@ -626,7 +628,6 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     TORCH_CHECK(ssm_states.scalar_type() == input_type);
     TORCH_CHECK(ssm_states.is_cuda());
     TORCH_CHECK(ssm_states.stride(-1) == 1);
-    CHECK_SHAPE(ssm_states, batch_size, dim, dstate);
 
     SSMParamsBase params;
     set_ssm_params_fwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
