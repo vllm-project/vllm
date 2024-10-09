@@ -101,7 +101,7 @@ class PPTestSettings:
 
     def iter_params(self, model_name: str):
         opts = self.test_options
-     
+
         for parallel_setup in self.parallel_setups:
             for distributed_backend in self.distributed_backends:
                 yield (model_name, parallel_setup, distributed_backend, opts)
@@ -157,8 +157,7 @@ GENERATION_MODEL_SETTINGS = {
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "microsoft/phi-2": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    # FIXME: https://github.com/vllm-project/vllm/issues/8553
-    # "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "Qwen/Qwen2-beta-7B-Chat": PPTestSettings.fast(),
