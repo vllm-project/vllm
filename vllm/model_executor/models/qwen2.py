@@ -48,8 +48,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer, group_weights_with_prefix,
-                    is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -435,17 +434,9 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights_group = group_weights_with_prefix(weights)
-
-        self.model.load_weights(weights_group["model"])
-
-        if not self.config.tie_word_embeddings:
-            lm_head_dict = dict(self.lm_head.named_parameters())
-            for name, loaded_weight in weights_group["lm_head"]:
-                if is_pp_missing_parameter(name, self.lm_head):
-                    continue
-
-                param = lm_head_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        loader.load_weights(weights)
