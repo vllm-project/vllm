@@ -457,5 +457,9 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            # This model doesn't support images for now
+            ignore_unexpected_prefixes=["image_newline"],
+        )
         loader.load_weights(weights)
