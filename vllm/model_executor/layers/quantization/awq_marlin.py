@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -122,6 +123,9 @@ class AWQMarlinConfig(QuantizationConfig):
         num_bits = quant_config.get("bits")
         group_size = quant_config.get("group_size")
         has_zp = quant_config.get("zero_point")
+
+        if not current_platform.is_cuda():
+            return False
 
         if quant_method != "awq":
             return False
