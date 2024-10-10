@@ -591,24 +591,27 @@ struct MacheteCollectiveMma {
     tma_load_b = make_tma_copy_B(
         make_logical_tensor(ptr_B, make_shape(N, K, L), args.dB));
 
+    int32_t scale_k =
+        (ModeHasScales) ? (K + args.group_size - 1) / args.group_size : 0;
+    int32_t group_size = (ModeHasScales) ? args.group_size : 0;
+
     if constexpr (ModeHasScales) {
-      tma_load_scale = make_tma_copy_scale(make_logical_tensor(
-          args.ptr_S, make_shape(M, args.group_size, L), args.dS));
+      tma_load_scale = make_tma_copy_scale(
+          make_logical_tensor(args.ptr_S, make_shape(M, scale_k, L), args.dS));
     }
 
     if constexpr (KernelConversionMode ==
                   ConversionMode::ConvertAndScaleWithZero) {
-      tma_load_zero = make_tma_copy_zero(make_logical_tensor(
-          args.ptr_Z, make_shape(M, args.group_size, L), args.dS));
+      tma_load_zero = make_tma_copy_zero(
+          make_logical_tensor(args.ptr_Z, make_shape(M, scale_k, L), args.dS));
     }
 
-    if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
-      return {tma_load_a, tma_load_b, tma_load_scale, tma_load_zero, 0, 0};
-    } else if constexpr (ModeHasScales) {
-      auto scale_k = (K + args.group_size - 1) / args.group_size;
-
+    if constexpr (KernelConversionMode == ConversionMode::DirectConvert ||
+                  KernelConversionMode == ConversionMode::ConvertAndScale ||
+                  KernelConversionMode ==
+                      ConversionMode::ConvertAndScaleWithZero) {
       return {tma_load_a,    tma_load_b, tma_load_scale,
-              tma_load_zero, scale_k,    args.group_size};
+              tma_load_zero, scale_k,    group_size};
     } else {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>,
                     "Conversion mode not handled in to_underlying_arguments.");
