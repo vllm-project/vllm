@@ -7,6 +7,7 @@ from vllm.attention import AttentionMetadata
 from vllm.compilation.levels import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.sequence import IntermediateTensors
+from vllm.utils import supports_dynamo
 
 
 def support_compile_llama_style(cls: type):
@@ -20,7 +21,7 @@ def support_compile_llama_style(cls: type):
     # will handle the compilation, so we don't need to do anything here.
     if envs.VLLM_TORCH_COMPILE_LEVEL in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-    ]:
+    ] or not supports_dynamo():
         return cls
 
     # take care of method resolution order
