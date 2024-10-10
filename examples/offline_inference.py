@@ -5,6 +5,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
+<<<<<<< HEAD
 def get_prompts(num_prompts: int):
     # The default sample prompts.
     prompts = [
@@ -78,3 +79,15 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(args)
+=======
+# Create an LLM.
+llm = LLM(model="facebook/opt-125m")
+# Generate texts from the prompts. The output is a list of RequestOutput objects
+# that contain the prompt, generated text, and other information.
+outputs = llm.generate(prompts, sampling_params)
+# Print the outputs.
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+>>>>>>> 3ff99cf4 (Enabled path for ARM machines)
