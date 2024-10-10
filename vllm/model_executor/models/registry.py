@@ -3,8 +3,9 @@ import pickle
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
-from functools import lru_cache, partial
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import cloudpickle
@@ -117,17 +118,12 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 # yapf: enable
 
-_MODELS = {
+_VLLM_MODELS = {
     **_TEXT_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
 }
-
-# Architecture -> type or (module, class).
-# out of tree models
-_OOT_MODELS: Dict[str, Type[nn.Module]] = {}
-_OOT_MODELS_LAZY: Dict[str, Tuple[str, str]] = {}
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: List[str] = []
@@ -156,101 +152,124 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
 
 
 @dataclass
-class _ModelInterfaces:
+class _ModelInfo:
     is_text_generation_model: bool
     is_embedding_model: bool
     supports_multimodal: bool
     supports_pp: bool
 
-
-def _inspect_model(model: object) -> _ModelInterfaces:
-    return _ModelInterfaces(
-        is_text_generation_model=is_text_generation_model(model),
-        is_embedding_model=is_embedding_model(model),
-        supports_multimodal=supports_multimodal(model),
-        supports_pp=supports_pp(model),
-    )
-
-
-def _inspect_model_lazy(mod_name: str, cls_name: str) -> _ModelInterfaces:
-    mod = importlib.import_module(mod_name)
-    klass = getattr(mod, cls_name)
-    return _inspect_model(klass)
+    @staticmethod
+    def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
+        return _ModelInfo(
+            is_text_generation_model=is_text_generation_model(model),
+            is_embedding_model=is_embedding_model(model),
+            supports_multimodal=supports_multimodal(model),
+            supports_pp=supports_pp(model),
+        )
 
 
-class ModelRegistry:
+class _BaseRegisteredModel(ABC):
+
+    @abstractmethod
+    def inspect_model_cls(self) -> _ModelInfo:
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_model_cls(self) -> Type[nn.Module]:
+        raise NotImplementedError
+
+
+@dataclass
+class _RegisteredModel(_BaseRegisteredModel):
+    """
+    Represents a model that has already been imported in the main process.
+    """
+
+    interfaces: _ModelInfo
+    model_cls: Type[nn.Module]
 
     @staticmethod
-    def _get_module_cls_name(model_arch: str) -> Tuple[str, str]:
-        if model_arch in _MODELS:
-            module_relname, cls_name = _MODELS[model_arch]
-            return f"vllm.model_executor.models.{module_relname}", cls_name
+    def from_model_cls(model_cls: Type[nn.Module]):
+        return _RegisteredModel(
+            interfaces=_ModelInfo.from_model_cls(model_cls),
+            model_cls=model_cls,
+        )
 
-        if model_arch in _OOT_MODELS_LAZY:
-            return _OOT_MODELS_LAZY[model_arch]
+    def inspect_model_cls(self) -> _ModelInfo:
+        return self.interfaces
 
-        raise KeyError(model_arch)
+    def load_model_cls(self) -> Type[nn.Module]:
+        return self.model_cls
 
-    @staticmethod
-    @lru_cache(maxsize=128)
-    def _try_get_model_stateful(model_arch: str) -> Optional[Type[nn.Module]]:
-        try:
-            mod_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
-        except KeyError:
-            return None
 
-        module = importlib.import_module(mod_name)
-        return getattr(module, cls_name, None)
+@dataclass
+class _LazyRegisteredModel(_BaseRegisteredModel):
+    """
+    Represents a model that has not been imported in the main process.
+    """
+    module_name: str
+    class_name: str
 
-    @staticmethod
-    def _try_get_model_stateless(model_arch: str) -> Optional[Type[nn.Module]]:
-        if model_arch in _OOT_MODELS:
-            return _OOT_MODELS[model_arch]
+    # Performed in another process to avoid initializing CUDA
+    def inspect_model_cls(self) -> _ModelInfo:
+        return _run_in_subprocess(
+            lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
 
-        if is_hip():
-            if model_arch in _ROCM_UNSUPPORTED_MODELS:
-                raise ValueError(
-                    f"Model architecture {model_arch} is not supported by "
-                    "ROCm for now.")
-            if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
-                logger.warning(
-                    "Model architecture %s is partially supported by ROCm: %s",
-                    model_arch, _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
+    def load_model_cls(self) -> Type[nn.Module]:
+        mod = importlib.import_module(self.module_name)
+        return getattr(mod, self.class_name)
 
+
+@lru_cache(maxsize=128)
+def _try_load_model_cls(
+    model_arch: str,
+    model: _BaseRegisteredModel,
+) -> Optional[Type[nn.Module]]:
+    if is_hip():
+        if model_arch in _ROCM_UNSUPPORTED_MODELS:
+            raise ValueError(f"Model architecture '{model_arch}' is not "
+                             "supported by ROCm for now.")
+
+        if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
+            msg = _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch]
+            logger.warning(
+                "Model architecture '%s' is partially "
+                "supported by ROCm: %s", model_arch, msg)
+
+    try:
+        return model.load_model_cls()
+    except Exception:
+        logger.exception("Error in loading model architecture '%s'",
+                         model_arch)
         return None
 
-    @staticmethod
-    def _try_load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
-        model = ModelRegistry._try_get_model_stateless(model_arch)
-        if model is not None:
-            return model
 
-        return ModelRegistry._try_get_model_stateful(model_arch)
+@lru_cache(maxsize=128)
+def _try_inspect_model_cls(
+    model_arch: str,
+    model: _BaseRegisteredModel,
+) -> Optional[_ModelInfo]:
+    try:
+        return model.inspect_model_cls()
+    except Exception:
+        logger.exception("Error in inspecting model architecture '%s'",
+                         model_arch)
+        return None
 
-    @staticmethod
-    def resolve_model_cls(
-        architectures: Union[str, List[str]], ) -> Tuple[Type[nn.Module], str]:
-        if isinstance(architectures, str):
-            architectures = [architectures]
-        if not architectures:
-            logger.warning("No model architectures are specified")
 
-        for arch in architectures:
-            model_cls = ModelRegistry._try_load_model_cls(arch)
-            if model_cls is not None:
-                return (model_cls, arch)
+@dataclass
+class _ModelRegistry:
+    # Keyed by model_arch
+    models: Dict[str, _BaseRegisteredModel] = field(default_factory=dict)
 
-        raise ValueError(
-            f"Model architectures {architectures} are not supported for now. "
-            f"Supported architectures: {ModelRegistry.get_supported_archs()}")
+    def get_supported_archs(self) -> List[str]:
+        return list(self.models.keys())
 
-    @staticmethod
-    def get_supported_archs() -> List[str]:
-        return list(_MODELS.keys()) + list(_OOT_MODELS.keys())
-
-    @staticmethod
-    def register_model(model_arch: str, model_cls: Union[Type[nn.Module],
-                                                         str]):
+    def register_model(
+        self,
+        model_arch: str,
+        model_cls: Union[Type[nn.Module], str],
+    ) -> None:
         """
         Register an external model to be used in vLLM.
 
@@ -262,7 +281,7 @@ class ModelRegistry:
           when importing the model and thus the related error
           :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
         """
-        if model_arch in _MODELS:
+        if model_arch in self.models:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
                 "overwritten by the new model class %s.", model_arch,
@@ -274,13 +293,36 @@ class ModelRegistry:
                 msg = "Expected a string in the format `<module>:<class>`"
                 raise ValueError(msg)
 
-            module_name, cls_name = split_str
-            _OOT_MODELS_LAZY[model_arch] = module_name, cls_name
+            model = _LazyRegisteredModel(*split_str)
         else:
-            _OOT_MODELS[model_arch] = model_cls
+            model = _RegisteredModel.from_model_cls(model_cls)
 
-    @staticmethod
-    def _normalize_archs(architectures: Union[str, List[str]]) -> List[str]:
+        self.models[model_arch] = model
+
+    def _raise_for_unsupported(self, architectures: List[str]):
+        all_supported_archs = self.get_supported_archs()
+
+        raise ValueError(
+            f"Model architectures {architectures} are not supported for now. "
+            f"Supported architectures: {all_supported_archs}")
+
+    def _try_load_model_cls(self,
+                            model_arch: str) -> Optional[Type[nn.Module]]:
+        if model_arch not in self.models:
+            return None
+
+        return _try_load_model_cls(model_arch, self.models[model_arch])
+
+    def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
+        if model_arch not in self.models:
+            return None
+
+        return _try_inspect_model_cls(model_arch, self.models[model_arch])
+
+    def _normalize_archs(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> List[str]:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
@@ -288,51 +330,64 @@ class ModelRegistry:
 
         return architectures
 
-    @staticmethod
-    @lru_cache(maxsize=128)
-    def _inspect_stateless(model_arch: str) -> _ModelInterfaces:
-        """
-        Inspect the interfaces that are implemented by a model.
+    def inspect_model_cls(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> _ModelInfo:
+        architectures = self._normalize_archs(architectures)
 
-        If the model is not already imported, the inspection is done inside a
-        subprocess to avoid initializing CUDA for the main program.
-        """
-        model = ModelRegistry._try_get_model_stateless(model_arch)
-        if model is not None:
-            return _inspect_model(model)
+        for arch in architectures:
+            model_info = self._try_inspect_model_cls(arch)
+            if model_info is not None:
+                return model_info
 
-        try:
-            mod_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
-        except KeyError:
-            raise
+        return self._raise_for_unsupported(architectures)
 
-        inspect_fn = partial(_inspect_model_lazy, mod_name, cls_name)
-        return _run_in_subprocess(inspect_fn)
+    def resolve_model_cls(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> Tuple[Type[nn.Module], str]:
+        architectures = self._normalize_archs(architectures)
 
-    @staticmethod
-    def is_text_generation_model(architectures: Union[str, List[str]]) -> bool:
-        return any(
-            ModelRegistry._inspect_stateless(arch).is_text_generation_model
-            for arch in ModelRegistry._normalize_archs(architectures))
+        for arch in architectures:
+            model_cls = self._try_load_model_cls(arch)
+            if model_cls is not None:
+                return (model_cls, arch)
 
-    @staticmethod
-    def is_embedding_model(architectures: Union[str, List[str]]) -> bool:
-        return any(
-            ModelRegistry._inspect_stateless(arch).is_embedding_model
-            for arch in ModelRegistry._normalize_archs(architectures))
+        return self._raise_for_unsupported(architectures)
 
-    @staticmethod
-    def is_multimodal_model(architectures: Union[str, List[str]]) -> bool:
-        return any(
-            ModelRegistry._inspect_stateless(arch).supports_multimodal
-            for arch in ModelRegistry._normalize_archs(architectures))
+    def is_text_generation_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        return self.inspect_model_cls(architectures).is_text_generation_model
 
-    @staticmethod
-    def is_pp_supported_model(architectures: Union[str, List[str]]) -> bool:
-        return any(
-            ModelRegistry._inspect_stateless(arch).supports_pp
-            for arch in ModelRegistry._normalize_archs(architectures))
+    def is_embedding_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        return self.inspect_model_cls(architectures).is_embedding_model
 
+    def is_multimodal_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        return self.inspect_model_cls(architectures).supports_multimodal
+
+    def is_pp_supported_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        return self.inspect_model_cls(architectures).supports_pp
+
+
+ModelRegistry = _ModelRegistry({
+    model_arch: _LazyRegisteredModel(
+        module_name=f"vllm.model_executor.models.{mod_relname}",
+        class_name=cls_name,
+    )
+    for model_arch, (mod_relname, cls_name) in _VLLM_MODELS.items()
+})
 
 _T = TypeVar("_T")
 
