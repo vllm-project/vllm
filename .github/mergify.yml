@@ -1,0 +1,33 @@
+pull_request_rules:
+- name: label-documentation
+  description: Automatically apply documentation label
+  conditions:
+    - or:
+      - files~=^[^/]+\.md$
+      - files~=^docs/
+  actions:
+    label:
+      add:
+        - documentation
+
+- name: ping author on conflicts and add 'needs-rebase' label
+  conditions:
+      - conflict
+      - -closed
+  actions:
+    label:
+      add:
+        - needs-rebase
+    comment:
+      message: |
+       This pull request has merge conflicts that must be resolved before it can be
+       merged. @{{author}} please rebase it. https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/syncing-a-fork
+
+- name: remove 'needs-rebase' label when conflict is resolved
+  conditions:
+      - -conflict
+      - -closed
+  actions:
+    label:
+      remove:
+        - needs-rebase
