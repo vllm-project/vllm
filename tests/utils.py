@@ -615,6 +615,9 @@ async def completions_with_server_args(
     num_logprobs: Optional[int],
     max_wait_seconds: int = 240,
     max_tokens: Union[int, list] = 5,
+    best_of: Optional[int] = None,
+    n: Optional[int] = None,
+    temperature: float = 0,
 ) -> List[Completion]:
     '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
@@ -647,10 +650,12 @@ async def completions_with_server_args(
         client = server.get_async_client()
         outputs = [ client.completions.create(model=model_name,
                                               prompt=[p],
-                                              temperature=0,
+                                              temperature=temperature,
                                               stream=False,
                                               max_tokens=max_tok,
-                                              logprobs=num_logprobs) \
+                                              logprobs=num_logprobs,
+                                              best_of=best_of,
+                                              n=n) \
                     for p, max_tok in zip(prompts, max_tokens) ]
         outputs = await asyncio.gather(*outputs)
 
