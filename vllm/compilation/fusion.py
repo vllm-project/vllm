@@ -9,59 +9,6 @@ from vllm import envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-logger.setLevel(logging.DEBUG)  # TODO
-
-
-# DYNAMIC
-@torch.library.custom_op("vllm::fused_rms_norm_quant_dynamic", mutates_args=['result', 'scale'])
-def fused_rms_norm_quant_dynamic(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-                                 epsilon: float) -> None:
-    print("vllm::fused_rms_norm_quant_dynamic")
-    result_rms = torch.empty_like(input)
-    torch.ops._C.rms_norm(result_rms, input, weight, epsilon)
-    torch.ops._C.dynamic_scaled_fp8_quant(result, result_rms, scale)
-
-
-@torch.library.register_fake("vllm::fused_rms_norm_quant_dynamic")
-def _(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, epsilon: float) -> None:
-    return
-
-
-# TODO epsilon
-def rms_pattern(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
-                scale: torch.Tensor):
-    at1 = auto_functionalized(torch.ops._C.rms_norm.default, result=result_rms, input=input, weight=weight,
-                              epsilon=1e-6)
-    at2 = auto_functionalized(torch.ops._C.dynamic_scaled_fp8_quant.default, result=result, input=at1[1], scale=scale)
-
-    # result, scale (multi-output not currently working)
-    return at2[1:3]
-
-
-def rms_replacement(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
-                    scale: torch.Tensor):
-    at = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.fused_rms_norm_quant_dynamic.default, result=result,
-                                                    input=input, weight=weight,
-                                                    epsilon=1e-6, scale=scale)
-
-    # result, scale (multi-output not currently working)
-    return at[1:3]
-
-
-# STATIC
-@torch.library.custom_op("vllm::fused_rms_norm_quant_static", mutates_args=['result'])
-def fused_rms_norm_quant_static(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-                                epsilon: float) -> None:
-    print("vllm::fused_rms_norm_quant_static")
-    result_rms = torch.empty_like(input)
-    torch.ops._C.rms_norm(result_rms, input, weight, epsilon)
-    torch.ops._C.static_scaled_fp8_quant(result, result_rms, scale)
-
-
-@torch.library.register_fake("vllm::fused_rms_norm_quant_static")
-def _(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor, epsilon: float) -> None:
-    return
-
 
 def rms_pattern_static(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
                        scale: torch.Tensor):
@@ -80,20 +27,6 @@ def rms_replacement_static(result: torch.Tensor, result_rms: torch.Tensor, input
 
     # result
     return at[1]
-
-
-@torch.library.custom_op("vllm::fused_rms_norm_residual_quant_static", mutates_args=['result', 'input', 'residual'])
-def fused_rms_norm_residual_quant_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
-                                         weight: torch.Tensor, scale: torch.Tensor, epsilon: float) -> None:
-    # print("vllm::fused_rms_norm_residual_quant_static")
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
-    torch.ops._C.static_scaled_fp8_quant(result, input, scale)
-
-
-@torch.library.register_fake("vllm::fused_rms_norm_residual_quant_static")
-def _(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
-      epsilon: float) -> None:
-    return
 
 
 def rms_pattern_residual_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
@@ -129,7 +62,6 @@ def get_patterns():
     my_patterns = PatternMatcherPass(pass_name="fusion_pass")
 
     inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda")]
-    register_replacement(rms_pattern, rms_replacement, inputs, fwd_only, my_patterns)
     register_replacement(rms_pattern_static, rms_replacement_static, inputs, fwd_only, my_patterns)
 
     matches = []
