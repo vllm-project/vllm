@@ -53,10 +53,10 @@ def causal_conv1d_fn(x: torch.Tensor,
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    out = ops.causal_conv1d_fwd(x, weight, bias, conv_states, query_start_loc,
-                                cache_indices, has_initial_state, activation
-                                in ["silu", "swish"], pad_slot_id)
-    return out
+    ops.causal_conv1d_fwd(x, weight, bias, conv_states, query_start_loc,
+                          cache_indices, has_initial_state, activation
+                          in ["silu", "swish"], pad_slot_id)
+    return x
 
 
 def causal_conv1d_update(x: torch.Tensor,
@@ -95,9 +95,8 @@ def causal_conv1d_update(x: torch.Tensor,
     unsqueeze = x.dim() == 2
     if unsqueeze:
         x = x.unsqueeze(-1)
-    out = ops.causal_conv1d_update(x, conv_state, weight, bias, activation_val,
-                                   cache_seqlens, conv_state_indices,
-                                   pad_slot_id)
+    ops.causal_conv1d_update(x, conv_state, weight, bias, activation_val,
+                             cache_seqlens, conv_state_indices, pad_slot_id)
     if unsqueeze:
-        out = out.squeeze(-1)
-    return out
+        x = x.squeeze(-1)
+    return x
