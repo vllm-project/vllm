@@ -582,9 +582,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         else:  # attn_type == AttentionType.ENCODER_DECODER
             # Encoder/decoder cross-attention requires no chunked
             # prefill (100% prefill or 100% decode tokens, no mix)
-            assert attn_metadata.num_encoder_tokens is not None
             num_prefill_tokens = attn_metadata.num_prefill_tokens
-            num_encoder_tokens = attn_metadata.num_encoder_tokens
+            if attn_metadata.num_encoder_tokens is not None:
+                num_encoder_tokens = attn_metadata.num_encoder_tokens
+            else:
+                num_encoder_tokens = attn_metadata.num_prefill_tokens
             num_decode_tokens = attn_metadata.num_decode_tokens
 
         output = torch.empty_like(query)
