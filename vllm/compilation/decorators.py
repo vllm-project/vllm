@@ -84,17 +84,13 @@ def _support_torch_compile(cls: type,
             bound_args = sig.bind(self, *args, **kwargs)
             bound_args.apply_defaults()
             for k, dims in dynamic_arg_dims.items():
-                if isinstance(dims, int):
-                    dims = [dims]
                 arg = bound_args.arguments.get(k)
                 if arg is not None:
                     if isinstance(arg, torch.Tensor):
-                        for dim in dims:
-                            torch._dynamo.mark_dynamic(arg, dim)
+                        torch._dynamo.mark_dynamic(arg, dims)
                     elif isinstance(arg, IntermediateTensors):
                         for tensor in arg.tensors.values():
-                            for dim in dims:
-                                torch._dynamo.mark_dynamic(tensor, dim)
+                            torch._dynamo.mark_dynamic(tensor, dims)
                     else:
                         raise ValueError(
                             "Unsupported dynamic dimensions"
