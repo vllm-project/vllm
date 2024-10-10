@@ -454,9 +454,12 @@ class SiglipVisionTransformer(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
         num_hidden_layers_override: Optional[int] = None,
-    ):
+        require_post_norm: Optional[bool] = None,
+    ) -> None:
         super().__init__()
+
         self.config = config
         embed_dim = config.hidden_size
 
@@ -467,17 +470,21 @@ class SiglipVisionTransformer(nn.Module):
             num_hidden_layers_override=num_hidden_layers_override,
         )
 
+        num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
-                f"The original encoder only has {config.num_hidden_layers} "
+                f"The original encoder only has {num_hidden_layers} "
                 f"layers, but you requested {len(self.encoder.layers)} layers."
             )
-        elif len(self.encoder.layers) == config.num_hidden_layers:
+
+        # If possible, skip post_layernorm to conserve memory
+        if require_post_norm is None:
+            require_post_norm = len(self.encoder.layers) == num_hidden_layers
+
+        if require_post_norm:
             self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
-            # post_layernorm is unused when we extract intermediate features
-            # In this case, we can skip it to conserve memory
             self.post_layernorm = None
 
         self.use_head = (True if not hasattr(config, "vision_use_head") else
@@ -517,8 +524,10 @@ class SiglipVisionModel(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
         num_hidden_layers_override: Optional[int] = None,
-    ):
+        require_post_norm: Optional[bool] = None,
+    ) -> None:
         super().__init__()
 
         num_heads = config.num_attention_heads
@@ -529,6 +538,7 @@ class SiglipVisionModel(nn.Module):
             config,
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            require_post_norm=require_post_norm,
         )
 
     def get_input_embeddings(self) -> nn.Module:

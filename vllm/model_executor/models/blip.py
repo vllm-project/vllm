@@ -122,7 +122,7 @@ def input_processor_for_blip(
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
 class BlipVisionEmbeddings(nn.Module):
 
-    def __init__(self, config: BlipVisionConfig):
+    def __init__(self, config: Union[BlipVisionConfig, Blip2VisionConfig]):
         super().__init__()
 
         self.config = config
@@ -167,7 +167,7 @@ class BlipParallelAttention(nn.Module):
 
     def __init__(
         self,
-        config: BlipVisionConfig,
+        config: Union[BlipVisionConfig, Blip2VisionConfig],
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -236,7 +236,7 @@ class BlipParallelAttention(nn.Module):
 class BlipMLP(nn.Module):
 
     def __init__(self,
-                 config: BlipVisionConfig,
+                 config: Union[BlipVisionConfig, Blip2VisionConfig],
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
@@ -263,7 +263,7 @@ class BlipMLP(nn.Module):
 class BlipEncoderLayer(nn.Module):
 
     def __init__(self,
-                 config: BlipVisionConfig,
+                 config: Union[BlipVisionConfig, Blip2VisionConfig],
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
@@ -308,7 +308,7 @@ class BlipEncoder(nn.Module):
     """
 
     def __init__(self,
-                 config: BlipVisionConfig,
+                 config: Union[BlipVisionConfig, Blip2VisionConfig],
                  quant_config: Optional[QuantizationConfig] = None,
                  num_hidden_layers_override: Optional[int] = None):
         super().__init__()
@@ -337,10 +337,14 @@ class BlipVisionModel(nn.Module):
     config_class = BlipVisionConfig
     main_input_name = "pixel_values"
 
-    def __init__(self,
-                 config: BlipVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None):
+    def __init__(
+        self,
+        config: Union[BlipVisionConfig, Blip2VisionConfig],
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
+    ) -> None:
         super().__init__()
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -356,17 +360,21 @@ class BlipVisionModel(nn.Module):
             num_hidden_layers_override=num_hidden_layers_override,
         )
 
+        num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
-                f"The original encoder only has {config.num_hidden_layers} "
+                f"The original encoder only has {num_hidden_layers} "
                 f"layers, but you requested {len(self.encoder.layers)} layers."
             )
-        elif len(self.encoder.layers) == config.num_hidden_layers:
+
+        # If possible, skip post_layernorm to conserve memory
+        if require_post_norm is None:
+            require_post_norm = len(self.encoder.layers) == num_hidden_layers
+
+        if require_post_norm:
             self.post_layernorm = nn.LayerNorm(config.hidden_size,
                                                eps=config.layer_norm_eps)
         else:
-            # post_layernorm is unused when we extract intermediate features
-            # In this case, we can skip it to conserve memory
             self.post_layernorm = None
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:

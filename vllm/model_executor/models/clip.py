@@ -354,11 +354,16 @@ class CLIPEncoder(nn.Module):
 
 class CLIPVisionTransformer(nn.Module):
 
-    def __init__(self,
-                 config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None):
+    def __init__(
+        self,
+        config: CLIPVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
+    ) -> None:
         super().__init__()
+
         self.config = config
         embed_dim = config.hidden_size
 
@@ -372,17 +377,21 @@ class CLIPVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override)
 
+        num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
-                f"The original encoder only has {config.num_hidden_layers} "
+                f"The original encoder only has {num_hidden_layers} "
                 f"layers, but you requested {len(self.encoder.layers)} layers."
             )
-        elif len(self.encoder.layers) == config.num_hidden_layers:
+
+        # If possible, skip post_layernorm to conserve memory
+        if require_post_norm is None:
+            require_post_norm = len(self.encoder.layers) == num_hidden_layers
+
+        if require_post_norm:
             self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
-            # post_layernorm is unused when we extract intermediate features
-            # In this case, we can skip it to conserve memory
             self.post_layernorm = None
 
     def forward(
@@ -405,10 +414,14 @@ class CLIPVisionModel(nn.Module):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
 
-    def __init__(self,
-                 config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None):
+    def __init__(
+        self,
+        config: CLIPVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
+    ) -> None:
         super().__init__()
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -418,7 +431,9 @@ class CLIPVisionModel(nn.Module):
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
-            num_hidden_layers_override=num_hidden_layers_override)
+            num_hidden_layers_override=num_hidden_layers_override,
+            require_post_norm=require_post_norm,
+        )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         return self.vision_model(pixel_values)
