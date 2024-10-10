@@ -289,10 +289,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             dim=2).reshape(num_images, -1, hid_dim)
         return image_features_hd_newline
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
-
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
 def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
