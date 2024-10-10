@@ -1,8 +1,15 @@
 import pytest
 
+from tests.utils import check_deprecated_block_manager_usage
 from vllm import SamplingParams
 
 from .conftest import get_output_from_llm_generator
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_deprecated_block_manager():
+    check_deprecated_block_manager_usage(
+        'tests/spec_decode/e2e/test_compatibility.py')
 
 
 @pytest.mark.parametrize(

@@ -33,6 +33,7 @@ from typing import List, Optional, Tuple
 from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
+from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 try:
@@ -177,6 +178,7 @@ if __name__ == "__main__":
                         help='enable prefix caching')
     parser.add_argument('--use-v2-block-manager',
                         action='store_true',
+                        default=EngineArgs.use_v2_block_manager,
                         help='Use BlockSpaceMangerV2')
     parser.add_argument('--num-prompts',
                         type=int,
