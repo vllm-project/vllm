@@ -1137,10 +1137,9 @@ class EmbeddingSequenceGroupOutput(
         return self.embeddings == other.embeddings
 
 
-class IntermediateTensors(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
+# cannot use msgspec.Struct here because Dynamo does not support it
+@dataclass
+class IntermediateTensors:
     """For all pipeline stages except the last, we need to return the hidden
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.
