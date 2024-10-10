@@ -440,8 +440,14 @@ class MllamaVisionEncoder(nn.Module):
 
 class MllamaVisionModel(nn.Module):
 
-    def __init__(self, config: config_mllama.MllamaVisionConfig):
+    def __init__(self, config: config_mllama.MllamaVisionConfig,
+                 quant_config: Optional[QuantizationConfig]):
+        # NOTE: Vision tower is not quantized by any of the supported methods
+        if quant_config is not None:
+            quant_config = None
+
         super().__init__()
+
         self.image_size = config.image_size
         self.patch_size = config.patch_size
         self.max_num_tiles = config.max_num_tiles
@@ -908,7 +914,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             config.pad_token_id if config.pad_token_id is not None else -1
         self.image_size = config.vision_config.image_size
 
-        self.vision_model = MllamaVisionModel(config.vision_config)
+        self.vision_model = MllamaVisionModel(config.vision_config, quant_config)
         self.language_model = MllamaForCausalLM(
             config.text_config,
             cache_config=cache_config,
