@@ -28,8 +28,6 @@ You can install vLLM using pip. It's recommended to use `conda <https://docs.con
 
 Please refer to the :ref:`installation documentation <installation>` for more details on installing vLLM.
 
-.. _offline_batched_inference:
-
 Offline Batched Inference
 -------------------------
 
@@ -77,9 +75,6 @@ vLLM's engine is then initialized for offline inference with the :class:`~vllm.L
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
-
-.. _openai_server
 
 OpenAI-Compatible Server
 -------------------------
