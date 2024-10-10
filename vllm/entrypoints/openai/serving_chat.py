@@ -543,7 +543,6 @@ class OpenAIServingChat(OpenAIServing):
                                 tool_parser.prev_tool_call_arr) > 0
                             index = len(tool_parser.prev_tool_call_arr
                                         ) - 1 if tools_called else 0
-                            tools_called = index > 0
                         else:
                             index = 0
                             tools_called = tool_choice_function_name is not None
