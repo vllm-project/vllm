@@ -914,7 +914,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             config.pad_token_id if config.pad_token_id is not None else -1
         self.image_size = config.vision_config.image_size
 
-        self.vision_model = MllamaVisionModel(config.vision_config, quant_config)
+        self.vision_model = MllamaVisionModel(config.vision_config,
+                                              quant_config)
         self.language_model = MllamaForCausalLM(
             config.text_config,
             cache_config=cache_config,
