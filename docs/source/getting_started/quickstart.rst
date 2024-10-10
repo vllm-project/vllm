@@ -20,7 +20,7 @@ Installation
 
 You can install vLLM using pip. It's recommended to use `conda <https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html>`_ to create a manage Python environments.
 
-.. code-block:: console
+.. code-block:: shell
 
     $ conda create -n myenv python=3.10 -y
     $ conda activate myenv
@@ -89,7 +89,7 @@ By default, it starts the server at ``http://localhost:8000``. You can specify t
 
 To start the server, simply use:
 
-.. code-block:: console
+.. code-block:: shell
 
     $ vllm serve facebook/opt-125m
 
@@ -99,7 +99,7 @@ To start the server, simply use:
 
 This server can be queried in the same format as OpenAI API. For example, to list the models:
 
-.. code-block:: console
+.. code-block:: shell
 
     $ curl http://localhost:8000/v1/models
 
@@ -110,7 +110,7 @@ OpenAI Completions API with vLLM
 
 Once your server is started, you can query the model with input prompts:
 
-.. code-block:: console
+.. code-block:: shell
 
     $ curl http://localhost:8000/v1/completions \
     $     -H "Content-Type: application/json" \
@@ -147,7 +147,7 @@ vLLM is also designed to support the OpenAI Chat API. The chat interface is a mo
 
 You can use the `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_ endpoint:
 
-.. code-block:: console
+.. code-block:: shell
 
     $ curl http://localhost:8000/v1/chat/completions \
     $     -H "Content-Type: application/json" \
