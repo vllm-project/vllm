@@ -2,6 +2,8 @@
 #include "machete_prepack_launcher.cuh"
 #include "core/scalar_type.hpp"
 
+#include "core/registration.h"
+
 namespace machete {
 
 using namespace vllm;
@@ -78,14 +80,20 @@ torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
 }
 
 torch::Tensor prepack_B(torch::Tensor const& B,
-                        ScalarTypeTorchPtr const& btype) {
-#if defined(__CUDACC_VER_MAJOR__) && __CUDACC_VER_MAJOR__ >= 12
+                        vllm::ScalarTypeTorchPtr const& btype) {
   return scalar_type_dispatch(*btype, [&](auto BType) {
     return PrepackBDispatcher<half_t, decltype(BType), half_t>::dispatch(B);
   });
-#else
-  TORCH_CHECK(false, "Machete requires CUDA 12.0 or later");
-#endif
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("machete_prepack_B", &prepack_B);
+  m.impl("machete_gemm", &gemm);
+}
+
+// use CatchAll since supported_schedules has no tensor arguments
+TORCH_LIBRARY_IMPL(TORCH_EXTENSION_NAME, CatchAll, m) {
+  m.impl("machete_supported_schedules", &supported_schedules);
 }
 
 };  // namespace machete

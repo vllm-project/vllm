@@ -19,7 +19,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import STR_NOT_IMPL_ENC_DEC_ERR_STRS, make_tensor_with_pad
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -133,7 +133,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             (input_tokens, input_positions,
              attn_metadata) = self._prepare_decode(
                  self.seq_group_metadata_list)
-            seq_lens = []
+            seq_lens = None
 
         return self.model_input_cls(
             input_tokens=input_tokens,
@@ -148,8 +148,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         )
 
     def _compute_multi_modal_input(self, seq_data: SequenceData, mm_data,
-                                   computed_len: int):
-        mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                                   computed_len: int,
+                                   mm_processor_kwargs: Dict[str, Any]):
+        mm_kwargs = self.multi_modal_input_mapper(mm_data, mm_processor_kwargs)
 
         # special processing for mrope position deltas.
         mrope_positions = None
@@ -210,7 +211,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             mrope_positions = None
             if (mm_data := seq_group_metadata.multi_modal_data):
                 mm_kwargs, mrope_positions = self._compute_multi_modal_input(
-                    seq_data, mm_data, computed_len)
+                    seq_data, mm_data, computed_len,
+                    seq_group_metadata.mm_processor_kwargs)
                 multi_modal_inputs_list.append(mm_kwargs)
 
             # Token position ids
@@ -434,10 +436,6 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
 
-        if self.model_config.is_encoder_decoder_model:
-            raise NotImplementedError(
-                STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
-
     @property
     def model_is_mrope(self) -> bool:
         """Detect if the model has "mrope" rope_scaling type.
@@ -459,8 +457,8 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
     def make_model_input_from_broadcasted_tensor_dict(
         self,
         tensor_dict: Dict[str, Any],
-    ) -> ModelInputForCPU:
-        return ModelInputForCPU.from_broadcasted_tensor_dict(
+    ) -> ModelInputForCPUWithSamplingMetadata:
+        return ModelInputForCPUWithSamplingMetadata.from_broadcasted_tensor_dict(  # noqa: E501
             tensor_dict,
             attn_backend=self.attn_backend,
         )

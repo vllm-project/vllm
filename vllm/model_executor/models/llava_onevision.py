@@ -1,4 +1,5 @@
 import math
+from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -17,10 +18,8 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import (cached_get_tokenizer,
@@ -31,12 +30,12 @@ from vllm.utils import is_list_of
 from .clip import (CLIPVisionModel, dummy_seq_data_for_clip,
                    dummy_video_for_clip, get_clip_image_feature_size,
                    get_clip_patch_grid_length, input_processor_for_clip)
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_seq_data_for_siglip,
                      dummy_video_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import (flatten_bn, group_weights_with_prefix,
-                    init_vllm_registered_model, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -414,7 +413,8 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     "video", get_max_llava_onevision_video_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_onevision)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_onevision)
-class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
+class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                             SupportsPP):
 
     def __init__(self,
                  config: LlavaOnevisionConfig,
@@ -433,6 +433,16 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
             config.text_config, cache_config, quant_config)
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.model.make_empty_intermediate_tensors)
+
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return Sampler()
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )
@@ -805,39 +815,42 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for LlaVA-Onevision.
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values_videos: Pixels in each frames for each input videos.
         """
-        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
-        # merge video embeddings into input embeddings
-        if modalities:
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
-            if "images" in modalities:
-                image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
-                    self.config.image_token_index)
-            if "videos" in modalities:
-                video_input = modalities["videos"]
-                video_embeddings = self._process_video_pixels(video_input)
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, video_embeddings,
-                    self.config.video_token_index)
+        if intermediate_tensors is not None:
             input_ids = None
-        else:
             inputs_embeds = None
+        else:
+            modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+            if modalities:
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+                if "images" in modalities:
+                    image_input = modalities["images"]
+                    vision_embeddings = self._process_image_input(image_input)
+                    inputs_embeds = merge_multimodal_embeddings(
+                        input_ids, inputs_embeds, vision_embeddings,
+                        self.config.image_token_index)
+                if "videos" in modalities:
+                    video_input = modalities["videos"]
+                    video_embeddings = self._process_video_pixels(video_input)
+                    inputs_embeds = merge_multimodal_embeddings(
+                        input_ids, inputs_embeds, video_embeddings,
+                        self.config.video_token_index)
+                input_ids = None
+            else:
+                inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   kv_caches,
                                                   attn_metadata,
-                                                  None,
+                                                  intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -858,19 +871,5 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(weights)
-
-        # load vision encoder
-        self.vision_tower.load_weights(weights_group["vision_tower"])
-
-        # load mlp projector
-        mlp_params_dict = dict(self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in weights_group["multi_modal_projector"]:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load llm backbone
-        self.language_model.load_weights(weights_group["language_model"])
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(weights)
