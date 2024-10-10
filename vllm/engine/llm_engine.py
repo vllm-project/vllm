@@ -23,7 +23,6 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
-from vllm.engine.output_processor.multi_step import MultiStepOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
@@ -475,7 +474,7 @@ class LLMEngine:
                 ),
             ))
 
-        if isinstance(self.output_processor, MultiStepOutputProcessor):
+        if self.scheduler_config.user_is_multi_step:
             # Multi-step only: construct a fallback single-step output
             # processor for scenarios where a request utilizes a feature
             # unsupported by multi-step

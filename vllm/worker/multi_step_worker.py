@@ -152,7 +152,6 @@ class MultiStepWorker(Worker):
         this method may skip the normal _prepare_model_input and
         _prepare_worker_input methods and instead used cached values.
         """
-
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
