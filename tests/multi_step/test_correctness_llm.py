@@ -1,7 +1,7 @@
 # Test the LLMEngine with multi-step-decoding
 
 import copy
-from typing import Optional, Tuple
+from typing import Optional
 
 import pytest
 
@@ -209,7 +209,7 @@ def test_multi_step_llm_w_prompt_logprobs(
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("max_output_len", [7])
-@pytest.mark.parametrize("n_best_of", [
+@pytest.mark.parametrize("n,best_of", [
     (1, 2),
     (2, 2),
     (2, 3),
@@ -226,7 +226,8 @@ def test_multi_step_llm_best_of_fallback(
     num_scheduler_steps: int,
     num_prompts: int,
     max_output_len: int,
-    n_best_of: Tuple[int, int],
+    n: int,
+    best_of: int,
     enable_chunked_prefill: bool,
     enable_prefix_caching: bool,
 ) -> None:
@@ -248,9 +249,8 @@ def test_multi_step_llm_best_of_fallback(
                            GPU -> CPU output transfer
       num_prompts: number of example prompts under test
       max_output_len
-      n_best_of: a tuple of `n` (num seqs to output per :class:`SequenceGroup`) 
-                 and `best_of` (num seqs per :class:`SequenceGroup` from which
-                 to choose)
+      n: num seqs to output per :class:`SequenceGroup`
+      best_of: num seqs per :class:`SequenceGroup` from which to choose
       enable_chunked_prefill
       enable_prefix_caching
     """
@@ -261,8 +261,6 @@ def test_multi_step_llm_best_of_fallback(
     prompts = prompts[:num_prompts]
     assert len(prompts) == num_prompts
 
-    n = n_best_of[0]
-    best_of = n_best_of[1]
     sampling_params = SamplingParams(
         max_tokens=max_output_len,
         ignore_eos=True,
