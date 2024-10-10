@@ -3,8 +3,9 @@ import pickle
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from functools import lru_cache, partial
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import cloudpickle
 import torch.nn as nn
@@ -154,6 +155,29 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
 }
 
 
+@dataclass
+class _ModelInterfaces:
+    is_text_generation_model: bool
+    is_embedding_model: bool
+    supports_multimodal: bool
+    supports_pp: bool
+
+
+def _inspect_model(model: object) -> _ModelInterfaces:
+    return _ModelInterfaces(
+        is_text_generation_model=is_text_generation_model(model),
+        is_embedding_model=is_embedding_model(model),
+        supports_multimodal=supports_multimodal(model),
+        supports_pp=supports_pp(model),
+    )
+
+
+def _inspect_model_lazy(mod_name: str, cls_name: str) -> _ModelInterfaces:
+    mod = importlib.import_module(mod_name)
+    klass = getattr(mod, cls_name)
+    return _inspect_model(klass)
+
+
 class ModelRegistry:
 
     @staticmethod
@@ -256,114 +280,95 @@ class ModelRegistry:
             _OOT_MODELS[model_arch] = model_cls
 
     @staticmethod
+    def _normalize_archs(architectures: Union[str, List[str]]) -> List[str]:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        return architectures
+
+    @staticmethod
     @lru_cache(maxsize=128)
-    def _check_stateless(
-        func: Callable[[Type[nn.Module]], bool],
-        model_arch: str,
-        *,
-        default: Optional[bool] = None,
-    ) -> bool:
+    def _inspect_stateless(model_arch: str) -> _ModelInterfaces:
         """
-        Run a boolean function against a model and return the result.
+        Inspect the interfaces that are implemented by a model.
 
-        If the model is not found, returns the provided default value.
-
-        If the model is not already imported, the function is run inside a
+        If the model is not already imported, the inspection is done inside a
         subprocess to avoid initializing CUDA for the main program.
         """
         model = ModelRegistry._try_get_model_stateless(model_arch)
         if model is not None:
-            return func(model)
+            return _inspect_model(model)
 
         try:
             mod_name, cls_name = ModelRegistry._get_module_cls_name(model_arch)
         except KeyError:
-            if default is not None:
-                return default
-
             raise
 
-        with tempfile.NamedTemporaryFile() as output_file:
-            # `cloudpickle` allows pickling lambda functions directly
-            input_bytes = cloudpickle.dumps(
-                (mod_name, cls_name, func, output_file.name))
-            # cannot use `sys.executable __file__` here because the script
-            # contains relative imports
-            returned = subprocess.run(
-                [sys.executable, "-m", "vllm.model_executor.models.registry"],
-                input=input_bytes,
-                capture_output=True)
-
-            # check if the subprocess is successful
-            try:
-                returned.check_returncode()
-            except Exception as e:
-                # wrap raised exception to provide more information
-                raise RuntimeError(f"Error happened when testing "
-                                   f"model support for{mod_name}.{cls_name}:\n"
-                                   f"{returned.stderr.decode()}") from e
-            with open(output_file.name, "rb") as f:
-                result = pickle.load(f)
-            return result
+        inspect_fn = partial(_inspect_model_lazy, mod_name, cls_name)
+        return _run_in_subprocess(inspect_fn)
 
     @staticmethod
     def is_text_generation_model(architectures: Union[str, List[str]]) -> bool:
-        if isinstance(architectures, str):
-            architectures = [architectures]
-        if not architectures:
-            logger.warning("No model architectures are specified")
-
-        is_txt_gen = partial(ModelRegistry._check_stateless,
-                             is_text_generation_model,
-                             default=False)
-
-        return any(is_txt_gen(arch) for arch in architectures)
+        return any(
+            ModelRegistry._inspect_stateless(arch).is_text_generation_model
+            for arch in ModelRegistry._normalize_archs(architectures))
 
     @staticmethod
     def is_embedding_model(architectures: Union[str, List[str]]) -> bool:
-        if isinstance(architectures, str):
-            architectures = [architectures]
-        if not architectures:
-            logger.warning("No model architectures are specified")
-
-        is_emb = partial(ModelRegistry._check_stateless,
-                         is_embedding_model,
-                         default=False)
-
-        return any(is_emb(arch) for arch in architectures)
+        return any(
+            ModelRegistry._inspect_stateless(arch).is_embedding_model
+            for arch in ModelRegistry._normalize_archs(architectures))
 
     @staticmethod
     def is_multimodal_model(architectures: Union[str, List[str]]) -> bool:
-        if isinstance(architectures, str):
-            architectures = [architectures]
-        if not architectures:
-            logger.warning("No model architectures are specified")
-
-        is_mm = partial(ModelRegistry._check_stateless,
-                        supports_multimodal,
-                        default=False)
-
-        return any(is_mm(arch) for arch in architectures)
+        return any(
+            ModelRegistry._inspect_stateless(arch).supports_multimodal
+            for arch in ModelRegistry._normalize_archs(architectures))
 
     @staticmethod
     def is_pp_supported_model(architectures: Union[str, List[str]]) -> bool:
-        if isinstance(architectures, str):
-            architectures = [architectures]
-        if not architectures:
-            logger.warning("No model architectures are specified")
+        return any(
+            ModelRegistry._inspect_stateless(arch).supports_pp
+            for arch in ModelRegistry._normalize_archs(architectures))
 
-        is_pp = partial(ModelRegistry._check_stateless,
-                        supports_pp,
-                        default=False)
 
-        return any(is_pp(arch) for arch in architectures)
+_T = TypeVar("_T")
+
+
+def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
+    with tempfile.NamedTemporaryFile() as output_file:
+        # `cloudpickle` allows pickling lambda functions directly
+        input_bytes = cloudpickle.dumps((fn, output_file.name))
+
+        # cannot use `sys.executable __file__` here because the script
+        # contains relative imports
+        returned = subprocess.run(
+            [sys.executable, "-m", "vllm.model_executor.models.registry"],
+            input=input_bytes,
+            capture_output=True)
+
+        # check if the subprocess is successful
+        try:
+            returned.check_returncode()
+        except Exception as e:
+            # wrap raised exception to provide more information
+            raise RuntimeError(f"Error raised in subprocess:\n"
+                               f"{returned.stderr.decode()}") from e
+
+        with open(output_file.name, "rb") as f:
+            return pickle.load(f)
+
+
+def _run() -> None:
+    fn, output_file = pickle.loads(sys.stdin.buffer.read())
+
+    result = fn()
+
+    with open(output_file, "wb") as f:
+        f.write(pickle.dumps(result))
 
 
 if __name__ == "__main__":
-    (mod_name, cls_name, func,
-     output_file) = pickle.loads(sys.stdin.buffer.read())
-    mod = importlib.import_module(mod_name)
-    klass = getattr(mod, cls_name)
-    result = func(klass)
-    with open(output_file, "wb") as f:
-        f.write(pickle.dumps(result))
+    _run()
