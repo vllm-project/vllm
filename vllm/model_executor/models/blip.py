@@ -345,6 +345,10 @@ class BlipVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
         require_post_norm: Optional[bool] = None,
     ) -> None:
+        # NOTE: Vision tower is not quantized by any of the supported methods
+        if quant_config is not None:
+            quant_config = None
+
         super().__init__()
 
         tp_size = get_tensor_model_parallel_world_size()
