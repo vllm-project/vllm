@@ -1723,8 +1723,9 @@ def _get_and_verify_max_len(
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None:
-        # Backwards compatibility. Although HF prefers "rope_type", we still
-        # have code that accesses "type"
+        # Backwards compatibility. NOTE: This updates hf_config in-place!
+        # Although HF prefers "rope_type", we have code that accesses "type",
+        # so we populate both keys
         if "type" in rope_scaling:
             rope_type = rope_scaling["rope_type"] = rope_scaling["type"]
         elif "rope_type" in rope_scaling:
@@ -1733,7 +1734,7 @@ def _get_and_verify_max_len(
             raise ValueError(
                 "rope_scaling must have a 'type' or 'rope_type' key.")
 
-        # Backwards compatibility
+        # Backwards compatibility. NOTE: This updates hf_config in-place!
         if rope_type == "su":
             rope_scaling["rope_type"] = rope_type = "longrope"
             logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
