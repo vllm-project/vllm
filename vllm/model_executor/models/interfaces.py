@@ -327,7 +327,7 @@ class IsAttentionFree(Protocol):
 
 @runtime_checkable
 class _IsAttentionFreeType(Protocol):
-    has_inner_state: ClassVar[Literal[True]]
+    is_attention_free: ClassVar[Literal[True]]
 
     def __init__(self) -> None:
         ...
