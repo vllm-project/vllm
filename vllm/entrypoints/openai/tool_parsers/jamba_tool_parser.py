@@ -81,7 +81,6 @@ class JambaToolParser(ToolParser):
         else:
 
             try:
-                # TODO: edit comment
                 # use a regex to find the tool call between the tags
                 function_calls = self.tool_calls_regex.findall(model_output)[0]
 
