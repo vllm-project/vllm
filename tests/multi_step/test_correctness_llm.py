@@ -243,7 +243,7 @@ def test_multi_step_llm_best_of_fallback(
       model: model under test (same for single- and multi-step engines)
       dtype: tensor datatype for engine to utilize
       tp_size: degree of tensor-parallelism
-      max_tokens: the maximum number of tokens to generate
+      max_output_len: the maximum number of tokens to generate
       enforce_eager
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
