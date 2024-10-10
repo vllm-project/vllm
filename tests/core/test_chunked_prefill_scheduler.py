@@ -8,6 +8,7 @@ from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import Logprob, SequenceGroup
 
+from ..utils import check_deprecated_block_manager_usage
 from .utils import create_dummy_prompt
 
 
@@ -25,6 +26,12 @@ def schedule_and_update_computed_tokens(scheduler):
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
     return metas, out
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_deprecated_block_manager():
+    check_deprecated_block_manager_usage(
+        'tests/core/test_chunked_prefill_scheduler.py')
 
 
 @pytest.mark.parametrize('use_v2_block_manager', [True, False])

@@ -12,9 +12,16 @@ from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroup, SequenceStatus
 
+from ..utils import check_deprecated_block_manager_usage
 from .utils import (append_new_token, append_new_token_seq_group,
                     create_dummy_prompt, get_sequence_groups,
                     schedule_and_update_computed_tokens)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_deprecated_block_manager():
+    check_deprecated_block_manager_usage(
+        "tests/core/test_chunked_prefill_scheduler.py")
 
 
 @pytest.mark.parametrize('use_v2_block_manager', [True, False])

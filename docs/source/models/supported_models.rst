@@ -378,7 +378,7 @@ Text Generation
     - ✅︎
   * - :code:`MiniCPMV`
     - MiniCPM-V
-    - Image\ :sup:`+`
+    - Image\ :sup:`E+`
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     - ✅︎
     - ✅︎

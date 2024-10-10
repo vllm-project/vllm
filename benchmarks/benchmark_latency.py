@@ -221,7 +221,9 @@ if __name__ == '__main__':
     parser.add_argument("--enable-prefix-caching",
                         action='store_true',
                         help="Enable automatic prefix caching")
-    parser.add_argument('--use-v2-block-manager', action='store_true')
+    parser.add_argument('--use-v2-block-manager',
+                        action='store_true',
+                        default=EngineArgs.use_v2_block_manager)
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

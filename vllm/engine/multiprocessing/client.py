@@ -606,7 +606,8 @@ class MQLLMEngineClient:
                 and request_id is not None)
 
         return self._process_request(prompt, pooling_params, request_id,
-                                     lora_request, trace_headers, priority)
+                                     lora_request, trace_headers, None,
+                                     priority)
 
     async def _process_request(
         self,
