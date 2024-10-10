@@ -28,6 +28,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_compile_llama_style
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -265,6 +266,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_compile_llama_style
 class LlamaModel(nn.Module):
 
     def __init__(

@@ -21,6 +21,7 @@ from torch import nn
 from transformers import Gemma2Config
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_compile_llama_style
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -238,6 +239,7 @@ class Gemma2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_compile_llama_style
 class Gemma2Model(nn.Module):
 
     def __init__(
