@@ -453,9 +453,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                cu_seq_len: Optional[torch.Tensor],
                                cache_indices: Optional[torch.Tensor],
                                has_initial_state: Optional[torch.Tensor],
-                               silu_activation: bool,
-                               pad_slot_id: int) -> torch.Tensor:
-        return torch.empty_like(x)
+                               silu_activation: bool, pad_slot_id: int):
+        return None
 
     @torch.library.register_fake("_C::causal_conv1d_update")
     def causal_conv1d_update_fake(x: torch.Tensor, conv_state: torch.Tensor,
@@ -465,7 +464,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                   cache_seqlens: Optional[torch.Tensor],
                                   conv_state_indices: Optional[torch.Tensor],
                                   pad_slot_id: int) -> torch.Tensor:
-        return torch.empty_like(x)
+        return None
 
     @torch.library.register_fake("_C::selective_scan_fwd")
     def selective_scan_fwd_fake(u: torch.Tensor, delta: torch.Tensor,
@@ -793,11 +792,11 @@ def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       query_start_loc: Optional[torch.Tensor],
                       cache_indices: Optional[torch.Tensor],
                       has_initial_state: Optional[torch.Tensor],
-                      silu_activation: bool, pad_slot_id: int) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
-                                          query_start_loc, cache_indices,
-                                          has_initial_state, silu_activation,
-                                          pad_slot_id)
+                      silu_activation: bool, pad_slot_id: int):
+    torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
+                                   query_start_loc, cache_indices,
+                                   has_initial_state, silu_activation,
+                                   pad_slot_id)
 
 
 def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
@@ -805,10 +804,10 @@ def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
                          silu_activation: bool,
                          cache_seqlens: Optional[torch.Tensor],
                          conv_state_indices: Optional[torch.Tensor],
-                         pad_slot_id: int) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                             silu_activation, cache_seqlens,
-                                             conv_state_indices, pad_slot_id)
+                         pad_slot_id: int):
+    torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
+                                      silu_activation, cache_seqlens,
+                                      conv_state_indices, pad_slot_id)
 
 
 def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,

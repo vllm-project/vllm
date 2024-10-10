@@ -290,7 +290,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool silu_activation,"
       "Tensor? cache_seqlens_,"
       "Tensor? conv_state_indices,"
-      "int pad_slot_id) -> Tensor");
+      "int pad_slot_id) -> ()");
   ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
 
   ops.def(
@@ -301,7 +301,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
       "bool silu_activation,"
-      "int pad_slot_id) -> Tensor");
+      "int pad_slot_id) -> ()");
   ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 #endif
 

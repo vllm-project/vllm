@@ -92,8 +92,7 @@ void set_conv_params_fwd(ConvParamsBase &params,
 }
 
 
-at::Tensor
-causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
+void causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                   const c10::optional<at::Tensor> &bias_,
                   const c10::optional<at::Tensor> &conv_states,
                   const c10::optional<at::Tensor> &query_start_loc,
@@ -158,7 +157,7 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
         CHECK_SHAPE(cache_indices_, batch_size);
     }
 
-    at::Tensor out = torch::empty_like(x);
+    at::Tensor out = x;
 
     ConvParamsBase params;
     set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
@@ -189,12 +188,10 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "causal_conv1d_fwd", [&] {
             causal_conv1d_fwd_cuda<input_t, weight_t>(params, stream);
     });
-    return out;
 }
 
 
-at::Tensor
-causal_conv1d_update(const at::Tensor &x,
+void causal_conv1d_update(const at::Tensor &x,
                      const at::Tensor &conv_state,
                      const at::Tensor &weight,
                      const c10::optional<at::Tensor> &bias_,
@@ -236,7 +233,7 @@ causal_conv1d_update(const at::Tensor &x,
         CHECK_SHAPE(bias, dim);
     }
 
-    at::Tensor out = torch::empty_like(x);
+    at::Tensor out = x;
 
     ConvParamsBase params;
     set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
@@ -285,7 +282,6 @@ causal_conv1d_update(const at::Tensor &x,
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "causal_conv1d_update", [&] {
             causal_conv1d_update_cuda<input_t, weight_t>(params, stream);
     });
-    return out;
 }
 
 template<int kNThreads_, int kWidth_, bool kIsVecLoad_, typename input_t_, typename weight_t_>
