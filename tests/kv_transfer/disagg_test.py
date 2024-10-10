@@ -80,7 +80,7 @@ def setup_servers():
 
 
 # Helper function to wait for server
-def wait_for_server(port, timeout=120):
+def wait_for_server(port, timeout=240):
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
