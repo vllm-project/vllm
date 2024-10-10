@@ -106,6 +106,7 @@ class InternParallelAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         *,
         num_dummy_heads: int = 0,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -134,6 +135,7 @@ class InternParallelAttention(nn.Module):
             num_dummy_heads + self.num_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv",
         )
 
         self.qk_normalization = config.qk_normalization
@@ -150,6 +152,7 @@ class InternParallelAttention(nn.Module):
             self.dummy_dim,
             self.embed_dim,
             quant_config=quant_config,
+            prefix=f"{prefix}.proj",
         )
 
     def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):
@@ -253,20 +256,26 @@ class InternSdpaAttention(nn.Module):
 
 class InternMLP(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
         self.fc1 = ColumnParallelLinear(config.hidden_size,
                                         config.intermediate_size,
                                         bias=True,
-                                        quant_config=quant_config)
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc1")
         self.fc2 = RowParallelLinear(config.intermediate_size,
                                      config.hidden_size,
                                      bias=True,
-                                     quant_config=quant_config)
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.fc2")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -284,6 +293,7 @@ class InternVisionEncoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         *,
         num_dummy_heads: int = 0,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -293,9 +303,10 @@ class InternVisionEncoderLayer(nn.Module):
 
         self.attn = self._init_attn(config,
                                     quant_config,
-                                    num_dummy_heads=num_dummy_heads)
+                                    num_dummy_heads=num_dummy_heads,
+                                    prefix=prefix)
 
-        self.mlp = InternMLP(config, quant_config=quant_config)
+        self.mlp = InternMLP(config, quant_config=quant_config, prefix=prefix)
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim,
                                              eps=config.layer_norm_eps)
         self.norm2 = NORM2FN[self.norm_type](self.embed_dim,
@@ -312,6 +323,7 @@ class InternVisionEncoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig],
         *,
         num_dummy_heads: int,
+        prefix: str = "",
     ):
         # fallback to sdpa attention if tp unavailable
         tp_size = get_tensor_model_parallel_world_size()
@@ -320,7 +332,8 @@ class InternVisionEncoderLayer(nn.Module):
         if USE_XFORMERS_OPS and (num_heads + num_dummy_heads) % tp_size == 0:
             return InternParallelAttention(config,
                                            quant_config=quant_config,
-                                           num_dummy_heads=num_dummy_heads)
+                                           num_dummy_heads=num_dummy_heads,
+                                           prefix=prefix)
 
         return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
 
@@ -346,6 +359,7 @@ class InternVisionEncoder(nn.Module):
         *,
         num_hidden_layers_override: Optional[int] = None,
         num_dummy_heads: int = 0,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -359,7 +373,8 @@ class InternVisionEncoder(nn.Module):
         self.layers = nn.ModuleList([
             InternVisionEncoderLayer(config,
                                      quant_config,
-                                     num_dummy_heads=num_dummy_heads)
+                                     num_dummy_heads=num_dummy_heads,
+                                     prefix=prefix)
             for _ in range(num_hidden_layers)
         ])
 
@@ -381,6 +396,7 @@ class InternVisionModel(nn.Module):
         *,
         num_hidden_layers_override: Optional[int] = None,
         num_dummy_heads: int = 0,
+        prefix: str = "",
     ) -> None:
         # NOTE: Vision tower is not quantized by any of the supported methods
         if quant_config is not None:
@@ -396,6 +412,7 @@ class InternVisionModel(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
+            prefix=prefix,
         )
 
     def get_input_embeddings(self):

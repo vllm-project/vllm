@@ -169,7 +169,8 @@ class BlipParallelAttention(nn.Module):
         self,
         config: Union[BlipVisionConfig, Blip2VisionConfig],
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -189,11 +190,13 @@ class BlipParallelAttention(nn.Module):
             self.num_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv",
         )
         self.projection = RowParallelLinear(
             self.embed_dim,
             self.embed_dim,
             quant_config=quant_config,
+            prefix=f"{prefix}.projection",
         )
 
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -235,9 +238,12 @@ class BlipParallelAttention(nn.Module):
 
 class BlipMLP(nn.Module):
 
-    def __init__(self,
-                 config: Union[BlipVisionConfig, Blip2VisionConfig],
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: BlipVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.config = config
@@ -246,11 +252,13 @@ class BlipMLP(nn.Module):
         self.fc1 = ColumnParallelLinear(config.hidden_size,
                                         config.intermediate_size,
                                         bias=True,
-                                        quant_config=quant_config)
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc1")
         self.fc2 = RowParallelLinear(config.intermediate_size,
                                      config.hidden_size,
                                      bias=True,
-                                     quant_config=quant_config)
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.fc2")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -262,9 +270,12 @@ class BlipMLP(nn.Module):
 
 class BlipEncoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: Union[BlipVisionConfig, Blip2VisionConfig],
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: BlipVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         # fallback to sdpa attention if tp unavailable
@@ -272,14 +283,15 @@ class BlipEncoderLayer(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
             self.self_attn = BlipParallelAttention(config,
-                                                   quant_config=quant_config)
+                                                   quant_config=quant_config,
+                                                   prefix=prefix)
         else:
             # Blip doesn't have SDPA attention implemented in transformers
             # use eager attention instead for cpu backend
             self.self_attn = BlipAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
-        self.mlp = BlipMLP(config, quant_config=quant_config)
+        self.mlp = BlipMLP(config, quant_config=quant_config, prefix=prefix)
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
@@ -307,10 +319,13 @@ class BlipEncoder(nn.Module):
         config: BlipConfig
     """
 
-    def __init__(self,
-                 config: Union[BlipVisionConfig, Blip2VisionConfig],
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None):
+    def __init__(
+        self,
+        config: BlipVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        num_hidden_layers_override: Optional[int] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.config = config
@@ -321,8 +336,9 @@ class BlipEncoder(nn.Module):
             num_hidden_layers = num_hidden_layers_override
 
         self.layers = nn.ModuleList([
-            BlipEncoderLayer(config=config, quant_config=quant_config)
-            for _ in range(num_hidden_layers)
+            BlipEncoderLayer(config=config,
+                             quant_config=quant_config,
+                             prefix=prefix) for _ in range(num_hidden_layers)
         ])
 
     def forward(self, inputs_embeds: torch.Tensor):
@@ -339,11 +355,12 @@ class BlipVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: Union[BlipVisionConfig, Blip2VisionConfig],
+        config: BlipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         *,
         num_hidden_layers_override: Optional[int] = None,
         require_post_norm: Optional[bool] = None,
+        prefix: str = "",
     ) -> None:
         # NOTE: Vision tower is not quantized by any of the supported methods
         if quant_config is not None:
@@ -362,6 +379,7 @@ class BlipVisionModel(nn.Module):
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            prefix=prefix,
         )
 
         num_hidden_layers = config.num_hidden_layers

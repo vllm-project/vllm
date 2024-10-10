@@ -356,9 +356,13 @@ class MllamaVisionSdpaAttention(nn.Module):
 
 class MllamaVisionEncoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: config_mllama.MllamaVisionConfig,
-                 is_gated: bool = False):
+    def __init__(
+        self,
+        config: config_mllama.MllamaVisionConfig,
+        quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
+        is_gated: bool = False,
+    ) -> None:
         super().__init__()
 
         self.hidden_size = config.hidden_size
@@ -367,7 +371,7 @@ class MllamaVisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         self.self_attn = MllamaVisionSdpaAttention(config)
-        self.mlp = CLIPMLP(config)
+        self.mlp = CLIPMLP(config, quant_config=quant_config, prefix=prefix)
 
         self.input_layernorm = nn.LayerNorm(self.hidden_size,
                                             eps=config.norm_eps)
@@ -404,16 +408,22 @@ class MllamaVisionEncoderLayer(nn.Module):
 
 class MllamaVisionEncoder(nn.Module):
 
-    def __init__(self,
-                 config: config_mllama.MllamaVisionConfig,
-                 num_layers=32,
-                 is_gated=False,
-                 output_hidden_states=None):
+    def __init__(
+        self,
+        config: config_mllama.MllamaVisionConfig,
+        quant_config: Optional[QuantizationConfig],
+        num_layers: int = 32,
+        is_gated: bool = False,
+        output_hidden_states=None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([
-            MllamaVisionEncoderLayer(config, is_gated)
-            for _ in range(num_layers)
+            MllamaVisionEncoderLayer(config,
+                                     quant_config=quant_config,
+                                     is_gated=is_gated,
+                                     prefix=prefix) for _ in range(num_layers)
         ])
         self.output_hidden_states = output_hidden_states or []
 
@@ -440,8 +450,12 @@ class MllamaVisionEncoder(nn.Module):
 
 class MllamaVisionModel(nn.Module):
 
-    def __init__(self, config: config_mllama.MllamaVisionConfig,
-                 quant_config: Optional[QuantizationConfig]):
+    def __init__(
+        self,
+        config: config_mllama.MllamaVisionConfig,
+        quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
+    ) -> None:
         # NOTE: Vision tower is not quantized by any of the supported methods
         if quant_config is not None:
             quant_config = None
@@ -483,12 +497,19 @@ class MllamaVisionModel(nn.Module):
         # encoders
         self.transformer = MllamaVisionEncoder(
             config,
+            quant_config,
             config.num_hidden_layers,
             is_gated=False,
-            output_hidden_states=config.intermediate_layers_indices)
-        self.global_transformer = MllamaVisionEncoder(config,
-                                                      config.num_global_layers,
-                                                      is_gated=True)
+            output_hidden_states=config.intermediate_layers_indices,
+            prefix=prefix,
+        )
+        self.global_transformer = MllamaVisionEncoder(
+            config,
+            quant_config,
+            config.num_global_layers,
+            is_gated=True,
+            prefix=prefix,
+        )
 
     def apply_class_embedding(self,
                               hidden_state: torch.Tensor) -> torch.Tensor:
@@ -631,6 +652,7 @@ class MllamaTextCrossAttention(nn.Module):
         config: Optional[config_mllama.MllamaTextConfig] = None,
         layer_idx: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -656,6 +678,7 @@ class MllamaTextCrossAttention(nn.Module):
             self.num_key_value_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.num_heads * self.head_dim,
@@ -663,6 +686,7 @@ class MllamaTextCrossAttention(nn.Module):
             bias=False,
             input_is_parallel=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
         # vllm.model_executor.layers.layernorm.RMSNorm has precision issue,
         # use huggingface's instead
@@ -675,6 +699,7 @@ class MllamaTextCrossAttention(nn.Module):
             self.head_dim,
             self.scaling,
             self.num_local_key_value_heads,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
@@ -717,15 +742,21 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
     """Cross-attention transformer block with tanh-gated attention
     and feedforward."""
 
-    def __init__(self, config: config_mllama.MllamaTextConfig, layer_idx: int,
-                 quant_config: Optional[QuantizationConfig]) \
-        -> None:
+    def __init__(
+        self,
+        config: config_mllama.MllamaTextConfig,
+        layer_idx: int,
+        quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.layer_idx = layer_idx
         self.cross_attn = MllamaTextCrossAttention(
             config=config,
             layer_idx=layer_idx,
             quant_config=quant_config,
+            prefix=prefix,
         )
 
         self.input_layernorm = RMSNorm(config.hidden_size,
@@ -737,6 +768,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            prefix=prefix,
         )
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
@@ -778,10 +810,15 @@ class MllamaTextModel(nn.Module):
     config_class = config_mllama.MllamaTextConfig
     base_model_prefix = "model"
 
-    def __init__(self, config: config_mllama.MllamaTextConfig,
-                 cache_config: Optional[CacheConfig],
-                 quant_config: Optional[QuantizationConfig]):
+    def __init__(
+        self,
+        config: config_mllama.MllamaTextConfig,
+        cache_config: Optional[CacheConfig],
+        quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size + 8,
@@ -793,13 +830,18 @@ class MllamaTextModel(nn.Module):
             if layer_idx in self.cross_attention_layers:
                 layers.append(
                     MllamaCrossAttentionDecoderLayer(
-                        config, layer_idx, quant_config=quant_config))
+                        config,
+                        layer_idx,
+                        quant_config=quant_config,
+                        prefix=prefix,
+                    ))
             else:
                 # TODO: force LlamaDecoderLayer to config.attention_bias=False
                 layers.append(
                     LlamaDecoderLayer(config,
                                       cache_config=cache_config,
-                                      quant_config=quant_config))
+                                      quant_config=quant_config,
+                                      prefix=prefix))
 
         self.layers = nn.ModuleList(layers)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -854,12 +896,19 @@ class MllamaForCausalLM(nn.Module):
         "MllamaCrossAttentionDecoderLayer", "MllamaSelfAttentionDecoderLayer"
     ]
 
-    def __init__(self, config: config_mllama.MllamaTextConfig,
-                 cache_config: Optional[CacheConfig],
-                 quant_config: Optional[QuantizationConfig]):
+    def __init__(
+        self,
+        config: config_mllama.MllamaTextConfig,
+        cache_config: Optional[CacheConfig],
+        quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.vocab_size = config.vocab_size
-        self.model = MllamaTextModel(config, cache_config, quant_config)
+        self.model = MllamaTextModel(config,
+                                     cache_config,
+                                     quant_config,
+                                     prefix=f"{prefix}.model")
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
@@ -920,6 +969,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             config.text_config,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix="language_model",
         )
         self.multi_modal_projector = nn.Linear(
             config.vision_config.vision_output_dim,
