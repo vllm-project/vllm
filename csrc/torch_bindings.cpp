@@ -140,13 +140,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantized GEMM for AWQ.
   ops.def(
       "awq_gemm(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "
-      "Tensor _zeros, int split_k_iters) -> Tensor");
+      "Tensor _zeros, SymInt split_k_iters) -> Tensor");
   ops.impl("awq_gemm", torch::kCUDA, &awq_gemm);
 
   // Dequantization for AWQ.
   ops.def(
       "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
-      "Tensor _zeros, int split_k_iters, int thx, int thy) -> Tensor");
+      "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
   ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);
 
   // Note about marlin kernel 'workspace' arguments:
@@ -166,7 +166,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Marlin (Dense) Optimized Quantized GEMM for GPTQ.
   ops.def(
       "marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor! workspace, int size_m, int size_n, int size_k) -> Tensor");
+      "Tensor! workspace, SymInt size_m, SymInt size_n, SymInt size_k) -> Tensor");
   // conditionally compiled so impl in source file
 
   // Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ.
@@ -174,7 +174,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "gptq_marlin_24_gemm(Tensor a, Tensor b_q_weight, Tensor b_meta, "
       "Tensor b_scales, Tensor workspace, "
       "__torch__.torch.classes._core_C.ScalarType b_q_type, "
-      "int size_m, int size_n, int size_k) -> Tensor");
+      "SymInt size_m, SymInt size_n, SymInt size_k) -> Tensor");
   //  conditionally compiled so impl in source file
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
@@ -202,7 +202,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
       "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor workspace, "
       "__torch__.torch.classes._core_C.ScalarType b_q_type, "
-      "int size_m, int size_n, int size_k, bool is_k_full, "
+      "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
       "bool has_zp, bool use_fp32_reduce) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
@@ -219,32 +219,32 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // conditionally compiled so impl registrations are in source file
 
   // Dequantization for GGML.
-  ops.def("ggml_dequantize(Tensor W, int type, int m, int n) -> Tensor");
+  ops.def("ggml_dequantize(Tensor W, int type, SymInt m, SymInt n) -> Tensor");
   ops.impl("ggml_dequantize", torch::kCUDA, &ggml_dequantize);
 
   // mmvq kernel for GGML.
   ops.def(
-      "ggml_mul_mat_vec_a8(Tensor W, Tensor X, int type, int row) "
+      "ggml_mul_mat_vec_a8(Tensor W, Tensor X, int type, SymInt row) "
       "-> Tensor");
   ops.impl("ggml_mul_mat_vec_a8", torch::kCUDA, &ggml_mul_mat_vec_a8);
 
   // mmq kernel for GGML.
-  ops.def("ggml_mul_mat_a8(Tensor W, Tensor X, int type, int row) -> Tensor");
+  ops.def("ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
 
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def(
       "fp8_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor! workspace, int num_bits, int size_m, int size_n, "
-      "int size_k) -> Tensor");
+      "Tensor! workspace, int num_bits, SymInt size_m, SymInt size_n, "
+      "SymInt size_k) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
   // marlin_qqq_gemm for QQQ.
   ops.def(
       "marlin_qqq_gemm(Tensor a, Tensor b_q_weight, "
       "Tensor s_tok, Tensor s_ch, Tensor s_group, "
-      "Tensor! workspace, int size_m, int size_n, "
-      "int size_k) -> Tensor");
+      "Tensor! workspace, SymInt size_m, SymInt size_n, "
+      "SymInt size_k) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column

@@ -254,6 +254,28 @@ def test_gptq_marlin_gemm(
     assert max_diff < 0.04
 
 
+@torch.compile(fullgraph=True)
+def marlin_24_gemm_tester(a_input,
+                          marlin_24_q_w_comp,
+                          marlin_24_meta,
+                          marlin_24_s,
+                          scratch,
+                          quant_type,
+                          size_m,
+                          size_n,
+                          size_k):
+    return ops.gptq_marlin_24_gemm(
+        a_input,
+        marlin_24_q_w_comp,
+        marlin_24_meta,
+        marlin_24_s,
+        scratch,
+        quant_type,
+        size_m,
+        size_n,
+        size_k
+    )
+
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_24_K_CHUNKS)
@@ -283,10 +305,18 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size,
     opcheck(torch.ops._C.gptq_marlin_24_gemm,
             (a_input, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s,
              workspace_24.scratch, quant_type, a_input.shape[0],
-             b_weight.shape[1], a_input.shape[1]),
-            test_utils=DEFAULT_OPCHECK_TEST_UTILS)
+             b_weight.shape[1], a_input.shape[1]))#    test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
-    output = ops.gptq_marlin_24_gemm(
+#    torch._higher_order_ops.effects._register_effectful_op(torch.ops._C.gptq_marlin_24_gemm.default, torch._higher_order_ops.effects._EffectType.ORDERED)
+
+#    torch._higher_order_ops.effects.SIDE_EFFECTS[torch.ops._C.gptq_marlin_24_gemm.default] = torch._higher_order_ops.effects._EffectType.ORDERED
+#    torch._higher_order_ops.effects.SIDE_EFFECTS[torch.ops._C.gptq_marlin_24_gemm.default] = None
+#    print(f"so = {isinstance(quant_type, torch.ScriptObject)}")
+#    print(f"aliasing = {torch._higher_order_ops.effects.has_aliasing(torch.ops._C.gptq_marlin_24_gemm.default)}")
+#    print(f"effect_key = {torch._higher_order_ops.effects.get_effect_key(torch.ops._C.gptq_marlin_24_gemm.default, (a_input, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s, workspace_24.scratch, quant_type, a_input.shape[0], b_weight.shape[1], a_input.shape[1]), {})}")
+    print(f"has = {torch._higher_order_ops.effects.has_effects(torch.ops._C.gptq_marlin_24_gemm.default, (a_input, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s, workspace_24.scratch, quant_type, a_input.shape[0], b_weight.shape[1], a_input.shape[1]), {})}")
+
+    output = marlin_24_gemm_tester(
         a_input,
         marlin_24_q_w_comp,
         marlin_24_meta,
