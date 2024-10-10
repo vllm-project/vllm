@@ -17,6 +17,9 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
+from vllm.attention.backends.utils import CommonAttentionState
+from vllm.compilation.compile_context import set_compile_context
+from vllm.compilation.levels import CompilationLevel
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -1118,10 +1121,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
-            from vllm.compilation.backends import vllm_backend
+        if envs.VLLM_TORCH_COMPILE_LEVEL == CompilationLevel.DYNAMO_AS_IS \
+            and supports_dynamo():
             from vllm.plugins import get_torch_compile_backend
-            backend = get_torch_compile_backend() or vllm_backend
+            backend = get_torch_compile_backend() or "eager"
             self.model = torch.compile(
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
@@ -1281,7 +1284,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 batch_size=batch_size,
                 dtype=self.model_config.dtype,
                 device=self.device)
-        self.execute_model(model_input, kv_caches, intermediate_tensors)
+
+        graph_batch_size = self.max_batchsize_to_capture
+        batch_size_capture_list = [
+            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
+        ]
+        if self.model_config.enforce_eager:
+            batch_size_capture_list = []
+        with set_compile_context(batch_size_capture_list):
+            self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
         return
 
