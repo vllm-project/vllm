@@ -30,9 +30,6 @@ Create a file named ``Dockerfile.nginx``:
 
 .. code-block:: console
 
-    # Copyright (C) 2024 Intel Corporation
-    # SPDX-License-Identifier: Apache-2.0
-
     FROM nginx:latest
     RUN rm /etc/nginx/conf.d/default.conf
     EXPOSE 80
@@ -74,15 +71,9 @@ Create a file named ``nginx_conf/nginx.conf``. Note that you can add as many ser
 Build vLLM Container
 --------------------
 
-Notes:
-
-* Adjust the model name that you want to use in your vLLM servers if you don't want to use ``Llama-2-7b-hf``. 
-
 .. code-block:: console
 
     cd $vllm_root
-    model=meta-llama/Llama-2-7b-hf
-    sed -i "s|ENTRYPOINT \[\"python3\", \"-m\", \"vllm.entrypoints.openai.api_server\"\]|ENTRYPOINT [\"python3\", \"-m\", \"vllm.entrypoints.openai.api_server\", \"--model\", \"$model\"]|" Dockerfile.cpu
     docker build -f Dockerfile.cpu . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
 
 .. _nginxloadbalancer_nginx_docker_network:
@@ -105,6 +96,7 @@ Notes:
 * If you have your HuggingFace models cached somewhere else, update ``hf_cache_dir`` below. 
 * If you don't have an existing HuggingFace cache you will want to start ``vllm0`` and wait for the model to complete downloading and the server to be ready. This will ensure that ``vllm1`` can leverage the model you just downloaded and it won't have to be downloaded again.
 * The below example assumes a machine where socket 0 has cores 0-47 and socket 1 has cores 48-95. Adjust as needed for your application.
+* Adjust the model name that you want to use in your vLLM servers if you don't want to use ``Llama-2-7b-chat-hf``. 
 
 .. code-block:: console
 
@@ -112,8 +104,8 @@ Notes:
     hf_cache_dir=~/.cache/huggingface/
     SVR_0_CORES=0-47
     SVR_1_CORES=48-95
-    docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_0_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm
-    docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_1_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm 
+    docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_0_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm --model meta-llama/Llama-2-7b-chat-hf
+    docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_1_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm --model meta-llama/Llama-2-7b-chat-hf
 
 .. _nginxloadbalancer_nginx_launch_nginx:
 
