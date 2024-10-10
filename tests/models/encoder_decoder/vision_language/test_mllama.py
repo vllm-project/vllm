@@ -317,15 +317,13 @@ def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
 
     inputs = [(
         [
-            "<|begin_of_text|>The meaning of the image <|image|> is",  # noqa: E501
-            "<|begin_of_text|>Is this <|image|> a stop sign and is this <|image|> a cherry blossom?",  # noqa: E501
+            "<|begin_of_text|>The content of the image <|image|> is",  # noqa: E501
+            "<|begin_of_text|>Between the first image <|image|> and the second image<|image|>, "  # noqa: E501
+            "which is a stop sign and which is a cherry blossom?",  # noqa: E501
         ],
         [
-            [stop_sign.resize((1536, 512))],
-            [
-                stop_sign.resize((1024, 512)),
-                cherry_blossom.resize((512, 2028)),
-            ],
+            [stop_sign],
+            [stop_sign, cherry_blossom],
         ])]
 
     _run_test(
