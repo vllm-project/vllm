@@ -447,6 +447,8 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
 
+        self._computed_block_hashes: List[int] = []
+
     @property
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
@@ -530,6 +532,61 @@ class Sequence:
 
         return self.data._cached_all_token_ids[-num_new_tokens:]
 
+    def get_block_hash(self, block_idx: int) -> Optional[int]:
+
+        # Lazy update the block hashes on the first invocation.
+        if block_idx >= len(self._computed_block_hashes):
+            self._update_block_hashes()
+
+        if block_idx < len(self._computed_block_hashes):
+            return self._computed_block_hashes[block_idx]
+        return None
+
+    def get_block_hashes(self) -> List[int]:
+        # TODO(rickyx): maybe better to have an API to track if the computed hash is updated.
+        self._update_block_hashes()
+        return self._computed_block_hashes
+
+    def _update_block_hashes(self):
+        """
+        Update the block hashes for all the full blocks in the sequence.
+
+        It skips the blocks that have already been computed.
+        """
+        token_ids = self.get_token_ids()  # All token ids in the sequence
+        num_full_blocks = len(token_ids) // self.block_size
+        cur_num_full_blocks = len(self._computed_block_hashes)
+        prev_block_hash = (
+            None if cur_num_full_blocks == 0 else self._computed_block_hashes[-1]
+        )
+        for i in range(cur_num_full_blocks, num_full_blocks):
+            block_token_ids = token_ids[i * self.block_size : (i + 1) * self.block_size]
+            assert len(block_token_ids) == self.block_size
+            block_hash = hash(
+                (
+                    prev_block_hash,  # Previous block hash
+                    self.from_decoder_prompt,  # Whether the sequence is decoder-only
+                    # LoRA int id since the attention output will depend on
+                    # LoRA with same token ids.
+                    self.lora_int_id,
+                    *block_token_ids,  # The block token ids
+                )
+            )
+            self._computed_block_hashes.append(block_hash)
+            prev_block_hash = block_hash
+
+    def _reset_block_hashes(self):
+        """
+        Clear all the block hashes from output tokens. The full blocks for the
+        prompt tokens should not be cleared.
+
+        This is used when the sequence is recomputed.
+        """
+        num_full_prompt_blocks = self.get_prompt_len() // self.block_size
+        self._computed_block_hashes = self._computed_block_hashes[
+            num_full_prompt_blocks:
+        ]
+
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
 
@@ -546,12 +603,17 @@ class Sequence:
     def reset_state_for_recompute(self):
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
+        self._reset_block_hashes()
 
     def append_token_id(self, token_id: int, logprobs: Dict[int,
                                                             Logprob]) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
+
+    def update_num_computed_tokens(self, num_tokens: int):
+        self.data.update_num_computed_tokens(num_tokens)
+        self._update_block_hashes()
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -837,7 +899,7 @@ class SequenceGroup:
         """Update number of tokens computed so far."""
         for seq in self.seqs:
             if not seq.is_finished():
-                seq.data.update_num_computed_tokens(num_new_computed_tokens)
+                seq.update_num_computed_tokens(num_new_computed_tokens)
 
     def get_num_uncomputed_tokens(self) -> int:
         num_uncomputed_tokens = 0

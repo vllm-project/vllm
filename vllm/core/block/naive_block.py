@@ -60,10 +60,13 @@ class NaiveBlockAllocator(BlockAllocator):
             # a block pool between allocators
             self._block_pool = block_pool
 
-    def allocate_immutable_block(self,
-                                 prev_block: Optional[Block],
-                                 token_ids: List[int],
-                                 device: Optional[Device] = None) -> Block:
+    def allocate_immutable_block(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+        device: Optional[Device] = None,
+        block_hash: Optional[int] = None,
+    ) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
 
@@ -77,15 +80,19 @@ class NaiveBlockAllocator(BlockAllocator):
             Block: The newly allocated immutable block.
         """
         assert device is None
+        assert block_hash is None
+
         block = self.allocate_mutable_block(prev_block=prev_block)
         block.append_token_ids(token_ids)
         return block
 
     def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            device: Optional[Device] = None) -> List[Block]:
+        self,
+        prev_block: Optional[Block],
+        block_token_ids: List[List[int]],
+        block_hashes: Optional[List[Optional[int]]] = None,
+        device: Optional[Device] = None,
+    ) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
 
@@ -104,9 +111,12 @@ class NaiveBlockAllocator(BlockAllocator):
 
         return blocks
 
-    def allocate_mutable_block(self,
-                               prev_block: Optional[Block],
-                               device: Optional[Device] = None) -> Block:
+    def allocate_mutable_block(
+        self,
+        prev_block: Optional[Block],
+        device: Optional[Device] = None,
+        block_hash: Optional[int] = None,
+    ) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
         Args:
@@ -118,6 +128,8 @@ class NaiveBlockAllocator(BlockAllocator):
             Block: The newly allocated mutable block.
         """
         assert device is None
+        assert block_hash is None
+
         block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
@@ -318,7 +330,7 @@ class NaiveBlockAllocator(BlockAllocator):
             else:
                 tmp_block = self.allocate_mutable_block(
                     prev_block=block.prev_block)
-                tmp_block.append_token_ids(block.token_ids)
+                tmp_block.append_token_ids(block.token_ids, block_hash=None)
 
             block_id = tmp_block.block_id
             tmp_block.block_id = None
@@ -328,6 +340,9 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
+
+    def get_cached_blocks(self, block_hashes: List[int]) -> List[int]:
+        return []
 
 
 class NaiveBlock(Block):
@@ -368,14 +383,17 @@ class NaiveBlock(Block):
 
         self._append_token_ids_no_cow(token_ids)
 
-    def append_token_ids(self, token_ids: List[int]) -> None:
-        """Appends the given token IDs to the block and performs a 
+    def append_token_ids(
+        self, token_ids: List[int], block_hash: Optional[int] = None
+    ) -> None:
+        """Appends the given token IDs to the block and performs a
         copy-on-write if necessary.
 
         Args:
-            token_ids (Optional[List[int]]): The token IDs to be appended 
+            token_ids (Optional[List[int]]): The token IDs to be appended
                 to the block.
         """
+        assert block_hash is None
         self._append_token_ids_no_cow(token_ids)
 
         if self._block_id is not None:
@@ -447,3 +465,8 @@ class NaiveBlock(Block):
     @property
     def content_hash(self) -> Optional[int]:
         return None
+
+    def set_content_hash(self, content_hash: int) -> None:
+        raise NotImplementedError(
+            "Setting content hash is not supported for naive block"
+        )

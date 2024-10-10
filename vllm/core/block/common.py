@@ -196,8 +196,25 @@ class BlockPool:
                                    allocator=self._allocator,
                                    block_id=None))
 
-    def init_block(self, prev_block: Optional[Block], token_ids: List[int],
-                   block_size: int, physical_block_id: Optional[int]) -> Block:
+    # TODO(rickyx): This should take in kwargs for flexible initialization of different types of blocks
+    # Right now, we update explicitly blocks with other args after initialization, e.g. block_hash
+    # computed for the prefix caching block.
+    def init_block(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+        block_size: int,
+        physical_block_id: Optional[int],
+    ) -> Block:
+        """Initializes a block with the given parameters.
+
+        Args:
+            prev_block (Optional[Block]): The previous block in the sequence.
+            token_ids (List[int]): The token IDs to be stored in the block.
+            block_size (int): The size of the block.
+            physical_block_id (Optional[int]): The physical block ID.
+            block_hash (Optional[int]): The hash of the block's content.
+        """
         if len(self._free_ids) == 0:
             self.increase_pool()
             assert len(self._free_ids) > 0
@@ -209,8 +226,9 @@ class BlockPool:
             prev_block=prev_block,
             token_ids=token_ids,
             block_size=block_size,
-            allocator=block._allocator,  # type: ignore[attr-defined] 
-            block_id=physical_block_id)
+            allocator=block._allocator,  # type: ignore[attr-defined]
+            block_id=physical_block_id,
+        )
         block.pool_id = pool_id  # type: ignore[attr-defined]
         return block
 
@@ -248,11 +266,13 @@ class BlockList:
         for block in self._blocks:
             self._add_block_id(block.block_id)
 
-    def append_token_ids(self, block_index: int, token_ids: List[int]) -> None:
+    def append_token_ids(
+        self, block_index: int, token_ids: List[int], block_hash: Optional[int]
+    ) -> None:
         block = self._blocks[block_index]
         prev_block_id = block.block_id
 
-        block.append_token_ids(token_ids)
+        block.append_token_ids(token_ids, block_hash)
 
         # CoW or promotion may update the internal block_id
         if prev_block_id != block.block_id:

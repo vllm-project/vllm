@@ -4,6 +4,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
+from vllm.sequence import Sequence
 from vllm.utils import Device
 
 
@@ -116,8 +117,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 self.allocate_mutable_block(None, Device.GPU))
         return self._null_block
 
-    def allocate_mutable_block(self, prev_block: Optional[Block],
-                               device: Device) -> Block:
+    def allocate_mutable_block(
+        self,
+        prev_block: Optional[Block],
+        device: Device,
+    ) -> Block:
         """Allocates a new mutable block on the specified device.
 
         Args:
@@ -130,9 +134,13 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].allocate_mutable_block(prev_block)
 
-    def allocate_immutable_blocks(self, prev_block: Optional[Block],
-                                  block_token_ids: List[List[int]],
-                                  device: Device) -> List[Block]:
+    def allocate_immutable_blocks(
+        self,
+        prev_block: Optional[Block],
+        block_token_ids: List[List[int]],
+        device: Device,
+        block_hashes: Optional[List[Optional[int]]] = None,
+    ) -> List[Block]:
         """Allocates a new group of immutable blocks with the provided block 
         token IDs on the specified device.
 
@@ -148,7 +156,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 containing the provided block token IDs.
         """
         return self._allocators[device].allocate_immutable_blocks(
-            prev_block, block_token_ids)
+            prev_block, block_token_ids, block_hashes
+        )
+
+    def get_cached_blocks(
+        self,
+        block_hashes: List[int],
+        device: Device,
+    ) -> List[int]:
+        return self._allocators[device].get_cached_blocks(block_hashes)
 
     def allocate_immutable_block(self, prev_block: Optional[Block],
                                  token_ids: List[int],
@@ -402,3 +418,6 @@ class NullBlock(Block):
     @property
     def content_hash(self):
         return self._proxy.content_hash
+
+    def set_content_hash(self, content_hash: Optional[int]) -> None:
+        raise NotImplementedError("NullBlock does not support set_content_hash")

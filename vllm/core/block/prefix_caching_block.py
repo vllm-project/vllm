@@ -134,54 +134,70 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             computed=computed,
         )
 
-    def allocate_immutable_block(self,
-                                 prev_block: Optional[Block],
-                                 token_ids: List[int],
-                                 device: Optional[Device] = None) -> Block:
+    def allocate_immutable_block(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+        block_hash: Optional[int] = None,
+        device: Optional[Device] = None,
+    ) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
 
         Args:
             prev_block (Optional[Block]): The previous block in the sequence.
             token_ids (List[int]): The token IDs to be stored in the block.
+            block_hash (int): The hash of the block's content.
 
         Returns:
             Block: The allocated immutable block.
         """
         assert device is None
+        assert len(token_ids) == self._block_size, "An immutable block should be full"
+        assert (
+            block_hash is not None
+        ), "An immutable block should have a content hash for prefix caching"
         assert_prefix_caching_block_or_none(prev_block)
 
-        # First, try to create a block that points to cached data
-        block = self._block_pool.init_block(prev_block=prev_block,
-                                            token_ids=token_ids,
-                                            block_size=self._block_size,
-                                            physical_block_id=None)
-        assert block.content_hash is not None
-
-        cached_block_id = self._cached_blocks.get(block.content_hash, None)
+        cached_block_id = self._cached_blocks.get(block_hash, None)
         if cached_block_id is not None:
+            # Initialize a block that points to cached data
+            block: Block = self._block_pool.init_block(
+                prev_block=prev_block,
+                token_ids=token_ids,
+                block_size=self._block_size,
+                physical_block_id=cached_block_id,
+            )
+            block.set_content_hash(block_hash)
             self.metric_data.query(hit=True)
-            block.block_id = cached_block_id
             self._incr_refcount_cached_block(block)
             return block
         self.metric_data.query(hit=False)
-        self._block_pool.free_block(block)
 
         # No cached block => Allocate a new block
         block = self.allocate_mutable_block(prev_block)
-        block.append_token_ids(token_ids)
+        block.append_token_ids(token_ids, block_hash=block_hash)
         return block
 
     def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            device: Optional[Device] = None) -> List[Block]:
+        self,
+        prev_block: Optional[Block],
+        block_token_ids: List[List[int]],
+        block_hashes: Optional[List[int]] = None,
+        device: Optional[Device] = None,
+    ) -> List[Block]:
         blocks = []
-        for token_ids in block_token_ids:
-            prev_block = self.allocate_immutable_block(prev_block=prev_block,
-                                                       token_ids=token_ids,
-                                                       device=device)
+        assert (
+            block_hashes is not None
+        ), "block_hashes must be provided for immutable prefix cache blocks"
+
+        for token_ids, block_hash in zip(block_token_ids, block_hashes):
+            prev_block = self.allocate_immutable_block(
+                prev_block=prev_block,
+                token_ids=token_ids,
+                block_hash=block_hash,
+                device=device,
+            )
             blocks.append(prev_block)
         return blocks
 
@@ -284,7 +300,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def _maybe_allocate_hashless_block_id(self) -> Optional[BlockId]:
         try:
-            # Allocate mutable block and extract its block_id
+            # Allocate mutable block and extrct its block_id
             block = self._hashless_allocator.allocate_mutable_block(
                 prev_block=None)
             block_id = block.block_id
@@ -373,11 +389,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert refcount != 1, "can't fork free'd block_id = {}".format(
                 block_id)
 
-            forked_block = self._block_pool.init_block(
+            forked_block: Block = self._block_pool.init_block(
                 prev_block=prev_block,
                 token_ids=block.token_ids,
                 block_size=self._block_size,
-                physical_block_id=block_id)
+                physical_block_id=block_id,
+            )
+
+            forked_block.set_content_hash(block.content_hash)
 
             forked_blocks.append(forked_block)
             prev_block = forked_blocks[-1]
@@ -622,17 +641,34 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # and the block_id is assigned to "block" to allow reusing the
             # existing "block" object
             if block.is_full:
+                assert (
+                    block.content_hash is not None
+                ), "Block is full but has no content hash"
                 tmp_block = self.allocate_immutable_block(
-                    prev_block=block.prev_block, token_ids=block.token_ids)
+                    prev_block=block.prev_block,
+                    token_ids=block.token_ids,
+                    block_hash=block.content_hash,
+                )
             else:
+                assert (
+                    block.content_hash is None
+                ), "Block is not full but has content hash"
                 tmp_block = self.allocate_mutable_block(
                     prev_block=block.prev_block)
-                tmp_block.append_token_ids(block.token_ids)
+                tmp_block.append_token_ids(block.token_ids, block_hash=None)
 
             block_id = tmp_block.block_id
             self._block_pool.free_block(tmp_block)
 
             block.block_id = block_id  # Assign block_id
+
+    def get_cached_blocks(self, block_hashes: List[PrefixHash]) -> List[PrefixHash]:
+        # Search for the longest prefix in `block_hashes` that are present cached blocks.
+        # TODO(rickyx): this could be made to binary search.
+        for i, block_hash in enumerate(block_hashes):
+            if block_hash not in self._cached_blocks:
+                return block_hashes[:i]
+        return block_hashes
 
 
 class PrefixCachingBlock(Block):
@@ -685,13 +721,16 @@ class PrefixCachingBlock(Block):
                 token_ids=token_ids,
                 block_size=block_size,
                 block_id=block_id,
-                allocator=self._allocator)
+                allocator=self._allocator,
+            )
         else:
-            self._block = NaiveBlock(prev_block=prev_block,
-                                     token_ids=token_ids,
-                                     block_size=block_size,
-                                     block_id=block_id,
-                                     allocator=self._allocator)
+            self._block = NaiveBlock(
+                prev_block=prev_block,
+                token_ids=token_ids,
+                block_size=block_size,
+                block_id=block_id,
+                allocator=self._allocator,
+            )
 
         self._update_num_tokens_total()
 
@@ -726,12 +765,15 @@ class PrefixCachingBlock(Block):
     def last_accessed(self, last_accessed_ts: float):
         self._last_accessed = last_accessed_ts
 
-    def append_token_ids(self, token_ids: List[int]) -> None:
+    def append_token_ids(
+        self, token_ids: List[int], block_hash: Optional[int] = None
+    ) -> None:
         """Appends the given token IDs to the block and registers the block as
         immutable if the block becomes full.
 
         Args:
             token_ids (List[int]): The token IDs to be appended to the block.
+            block_hash (Optional[int]): The content hash of the block. None if the block is not full.
         """
         # Ensure this is mutable block (not promoted)
         assert self.content_hash is None
@@ -744,14 +786,13 @@ class PrefixCachingBlock(Block):
         assert token_ids, "Got token_ids = {}".format(token_ids)
 
         # Naive block handles CoW.
-        self._block.append_token_ids(token_ids)
+        self._block.append_token_ids(token_ids, block_hash=None)
         self._update_num_tokens_total()
 
-        # If the content hash is present, then the block can be made immutable.
-        # Register ourselves with the allocator, potentially replacing the
-        # physical block index.
-        if self.content_hash is not None:
-            self.block_id = self._allocator.promote_to_immutable_block(self)
+        # Promote the block to an immutable block if it is full.
+        if block_hash is not None:
+            self.set_content_hash(block_hash)
+            self._allocator.promote_to_immutable_block(self)
 
     @property
     def block_id(self) -> Optional[int]:
@@ -785,38 +826,56 @@ class PrefixCachingBlock(Block):
     def prev_block(self) -> Optional[Block]:
         return self._prev_block
 
+    # @property
+    # def content_hash(self) -> Optional[int]:
+    #     """Return the content-based hash of the current block, or None if it is
+    #     not yet defined.
+
+    #     For the content-based hash to be defined, the current block must be
+    #     full.
+    #     """
+    #     # If the hash is already computed, return it.
+    #     if self._cached_content_hash is not None:    #         return self._cached_content_hash
+
+    #     # We cannot compute a hash for the current block because it is not full.
+    #     if not self.is_full:
+    #         return None
+
+    #     is_first_block = self._prev_block is None
+    #     prev_block_hash = (
+    #         None if is_first_block else
+    #         self._prev_block.content_hash  # type: ignore
+    #     )
+
+    #     # Previous block exists but does not yet have a hash.
+    #     # Return no hash in this case.
+    #     if prev_block_hash is None and not is_first_block:
+    #         return None
+
+    #     self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
+    #         is_first_block,
+    #         prev_block_hash,
+    #         cur_block_token_ids=self.token_ids)
+    #     return self._cached_content_hash
+
     @property
     def content_hash(self) -> Optional[int]:
-        """Return the content-based hash of the current block, or None if it is
-        not yet defined.
-
-        For the content-based hash to be defined, the current block must be
-        full.
-        """
-        # If the hash is already computed, return it.
-        if self._cached_content_hash is not None:
-            return self._cached_content_hash
-
-        # We cannot compute a hash for the current block because it is not full.
-        if not self.is_full:
-            return None
-
-        is_first_block = self._prev_block is None
-        prev_block_hash = (
-            None if is_first_block else
-            self._prev_block.content_hash  # type: ignore
-        )
-
-        # Previous block exists but does not yet have a hash.
-        # Return no hash in this case.
-        if prev_block_hash is None and not is_first_block:
-            return None
-
-        self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
-            is_first_block,
-            prev_block_hash,
-            cur_block_token_ids=self.token_ids)
         return self._cached_content_hash
+
+    def set_content_hash(self, content_hash: Optional[int]) -> None:
+        """
+        Set the content hash of the block.
+        """
+        assert self.content_hash is None, "Content hash already set"
+        if content_hash is None:
+            # This could happen when forking a mutable block.
+            assert (
+                not self.is_full
+            ), "Block should not be full when new content hash is None"
+            # No op.
+            return
+        assert self.is_full, "Block is not full when setting content hash"
+        self._cached_content_hash = content_hash
 
     @staticmethod
     def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int],
@@ -878,6 +937,12 @@ class ComputedBlocksTracker:
         assert seq_id in self._cached_computed_seq_blocks
         del self._cached_computed_seq_blocks[seq_id]
 
+    def update_seq(self, seq_id: int, computed_tokens: List[int]):
+        pass
+
+    def get_cached_computed_blocks(self, seq_id: int) -> List[int]:
+        pass
+
     def get_cached_computed_blocks_and_update(
             self, seq_id: int, block_ids: List[int]) -> List[int]:
         """ Look at the class documentation for details
@@ -914,6 +979,8 @@ class ComputedBlocksTracker:
             skip_last_block_id=
             True,  # We skip last block id to avoid caching of full seq
         )
+
+        # QQ(rickyx): why is it possible to actually have a gap?
 
         # Detect if there is a "gap"
         has_gap = len(computed_block_ids) < num_cur_blocks

@@ -11,7 +11,7 @@ from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
-from vllm.utils import Device
+from vllm.utils import Device, cdiv
 
 SeqId = int
 EncoderSeqId = str
@@ -106,6 +106,19 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
 
+    def _get_num_blocks_to_allocate(
+        self, seq: Sequence, num_lookahead_slots: int = 0
+    ) -> int:
+        seq_blocks = seq.get_block_hashes()
+        cached_seq_blocks = self.block_allocator.get_cached_blocks(
+            block_hashes=seq_blocks,
+            device=Device.GPU,
+        )
+
+        num_required_blocks = cdiv(seq.get_len() + num_lookahead_slots, self.block_size)
+
+        return num_required_blocks - len(cached_seq_blocks)
+
     def can_allocate(self,
                      seq_group: SequenceGroup,
                      num_lookahead_slots: int = 0) -> AllocStatus:
@@ -115,32 +128,29 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-        num_required_blocks = BlockTable.get_num_required_blocks(
-            seq.get_token_ids(),
-            block_size=self.block_size,
-            num_lookahead_slots=num_lookahead_slots,
+        num_blocks_to_allocate = self._get_num_blocks_to_allocate(
+            seq, num_lookahead_slots
         )
 
         if seq_group.is_encoder_decoder():
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
-            num_required_blocks += BlockTable.get_num_required_blocks(
-                encoder_seq.get_token_ids(),
-                block_size=self.block_size,
+            num_blocks_to_allocate += self._get_num_blocks_to_allocate(
+                encoder_seq, num_lookahead_slots=0
             )
 
         if self.max_block_sliding_window is not None:
-            num_required_blocks = min(num_required_blocks,
-                                      self.max_block_sliding_window)
+            num_blocks_to_allocate = min(
+                num_blocks_to_allocate, self.max_block_sliding_window
+            )
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
-        if (self.num_total_gpu_blocks - num_required_blocks <
-                self.watermark_blocks):
+        if self.num_total_gpu_blocks - num_blocks_to_allocate < self.watermark_blocks:
             return AllocStatus.NEVER
-        if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
+        if num_free_gpu_blocks - num_blocks_to_allocate >= self.watermark_blocks:
             return AllocStatus.OK
         else:
             return AllocStatus.LATER
@@ -150,10 +160,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
+            enable_prefix_caching=self.enable_caching,
         )
         if seq.get_token_ids():
             # Add blocks to the block table only if the sequence is non empty.
-            block_table.allocate(seq.get_token_ids())
+            block_table.allocate(seq)
 
         return block_table
 
@@ -214,20 +225,22 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         This is used by speculative decoding when speculating future tokens.
         """
 
-        num_touched_blocks = 0
+        num_blocks_to_allocate = 0
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            block_table = self.block_tables[seq.seq_id]
+            num_blocks_to_allocate += self._get_num_blocks_to_allocate(
+                seq, num_lookahead_slots=num_lookahead_slots
+            )
 
-            num_touched_blocks += (
-                block_table.get_num_blocks_touched_by_append_slots(
-                    token_ids=block_table.get_unseen_token_ids(
-                        seq.get_token_ids()),
-                    num_lookahead_slots=num_lookahead_slots,
-                ))
+            # num_touched_blocks += (
+            #     block_table.get_num_blocks_touched_by_append_slots(
+            #         token_ids=block_table.get_unseen_token_ids(
+            #             seq.get_token_ids()),
+            #         num_lookahead_slots=num_lookahead_slots,
+            #     ))
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             Device.GPU)
-        return num_touched_blocks <= num_free_gpu_blocks
+        return num_blocks_to_allocate <= num_free_gpu_blocks
 
     def append_slots(
         self,
@@ -237,10 +250,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         block_table = self.block_tables[seq.seq_id]
 
-        block_table.append_token_ids(
-            token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+        # Extend the block table for any new decoded tokens, as well as reserve
+        # space for lookahead slots.
+        block_table.append_slots(
+            seq=seq,
             num_lookahead_slots=num_lookahead_slots,
-            num_computed_slots=seq.data.get_num_computed_tokens(),
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()

@@ -1,10 +1,31 @@
-from typing import List
+from typing import List, Optional
 
 import pytest
 
+from tests.core.utils import create_dummy_sequence
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.sequence import Logprob
 from vllm.utils import Device, cdiv, chunk_list
+
+
+def make_sequence(
+    request_id: int,
+    token_ids: List[int],
+    block_size: int,
+    num_output_tokens: int = 0,
+    output_tokens: Optional[List[int]] = None,
+):
+    if output_tokens is None:
+        output_tokens = list(range(num_output_tokens))
+
+    seq = create_dummy_sequence(
+        sequence_id=request_id,
+        prompt_tokens=token_ids,
+        block_size=block_size,
+        output_tokens=output_tokens,
+    )
+    return seq
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -35,12 +56,13 @@ def test_allocate_naive(block_size: int, sequence_len: int):
         assert allocator.get_num_free_blocks(
             device=Device.GPU) == num_gpu_blocks - i * num_blocks_per_alloc
 
+        seq = make_sequence(i, token_ids, block_size)
         block_tables.append(
             BlockTable(
                 block_size=block_size,
                 block_allocator=allocator,
             ))
-        block_tables[-1].allocate(token_ids=token_ids, device=Device.GPU)
+        block_tables[-1].allocate(seq=seq, device=Device.GPU)
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -82,8 +104,11 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
             BlockTable(
                 block_size=block_size,
                 block_allocator=allocator,
-            ))
-        block_tables[-1].allocate(token_ids=token_ids, device=Device.GPU)
+                enable_prefix_caching=True,
+            )
+        )
+        seq = make_sequence(alloc_i, token_ids, block_size)
+        block_tables[-1].allocate(seq=seq, device=Device.GPU)
 
         # Expect all sequences to share allocations, except for their last block
         # (which may be mutable).
@@ -123,10 +148,12 @@ def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
+        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
     )
 
     for i in range(5):
-        block_table.allocate(token_ids=token_ids, device=device)
+        seq = make_sequence(i, token_ids, block_size)
+        block_table.allocate(seq=seq, device=device)
         assert allocator.get_num_free_blocks(
             device) == num_device_blocks - num_blocks_per_alloc
         assert all(block_id is not None
@@ -166,6 +193,7 @@ def test_append_token_ids_allocation(block_size: int, sequence_len: int,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
+        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
     )
 
     num_expected_blocks_before_append = len(
@@ -174,11 +202,18 @@ def test_append_token_ids_allocation(block_size: int, sequence_len: int,
         list(chunk_list(token_ids + token_ids_to_append,
                         block_size))) - num_expected_blocks_before_append
 
-    block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    seq = make_sequence(0, token_ids, block_size)
+
+    block_table.allocate(seq=seq, device=Device.GPU)
 
     assert len(
         block_table.physical_block_ids) == num_expected_blocks_before_append
-    block_table.append_token_ids(token_ids_to_append)
+
+    # Update the sequence.
+    for token_id in token_ids_to_append:
+        seq.append_token_id(token_id, {token_id: Logprob(0.0)})
+
+    block_table.append_slots(seq=seq, num_lookahead_slots=0)
     assert len(
         block_table.physical_block_ids
     ) == num_expected_blocks_before_append + num_expected_appended_blocks
@@ -215,6 +250,7 @@ def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
+        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
     )
 
     num_expected_blocks_before_append = len(
@@ -223,7 +259,9 @@ def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
         list(chunk_list(token_ids + [-1] * num_empty_slots,
                         block_size))) - num_expected_blocks_before_append
 
-    block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    seq = make_sequence(0, token_ids, block_size)
+
+    block_table.allocate(seq=seq, device=Device.GPU)
 
     # Assert that the empty slots consume the expected number of additional
     # blocks.
@@ -236,7 +274,10 @@ def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
 
     # Now, ensure no additional blocks consumed as we fill up the empty slots.
     num_free_blocks = allocator.get_num_free_blocks(device=Device.GPU)
-    block_table.append_token_ids(token_ids=list(range(num_empty_slots)))
+    tokens_to_append = list(range(num_empty_slots))
+    for token_id in tokens_to_append:
+        seq.append_token_id(token_id, {token_id: Logprob(0.0)})
+    block_table.append_slots(seq=seq, num_lookahead_slots=0)
     assert num_free_blocks == allocator.get_num_free_blocks(device=Device.GPU)
 
 
@@ -267,12 +308,17 @@ def test_append_token_ids_correct_content(block_size: int, sequence_len: int,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
+        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
     )
-    block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    seq = make_sequence(0, token_ids, block_size)
+    block_table.allocate(seq=seq, device=Device.GPU)
 
     appended_so_far: List[int] = []
     for append in chunk_list(token_ids_to_append, append_size):
-        block_table.append_token_ids(append)
+        for token_id in append:
+            seq.append_token_id(token_id, {token_id: Logprob(0.0)})
+        block_table.append_slots(seq=seq, num_lookahead_slots=0)
+
         appended_so_far.extend(append)
 
         assert block_table._get_all_token_ids() == token_ids + appended_so_far
@@ -307,9 +353,11 @@ def test_fork(seq_len: int, block_size: int, allocator_type: str):
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
+        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
     )
 
-    block_table.allocate(token_ids)
+    seq = make_sequence(0, token_ids, block_size)
+    block_table.allocate(seq=seq, device=Device.GPU)
 
     num_free_blocks_before_fork = allocator.get_num_free_blocks(
         device=Device.GPU)
@@ -366,13 +414,15 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
     original_block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
+        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
     )
 
     num_expected_non_cow_blocks = cdiv(sequence_len, block_size)
     num_expected_cow_blocks = cdiv(sequence_len + append_len,
                                    block_size) - (sequence_len // block_size)
 
-    original_block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    seq = make_sequence(0, token_ids, block_size)
+    original_block_table.allocate(seq=seq, device=Device.GPU)
     original_block_ids = original_block_table.physical_block_ids[:]
 
     print("original_block_ids = {}".format(original_block_ids))
@@ -392,7 +442,9 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
         raise ValueError(f"unknown test config {appender=}")
 
     # Write tokens.
-    appender_block_table.append_token_ids(token_ids_to_append)
+    for token_id in token_ids_to_append:
+        seq.append_token_id(token_id, {token_id: Logprob(0.0)})
+    appender_block_table.append_slots(seq=seq, num_lookahead_slots=0)
 
     # Expect the non-appending block table to have no change.
     assert static_block_table.physical_block_ids == original_block_ids
@@ -452,9 +504,11 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int,
     original_block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
+        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
     )
 
-    original_block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    seq = make_sequence(0, token_ids, block_size)
+    original_block_table.allocate(seq=seq, device=Device.GPU)
 
     # Allocate lookahead slots.
     original_block_table.ensure_num_empty_slots(lookahead_slots)
@@ -472,7 +526,9 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int,
         raise ValueError(f"unknown test config {appender=}")
 
     # Write tokens.
-    appender_block_table.append_token_ids(token_ids_to_append)
+    for token_id in token_ids_to_append:
+        seq.append_token_id(token_id, {token_id: Logprob(0.0)})
+    appender_block_table.append_slots(seq=seq, num_lookahead_slots=0)
 
     # Expect the non-appending block table to have no change.
     assert static_block_table.physical_block_ids == original_block_ids
@@ -534,9 +590,10 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
+        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
     )
-
-    block_table.allocate(token_ids=token_ids, device=Device.GPU)
+    seq = make_sequence(0, token_ids, block_size)
+    block_table.allocate(seq=seq, device=Device.GPU)
 
     # Add lookahead before fork so both sequences have the same lookahead
     # blocks.
@@ -556,7 +613,10 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
     #
     # We expect append_token_ids to CoW all mutated blocks that have refcount>1.
     num_free_blocks_before_append = allocator.get_num_free_blocks(Device.GPU)
-    block_table.append_token_ids(token_ids_to_append, num_lookahead_slots)
+    for token_id in token_ids_to_append:
+        seq.append_token_id(token_id, {token_id: Logprob(0.0)})
+    block_table.append_slots(seq=seq, num_lookahead_slots=num_lookahead_slots)
+
     num_consumed_blocks = (num_free_blocks_before_append -
                            allocator.get_num_free_blocks(Device.GPU))
 

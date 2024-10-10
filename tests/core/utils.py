@@ -44,6 +44,30 @@ def create_dummy_prompt(
     return prompt, seq_group
 
 
+def create_dummy_sequence(
+    sequence_id: int,
+    prompt_tokens: List[int],
+    block_size: int,
+    output_tokens: Optional[List[int]] = None,
+):
+    if output_tokens is None:
+        output_tokens = []
+
+    seq = Sequence(
+        sequence_id,
+        inputs={
+            "prompt": " ".join([str(t) for t in prompt_tokens]),
+            "prompt_token_ids": prompt_tokens,
+        },
+        block_size=block_size,
+    )
+
+    for token_id in output_tokens:
+        seq.append_token_id(token_id, {token_id: Logprob(0.0)})
+
+    return seq
+
+
 def create_dummy_prompt_encoder_decoder(
     request_id: str,
     decoder_prompt_length: int,

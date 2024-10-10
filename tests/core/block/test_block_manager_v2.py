@@ -326,8 +326,10 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
                                         num_gpu_blocks,
                                         watermark=0,
                                         enable_caching=enable_caching)
+    print(f"prompt_length={(num_gpu_blocks - 1) * block_size - 1}")
     prompt, seq_group = create_dummy_prompt(
-        "1", prompt_length=(num_gpu_blocks - 1) * block_size - 1)
+        "1", prompt_length=(num_gpu_blocks - 1) * block_size - 1, block_size=block_size
+    )
     prompt.status = SequenceStatus.WAITING
     block_manager.allocate(seq_group)
     prompt.status = SequenceStatus.RUNNING
