@@ -5,9 +5,11 @@ import tempfile
 
 import depyf
 
+from vllm.compilation.levels import CompilationLevel
+
 # disable custom dispatcher, let Dynamo takes over
 # all the control
-os.environ['VLLM_DYNAMO_USE_CUSTOM_DISPATCHER'] = "0"
+os.environ['VLLM_TORCH_COMPILE_LEVEL'] = str(CompilationLevel.DYNAMO_AS_IS)
 
 temp_dir = tempfile.mkdtemp()
 with depyf.prepare_debug(temp_dir):
