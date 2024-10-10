@@ -25,7 +25,8 @@ class InfiniStoreKVCacheTransporter(KVCacheTransporterBase):
         self.tokens_per_page = tokens_per_page
         self.conn: InfinityConnection = InfinityConnection()
        
-        infinite_server = os.environ.get("PD_SEPARATE_STAGE", Default_Infinite_Server)
+        infinite_server = os.environ.get("INFINITE_STORE_SERVER", Default_Infinite_Server)
+        print("~~~~~~~~~~~~~connecting to infinite store server: ", infinite_server)
         self.conn.connect(infinite_server)
 
     def _compute_kv_cache_block_offsets(
