@@ -351,7 +351,7 @@ steps:
 - label: Custom Models Test
   optional: true
   commands:
-    - echo "Testing custom models..."
+    - echo 'Testing custom models...'
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
     # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
