@@ -116,9 +116,17 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
+
+    # Number of query tokens for each request in the batch.
+    # Currently, we require that all requests have the same number of query
+    # tokens during the decoding phase. When speculavie decoding is enabled,
+    # decode_query_len might be greater than 1. In all other cases, it is 1.
+    decode_query_len: Optional[int] = None
+
     _cached_prefill_metadata: Optional["ROCmFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["ROCmFlashAttentionMetadata"] = None
 
@@ -183,12 +191,22 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         )
         return self._cached_decode_metadata
 
-    def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata",
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
                      sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int, num_seqs: int, num_queries: int):
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
         """
         Update metadata in-place to advance one decode step.
         """
+
+        assert not turn_prefills_into_decodes, \
+            ("Chunked prefill is not supported with rocm_flash_attn yet."
+             "turn_prefills_into_decodes is a Multi-Step + Chunked-Prefill "
+             "specific parameter.")
+
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries

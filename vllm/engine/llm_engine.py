@@ -25,6 +25,7 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
+from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
@@ -33,6 +34,8 @@ from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
@@ -287,9 +290,6 @@ class LLMEngine:
             model_config.mm_processor_kwargs,
         )
         # TODO(woosuk): Print more configs in debug mode.
-        from vllm.plugins import load_general_plugins
-        load_general_plugins()
-
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -811,6 +811,13 @@ class LLMEngine:
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
 
+        # This is a bit of a hack - copy the mm_processor_kwargs that were
+        # used in the input processor to the processed output, since these
+        # kwargs are presumed to be immutable and the values should be aligned
+        # between the input processor (here) and the input mapper.
+        processed_inputs["mm_processor_kwargs"] = preprocessed_inputs.get(
+            "mm_processor_kwargs")
+
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
@@ -842,6 +849,9 @@ class LLMEngine:
                     and sampling_params.prompt_logprobs > max_logprobs):
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
+
+        sampling_params = self._build_logits_processors(
+            sampling_params, lora_request)
 
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
@@ -959,6 +969,45 @@ class LLMEngine:
 
         return
 
+    def _update_num_computed_tokens_for_multi_step_prefill(
+            self, seq_group: SequenceGroup,
+            seq_group_meta: SequenceGroupMetadata,
+            is_first_step_output: Optional[bool]):
+        """
+        This function updates num_computed_tokens for prompt sequences
+        when Multi-Step is enabled.
+
+        seq_group: SequenceGroup to update the num_computed_tokens for. 
+        seq_group_meta: Metadata of the given SequenceGroup.
+        is_first_step_output: Optional[bool] - 
+            When available, is_first_step_output indicates if the appended
+            output token is the output of the first-step in multi-step.
+            A value of None indicates that outputs from all steps in
+            in multi-step are submitted in a single burst.
+        """
+
+        assert self.scheduler_config.is_multi_step
+
+        if not seq_group_meta.is_prompt:
+            # num_computed_token updates for multi-step decodes happen after
+            # the tokens are appended to the sequence.
+            return
+
+        do_update: bool = False
+        if self.scheduler_config.chunked_prefill_enabled:
+            # In multi-step + chunked-prefill case, the prompt sequences
+            # that are scheduled are fully processed in the first step.
+            do_update = is_first_step_output is None or is_first_step_output
+        else:
+            # Normal multi-step decoding case. In this case prompt-sequences
+            # are actually single-stepped. Always update in this case.
+            assert seq_group.state.num_steps == 1
+            do_update = True
+
+        if do_update:
+            seq_group.update_num_computed_tokens(
+                seq_group_meta.token_chunk_size)
+
     def _process_model_outputs(self,
                                ctx: SchedulerContext,
                                request_id: Optional[str] = None) -> None:
@@ -968,64 +1017,6 @@ class LLMEngine:
         ctx: The virtual engine context to work on
         request_id: If provided, then only this request is going to be processed
         """
-
-        def update_prefill_num_computed_tokens(
-                seq_group: SequenceGroup,
-                seq_group_meta: SequenceGroupMetadata, num_outputs: int,
-                is_first_step_output: Optional[bool]) -> None:
-            """
-            When multi-step and chunked-prefill are enabled together, the
-            prefill sequence scheduled for multi-step execution turn into
-            decodes in the first step itself. This function accounts
-            for that conversion.
-
-            seq_group: SequenceGroup - A prefill seq_group
-            seq_group_meta: SequenceGroupMetadata - Metadata of the given
-              prefill seq_group
-            num_outputs: int - number of output tokens being processed for the
-              given seq_group
-            is_first_step_output: Optional[bool] - 
-                If multi-step is enabled and num_outputs is 1, this value
-                indicates if this outputs belongs to the first step in the
-                multi-step.
-                If multi-step is enabled and num_outputs > 1, this value
-                must be None, as num_outputs > 1 indicates that outputs from
-                all the steps in multi-step are submitted in a single burst.
-                When multi-step is disabled, this value is always True.
-            """
-
-            assert seq_group_meta.is_prompt
-
-            token_chunk_size = seq_group_meta.token_chunk_size
-
-            if num_outputs == 1:
-                assert is_first_step_output is not None
-
-                if seq_group_meta.state.num_steps == 1:
-                    assert is_first_step_output is True
-                    seq_group.update_num_computed_tokens(token_chunk_size)
-                    return
-
-                # multi-step prefill is only supported when multi-step is
-                # enabled with chunked prefill
-                assert self.scheduler_config.is_multi_step and \
-                        self.scheduler_config.chunked_prefill_enabled
-                if is_first_step_output is True:
-                    # This sequence is a prompt during the first step only.
-                    seq_group.update_num_computed_tokens(token_chunk_size)
-                return
-
-            assert is_first_step_output is None
-
-            # multi-step prefill is only supported when multi-step is
-            # enabled with chunked prefill. Outputs from all the steps are
-            # submitted in a single burst.
-            assert self.scheduler_config.is_multi_step and \
-                    self.scheduler_config.chunked_prefill_enabled
-            assert num_outputs == seq_group_meta.state.num_steps, \
-                f"#outputs {len(outputs)} - num steps {seq_group_meta.state.num_steps}" #noqa
-            # This sequence is a prompt during the first step only.
-            seq_group.update_num_computed_tokens(token_chunk_size)
 
         now = time.time()
 
@@ -1087,7 +1078,7 @@ class LLMEngine:
             seq_group_meta = seq_group_metadata_list[i]
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
-            seq_group = scheduled_seq_group.seq_group
+            seq_group: SequenceGroup = scheduled_seq_group.seq_group
 
             if seq_group.is_finished():
                 finished_before.append(i)
@@ -1098,12 +1089,14 @@ class LLMEngine:
             else:
                 output = [outputs_by_sequence_group[0][i]]
 
-            if not is_async and seq_group_meta.is_prompt:
-                # Updates for all decodes happen when we actually append the
-                # token ids to the seq in process_outputs.
-                update_prefill_num_computed_tokens(seq_group, seq_group_meta,
-                                                   len(output),
-                                                   is_first_step_output)
+            if not is_async:
+                if self.scheduler_config.is_multi_step:
+                    # Updates happen only if the sequence is prefill
+                    self._update_num_computed_tokens_for_multi_step_prefill(
+                        seq_group, seq_group_meta, is_first_step_output)
+                else:
+                    seq_group.update_num_computed_tokens(
+                        seq_group_meta.token_chunk_size)
 
             if outputs:
                 for o in outputs:
@@ -1237,18 +1230,14 @@ class LLMEngine:
             if seq_group.is_finished():
                 continue
 
-            if seq_group_metadata.is_prompt:
-                if self.scheduler_config.is_multi_step and \
-                    self.scheduler_config.chunked_prefill_enabled:
-                    # Prompts are scheduled in multi-step only when
-                    # chunking is enabled. These prompts turn into
-                    # decodes after the very first step. Therefore,
-                    # we skip the update to the num_computed_tokens
-                    # here.
-                    pass
-                else:
-                    seq_group.update_num_computed_tokens(
-                        seq_group_metadata.token_chunk_size)
+            if self.scheduler_config.is_multi_step:
+                # Updates happen only if the sequence is prefill
+                self._update_num_computed_tokens_for_multi_step_prefill(
+                    seq_group, seq_group_metadata,
+                    seq_group.state.num_steps == 1)
+            else:
+                seq_group.update_num_computed_tokens(
+                    seq_group_metadata.token_chunk_size)
 
             if seq_group_metadata.do_sample:
                 assert len(sequence_group_outputs.samples) == 1, (
@@ -1259,8 +1248,15 @@ class LLMEngine:
 
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
-                seq.append_token_id(sample.output_token, sample.logprobs)
-                seq_group.update_num_computed_tokens(1)
+
+                if self.scheduler_config.is_multi_step:
+                    is_prefill_append = seq.data.get_num_uncomputed_tokens(
+                    ) == 0
+                    seq.append_token_id(sample.output_token, sample.logprobs)
+                    if not is_prefill_append:
+                        seq_group.update_num_computed_tokens(1)
+                else:
+                    seq.append_token_id(sample.output_token, sample.logprobs)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1895,3 +1891,51 @@ class LLMEngine:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def _build_logits_processors(
+            self, sampling_params: SamplingParams,
+            lora_request: Optional[LoRARequest]) -> SamplingParams:
+        """Constructs logits processors based on the guided_decoding,
+        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
+        those fields and adds the constructed logits processors to the
+        logits_processors field. Returns the modified sampling params."""
+
+        logits_processors = []
+        if (guided_decoding := sampling_params.guided_decoding) is not None:
+
+            logger.debug(
+                "Building guided decoding logits processor in "
+                "LLMEngine. Params: %s", guided_decoding)
+
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+            guided_decoding.backend = guided_decoding.backend or \
+                self.decoding_config.guided_decoding_backend
+
+            processor = get_local_guided_decoding_logits_processor(
+                guided_params=guided_decoding, tokenizer=tokenizer)
+            if processor:
+                logits_processors.append(processor)
+
+            # Unset so this doesn't get passed down to the model
+            sampling_params.guided_decoding = None
+
+        if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+
+            processors = get_logits_processors(
+                logit_bias=sampling_params.logit_bias,
+                allowed_token_ids=sampling_params.allowed_token_ids,
+                tokenizer=tokenizer)
+            logits_processors.extend(processors)
+
+            # Unset so these don't get passed down to the model
+            sampling_params.logit_bias = None
+            sampling_params.allowed_token_ids = None
+
+        if logits_processors:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = logits_processors
+            else:
+                sampling_params.logits_processors.extend(logits_processors)
+
+        return sampling_params

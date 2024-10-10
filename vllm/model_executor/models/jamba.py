@@ -25,14 +25,12 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn, selective_state_update)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader, default_weight_loader, sharded_weight_loader)
-from vllm.model_executor.models.interfaces import HasInnerState
 from vllm.model_executor.models.mamba_cache import MambaCacheManager
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
@@ -40,7 +38,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
-from .interfaces import SupportsLoRA
+from .interfaces import HasInnerState, SupportsLoRA
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -102,16 +100,6 @@ class JambaMambaMixer(nn.Module):
                                             self.intermediate_size,
                                             bias=True,
                                             skip_bias_add=True)
-
-        def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            tp_rank = get_tensor_model_parallel_rank()
-            tp_size = get_tensor_model_parallel_world_size()
-            param.data.copy_(
-                loaded_weight.data.split(loaded_weight.shape[0] // tp_size,
-                                         dim=0)[tp_rank])
-
-        def A_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            weight_loader(param, -torch.exp(loaded_weight.float()))
 
         tp_size = get_tensor_model_parallel_world_size()
         self.A = nn.Parameter(

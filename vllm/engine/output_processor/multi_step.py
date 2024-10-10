@@ -148,7 +148,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
                                                          len(output_token_ids))
         if remaining_tokens < 0:
-            valid_samples = valid_samples[:remaining_tokens]
             output_token_ids = output_token_ids[:remaining_tokens]
 
         # Truncate any tokens after EOS. This is required as spec decode
@@ -162,9 +161,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             for i in range(len(output_token_ids)):
                 if output_token_ids[i] == eos_token_id:
                     output_token_ids = output_token_ids[:i + 1]
-                    valid_samples = valid_samples[:i + 1]
                     break
 
+        is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
         for output_token_id, output_logprob in zip(output_token_ids,
@@ -173,7 +172,13 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 token_id=output_token_id,
                 logprobs=output_logprob,
             )
-            seq.data.update_num_computed_tokens(1)
+
+            if is_prefill_sampled_token:
+                is_prefill_sampled_token = False
+            else:
+                # Update num_computed_tokens iff the sampled token is not from
+                # a prefill step.
+                seq.data.update_num_computed_tokens(1)
 
             self._process_decode_and_stop(seq, sampling_params)
 

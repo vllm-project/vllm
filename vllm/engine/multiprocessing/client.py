@@ -2,8 +2,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
-                    Union, overload)
+from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
+                    Optional, Union, overload)
 
 import cloudpickle
 import zmq
@@ -12,10 +12,13 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
+from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
+from vllm.engine.async_llm_engine import (
+    build_guided_decoding_logits_processor_async)
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
@@ -25,14 +28,16 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCUProfileRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import deprecate_kwargs
+from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
+                        random_uuid)
 
 logger = init_logger(__name__)
 
@@ -378,6 +383,7 @@ class MQLLMEngineClient:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
 
@@ -390,6 +396,7 @@ class MQLLMEngineClient:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
 
@@ -405,6 +412,7 @@ class MQLLMEngineClient:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -423,6 +431,9 @@ class MQLLMEngineClient:
             trace_headers: OpenTelemetry trace headers.
             prompt_adapter_request: Prompt Adapter request to use
                                             for generation, if any.
+            priority: Priority of the request (lower means earlier handling). 
+                Any priority other than 0 will lead to an error if the 
+                scheduling policy is not "priority".
         """
         if inputs is not None:
             prompt = inputs
@@ -431,7 +442,105 @@ class MQLLMEngineClient:
 
         return self._process_request(prompt, sampling_params, request_id,
                                      lora_request, trace_headers,
-                                     prompt_adapter_request)
+                                     prompt_adapter_request, priority)
+
+    async def beam_search(
+        self,
+        prompt: Union[PromptType, List[int]],
+        request_id: str,
+        params: BeamSearchParams,
+    ) -> AsyncGenerator[RequestOutput, None]:
+
+        beam_width = params.beam_width
+        max_tokens = params.max_tokens
+        ignore_eos = params.ignore_eos
+        temperature = params.temperature
+        length_penalty = params.length_penalty
+
+        tokenizer = await self.get_tokenizer(lora_request=None)
+        tokenizedPrompt = prompt if isinstance(
+            prompt, list) else tokenizer.encode(prompt)
+        tokenizedLength = len(tokenizedPrompt)
+
+        sort_beams_key = create_sort_beams_key_function(
+            tokenizer.eos_token_id, length_penalty)
+
+        beam_search_params = SamplingParams(logprobs=2 * beam_width,
+                                            max_tokens=1,
+                                            temperature=temperature)
+        all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
+        completed = []
+
+        for _ in range(max_tokens):
+            prompts_batch = [
+                TokensPrompt(prompt_token_ids=beam.tokens)
+                for beam in all_beams
+            ]
+
+            tasks = []
+
+            request_id = f"beam_search-{random_uuid()}"
+            for i, individual_prompt in enumerate(prompts_batch):
+                request_id_item = f"{request_id}-{i}"
+                task = asyncio.create_task(
+                    collect_from_async_generator(
+                        self.generate(individual_prompt, beam_search_params,
+                                      request_id_item)))
+                tasks.append(task)
+
+            output = await asyncio.gather(*tasks)
+
+            output = [x[0] for x in output]
+
+            logger.info(output)
+
+            new_beams = []
+            for i, current_beam in enumerate(all_beams):
+                result = output[i]
+
+                if result.outputs[0].logprobs is not None:
+                    logprobs = result.outputs[0].logprobs[0]
+                    for token_id, logprob_obj in logprobs.items():
+                        new_beam = BeamSearchSequence(
+                            tokens=current_beam.tokens + [token_id],
+                            cum_logprob=current_beam.cum_logprob +
+                            logprob_obj.logprob)
+
+                        if token_id == tokenizer.eos_token_id and \
+                            not ignore_eos:
+                            completed.append(new_beam)
+                        else:
+                            new_beams.append(new_beam)
+
+            sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
+            all_beams = sorted_beams[:beam_width]
+
+        completed.extend(all_beams)
+        sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
+        best_beams = sorted_completed[:beam_width]
+
+        for beam in best_beams:
+            beam.text = tokenizer.decode(beam.tokens[tokenizedLength:])
+
+        beam_search_output = RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            outputs=[
+                CompletionOutput(
+                    text=beam.text,
+                    cumulative_logprob=beam.cum_logprob,
+                    token_ids=beam.tokens,
+                    index=i,
+                    logprobs=beam.cum_logprob,
+                ) for (i, beam) in enumerate(best_beams)
+            ],
+            finished=True,
+            prompt_token_ids=tokenizedPrompt,
+            prompt_logprobs=None)
+
+        logger.info(beam_search_output)
+
+        yield beam_search_output
 
     @overload  # DEPRECATED
     def encode(
@@ -442,6 +551,7 @@ class MQLLMEngineClient:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         ...
 
@@ -453,6 +563,7 @@ class MQLLMEngineClient:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         ...
 
@@ -467,6 +578,7 @@ class MQLLMEngineClient:
         request_id: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
@@ -494,7 +606,8 @@ class MQLLMEngineClient:
                 and request_id is not None)
 
         return self._process_request(prompt, pooling_params, request_id,
-                                     lora_request, trace_headers)
+                                     lora_request, trace_headers, None,
+                                     priority)
 
     async def _process_request(
         self,
@@ -503,7 +616,8 @@ class MQLLMEngineClient:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             EmbeddingRequestOutput, None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
@@ -511,6 +625,18 @@ class MQLLMEngineClient:
         # If already dead, error out.
         if self._errored_with is not None:
             raise ENGINE_DEAD_ERROR(self._errored_with)
+
+        # Constructing guided decoding logits processors is expensive, so we do
+        # it here to avoid contending with cpu resources and the GIL on the
+        # backend process.
+        if isinstance(params, SamplingParams) and \
+            params.guided_decoding is not None:
+            params = await \
+                build_guided_decoding_logits_processor_async(
+                    sampling_params=params,
+                    tokenizer=await self.get_tokenizer(lora_request),
+                    default_guided_backend=self.decoding_config.guided_decoding_backend
+                )
 
         # 1) Create output queue for this requests.
         queue: asyncio.Queue[Union[RequestOutput,
@@ -536,7 +662,9 @@ class MQLLMEngineClient:
                     request_id=request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request))
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=priority,
+                ))
 
             # 3) Send the RPCGenerateRequest to the MQLLMEngine.
             parts = (request_bytes,

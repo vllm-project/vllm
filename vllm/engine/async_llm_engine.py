@@ -7,6 +7,7 @@ from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
 from weakref import ReferenceType
 
 import vllm.envs as envs
+from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
@@ -17,18 +18,22 @@ from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import deprecate_kwargs, weak_bind
+from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
+                        random_uuid, weak_bind)
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -477,6 +482,18 @@ class _AsyncLLMEngine(LLMEngine):
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
 
+        if isinstance(params, SamplingParams) and \
+            params.guided_decoding is not None:
+            # Guided decoding has an async implementation for building logits
+            # processors in a separate threadpool.
+            # We want to invoke that here instead of using the blocking
+            # implementation in the LLMEngine
+            params = await build_guided_decoding_logits_processor_async(
+                sampling_params=params,
+                tokenizer=self.get_tokenizer(lora_request),
+                default_guided_backend=self.decoding_config.
+                guided_decoding_backend)
+
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
@@ -492,6 +509,36 @@ class _AsyncLLMEngine(LLMEngine):
         if self.tokenizer:
             self.tokenizer.check_health()
         self.model_executor.check_health()
+
+
+async def build_guided_decoding_logits_processor_async(
+        sampling_params: SamplingParams, tokenizer: AnyTokenizer,
+        default_guided_backend: str) -> SamplingParams:
+    """Constructs logits processors based on the guided_decoding,
+    logits_bias, and allowed_token_ids fields in sampling_params. Deletes
+    those fields and adds the constructed logits processors to the
+    logits_processors field. Modifies sampling params in-place and returns
+    the modified sampling params."""
+    if (guided_decoding := sampling_params.guided_decoding) is None:
+        return sampling_params
+
+    logger.debug("Building guided decoding logits processor. "
+                 "Params: %s", guided_decoding)
+
+    guided_decoding.backend = guided_decoding.backend or default_guided_backend
+
+    processor = await get_guided_decoding_logits_processor(
+        guided_params=guided_decoding, tokenizer=tokenizer)
+
+    if processor:
+        if sampling_params.logits_processors is None:
+            sampling_params.logits_processors = []
+        sampling_params.logits_processors.append(processor)
+
+    # Unset guided decoding params after constructing the lp from them
+    sampling_params.guided_decoding = None
+
+    return sampling_params
 
 
 class AsyncLLMEngine:
@@ -992,6 +1039,102 @@ class AsyncLLMEngine:
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
 
+    async def beam_search(
+        self,
+        prompt: Union[PromptType, List[int]],
+        request_id: str,
+        params: BeamSearchParams,
+    ) -> AsyncGenerator[RequestOutput, None]:
+
+        beam_width = params.beam_width
+        max_tokens = params.max_tokens
+        ignore_eos = params.ignore_eos
+        temperature = params.temperature
+        length_penalty = params.length_penalty
+
+        tokenizer = await self.get_tokenizer()
+        tokenizedPrompt = prompt if isinstance(
+            prompt, list) else tokenizer.encode(prompt)
+        tokenizedLength = len(tokenizedPrompt)
+
+        sort_beams_key = create_sort_beams_key_function(
+            tokenizer.eos_token_id, length_penalty)
+
+        beam_search_params = SamplingParams(logprobs=2 * beam_width,
+                                            max_tokens=1,
+                                            temperature=temperature)
+        all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
+        completed = []
+
+        for _ in range(max_tokens):
+            prompts_batch = [
+                TokensPrompt(prompt_token_ids=beam.tokens)
+                for beam in all_beams
+            ]
+
+            tasks = []
+
+            request_id = f"beam_search-{random_uuid()}"
+            for i, individual_prompt in enumerate(prompts_batch):
+                request_id_item = f"{request_id}-{i}"
+                task = asyncio.create_task(
+                    collect_from_async_generator(
+                        self.generate(individual_prompt, beam_search_params,
+                                      request_id_item)))
+                tasks.append(task)
+
+            output = await asyncio.gather(*tasks)
+
+            output = [x[0] for x in output]
+
+            logger.info(output)
+
+            new_beams = []
+            for i, current_beam in enumerate(all_beams):
+                result = output[i]
+
+                if result.outputs[0].logprobs is not None:
+                    logprobs = result.outputs[0].logprobs[0]
+                    for token_id, logprob_obj in logprobs.items():
+                        new_beam = BeamSearchSequence(
+                            tokens=current_beam.tokens + [token_id],
+                            cum_logprob=current_beam.cum_logprob +
+                            logprob_obj.logprob)
+
+                        if token_id == tokenizer.eos_token_id and \
+                            not ignore_eos:
+                            completed.append(new_beam)
+                        else:
+                            new_beams.append(new_beam)
+
+            sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
+            all_beams = sorted_beams[:beam_width]
+
+        completed.extend(all_beams)
+        sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
+        best_beams = sorted_completed[:beam_width]
+
+        for beam in best_beams:
+            beam.text = tokenizer.decode(beam.tokens[tokenizedLength:])
+
+        beam_search_output = RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            outputs=[
+                CompletionOutput(
+                    text=beam.text,
+                    cumulative_logprob=beam.cum_logprob,
+                    token_ids=beam.tokens,
+                    index=i,
+                    logprobs=beam.cum_logprob,
+                ) for (i, beam) in enumerate(best_beams)
+            ],
+            finished=True,
+            prompt_token_ids=tokenizedPrompt,
+            prompt_logprobs=None)
+
+        yield LLMEngine.validate_output(beam_search_output, RequestOutput)
+
     async def encode(
         self,
         prompt: PromptType,
@@ -999,6 +1142,7 @@ class AsyncLLMEngine:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
     ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         """Generate outputs for a request from an embedding model.
 
@@ -1013,6 +1157,8 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
+            priority: The priority of the request.
+                Only applicable with priority scheduling.
 
         Yields:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
@@ -1065,6 +1211,7 @@ class AsyncLLMEngine:
                 pooling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
+                priority=priority,
         ):
             yield LLMEngine.validate_output(output, EmbeddingRequestOutput)
 

@@ -1,8 +1,15 @@
 import pytest
 
+from tests.utils import check_deprecated_block_manager_usage
 from vllm import SamplingParams
 
 from .conftest import get_output_from_llm_generator
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_deprecated_block_manager():
+    check_deprecated_block_manager_usage(
+        'tests/spec_decode/e2e/test_compatibility.py')
 
 
 @pytest.mark.parametrize(
@@ -100,6 +107,7 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
     "model": "JackFram/llama-68m",
     "speculative_model": "JackFram/llama-68m",
     "num_speculative_tokens": 5,
+    "use_v2_block_manager": False,
 }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])

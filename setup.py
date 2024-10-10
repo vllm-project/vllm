@@ -332,7 +332,7 @@ def get_neuronxcc_version():
         # Return the version string
         return match.group(1)
     else:
-        raise RuntimeError("Could not find HIP version in the output")
+        raise RuntimeError("Could not find Neuron version in the output")
 
 
 def get_nvcc_cuda_version() -> Version:
@@ -503,7 +503,11 @@ setup(
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Information Technology",
+        "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
                                     "tests*")),

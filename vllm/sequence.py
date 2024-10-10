@@ -482,6 +482,10 @@ class Sequence:
             inputs).get("encoder_multi_modal_data")) or {}
 
     @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        return self.inputs.get("mm_processor_kwargs") or {}
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -576,25 +580,6 @@ class Sequence:
 
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
-
-    def get_beam_search_score(self,
-                              length_penalty: float = 1.0,
-                              seq_len: Optional[int] = None,
-                              eos_token_id: Optional[int] = None) -> float:
-        """Calculate the beam search score with length penalty.
-
-        Adapted from
-
-        https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
-        """
-        if seq_len is None:
-            seq_len = self.get_len()
-            # NOTE: HF implementation does not count the EOS token
-            # towards the length, we align with that here for testing.
-            if (eos_token_id is not None
-                    and self.get_last_token_id() == eos_token_id):
-                seq_len -= 1
-        return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
     def is_finished(self) -> bool:
         return SequenceStatus.is_finished(self.status)
@@ -730,6 +715,14 @@ class SequenceGroup:
         return self.seqs[0].multi_modal_data
 
     @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        # As with multi-modal data, all sequences in the group should have the
+        # same processor kwargs (i.e., mm_processor_kwargs are optionally
+        # provided per request; note that are independent of whether the model
+        # decoder-only or an encoder-decoder).
+        return self.seqs[0].mm_processor_kwargs
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -809,25 +802,18 @@ class SequenceGroup:
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
-        if self.sampling_params and self.sampling_params.use_beam_search:
-            # For beam search, maximally there will always be `best_of` beam
-            # candidates running in the future.
+        if self.sampling_params:
             best_of = self.sampling_params.best_of
             assert isinstance(best_of, int)
-            return best_of
-        else:
-            if self.sampling_params:
-                best_of = self.sampling_params.best_of
-                assert isinstance(best_of, int)
-                if best_of > self.num_seqs():
-                    # At prompt stage, the sequence group is not yet filled up
-                    # and only have one sequence running. However, in the
-                    # generation stage, we will have `best_of` sequences
-                    # running.
-                    return best_of
-            # At sampling stages, return the number of actual sequences
-            # that are not finished yet.
-            return self.num_unfinished_seqs()
+            if best_of > self.num_seqs():
+                # At prompt stage, the sequence group is not yet filled up
+                # and only have one sequence running. However, in the
+                # generation stage, we will have `best_of` sequences
+                # running.
+                return best_of
+        # At sampling stages, return the number of actual sequences
+        # that are not finished yet.
+        return self.num_unfinished_seqs()
 
     def get_seqs(
         self,
@@ -975,6 +961,7 @@ class SequenceGroupMetadata(
             used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
+        mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None 
                           unless you are working with an encoder/decoder
@@ -1001,6 +988,7 @@ class SequenceGroupMetadata(
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None

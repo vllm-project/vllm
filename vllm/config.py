@@ -32,28 +32,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
-_MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 4096
-
-_PP_SUPPORTED_MODELS = [
-    "AquilaForCausalLM",
-    "AquilaModel",
-    "DeepseekV2ForCausalLM",
-    "GPT2LMHeadModel",
-    "InternLM2ForCausalLM",
-    "InternLMForCausalLM",
-    "InternVLChatModel",
-    "JAISLMHeadModel",
-    "LlamaForCausalLM",
-    "LLaMAForCausalLM",
-    "MistralForCausalLM",
-    "MixtralForCausalLM",
-    "NemotronForCausalLM",
-    "Phi3ForCausalLM",
-    "Qwen2ForCausalLM",
-    "Qwen2MoeForCausalLM",
-    "QWenLMHeadModel",
-    "Qwen2VLForConditionalGeneration",
-]
+_MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 
 class ModelConfig:
@@ -229,16 +208,14 @@ class ModelConfig:
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
     ) -> Optional["MultiModalConfig"]:
         architectures = getattr(self.hf_config, "architectures", [])
-        if any(
-                ModelRegistry.is_multimodal_model(arch)
-                for arch in architectures):
+        if ModelRegistry.is_multimodal_model(architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
-        else:
-            if limit_mm_per_prompt:
-                raise ValueError(
-                    "limit_mm_per_prompt is only supported for multimodal "
-                    "models.")
-            return None
+
+        if limit_mm_per_prompt:
+            raise ValueError("`limit_mm_per_prompt` is only supported for "
+                             "multimodal models.")
+
+        return None
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -250,8 +227,7 @@ class ModelConfig:
 
     def _verify_embedding_mode(self) -> None:
         architectures = getattr(self.hf_config, "architectures", [])
-        self.embedding_mode = any(
-            ModelRegistry.is_embedding_model(arch) for arch in architectures)
+        self.embedding_mode = ModelRegistry.is_embedding_model(architectures)
 
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
@@ -418,17 +394,17 @@ class ModelConfig:
                 f"({tensor_parallel_size}).")
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
-        architectures = getattr(self.hf_config, "architectures", [])
-        if not all(arch in _PP_SUPPORTED_MODELS
-                   for arch in architectures) and pipeline_parallel_size > 1:
-            raise NotImplementedError(
-                "Pipeline parallelism is only supported for the following "
-                f" architectures: {_PP_SUPPORTED_MODELS}.")
+        if pipeline_parallel_size > 1:
+            architectures = getattr(self.hf_config, "architectures", [])
+            if not ModelRegistry.is_pp_supported_model(architectures):
+                raise NotImplementedError(
+                    "Pipeline parallelism is not supported for this model. "
+                    "Supported models implement the `SupportsPP` interface.")
 
-        if pipeline_parallel_size > 1 and self.use_async_output_proc:
-            logger.warning("Async output processor is not supported with "
-                           "pipeline parallelism currently. Disabling it.")
-            self.use_async_output_proc = False
+            if self.use_async_output_proc:
+                logger.warning("Async output processor is not supported with "
+                               "pipeline parallelism currently. Disabling it.")
+                self.use_async_output_proc = False
 
     @cached_property
     def is_attention_free(self) -> bool:
@@ -998,7 +974,7 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
-                 use_v2_block_manager: bool = False,
+                 use_v2_block_manager: bool = True,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
@@ -1089,6 +1065,18 @@ class SchedulerConfig:
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
 
+        if (not self.use_v2_block_manager \
+            and not envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1):
+            raise ValueError(
+                "The use of BlockSpaceManagerV1 is deprecated and will "
+                "be removed in a future release. Please switch to "
+                "BlockSpaceManagerV2 by setting --use-v2-block-manager to "
+                "True. If you wish to suppress this error temporarily, "
+                "you can set the environment variable "
+                "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. If your use "
+                "case is not supported in BlockSpaceManagerV2, please "
+                "file an issue with detailed information.")
+
     @property
     def is_multi_step(self) -> bool:
         return self.num_scheduler_steps > 1
@@ -1144,6 +1132,7 @@ class SpeculativeConfig:
         speculative_model_quantization: Optional[str],
         speculative_draft_tensor_parallel_size: Optional[int],
         num_speculative_tokens: Optional[int],
+        speculative_disable_mqa_scorer: Optional[bool],
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
@@ -1178,6 +1167,9 @@ class SpeculativeConfig:
             num_speculative_tokens (Optional[int]): The number of speculative
                 tokens, if provided. Will default to the number in the draft
                 model config if present, otherwise is required.
+            speculative_disable_mqa_scorer (Optional[bool]): Disable the MQA
+                scorer for the speculative model and fall back to batch
+                expansion for scoring.
             speculative_max_model_len (Optional[int]): The maximum model len of
                 the speculative model. Used when testing the ability to skip
                 speculation for some sequences.
@@ -1332,6 +1324,7 @@ class SpeculativeConfig:
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
+            speculative_disable_mqa_scorer,
             speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
@@ -1428,6 +1421,7 @@ class SpeculativeConfig:
         draft_model_config: ModelConfig,
         draft_parallel_config: ParallelConfig,
         num_speculative_tokens: int,
+        speculative_disable_mqa_scorer: Optional[bool],
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
@@ -1474,6 +1468,7 @@ class SpeculativeConfig:
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
+        self.speculative_disable_mqa_scorer = speculative_disable_mqa_scorer
         self.speculative_disable_by_batch_size = \
             speculative_disable_by_batch_size
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
