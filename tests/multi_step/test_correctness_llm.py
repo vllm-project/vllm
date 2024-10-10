@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import pytest
 
 from vllm import SamplingParams
+from vllm.entrypoints.utils import STR_MULTI_STEP_BEAM_SEARCH_NOT_SUPPORTED
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
 
@@ -204,7 +205,7 @@ def test_multi_step_llm_w_prompt_logprobs(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("tp_size", [1])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False, True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("max_output_len", [7])
@@ -293,6 +294,55 @@ def test_multi_step_llm_best_of_fallback(
         name_0="single_step_vllm",
         name_1="multi_step_vllm",
     )
+
+
+@pytest.mark.parametrize("model", ["JackFram/llama-160m"])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("num_scheduler_steps", [8])
+@pytest.mark.parametrize("max_output_len", [7])
+def test_multi_step_beam_search_fail(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    enforce_eager: int,
+    num_scheduler_steps: int,
+    max_output_len: int,
+) -> None:
+    """Test that vLLM engine with multi-step fails if beam search is enabled.
+
+    Beam search is not supported with multi-step.
+    
+    Args:
+      vllm_runner: vLLM model runner fixture
+      example_prompts: test fixture providing example prompts
+      model: model under test (same for single- and multi-step engines)
+      dtype: tensor datatype for engine to utilize
+      tp_size: degree of tensor-parallelism
+      max_tokens: the maximum number of tokens to generate
+      enforce_eager
+      num_scheduler_steps: for multi-step scheduling, GPU-side steps per
+                           GPU -> CPU output transfer
+      num_prompts: number of example prompts under test
+      num_logprobs: corresponds to the `logprobs` argument to the OpenAI
+                    completions endpoint; `None` -> 1 logprob returned.
+      best_of: `best_of` sampling param
+      use_beam_search: `use_beam_search` sampling param
+    """
+
+    with pytest.raises(ValueError,
+                       match=STR_MULTI_STEP_BEAM_SEARCH_NOT_SUPPORTED), \
+         vllm_runner(
+             model,
+             dtype=dtype,
+             enforce_eager=enforce_eager,
+             gpu_memory_utilization=0.7,
+             tensor_parallel_size=1,
+             use_v2_block_manager=True,
+             num_scheduler_steps=num_scheduler_steps,
+         ) as vllm_model:
+        vllm_model.generate_beam_search(example_prompts, 2, max_output_len)
 
 
 @pytest.mark.parametrize("model", MODELS)
