@@ -1723,25 +1723,7 @@ def _get_and_verify_max_len(
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None:
-        # Backwards compatibility. NOTE: This updates hf_config in-place!
-        # Although HF prefers "rope_type", we have code that accesses "type",
-        # so we populate both keys
-        if "type" in rope_scaling:
-            rope_type = rope_scaling["rope_type"] = rope_scaling["type"]
-        elif "rope_type" in rope_scaling:
-            rope_type = rope_scaling["type"] = rope_scaling["rope_type"]
-        else:
-            raise ValueError(
-                "rope_scaling must have a 'type' or 'rope_type' key.")
-
-        # Backwards compatibility. NOTE: This updates hf_config in-place!
-        if rope_type == "su":
-            rope_scaling["rope_type"] = rope_type = "longrope"
-            logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
-        elif rope_type == "mrope":
-            assert "mrope_section" in rope_scaling
-            rope_scaling["rope_type"] = rope_type = "default"
-            logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
+        rope_type = rope_scaling["rope_type"]
 
         if rope_type not in ("su", "longrope", "llama3"):
             if disable_sliding_window:

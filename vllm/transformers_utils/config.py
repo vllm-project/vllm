@@ -177,6 +177,27 @@ def get_config(
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
+    # Backwards compatibility for RoPE
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is not None:
+        # Although HF prefers "rope_type", we have code that accesses "type",
+        # so we populate both keys
+        if "type" in rope_scaling:
+            rope_type = rope_scaling["rope_type"] = rope_scaling["type"]
+        elif "rope_type" in rope_scaling:
+            rope_type = rope_scaling["type"] = rope_scaling["rope_type"]
+        else:
+            raise ValueError(
+                "rope_scaling must have a 'type' or 'rope_type' key.")
+
+        if rope_type == "su":
+            rope_scaling["rope_type"] = rope_type = "longrope"
+            logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
+        elif rope_type == "mrope":
+            assert "mrope_section" in rope_scaling
+            rope_scaling["rope_type"] = rope_type = "default"
+            logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
+
     for key, value in [
         ("rope_scaling", rope_scaling),
         ("rope_theta", rope_theta),
