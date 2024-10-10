@@ -4,6 +4,7 @@ sphinx-copybutton==0.5.2
 myst-parser==2.0.0
 sphinx-argparse==0.4.0
 msgspec
+cloudpickle
 
 # packages to install to build the documentation
 pydantic >= 2.8
