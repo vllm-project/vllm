@@ -299,7 +299,6 @@ def test_multi_step_llm_best_of_fallback(
         name_1="multi_step_vllm",
     )
 
-
 @pytest.mark.parametrize("model", ["JackFram/llama-160m"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -326,7 +325,6 @@ def test_multi_step_beam_search_fail(
       enforce_eager
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
-      num_prompts: number of example prompts under test
       max_output_len
     """
 
@@ -342,7 +340,6 @@ def test_multi_step_beam_search_fail(
              num_scheduler_steps=num_scheduler_steps,
          ) as vllm_model:
         vllm_model.generate_beam_search(example_prompts, 2, max_output_len)
-
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
