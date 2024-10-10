@@ -20,7 +20,7 @@ MODELS = [
 ]
 
 
-@pytest.fixture(scope="module", autouse=False)
+@pytest.fixture(scope="module", autouse=True)
 def check_deprecated_block_manager():
     check_deprecated_block_manager_usage(
         'tests/basic_correctness/test_chunked_prefill.py')

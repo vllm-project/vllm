@@ -18,14 +18,14 @@ from .utils import (append_new_token, append_new_token_seq_group,
                     schedule_and_update_computed_tokens)
 
 
-@pytest.fixture(scope="module", autouse=False)
+@pytest.fixture(scope="module", autouse=True)
 def check_deprecated_block_manager():
     check_deprecated_block_manager_usage(
         "tests/core/test_chunked_prefill_scheduler.py")
 
 
 @pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_schedler_add_seq_group(use_v2_block_manager: bool):
+def test_scheduler_add_seq_group(use_v2_block_manager: bool):
     block_size = 4
     scheduler_config = SchedulerConfig(
         100, 64, 1, use_v2_block_manager=use_v2_block_manager)
