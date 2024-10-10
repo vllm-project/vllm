@@ -7,31 +7,22 @@ from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ....conftest import HfRunner, PromptImageInput, VllmRunner, _ImageAssets
+from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
+                          _ImageAssets)
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
-_LIMIT_IMAGE_PER_PROMPT = 2
+_LIMIT_IMAGE_PER_PROMPT = 3
 
-# ("prompt", [image indices])
-# image-0: stop sign, image-1: cherry blossom
-# For each entry, we will generate a batch of
-# samples with different image sizes.
-PROMPTS = [
-    # Single leading image.
-    ("<|image|><|begin_of_text|>The meaning of the image is", [0]),
-    ("<|image|><|begin_of_text|>The city is", [1]),
-    # Single interleaved image.
-    ("<|begin_of_text|>The meaning of the image<|image|> is", [0]),
-    # Multi leading images.
-    ("<|image|><|image|><|begin_of_text|>Between the first and second image, "
-     "which is stop sign and which is cherry blossom?", [0, 1]),
-    # Multi interleaved images.
-    ("<|begin_of_text|>Between the first image<|image|> and second "
-     "image<|image|>, which is stop sign and which is cherry blossom?", [0,
-                                                                         1]),
-    # Text only.
-    ("The color of the sky is blue but sometimes it can also be", []),
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign":
+    "<|image|><|begin_of_text|>The meaning of the image is",
+    "cherry_blossom":
+    "<|image|><|begin_of_text|>The city is",
+})
+
+text_only_prompts = [
+    "The color of the sky is blue but sometimes it can also be",
 ]
 
 models = [
@@ -68,49 +59,32 @@ def _get_inputs(
     *,
     size_factors: Optional[List[float]] = None,
     sizes: Optional[List[Tuple[int, int]]] = None,
-) -> List[Tuple[List[str], List[Optional[PromptImageInput]]]]:
-    assets = [asset.pil_image for asset in image_assets]
-    assert len(assets) >= 2
+) -> List[Tuple[List[str], PromptImageInput]]:
+    images = [asset.pil_image for asset in image_assets]
 
-    # Inputs is a list of batches, a batch is a tuple of
-    # (prompts, images), prompts is a list of strings,
-    # images is a nested list of PIL images.
-    # len(prompts) == len(images)
-    # A batch will trigger a generate run.
-    inputs = []
-    for entry in PROMPTS:
-        prompt, image_indices = entry
-        images = [assets[i] for i in image_indices]
-        batch_prompts = []
-        batch_images = []
-        if size_factors is not None:
-            for factor in size_factors:
-                if factor is None:
-                    batch_prompts.append(PROMPTS[-1][0])
-                    batch_images.append(None)
-                else:
-                    batch_prompts.append(prompt)
-                    resized_images = [
-                        rescale_image_size(image, factor) for image in images
-                    ]
-                    batch_images.append(
-                        resized_images if resized_images else None)
-        elif sizes is not None:
-            for size in sizes:
-                if size is None:
-                    batch_prompts.append(PROMPTS[-1][0])
-                    batch_images.append(None)
-                else:
-                    batch_prompts.append(prompt)
-                    resized_images = [image.resize(size) for image in images]
-                    batch_images.append(
-                        resized_images if resized_images else None)
-        else:
-            raise ValueError(
-                "You must provide either `size_factors` or `sizes`")
-        assert len(batch_prompts) == len(batch_images)
-        inputs.append((batch_prompts, batch_images))
-    return inputs
+    if size_factors is not None:
+        inputs_per_image = [(
+            [prompt for _ in size_factors],
+            [rescale_image_size(image, factor) for factor in size_factors],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    elif sizes is not None:
+        inputs_per_image = [(
+            [
+                prompt if size is not None else text_only_prompts[0]
+                for size in sizes
+            ],
+            [
+                image.resize(size) if size is not None else None
+                for size in sizes
+            ],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+        if len(sizes) == 0:
+            inputs_per_image.append(
+                (text_only_prompts, [None] * len(text_only_prompts)))
+    else:
+        raise ValueError("You must provide either `size_factors` or `sizes`")
+
+    return inputs_per_image
 
 
 @overload
@@ -177,7 +151,7 @@ def run_test(
 def _run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], List[Optional[PromptImageInput]]]],
+    inputs: List[Tuple[List[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,
@@ -252,6 +226,8 @@ def _run_test(
 @pytest.mark.parametrize(
     "sizes",
     [
+        # Text only
+        [],
         # Single-size
         [(512, 512)],
         # Single-size, batched
@@ -268,14 +244,95 @@ def _run_test(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets, model, sizes, dtype,
-                max_tokens, num_logprobs) -> None:
+def test_models_single_leading_image(hf_runner, vllm_runner, image_assets,
+                                     model, sizes, dtype, max_tokens,
+                                     num_logprobs) -> None:
     run_test(
         hf_runner,
         vllm_runner,
         image_assets,
         model,
         sizes=sizes,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets,
+                                     model, dtype, max_tokens,
+                                     num_logprobs) -> None:
+
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
+
+    inputs = [(
+        [
+            "<|image|><|image|><|begin_of_text|>Describe 2 images.",  # noqa: E501
+            "<|image|><|image|><|begin_of_text|>Describe 2 images.",  # noqa: E501
+            "<|image|><|image|><|image|><|begin_of_text|>Describe 3 images.",  # noqa: E501
+        ],
+        [
+            [stop_sign, cherry_blossom],
+            # Images with different sizes.
+            [
+                stop_sign.resize((512, 512)),
+                stop_sign,
+            ],
+            [
+                stop_sign,
+                stop_sign.resize((512, 1536)),
+                cherry_blossom.resize((512, 1024)),
+            ],
+        ])]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        inputs,
+        model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
+                                   dtype, max_tokens, num_logprobs) -> None:
+
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
+
+    inputs = [(
+        [
+            "<|begin_of_text|>The meaning of the image <|image|> is",  # noqa: E501
+            "<|begin_of_text|>Is this <|image|> a stop sign and is this <|image|> a cherry blossom?",  # noqa: E501
+        ],
+        [
+            [stop_sign.resize((1536, 512))],
+            [
+                stop_sign.resize((1024, 512)),
+                cherry_blossom.resize((512, 2028)),
+            ],
+        ])]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        inputs,
+        model,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,

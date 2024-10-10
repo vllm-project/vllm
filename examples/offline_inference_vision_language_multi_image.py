@@ -246,8 +246,6 @@ def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
-    question = "Between the two images, " \
-               "which one is a lion and which one is a duck?"
     prompt = f"<|image|><|image|><|begin_of_text|>{question}"
     return ModelRequestData(
         llm=llm,

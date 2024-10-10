@@ -1128,27 +1128,14 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 start_pos:end_pos] = vision_token_in_batch[:seq_len]
             start_pos = end_pos
         cross_attention_states = cross_attention_states_flat
-
-        full_text_row_masked_out_mask = torch.ones(
-            (attn_metadata.num_prefill_tokens, 1), dtype=torch.bool)
-        start_pos = 0
-        for seq_len, encoder_seq_len in zip(attn_metadata.seq_lens,
-                                            attn_metadata.encoder_seq_lens):
-            if encoder_seq_len == 0:
-                full_text_row_masked_out_mask[start_pos:start_pos +
-                                              seq_len] = False
-            start_pos += seq_len
-        full_text_row_masked_out_mask = full_text_row_masked_out_mask.to(
-            cross_attention_states.device)
-
-        return cross_attention_states, full_text_row_masked_out_mask
+        return cross_attention_states
 
     def get_cross_attention_states(
         self,
         image_inputs: MllamaImagePixelInputs,
         attn_metadata: AttentionMetadata,
         actual_encoder_seq_lens: List[int],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor]:
         # NOTE: llama's reference implementation runs vision model on CPU
         pixel_values = image_inputs['data']
         aspect_ratio_ids = image_inputs['aspect_ratio_ids']
@@ -1163,12 +1150,10 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         cross_attention_states = cross_attention_states.view(
             bsz, -1, image_token_dim)
 
-        cross_attention_states, full_text_row_masked_out_mask = \
-            self.flat_encoder_result(
-                cross_attention_states, attn_metadata,
-                actual_encoder_seq_lens)
+        cross_attention_states = self.flat_encoder_result(
+            cross_attention_states, attn_metadata, actual_encoder_seq_lens)
 
-        return cross_attention_states, full_text_row_masked_out_mask
+        return cross_attention_states
 
     def get_cross_attention_mask(
         self,
@@ -1205,6 +1190,24 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         ] for t in tile_range_for_decode]
 
         return cross_attention_mask, kv_range_for_decode
+
+    def get_full_text_row_masked_out_mask(
+        self,
+        attn_metadata: AttentionMetadata,
+        device: torch.device,
+    ) -> torch.Tensor:
+        full_text_row_masked_out_mask = torch.ones(
+            (attn_metadata.num_prefill_tokens, 1), dtype=torch.bool)
+        start_pos = 0
+        for seq_len, encoder_seq_len in zip(attn_metadata.seq_lens,
+                                            attn_metadata.encoder_seq_lens):
+            if encoder_seq_len == 0:
+                full_text_row_masked_out_mask[start_pos:start_pos +
+                                              seq_len] = False
+            start_pos += seq_len
+        full_text_row_masked_out_mask = full_text_row_masked_out_mask.to(
+            device)
+        return full_text_row_masked_out_mask
 
     def forward(
         self,
@@ -1248,9 +1251,12 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                     actual_encoder_seq_lens, attn_metadata.encoder_seq_lens):
                 assert actual_len >= last_group_len
 
-            cross_attention_states, full_text_row_masked_out_mask = \
-                self.get_cross_attention_states(
-                    image_inputs, attn_metadata, actual_encoder_seq_lens)
+            cross_attention_states = self.get_cross_attention_states(
+                image_inputs, attn_metadata, actual_encoder_seq_lens)
+
+            full_text_row_masked_out_mask = \
+                self.get_full_text_row_masked_out_mask(
+                    attn_metadata, input_ids.device)
 
             cross_attention_mask, kv_range_for_decode = \
                 self.get_cross_attention_mask(
