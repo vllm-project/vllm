@@ -475,58 +475,36 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
         attn_metadata.advance_step(num_seqs, num_queries)
 
         # refer ops.advance_step()
-        global test_count
-        global test_total_time
-        test_count = test_count + 1
-        st = time.perf_counter()
-        from dataclasses import replace
-
-        # 2. 计算 next_seq_len 和 next_input_pos
         next_seq_len = attn_metadata.seq_lens_tensor + 1
         next_input_pos = next_seq_len - 1
-
-        # 3. 更新 seq_lens_tensor 和 input_positions
         attn_metadata.seq_lens_tensor = next_seq_len
-        # frozen_model_input.input_positions = next_input_pos
 
-        # new_frozen_model_input = replace(
-        #     frozen_model_input,
-        #     input_tokens=model_input.cached_outputs[-1].sampled_token_ids.clone(),
-        #     input_positions=next_input_pos.clone(),
-        # )
-
-        # 4. 计算 block_index 和 block_offset
         block_index = next_input_pos // self.block_size
         block_offset = next_input_pos % self.block_size
-
-        # # 5. 更新 slot_mapping
         slot = attn_metadata.block_tables
         slot_num = slot[torch.arange(num_queries), block_index] * self.block_size + block_offset
-        # attn_metadata.slot_mapping = slot_num.to(dtype=torch.long)
+        attn_metadata.slot_mapping = slot_num.to(dtype=torch.long)
 
-        # frozen_model_input = new_frozen_model_input
-
-        for i in range(num_queries):
-            frozen_model_input.input_tokens[i] = model_input.cached_outputs[-1].sampled_token_ids[i]
-            # seq_len = attn_metadata.seq_lens_tensor[i]
-            # next_seq_len = seq_len + 1
-            # next_input_pos = next_seq_len - 1
-            # attn_metadata.seq_lens_tensor[i] = next_seq_len
-            frozen_model_input.input_positions[i] = next_input_pos[i]
-            # block_index = next_input_pos // self.block_size
-            # block_offset = next_input_pos % self.block_size
-            # slot = attn_metadata.block_tables[i]
-            # slot_num = slot[block_index[i]] * self.block_size + block_offset
-            attn_metadata.slot_mapping[i] = slot_num[i]
-
-        ed = time.perf_counter()
-        test_total_time = test_total_time + (ed-st)*1000
-        print("test_count ",test_count)
-        print("test_total_time ",test_total_time)
+        tmp_input_tokens = frozen_model_input.input_tokens
+        sampled_token_ids = model_input.cached_outputs[-1].sampled_token_ids
+        if sampled_token_ids.dim() > 1 and sampled_token_ids.size(-1) == 1:
+            sampled_token_ids = sampled_token_ids.squeeze(-1)
+        tmp_input_tokens[:num_queries] = sampled_token_ids[:num_queries]
+        tmp_input_positions = frozen_model_input.input_positions
+        tmp_input_positions[:num_queries] = next_input_pos[:num_queries]
+        frozen_model_input = dataclasses.replace(
+            frozen_model_input,
+            input_tokens=tmp_input_tokens,
+            input_positions=tmp_input_positions,
+        )
 
         if frozen_model_input.seq_lens is not None:
-            for i in range(num_queries):
-                frozen_model_input.seq_lens[i] = attn_metadata.seq_lens[i]
+            tmp_seq_lens = frozen_model_input.seq_lens
+            tmp_seq_lens[:num_queries] = attn_metadata.seq_lens[:num_queries]
+            frozen_model_input = dataclasses.replace(
+                frozen_model_input,
+                seq_lens=tmp_seq_lens,
+            )
 
         return model_input
 
