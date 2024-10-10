@@ -1,5 +1,4 @@
 from enum import IntEnum
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -13,7 +12,7 @@ class PoolingType(IntEnum):
     """Enumeration for different types of pooling methods."""
     LAST = 0
     ALL = 1
-    MODEL = 2
+    CLS = 2
 
 
 class Pooler(nn.Module):
@@ -25,7 +24,7 @@ class Pooler(nn.Module):
     3. Returns structured results as `PoolerOutput`.
 
     Attributes:
-        pooling_type: The type of pooling to use (LAST, AVERAGE, MAX).
+        pooling_type: The type of pooling to use (LAST, MAX, CLS).
         normalize: Whether to normalize the pooled data.
     """
 
@@ -39,17 +38,17 @@ class Pooler(nn.Module):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-        model_pooler: Optional[nn.Module] = None,
     ) -> PoolerOutput:
         """Pools specific information from hidden states based on metadata."""
-        
+
         prompt_lens = PoolingTensors.from_pooling_metadata(
             pooling_metadata, hidden_states.device).prompt_lens
-        
-        if self.pooling_type is PoolingType.MODEL:
-            assert model_pooler is not None, (
-                "PoolingType.MODEL requires the model to pass its pooler")
-            pooled_data = model_pooler(hidden_states, prompt_lens)
+
+        if self.pooling_type is PoolingType.CLS:
+            first_token_flat_indices = torch.zeros_like(prompt_lens)
+            first_token_flat_indices[1:] += torch.cumsum(prompt_lens,
+                                                         dim=0)[:-1]
+            pooled_data = hidden_states[first_token_flat_indices]
         elif self.pooling_type == PoolingType.LAST:
             last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
             pooled_data = hidden_states[last_token_flat_indices]
@@ -66,6 +65,7 @@ class Pooler(nn.Module):
             pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
 
         pooled_outputs = [
-            EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data]
+            EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data
+        ]
 
         return PoolerOutput(outputs=pooled_outputs)

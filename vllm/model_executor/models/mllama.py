@@ -702,7 +702,7 @@ class MllamaTextCrossAttention(nn.Module):
                            v,
                            kv_cache,
                            attn_metadata,
-                           attn_type=AttentionType.CROSS)
+                           attn_type=AttentionType.ENCODER_DECODER)
         out, _ = self.o_proj(output)
         return out
 

@@ -8,8 +8,8 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (QKVParallelLinear, 
-                                               ColumnParallelLinear, 
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
@@ -18,7 +18,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 
@@ -27,16 +26,16 @@ class BertEmbedding(nn.Module):
     def __init__(self, config: BertConfig):
         super().__init__()
         self.size = config.hidden_size
-        self.word_embeddings = VocabParallelEmbedding(
-            config.vocab_size, config.hidden_size)
+        self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
+                                                      config.hidden_size)
         self.position_embeddings = VocabParallelEmbedding(
             config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = VocabParallelEmbedding(
             config.type_vocab_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.position_ids = nn.Parameter(torch.empty((1,
-                                                      config.max_position_embeddings)),)
+        self.position_ids = nn.Parameter(
+            torch.empty((1, config.max_position_embeddings)), )
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type != "absolute":
@@ -59,7 +58,7 @@ class BertEmbedding(nn.Module):
         # Token type embeddings. (TODO: move off hotpath?)
         token_type_embeddings = self.token_type_embeddings(
             torch.zeros(input_shape,
-                        dtype=torch.long, 
+                        dtype=torch.long,
                         device=inputs_embeds.device))
 
         embeddings = inputs_embeds + token_type_embeddings + position_embeddings
@@ -69,13 +68,11 @@ class BertEmbedding(nn.Module):
 
 class BertEncoder(nn.Module):
 
-    def __init__(
-        self,
-        config: BertConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = ""
-    ):
+    def __init__(self,
+                 config: BertConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.layer = nn.ModuleList([
             BertLayer(config=config,
@@ -93,9 +90,7 @@ class BertEncoder(nn.Module):
     ) -> torch.Tensor:
         for i in range(len(self.layer)):
             layer = self.layer[i]
-            hidden_states = layer(hidden_states, 
-                                  kv_caches[i], 
-                                  attn_metadata)
+            hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
         return hidden_states
 
 
@@ -123,13 +118,11 @@ class BertLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.intermediate")
 
-        self.output = BertOutput(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            layer_norm_eps=config.layer_norm_eps,
-            quant_config=quant_config,
-            prefix=f"{prefix}.output"
-        )
+        self.output = BertOutput(hidden_size=config.hidden_size,
+                                 intermediate_size=config.intermediate_size,
+                                 layer_norm_eps=config.layer_norm_eps,
+                                 quant_config=quant_config,
+                                 prefix=f"{prefix}.output")
 
     def forward(
         self,
@@ -137,9 +130,7 @@ class BertLayer(nn.Module):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
-        attn_output = self.attention(hidden_states,
-                                     kv_cache,
-                                     attn_metadata)
+        attn_output = self.attention(hidden_states, kv_cache, attn_metadata)
         intermediate_output = self.intermediate(attn_output)
         output = self.output(intermediate_output, attn_output)
         return output
@@ -158,18 +149,16 @@ class BertAttention(nn.Module):
     ):
         super().__init__()
 
-        self.self = BertSelfAttention(
-            hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.output")
+        self.self = BertSelfAttention(hidden_size=hidden_size,
+                                      num_attention_heads=num_attention_heads,
+                                      cache_config=cache_config,
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.output")
 
-        self.output = BertSelfOutput(
-            hidden_size=hidden_size,
-            layer_norm_eps=layer_norm_eps,
-            quant_config=quant_config,
-            prefix=f"{prefix}.output")
+        self.output = BertSelfOutput(hidden_size=hidden_size,
+                                     layer_norm_eps=layer_norm_eps,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.output")
 
     def forward(
         self,
@@ -217,14 +206,13 @@ class BertSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj")
 
-        self.attn = Attention(
-            num_heads=self.num_heads,
-            head_size=self.head_dim,
-            scale=self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn")
+        self.attn = Attention(num_heads=self.num_heads,
+                              head_size=self.head_dim,
+                              scale=self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -251,16 +239,14 @@ class BertSelfOutput(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
-        self.dense = RowParallelLinear(
-            input_size=hidden_size,
-            output_size=hidden_size,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.dense")
+        self.dense = RowParallelLinear(input_size=hidden_size,
+                                       output_size=hidden_size,
+                                       bias=True,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.dense")
         self.LayerNorm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
 
-    def forward(self,
-                hidden_states: torch.Tensor,
+    def forward(self, hidden_states: torch.Tensor,
                 input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.dense(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
@@ -269,20 +255,18 @@ class BertSelfOutput(nn.Module):
 
 class BertIntermediate(nn.Module):
 
-    def __init__(self, 
+    def __init__(self,
                  hidden_size: int,
                  intermediate_size: int,
                  hidden_act: str,
                  quant_config: Optional[QuantizationConfig] = None,
-
                  prefix: str = ""):
         super().__init__()
-        self.dense = ColumnParallelLinear(
-            input_size=hidden_size, 
-            output_size=intermediate_size,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.dense")
+        self.dense = ColumnParallelLinear(input_size=hidden_size,
+                                          output_size=intermediate_size,
+                                          bias=True,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.dense")
         self.intermediate_act_fn = get_act_fn(hidden_act)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -301,70 +285,34 @@ class BertOutput(nn.Module):
                  prefix: str = ""):
         super().__init__()
 
-        self.dense = RowParallelLinear(
-            input_size=intermediate_size,
-            output_size=hidden_size,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.dense")
+        self.dense = RowParallelLinear(input_size=intermediate_size,
+                                       output_size=hidden_size,
+                                       bias=True,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.dense")
 
-        self.LayerNorm = nn.LayerNorm(hidden_size, 
-                                      eps=layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
 
-    def forward(self, 
-                hidden_states: torch.Tensor,
+    def forward(self, hidden_states: torch.Tensor,
                 input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.dense(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
-class BertPooler(nn.Module):
-
-    def __init__(self,
-                 hidden_size: int,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
-        super().__init__()
-        
-        self.dense = ColumnParallelLinear(
-            input_size=hidden_size,
-            output_size=hidden_size,
-            bias=True,
-            gather_output=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.dense")
-
-        self.activation_fn = nn.Tanh()
-
-    def forward(self, 
-                hidden_states: torch.Tensor,
-                prompt_lens: torch.Tensor) -> torch.Tensor:
-
-        first_token_indices = torch.zeros_like(prompt_lens)
-        first_token_indices[1:] += torch.cumsum(prompt_lens, dim=0)[:-1]
-
-        # We "pool" the model by taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[first_token_indices, :]
-        pooled_output, _ = self.dense(first_token_tensor)
-        return self.activation_fn(pooled_output)
 
 class BertModel(nn.Module):
 
-    def __init__(
-        self,
-        config: BertConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = ""
-    ):
+    def __init__(self,
+                 config: BertConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.embeddings = BertEmbedding(config)
-        self.encoder = BertEncoder(config, cache_config, quant_config,
+        self.encoder = BertEncoder(config,
+                                   cache_config,
+                                   quant_config,
                                    prefix=f"{prefix}.encoder")
-        self.pooler = BertPooler(hidden_size=config.hidden_size,
-                                 quant_config=quant_config,
-                                 prefix=f"{prefix}.pooler")
 
     def forward(
         self,
@@ -378,8 +326,8 @@ class BertModel(nn.Module):
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
-            hidden_states = self.embeddings(
-                input_ids=input_ids, position_ids=position_ids)
+            hidden_states = self.embeddings(input_ids=input_ids,
+                                            position_ids=position_ids)
 
         return self.encoder(hidden_states, kv_caches, attn_metadata)
 
@@ -390,9 +338,11 @@ class BertModel(nn.Module):
             ("qkv_proj", "key", "k"),
             ("qkv_proj", "value", "v"),
         ]
-        
+
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
+            if "pooler" in name:
+                continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -413,6 +363,7 @@ class BertModel(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
 
+
 class BertEmbeddingModel(nn.Module):
     """A model that uses Bert to provide embedding functionalities.
 
@@ -432,8 +383,7 @@ class BertEmbeddingModel(nn.Module):
     ) -> None:
         super().__init__()
         self.model = BertModel(config, cache_config, quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.MODEL,
-                              normalize=True)
+        self._pooler = Pooler(pooling_type=PoolingType.CLS, normalize=True)
 
     def forward(
         self,
@@ -456,9 +406,7 @@ class BertEmbeddingModel(nn.Module):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, 
-                            pooling_metadata, 
-                            self.model.pooler)
+        return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)

@@ -508,7 +508,7 @@ def _enc_dec_cross_attn_setup_reuses_query(
                  num_heads,
                  head_size,
                  force_kv_seq_lens=encoder_seq_lens,
-                 attn_type=AttentionType.CROSS,
+                 attn_type=AttentionType.ENCODER_DECODER,
                  device=CUDA_DEVICE)
 
     ideal_output = ref_masked_attention(decoder_query,
@@ -684,7 +684,7 @@ def _run_encoder_decoder_cross_attention_test(
     is None, this reflects that in decode-phase cross attention there
     is no growth in the key and value tensors.
 
-    attn.forward() is passed attn_type=AttentionType.CROSS
+    attn.forward() is passed attn_type=AttentionType.ENCODER_DECODER
     in order to configure the kernel invocation for encoder/decoder cross-
     attention.
 
@@ -708,7 +708,7 @@ def _run_encoder_decoder_cross_attention_test(
     '''
     assert decoder_test_params.packed_qkvo.packed_qkv is not None
 
-    attn_type = AttentionType.CROSS
+    attn_type = AttentionType.ENCODER_DECODER
     attn = test_rsrcs.attn
     kv_cache = test_rsrcs.kv_cache
     if cross_test_params is None:
