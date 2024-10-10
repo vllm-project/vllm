@@ -841,8 +841,8 @@ class Scheduler:
         self.running = running_queue
         return force_preemption_count
 
-    def _configure_multi_step_accounting_for_best_of(self) -> None:
-        """Configure per-step multi-step scheduling, accounting for best_of>1
+    def _maybe_disable_multi_step_by_sampling_params(self) -> None:
+        """Disable multi-step scheduling for unsupported sampling parameters.
 
         This method must be called each step in order to update scheduler config
         `is_multi_step` member.
