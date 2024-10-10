@@ -23,6 +23,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.multi_step import MultiStepOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
@@ -473,6 +474,24 @@ class LLMEngine:
                     get_tokenizer_for_seq,
                 ),
             ))
+
+        if isinstance(self.output_processor, MultiStepOutputProcessor):
+            # Multi-step only: construct a fallback single-step output
+            # processor for scenarios where a request utilizes a feature
+            # unsupported by multi-step
+            self.single_step_output_processor = (
+                SequenceGroupOutputProcessor.create_output_processor(
+                    self.scheduler_config,
+                    self.detokenizer,
+                    self.scheduler,
+                    self.seq_counter,
+                    get_tokenizer_for_seq,
+                    stop_checker=StopChecker(
+                        self.scheduler_config.max_model_len,
+                        get_tokenizer_for_seq,
+                    ),
+                    force_single_step=True,
+                ))
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1118,9 +1137,14 @@ class LLMEngine:
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
             else:
-                self.output_processor.process_prompt_logprob(seq_group, output)
+                selected_output_processor = (self.single_step_output_processor
+                                             if
+                                             self._should_force_single_step()
+                                             else self.output_processor)
+                selected_output_processor.process_prompt_logprob(
+                    seq_group, output)
                 if seq_group_meta.do_sample:
-                    self.output_processor.process_outputs(
+                    selected_output_processor.process_outputs(
                         seq_group, output, is_async)
 
             if seq_group.is_finished():
@@ -1258,6 +1282,10 @@ class LLMEngine:
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs)
 
+    def _should_force_single_step(self) -> bool:
+        return (self.scheduler_config.user_is_multi_step
+                and (not self.scheduler_config.is_multi_step))
+
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
@@ -1354,9 +1382,6 @@ class LLMEngine:
                     virtual_engine, seq_group_metadata_list, scheduler_outputs,
                     allow_async_output_proc)
 
-        is_multi_step = self.scheduler_config.is_multi_step
-        user_is_multi_step = self.scheduler_config.user_is_multi_step
-
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
@@ -1382,7 +1407,7 @@ class LLMEngine:
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
                 last_sampled_token_ids=last_sampled_token_ids,
-                force_single_step=(user_is_multi_step and (not is_multi_step)))
+                force_single_step=self._should_force_single_step())
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
@@ -1393,7 +1418,7 @@ class LLMEngine:
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
-            if is_multi_step:
+            if self.scheduler_config.is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
             # Nothing scheduled => If there is pending async postprocessor,
