@@ -440,7 +440,6 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
                 [torch.tensor([-1]), eos_pos,
                  torch.tensor([seqlen - 1])])).tolist())
 
-    print(seqlens)
     assert sum(seqlens[-1]) == seqlen
     assert all(s > 0 for s in seqlens[-1])
 
@@ -448,7 +447,6 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
     cumsum = torch.cumsum(torch.tensor(seqlens[0]), dim=0).to(torch.int32)
     cumsum = torch.concat([torch.tensor([0], dtype=torch.int32), cumsum],
                           dim=0).cuda()
-    print(cumsum)
 
     dim = 4
     dstate = 8
@@ -483,7 +481,6 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
                              dtype=itype,
                              requires_grad=False)
     prev_state_ref = prev_state.clone()
-    prev_state_for_padding_test = prev_state.clone()
     state_indices = torch.randperm(total_entries,
                                    dtype=torch.int32,
                                    device=u.device)[:batch_size]
@@ -513,42 +510,32 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
     for i in range(len(seqlens[0])):
         u_s, delta_s, B_s, C_s, z_s = [v[i].unsqueeze(0) for v in splits]
         if padded_state_indices[i] == PAD_SLOT_ID:
-            out_ref_s = z_s if has_z else delta_s
-        else:
-            out_ref_s, _ = selective_scan_ref(
-                u_s,
-                delta_s,
-                A_ref,
-                B_s,
-                C_s,
-                D_ref,
-                z=z_s,
-                delta_bias=delta_bias,
-                delta_softplus=delta_softplus,
-                return_last_state=return_last_state,
-                prev_state=prev_state_ref[padded_state_indices[i]].unsqueeze(0)
-                if has_initial_state[i] else None,
-                final_state_out=prev_state_ref[
-                    padded_state_indices[i]].unsqueeze(0))
+            continue
+        out_ref_s, _ = selective_scan_ref(
+            u_s,
+            delta_s,
+            A_ref,
+            B_s,
+            C_s,
+            D_ref,
+            z=z_s,
+            delta_bias=delta_bias,
+            delta_softplus=delta_softplus,
+            return_last_state=return_last_state,
+            prev_state=prev_state_ref[padded_state_indices[i]].unsqueeze(0)
+            if has_initial_state[i] else None,
+            final_state_out=prev_state_ref[padded_state_indices[i]].unsqueeze(
+                0))
         outs_ref.append(out_ref_s)
-    out_ref = torch.cat(outs_ref, dim=-1) if len(outs_ref) > 1 else outs_ref[0]
+    out_ref = torch.cat(outs_ref, dim=-1)[0]
 
-    # test "real" entries are correct
-    print("Output diff max", (out - out_ref[0]).max())
-    print("Output diff mean", (out - out_ref[0]).mean())
+    unpadded_out = out[:, :out_ref[0].shape[-1]]
+    print("Output diff max", (unpadded_out - out_ref).max())
+    print("Output diff mean", (unpadded_out - out_ref).mean())
     print("Output state diff max", (prev_state - prev_state_ref).max())
     print("Output state diff mean", (prev_state - prev_state_ref).mean())
     assert torch.allclose(prev_state, prev_state_ref, rtol=rtol, atol=atol)
-    assert torch.allclose(out, out_ref[0], rtol=rtol, atol=atol)
-    # test padded entries are correct
-    if with_padding:
-        assert torch.equal(prev_state[unused_states_bool],
-                           prev_state_for_padding_test[unused_states_bool])
-        if has_z:
-            assert torch.equal(out[batch_size + 1:], z[batch_size + 1:])
-        else:
-            assert torch.equal(out[batch_size + 1:], delta[batch_size + 1:])
-
+    assert torch.allclose(unpadded_out, out_ref, rtol=rtol, atol=atol)
     selective_scan_opcheck_fn(u, delta, A, B, C, D, z, delta_bias,
                               delta_softplus, cumsum, padded_state_indices,
                               has_initial_state, prev_state)
@@ -559,7 +546,9 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
 @pytest.mark.parametrize("has_z", [True])
 @pytest.mark.parametrize("dstate", [16, 32, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
-def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
+@pytest.mark.parametrize("with_padding", [True, False])
+def test_selective_state_update_with_batch_indices(with_padding, dim, dstate,
+                                                   has_z, itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
@@ -569,7 +558,7 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
     # set seed
     torch.random.manual_seed(0)
     batch_size = 3
-    padding = 5
+    padding = 5 if with_padding else 0
     padded_batch_size = batch_size + padding
     total_entries = 10 * batch_size
     state = torch.randn(total_entries, dim, dstate, dtype=itype, device=device)
@@ -585,7 +574,6 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
             [PAD_SLOT_ID] * padding, dtype=torch.int32, device=device)
     ],
                                         dim=0)
-
     x = torch.randn(padded_batch_size, dim, device=device, dtype=itype)
     dt = torch.randn(padded_batch_size, dim, device=device, dtype=itype)
     dt_bias = torch.rand(dim, device=device) - 4.0
@@ -624,12 +612,13 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
     print("Output state diff mean",
           (state[state_indices, :] - state_ref).mean())
     # test padded entries stay the same
-    assert torch.equal(state_before[unused_states_bool],
-                       state[unused_states_bool])
-    assert torch.equal(x[batch_size + 1:], x[batch_size + 1:])
-    assert torch.equal(dt[batch_size + 1:], dt[batch_size + 1:])
-    assert torch.equal(B[batch_size + 1:], B[batch_size + 1:])
-    assert torch.equal(C[batch_size + 1:], C[batch_size + 1:])
+    if with_padding:
+        assert torch.equal(state_before[unused_states_bool],
+                           state[unused_states_bool])
+        assert torch.equal(x[batch_size + 1:], x[batch_size + 1:])
+        assert torch.equal(dt[batch_size + 1:], dt[batch_size + 1:])
+        assert torch.equal(B[batch_size + 1:], B[batch_size + 1:])
+        assert torch.equal(C[batch_size + 1:], C[batch_size + 1:])
 
     # test "real" entries
     assert torch.allclose(state[state_indices, :],
