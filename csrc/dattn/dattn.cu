@@ -2,7 +2,6 @@
  Copyright (c) ByteDance Inc.
  Authors: 
   - Tongping Liu (tongping.liu@bytedance.com)
-  - https://github.com/vllm-project/vllm/pull/6102/commits
  */ 
  
 #include <c10/core/ScalarType.h>
@@ -48,7 +47,7 @@ static int allocatePhyPages(void * ptr, uint64_t size) {
       fprintf(stderr, "cuMemRelease failed, err code: %d\n", status);
     } 
   } else {
-    fprintf(stderr, "cuMemCreate failed!, err code: %d\n", status);
+    fprintf(stderr, "cuMemCreate %ld failed!, err code: %d\n", size, status);
   }
   return status == CUDA_SUCCESS ? 0 : -1;
 }
@@ -57,7 +56,6 @@ static int allocatePhyPages(void * ptr, uint64_t size) {
 static void freePhysicalMemory(void* ptr, size_t size) {
   CUdeviceptr dptr = (CUdeviceptr)ptr;
   CHECK_DRV(cuMemUnmap(dptr, size));
-  CHECK_DRV(cuMemAddressFree(dptr, size));
 }
 
 /*
@@ -73,6 +71,7 @@ kvCacheRegion::kvCacheRegion(uint64_t region_size, uint64_t block_size, uint64_t
   this->offset = 0; 
   this->total_pages = 0;
   this->used_pages = 0; 
+  //fprintf(stderr, "NNNNNNNNNN block_size %lx\n", this->block_size);
 }
 
 // Decontructor: release all physical pages of this region
@@ -116,6 +115,8 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
   // Align the new offset to page_size
   uint64_t alignedOffset = roundup(this->offset + size, this->page_size); 
 
+  this->total_pages = alignedOffset/this->page_size; 
+
   // Check how many pages should we allocated this time
   char * alignedAddr = this->dptr + alignedOffset; 
   if( alignedAddr > this->nextUnmapedAddr) {
@@ -143,6 +144,12 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
   }
  
   return toallocPages; 
+}
+
+void kvCacheRegion::freeAllPhyMemory(void) {
+  char * startAddr = this->dptr; 
+  uint64_t size = this->total_pages * this->page_size;
+  freePhysicalMemory(startAddr, size);
 }
 
 // freeUnusedPages from a region, and return freed pages
@@ -226,8 +233,8 @@ int64_t kvCacheAllocator::getPageSize() {
 }
 
 
-// reserve function, reserve virtual address space for a request, and also allocate the first physical block
-int64_t kvCacheAllocator::reserveRegion(int64_t req_id) {
+// reserve function, reserve virtual address space for a request
+int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
   CUdeviceptr ptr;
   kvCacheRegion * region = nullptr;
 
@@ -250,32 +257,33 @@ int64_t kvCacheAllocator::reserveRegion(int64_t req_id) {
   
   // Record the region information
   this->active_regions += 1; 
-  this->active_regions_map[req_id] = region; 
+  this->active_regions_map[region_id] = region; 
 
   return static_cast<int64_t>(ptr);
 }
 
-// Release the region with the given req_id
-void kvCacheAllocator::_releaseRegion(int64_t req_id) {
-  // Find the region corresponding to the given req_id
-  if(this->active_regions_map.count(req_id) == 0) {
-    fprintf(stderr, "ERROR: req_id-%ld at does not exist at all.!\n", req_id);
+// Release the region with the given region_id
+void kvCacheAllocator::_releaseRegion(int64_t region_id) {
+  // Find the region corresponding to the given region_id
+  if(this->active_regions_map.count(region_id) == 0) {
+    fprintf(stderr, "ERROR: region_id-%ld at does not exist at all.!\n", region_id);
     exit(-1); 
   }
 
   std::lock_guard<std::mutex> lock(this->mutex);
 
-  kvCacheRegion * region = this->active_regions_map[req_id];
+  kvCacheRegion * region = this->active_regions_map[region_id];
   // Delete this region from active_regions_map that only keep 
-  this->active_regions_map.erase(req_id);
+  this->active_regions_map.erase(region_id);
   this->active_regions--; 
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
+  region->freeAllPhyMemory(); 
 
   // Cache the given region, as it can be used for the future ideally. 
   // In order to reduce the overhead of memory management, we did not 
   // reclaim physical blocks until necessary.
-  _cacheReleasedRegion(region); 
+  //_cacheReleasedRegion(region); 
 }
 
 // Cache the released region. Don't release the virtual address and physical cache blocks
@@ -349,19 +357,19 @@ void kvCacheAllocator::_gcPhyPages(int64_t toCollectPages) {
 // require to save KV cache of multiple tokens, which should not invoke this function multiple times. 
 // Similarly, the python code may get the physical blocks for multiple tokens during the decoding phase
 // Note that the allocator doesn't care about tokens (which should be handled by the python code), but only blocks here.
-int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t req_id, int64_t blocks) {
+int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t blocks) {
   int64_t pages = -1;
 
-  // Find the region corresponding to the given req_id, which should reserveRegion before
-  // If the req_id doesn't exist at all, it is the bug that should be fixed.  
-  if(this->active_regions_map.count(req_id) == 0) {
-    fprintf(stderr, "ERROR: req_id %ld does not exist at all.!\n", req_id);
+  // Find the region corresponding to the given region_id, which should reserveRegion before
+  // If the region_id doesn't exist at all, it is the bug that should be fixed.  
+  if(this->active_regions_map.count(region_id) == 0) {
+    fprintf(stderr, "ERROR: region_id %ld does not exist at all.!\n", region_id);
     exit(-1); 
   }
 
   std::lock_guard<std::mutex> lock(this->mutex);
 
-  kvCacheRegion * region = this->active_regions_map[req_id]; 
+  kvCacheRegion * region = this->active_regions_map[region_id]; 
 
   pages = region->allocCacheBlocks(blocks, &this->used_pages);
 
@@ -386,11 +394,11 @@ int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req
   int64_t pages = 0; 
 
   for(auto row : req_blocks) {
-    uint64_t req_id = row[0]; 
+    uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
 
-    //fprintf(stderr, "allocating req_id-%d and blocks-%d\n", req_id, blocks);
-    pages += _allocCacheBlocksForRequest(req_id, blocks); 
+    //fprintf(stderr, "allocating region_id-%d and blocks-%d\n", region_id, blocks);
+    pages += _allocCacheBlocksForRequest(region_id, blocks); 
   }
 
   return pages; 
@@ -403,23 +411,23 @@ void kvCacheAllocator::releaseRegions(std::vector<int64_t> regions) {
 }
 
 
-int64_t kvCacheAllocator::getAllocPhyPages(int64_t req_id) {
+int64_t kvCacheAllocator::getAllocPhyPages(int64_t region_id) {
   int64_t pages = 0; 
 
-  if(req_id == 0) {
+  if(region_id == 0) {
     pages = this->total_pages; 
   }
   else {
-    // Find the region corresponding to the given req_id, which should reserveRegion before
-    // If the req_id doesn't exist at all, it is the bug that should be fixed.  
-    if(this->active_regions_map.count(req_id) == 0) {
-      fprintf(stderr, "ERROR: req_id does not exist at all.!");
+    // Find the region corresponding to the given region_id, which should reserveRegion before
+    // If the region_id doesn't exist at all, it is the bug that should be fixed.  
+    if(this->active_regions_map.count(region_id) == 0) {
+      fprintf(stderr, "ERROR: region_id does not exist at all.!");
       exit(-1); 
     }
 
     std::lock_guard<std::mutex> lock(this->mutex);
 
-    kvCacheRegion * region = this->active_regions_map[req_id]; 
+    kvCacheRegion * region = this->active_regions_map[region_id]; 
     pages = region->getAllocPhyPages(); 
   }
 

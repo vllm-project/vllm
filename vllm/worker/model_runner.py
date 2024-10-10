@@ -1204,12 +1204,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         If cuda graph is required, this API automatically pads inputs.
         """
         builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
-        i = 0
         #print(f"in _prepare_model_input_tensors: size:{len(seq_group_metadata_list)}", file=sys.stderr)
         for seq_group_metadata in seq_group_metadata_list:
-            #print(f"in handling group {i},requestid:{seq_group_metadata.request_id}", file=sys.stderr)
-            #i +=1
-            builder.add_seq_group(seq_group_metadata, self._get_kv_ptr(int(seq_group_metadata.request_id)) if self.use_dattn else 0)
+            request_id = int(seq_group_metadata.request_id)
+            cache_id =seq_group_metadata.seq_data[request_id].cache_id 
+            builder.add_seq_group(seq_group_metadata, self._get_kv_ptr(cache_id) if self.use_dattn else 0)
 
         builder.reset_cached_inter_data()
 

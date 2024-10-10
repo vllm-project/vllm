@@ -135,8 +135,8 @@ class SchedulerOutputs:
     running_queue_size: int
     preempted: int
     # new add for dattention
-    allocated_block_counts: Dict[int, int] = field(default_factory=dict)
-    free_buffer_ids: List[int] = field(default_factory=list)
+    allocated_blocks: Dict[int, int] = field(default_factory=dict)
+    free_kv_caches: List[int] = field(default_factory=list)
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -350,7 +350,7 @@ class Scheduler:
                 num_cpu_blocks=num_cpu_blocks,
                 sliding_window=self.cache_config.sliding_window,
                 enable_caching=self.cache_config.enable_prefix_caching,
-                num_cache_buffers=self.scheduler_config.max_num_seqs)
+                num_caches=self.scheduler_config.max_num_seqs)
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -473,6 +473,7 @@ class Scheduler:
                     if seq.is_finished():
                         continue
                     seq.status = SequenceStatus.FINISHED_ABORTED
+                    print(f"aborted seq:{seq.seq_id}", file=sys.stderr)
                     self.free_seq(seq)
 
                 self._free_seq_group_cross_attn_blocks(aborted_group)
@@ -1134,8 +1135,8 @@ class Scheduler:
         now = time.time()
 
         if self.use_dattn:
-            scheduler_outputs.allocated_block_counts, \
-                scheduler_outputs.free_buffer_ids = self.block_manager.step()
+            scheduler_outputs.allocated_blocks, \
+                scheduler_outputs.free_kv_caches = self.block_manager.step()
             
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
@@ -1180,11 +1181,7 @@ class Scheduler:
                 if not self.use_dattn:
                     block_tables[seq_id] = self.block_manager.get_block_table(seq)
                     self.block_manager.access_all_blocks_in_seq(seq, now)
-                else:
-                    cache_buffer_id = seq.cache_buffer_id
-                    assert cache_buffer_id >= 0  # allocated seq.cache_buffer_id should be >= 0
-                    scheduler_outputs.allocated_block_counts[cache_buffer_id] = self.block_manager.get_allocated_block_count(seq.seq_id)
-
+                
             if self.cache_config.enable_prefix_caching:
                 common_computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
@@ -1290,12 +1287,14 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
+        #print(f"free_seq: seq:{seq.seq_id}", file=sys.stderr)
         self.block_manager.free(seq)
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
         """Free finished seqs in a sequence group."""
         for seq in seq_group.get_seqs():
             if seq.is_finished():
+                #print(f"_free_finished_seqs, seq->id:{seq.seq_id}", file=sys.stderr)
                 self.free_seq(seq)
 
     def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
@@ -1415,6 +1414,7 @@ class Scheduler:
         assert len(seqs) == 1
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
+            print(f"_preempt_by_recompute, free_seq:{seq.seq_id}", file=sys.stderr)
             self.free_seq(seq)
             seq.reset_state_for_recompute()
 

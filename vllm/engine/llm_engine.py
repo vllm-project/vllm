@@ -1250,8 +1250,8 @@ class LLMEngine:
                     virtual_engine]
 
             if self.use_dattn:
-                execute_model_req.allocated_block_counts = scheduler_outputs.allocated_block_counts
-                execute_model_req.free_buffer_ids = scheduler_outputs.free_buffer_ids
+                execute_model_req.allocated_blocks = scheduler_outputs.allocated_blocks
+                execute_model_req.free_kv_caches = scheduler_outputs.free_kv_caches
                 
             if self.profile == True:
                 T2 = time.time()

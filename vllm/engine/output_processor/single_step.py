@@ -11,6 +11,7 @@ from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
+import inspect
 
 logger = init_logger(__name__)
 
@@ -112,6 +113,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput,
                                         is_async: bool) -> None:
+        import sys
         sampling_params = seq_group.sampling_params
         if sampling_params.best_of == 1 and not sampling_params.use_beam_search:
             # only have one output sample
@@ -131,7 +133,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 sampling_params,
                 lora_req=seq_group.lora_request,
             )
+
             if seq.is_finished():
+                #print(f"free_seq at line number: {inspect.currentframe().f_lineno}")
                 for scheduler in self.scheduler:
                     scheduler.free_seq(seq)
             return

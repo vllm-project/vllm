@@ -91,6 +91,7 @@ public:
   uint64_t getUsedPhysicalPages(void);
   int64_t allocCacheBlocks(uint64_t blocks, uint64_t * used_pages);
   int freeUnusedPages(void);
+  void freeAllPhyMemory(void);
 };
 
 
@@ -130,9 +131,9 @@ private:
   void _gcPhyPages(int64_t toCollectPages);
   void _initializeAllocHandles(void);
   // Release the virtual address space for a region that is related to one request
-  void _releaseRegion(int64_t req_id);
+  void _releaseRegion(int64_t region_id);
   // Allocate physical memory, map to the reserved virtual address space of dptr, and set access permission
-  int64_t _allocCacheBlocksForRequest(int64_t req_id, int64_t blocks = 1);
+  int64_t _allocCacheBlocksForRequest(int64_t region_id, int64_t blocks = 1);
 
 
 public:
@@ -155,15 +156,15 @@ public:
   // Reserve the virtual address space for a region that is related to one request
   // In particular, the regionSize == 2 * max_seq_length * layers_num * heads_num * head_size * dtype_size
   // "2" here is to allocate Key and Value cache together, which helps to reduce the fragmentation 
-  int64_t reserveRegion(int64_t req_id);
+  int64_t reserveRegion(int64_t region_id);
 
   void releaseRegions(std::vector<int64_t> regions);
 
   int64_t allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks);
 
   // Allow the python code to know the physical memory used for the whole 
-  // kv cache or the memory for the specified request (when req_id is not 0). 
-  int64_t getAllocPhyPages(int64_t req_id = 0); 
+  // kv cache or the memory for the specified request (when region_id is not 0). 
+  int64_t getAllocPhyPages(int64_t region_id = 0); 
   void collectPhyPages(int64_t pages = 0); 
 };
 

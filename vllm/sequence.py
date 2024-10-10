@@ -167,7 +167,7 @@ class SequenceData(msgspec.Struct,
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
     # support dattn
-    cache_buffer_id: int = -1
+    cache_id: int = -1
     
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
@@ -327,7 +327,7 @@ class SequenceData(msgspec.Struct,
                 f"prompt_token_ids={self._prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
-                f"cache_buffer_id={self.cache_buffer_id}, "
+                f"cache_id={self.cache_id}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()}")
 
 
@@ -423,7 +423,7 @@ class Sequence:
         self.tokens: Optional[List[str]] = None
 
         # support dattn
-        self.cache_buffer_id = -1
+        self.cache_id = -1
 
     @property
     def n_blocks(self) -> int:
@@ -937,6 +937,7 @@ class SequenceGroupMetadata(
     seq_data: Dict[int, SequenceData]
     sampling_params: Optional[SamplingParams]
     block_tables: Dict[int, List[int]]
+    #cache_id: int # supporting dattention. We cannot use request_id directly to find the cache's start address 
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
     lora_request: Optional[LoRARequest] = None
@@ -1289,8 +1290,8 @@ class ExecuteModelRequest(
     # Async callback
     async_callback: Optional[Callable] = None
     # new add for dattn
-    allocated_block_counts: Dict[int, int]= msgspec.field(default_factory=dict),
-    free_buffer_ids: List[int] = msgspec.field(default_factory=list)
+    allocated_blocks: Dict[int, int]= msgspec.field(default_factory=dict),
+    free_kv_caches: List[int] = msgspec.field(default_factory=list)
 
     @property
     def is_first_multi_step(self) -> bool:

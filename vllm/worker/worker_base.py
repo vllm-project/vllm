@@ -136,8 +136,8 @@ class WorkerInput:
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
     
-    allocated_block_counts : Optional[Dict[int, int]] = None    # new add for vmm
-    free_buffer_ids: Optional[List[int]] = None
+    allocated_blocks : Optional[Dict[int, int]] = None    # new add for vmm
+    free_kv_caches: Optional[List[int]] = None
     
     num_steps: int = 1
 
@@ -156,8 +156,8 @@ class WorkerInput:
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
-            allocated_block_counts=tensor_dict.pop("allocated_block_counts"),   # new add for dattn
-            free_buffer_ids=tensor_dict.pop("free_buffer_ids"),
+            allocated_blocks=tensor_dict.pop("allocated_blocks"),   # new add for dattn
+            free_kv_caches=tensor_dict.pop("free_kv_caches"),
             num_steps=tensor_dict.pop("num_steps"),
         )
 
@@ -173,8 +173,8 @@ class WorkerInput:
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
             # new add for dattn
-            "allocated_block_counts": self.allocated_block_counts,  
-            "free_buffer_ids": self.free_buffer_ids,
+            "allocated_blocks": self.allocated_blocks,  
+            "free_kv_caches": self.free_kv_caches,
             "num_steps": self.num_steps,
         }
 
@@ -379,6 +379,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         assert execute_model_req is not None, (
             "_execute_model_spmd() requires each worker to take in an "
             "ExecuteModelRequest")
+        
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
         model_input: ModelRunnerInputBase = (

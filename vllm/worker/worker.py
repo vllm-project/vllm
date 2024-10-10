@@ -334,11 +334,11 @@ class Worker(LocalOrDistributedWorkerBase):
                                       dtype=torch.int64).view(-1, 2)
 
         if self.use_dattn:
-            allocated_block_counts = execute_model_req.allocated_block_counts
-            free_buffer_ids = execute_model_req.free_buffer_ids
+            allocated_blocks = execute_model_req.allocated_blocks
+            free_kv_caches = execute_model_req.free_kv_caches
         else:
-            allocated_block_counts = None
-            free_buffer_ids = None
+            allocated_blocks = None
+            free_kv_caches = None
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,
@@ -346,8 +346,8 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
-            allocated_block_counts=allocated_block_counts,
-            free_buffer_ids=free_buffer_ids,
+            allocated_blocks=allocated_blocks,
+            free_kv_caches=free_kv_caches,
             num_steps=num_steps,
         )
 
@@ -367,12 +367,12 @@ class Worker(LocalOrDistributedWorkerBase):
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
 
-        if self.use_dattn and (worker_input.free_buffer_ids is not None) and len(worker_input.free_buffer_ids) > 0:
+        if self.use_dattn and (worker_input.free_kv_caches is not None) and len(worker_input.free_kv_caches) > 0:
             self.cache_engine[virtual_engine].free_seqs(
-                worker_input.free_buffer_ids)
+                worker_input.free_kv_caches)
 
-        if self.use_dattn and (worker_input.allocated_block_counts is not None):           
-            self.cache_engine[virtual_engine].alloc_seqs(worker_input.allocated_block_counts)
+        if self.use_dattn and (worker_input.allocated_blocks is not None):           
+            self.cache_engine[virtual_engine].alloc_seqs(worker_input.allocated_blocks)
     
     def _get_cached_seq_group_metadata(
             self,

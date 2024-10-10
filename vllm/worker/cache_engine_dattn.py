@@ -92,7 +92,7 @@ class CacheEngineDAttn:
                                                              self.head_size, self.block_size, self.dtype_size)
 
         # record the number of allocated blocks in a cache space for each request 
-        self.allocated_block_counts = [0 for _ in range(self.max_batch_size)] 
+        self.allocated_blocks = [0 for _ in range(self.max_batch_size)] 
         
         # Get attention backend.
         self.attn_backend = get_attn_backend(
@@ -171,30 +171,31 @@ class CacheEngineDAttn:
         However, it is not a wise approach, as that can increase the overhead by 100X based on our experiments. 
         Instead, we should invoke c++ library function just once by passing an array with [req_id, new_blocks]
 
-        Note that self.allocated_block_counts[buffer_id] will track the number of allocated blocks
+        Note that self.allocated_blocks[buffer_id] will track the number of allocated blocks
         in this function. Let's utilize the same mechanism at the first step. 
         TODO: we may change this later. To my understanding, it is better to track the number of blocks at sequence 
     """
-    def alloc_seqs(self, allocated_block_counts: Dict[int, int]):
+    def alloc_seqs(self, allocated_blocks: Dict[int, int]):
         to_alloc_blocks = []
+
         """Allocate cache handles for the given number of blocks."""
-        for buffer_id, num_blocks in allocated_block_counts.items():
-            allocated_blocks = self.allocated_block_counts[buffer_id]
+        for buffer_id, num_blocks in allocated_blocks.items():
+            allocated_blocks = self.allocated_blocks[buffer_id]
             num_blocks -= allocated_blocks
             #print(f"CacheEngineDAttn: buffer_id-{buffer_id}, num_blocks:{num_blocks}")
             if num_blocks > 0:
                 to_alloc_blocks.append([buffer_id, num_blocks])
-                self.allocated_block_counts[buffer_id] += num_blocks
+                self.allocated_blocks[buffer_id] += num_blocks
 
         # Allocate physical blocks for all requests. 
         self.device_cache_allocator.alloc_cache_blocks(to_alloc_blocks) 
 
 
-    def free_seqs(self, free_buffer_ids: List[int]):
+    def free_seqs(self, free_kv_caches: List[int]):
         """Free cache handles for the given buffer ids."""
-        for req in free_buffer_ids:
-            print(f"BOOWWWW free_seqs with req:{req} with length:{len(free_buffer_ids)}")
-        self.device_cache_allocator.release_cache_regions(free_buffer_ids)
+        #for cache_id in free_kv_caches:
+        #    print(f"free_seqs with cache_id:{cache_id}")
+        self.device_cache_allocator.release_cache_regions(free_kv_caches)
 
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
