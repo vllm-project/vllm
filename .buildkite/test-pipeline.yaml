@@ -397,8 +397,7 @@ steps:
   - pytest -v -s ./compile/test_full_graph_multi_gpu.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
-  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus --ignore=basic_correctness/test_chunked_prefill.py
-  - TARGET_TEST_SUITE=L4 VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest basic_correctness/test_chunked_prefill.py -v -s -m distributed_2_gpus
+  - TARGET_TEST_SUITE=L4 VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest basic_correctness/ -v -s -m distributed_2_gpus
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m distributed_2_gpus
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
