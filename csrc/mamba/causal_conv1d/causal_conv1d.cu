@@ -100,7 +100,7 @@ void causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                   const c10::optional<at::Tensor> &has_initial_state,
                   bool silu_activation,
                  // used to identify padding entries if cache_indices provided
-                 // incase of padding, the kernel will return early
+                 // in case of padding, the kernel will return early
                   int64_t pad_slot_id) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();
@@ -199,7 +199,7 @@ void causal_conv1d_update(const at::Tensor &x,
                      const c10::optional<at::Tensor> &cache_seqlens_,
                      const c10::optional<at::Tensor> &conv_state_indices_,
                      // used to identify padding entries if cache_indices provided
-                     // incase of padding, the kernel will return early
+                     // in case of padding, the kernel will return early
                      int64_t pad_slot_id) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();

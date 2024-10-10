@@ -513,7 +513,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const c10::optional<torch::Tensor> &has_initial_state,
                   const torch::Tensor &ssm_states,
                   // used to identify padding entries if cache_indices provided
-                  // incase of padding, the kernel will return early
+                  // in case of padding, the kernel will return early
                   int64_t pad_slot_id) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
