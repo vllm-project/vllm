@@ -1,19 +1,30 @@
 # See https://help.github.com/articles/about-codeowners/
 # for more info about CODEOWNERS file
 
+# This lists cover the "core" components of vLLM that require careful review
+/vllm/attention/backends/abstract.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
+/vllm/core @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
+/vllm/engine/llm_engine.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
+/vllm/executor/executor_base.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
+/vllm/worker/worker_base.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
+/vllm/worker/worker.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
+/vllm/model_executor/layers/sampler.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
+CMakeLists.txt @tlrmchlsmth @WoosukKwon
+
+# Test ownership
 /tests/async_engine @njhill @robertgshaw2-neuralmagic @simon-mo
 /tests/test_inputs.py @DarkLight1337 @ywang96
-/tests/entrypoints @DarkLight1337 @robertgshaw2-neuralmagic @simon-mo 
+/tests/entrypoints @DarkLight1337 @robertgshaw2-neuralmagic @simon-mo
 /tests/models @DarkLight1337 @ywang96
 /tests/multimodal @DarkLight1337 @ywang96
-/tests/prefix_caching @comaniac @KuntaiDu 
+/tests/prefix_caching @comaniac @KuntaiDu
 /tests/spec_decode @njhill @LiuXiaoxuanPKU
-/tests/kernels @tlrmchlsmth @WoosukKwon 
+/tests/kernels @tlrmchlsmth @WoosukKwon
 /tests/quantization @mgoin @robertgshaw2-neuralmagic
-/.buildkite/lm-eval-harness @mgoin @simon-mo 
+/.buildkite/lm-eval-harness @mgoin @simon-mo
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/multi_step @alexm-neuralmagic @SolitaryThinker @comaniac
+/tests/multi_step @alexm-neuralmagic @comaniac
 /tests/weight_loading @mgoin @youkaichao
 /tests/basic_correctness/test_chunked_prefill @rkooo567 @comaniac
