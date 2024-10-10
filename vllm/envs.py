@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
+    VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1: bool = False
 
 
 def get_default_cache_root():
@@ -434,6 +435,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # and trust the driver's peer-to-peer capability report.
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
+
+    # If set, allowing the use of deprecated block manager V1
+    "VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1":
+    lambda: os.environ.get("VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1", "0"
+                           ) == "1",
 }
 
 # end-env-vars-definition
