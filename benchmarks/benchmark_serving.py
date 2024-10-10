@@ -141,7 +141,6 @@ def sample_sonnet_requests(
     # Load the dataset.
     with open(dataset_path, encoding='utf-8') as f:
         poem_lines = f.readlines()
-    num_poem_lines = len(poem_lines)
 
     # Tokenize the poem lines.
     poem_token_ids = tokenizer(poem_lines).input_ids
@@ -178,19 +177,8 @@ def sample_sonnet_requests(
     sampled_requests: List[Tuple[str, int, int]] = []
     for _ in range(num_requests):
         num_lines_needed = num_input_lines - num_prefix_lines
-
-        if num_lines_needed <= num_poem_lines:
-            sampled_lines = "".join(
-                prefix_lines + random.sample(poem_lines, num_lines_needed))
-        else:
-            num_round = num_lines_needed // num_poem_lines
-            remainder = num_lines_needed - num_round * num_poem_lines
-            sampled_lines = "".join(prefix_lines)
-            for _ in range(num_round):
-                new_lines = "".join(random.sample(poem_lines, num_poem_lines))
-                sampled_lines += new_lines
-            new_lines = "".join(random.sample(poem_lines, remainder))
-            sampled_lines += new_lines
+        sampled_lines = "".join(prefix_lines +
+                                random.choices(poem_lines, k=num_lines_needed))
 
         prompt = f"{base_prompt}{sampled_lines}"
         message = [
