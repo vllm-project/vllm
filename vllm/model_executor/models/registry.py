@@ -151,7 +151,7 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
 }
 
 
-@dataclass
+@dataclass(frozen=True)
 class _ModelInfo:
     is_text_generation_model: bool
     is_embedding_model: bool
@@ -179,7 +179,7 @@ class _BaseRegisteredModel(ABC):
         raise NotImplementedError
 
 
-@dataclass
+@dataclass(frozen=True)
 class _RegisteredModel(_BaseRegisteredModel):
     """
     Represents a model that has already been imported in the main process.
@@ -202,7 +202,7 @@ class _RegisteredModel(_BaseRegisteredModel):
         return self.model_cls
 
 
-@dataclass
+@dataclass(frozen=True)
 class _LazyRegisteredModel(_BaseRegisteredModel):
     """
     Represents a model that has not been imported in the main process.
