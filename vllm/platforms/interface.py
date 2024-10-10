@@ -3,6 +3,10 @@ from typing import NamedTuple, Optional, Tuple, Union
 
 import torch
 
+from vllm.utils import print_warning_once
+
+from .utils import PlatformMemoryProfiler
+
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
@@ -10,6 +14,8 @@ class PlatformEnum(enum.Enum):
     TPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
+    NEURON = enum.auto()
+    OPENVINO = enum.auto()
     UNSPECIFIED = enum.auto()
 
 
@@ -47,6 +53,12 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
+
+    def is_neuron(self) -> bool:
+        return self._enum == PlatformEnum.NEURON
+
+    def is_openvino(self) -> bool:
+        return self._enum == PlatformEnum.OPENVINO
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
@@ -102,6 +114,20 @@ class Platform:
         back to `torch.no_grad` by overriding this method.
         """
         return torch.inference_mode(mode=True)
+
+    @classmethod
+    def current_memory_usage(cls, device: torch.types.Device) -> float:
+        print_warning_once("current_memory_usage is not supported on"
+                           "current platform.")
+        return 0.0
+
+    def memory_profiler(self) -> PlatformMemoryProfiler:
+        return PlatformMemoryProfiler(
+            current_memory_usage_func=self.current_memory_usage)
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        return True
 
 
 class UnspecifiedPlatform(Platform):

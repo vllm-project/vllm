@@ -1,6 +1,8 @@
 import psutil
 import torch
 
+from vllm.utils import print_warning_once
+
 from .interface import Platform, PlatformEnum
 
 
@@ -18,3 +20,8 @@ class CpuPlatform(Platform):
     @classmethod
     def inference_mode(cls):
         return torch.no_grad()
+
+    @staticmethod
+    def is_pin_memory_available() -> bool:
+        print_warning_once("Pin memory is not supported on CPU.")
+        return False

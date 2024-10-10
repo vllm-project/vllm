@@ -4,11 +4,11 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (PyObjectCache, async_tensor_h2d,
-                        is_pin_memory_available, make_tensor_with_pad)
+from vllm.utils import PyObjectCache, async_tensor_h2d, make_tensor_with_pad
 
 _SAMPLING_EPS = 1e-5
 
@@ -502,7 +502,7 @@ class SamplingTensors:
     ) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
-        pin_memory = is_pin_memory_available()
+        pin_memory = current_platform.is_pin_memory_available()
 
         do_penalties = prompt_tokens or output_tokens
 

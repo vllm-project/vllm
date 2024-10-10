@@ -3,7 +3,6 @@ import asyncio
 import contextlib
 import datetime
 import enum
-import gc
 import inspect
 import ipaddress
 import os
@@ -323,47 +322,6 @@ def is_cpu() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_openvino() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        return "openvino" in version("vllm")
-    except PackageNotFoundError:
-        return False
-
-
-@lru_cache(maxsize=None)
-def is_neuron() -> bool:
-    try:
-        import transformers_neuronx
-    except ImportError:
-        transformers_neuronx = None
-    return transformers_neuronx is not None
-
-
-@lru_cache(maxsize=None)
-def is_xpu() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        is_xpu_flag = "xpu" in version("vllm")
-    except PackageNotFoundError:
-        return False
-    # vllm is not build with xpu
-    if not is_xpu_flag:
-        return False
-    try:
-        import intel_extension_for_pytorch as ipex  # noqa: F401
-        _import_ipex = True
-    except ImportError as e:
-        logger.warning("Import Error for IPEX: %s", e.msg)
-        _import_ipex = False
-    # ipex dependency is not ready
-    if not _import_ipex:
-        logger.warning("not found ipex lib")
-        return False
-    return hasattr(torch, "xpu") and torch.xpu.is_available()
-
-
-@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -392,7 +350,7 @@ def seed_everything(seed: int) -> None:
     if current_platform.is_cuda_alike():
         torch.cuda.manual_seed_all(seed)
 
-    if is_xpu():
+    if current_platform.is_xpu():
         torch.xpu.manual_seed_all(seed)
 
 
@@ -758,54 +716,6 @@ def create_kv_caches_with_random(
 def print_warning_once(msg: str) -> None:
     # Set the stacklevel to 2 to print the caller's line info
     logger.warning(msg, stacklevel=2)
-
-
-@lru_cache(maxsize=None)
-def is_pin_memory_available() -> bool:
-
-    if in_wsl():
-        # Pinning memory in WSL is not supported.
-        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
-        return False
-    elif is_xpu():
-        print_warning_once("Pin memory is not supported on XPU.")
-        return False
-    elif is_neuron():
-        print_warning_once("Pin memory is not supported on Neuron.")
-        return False
-    elif is_cpu() or is_openvino():
-        return False
-    return True
-
-
-class DeviceMemoryProfiler:
-
-    def __init__(self, device: Optional[torch.types.Device] = None):
-        self.device = device
-
-    def current_memory_usage(self) -> float:
-        # Return the memory usage in bytes.
-        if current_platform.is_cuda_alike():
-            torch.cuda.reset_peak_memory_stats(self.device)
-            mem = torch.cuda.max_memory_allocated(self.device)
-        elif is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
-            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
-        return mem
-
-    def __enter__(self):
-        self.initial_memory = self.current_memory_usage()
-        # This allows us to call methods of the context manager if needed
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.final_memory = self.current_memory_usage()
-        self.consumed_memory = self.final_memory - self.initial_memory
-
-        # Force garbage collection
-        gc.collect()
 
 
 def make_ndarray_with_pad(

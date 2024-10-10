@@ -15,8 +15,8 @@ from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal.base import NestedTensors
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
 
 WeightsMapping = Mapping[str, Optional[str]]
 """If a key maps to a value of `None`, the corresponding weight is ignored."""
@@ -344,7 +344,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
         return module
 
-    pin_memory = is_pin_memory_available()
+    pin_memory = current_platform.is_pin_memory_available()
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed

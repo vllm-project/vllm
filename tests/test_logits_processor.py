@@ -8,8 +8,8 @@ import torch
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
+from vllm.platforms import current_platform
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import is_pin_memory_available
 
 
 class MockLogitsProcessor(LogitsProcessor):
@@ -81,7 +81,7 @@ def test_logits_processors(seed: int, device: str):
         seq_lens,
         query_lens=seq_lens,
         device=device,
-        pin_memory=is_pin_memory_available())
+        pin_memory=current_platform.is_pin_memory_available())
     logits_processor_output = logits_processor(
         lm_head=None,
         hidden_states=input_tensor,

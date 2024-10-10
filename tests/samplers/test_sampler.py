@@ -12,8 +12,9 @@ import vllm.envs as envs
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
+from vllm.platforms import current_platform
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import Counter, is_pin_memory_available
+from vllm.utils import Counter
 
 
 class MockLogitsSampler(Sampler):
@@ -69,7 +70,7 @@ def _do_sample(
         seq_lens,
         query_lens=seq_lens,
         device=device,
-        pin_memory=is_pin_memory_available())
+        pin_memory=current_platform.is_pin_memory_available())
     return sampler(logits=input_tensor, sampling_metadata=sampling_metadata)
 
 
@@ -416,7 +417,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             seq_lens=seq_lens if seq_lens else None,
             query_lens=seq_lens if seq_lens else [1] * batch_size,
             device=device,
-            pin_memory=is_pin_memory_available())
+            pin_memory=current_platform.is_pin_memory_available())
         # the logits tensor is modified in-place by the sampler
         _ = sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
 
@@ -498,7 +499,7 @@ def test_sampler_mixed(seed: int, device: str):
             seq_lens,
             query_lens=seq_lens,
             device=device,
-            pin_memory=is_pin_memory_available(),
+            pin_memory=current_platform.is_pin_memory_available(),
             generators=generators)
         sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
@@ -607,7 +608,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
         seq_lens,
         query_lens=seq_lens,
         device=device,
-        pin_memory=is_pin_memory_available())
+        pin_memory=current_platform.is_pin_memory_available())
 
     sample_probs = None
 
@@ -687,7 +688,7 @@ def test_sampler_repetition_penalty_mixed(device: str):
             seq_lens,
             query_lens=seq_lens,
             device=device,
-            pin_memory=is_pin_memory_available())
+            pin_memory=current_platform.is_pin_memory_available())
 
         fake_logits = torch.full((2, vocab_size),
                                  1e-2,

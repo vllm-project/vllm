@@ -39,15 +39,15 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs, MultiModalRegistry)
+from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, is_hip, is_pin_memory_available,
-                        supports_dynamo)
+from vllm.utils import (PyObjectCache, async_tensor_h2d, flatten_2d_lists,
+                        is_hip, supports_dynamo)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -974,7 +974,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.observability_config = observability_config
 
         self.device = self.device_config.device
-        self.pin_memory = is_pin_memory_available()
+        self.pin_memory = current_platform.is_pin_memory_available()
 
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = model_config.get_sliding_window()
@@ -1049,7 +1049,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
-        with DeviceMemoryProfiler() as m:
+        with current_platform.memory_profiler() as m:
             self.model = get_model(model_config=self.model_config,
                                    device_config=self.device_config,
                                    load_config=self.load_config,
@@ -1290,7 +1290,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
-        torch.cuda.synchronize()
+        current_platform.synchronize()
         return
 
     def remove_all_loras(self):
@@ -1775,7 +1775,7 @@ class CUDAGraphRunner:
             )
         # Wait for the warm up operations to finish before proceeding with
         # Graph Capture.
-        torch.cuda.synchronize()
+        current_platform.synchronize()
         # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
@@ -1803,7 +1803,7 @@ class CUDAGraphRunner:
             # make sure `output_hidden_states` is deleted
             # in the graph's memory pool
             gc.collect()
-        torch.cuda.synchronize()
+        current_platform.synchronize()
 
         # Save the input and output buffers.
         self.input_buffers = {
