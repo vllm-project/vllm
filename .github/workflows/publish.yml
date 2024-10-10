@@ -30,7 +30,7 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: "actions/github-script@v6"
+        uses: "actions/github-script@v7"
         env:
           RELEASE_TAG: ${{ env.release_tag }}
         with:
