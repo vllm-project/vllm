@@ -373,8 +373,10 @@ class LLM:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         temperature = params.temperature
-        ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        stop = params.stop
+        stop_token_ids = params.stop_token_ids
+        ignore_eos = params.ignore_eos
 
         def sort_beams_key(x: BeamSearchSequence) -> float:
             return get_beam_search_score(x.tokens, x.cum_logprob,
@@ -385,9 +387,14 @@ class LLM:
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
-        beam_search_params = SamplingParams(logprobs=2 * beam_width,
-                                            max_tokens=1,
-                                            temperature=temperature)
+        beam_search_params = SamplingParams(
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            stop=stop,
+            stop_token_ids=stop_token_ids,
+            ignore_eos=ignore_eos
+        )
         instances: List[BeamSearchInstance] = []
 
         for prompt in prompts:
@@ -426,7 +433,7 @@ class LLM:
                     result = output[i]
 
                     if result.outputs[0].logprobs is not None:
-                        # if `result.outputs[0].logprobs` is None, it means
+                        # if `result.outputs[0].logprobs`is None, it means
                         # the sequence is completed because of the max-model-len
                         # or abortion. we don't need to add it to the new beams.
                         logprobs = result.outputs[0].logprobs[0]
@@ -436,11 +443,11 @@ class LLM:
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob)
 
-                            if token_id == tokenizer.eos_token_id and \
-                                not ignore_eos:
+                            if result.outputs[0].finish_reason == "stop":
                                 instance.completed.append(new_beam)
                             else:
                                 instance_new_beams.append(new_beam)
+
                 sorted_beams = sorted(instance_new_beams,
                                       key=sort_beams_key,
                                       reverse=True)

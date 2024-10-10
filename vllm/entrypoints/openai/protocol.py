@@ -594,6 +594,8 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
+            stop=self.stop,
+            stop_token_ids=self.stop_token_ids,
         )
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:

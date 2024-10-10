@@ -1045,12 +1045,13 @@ class AsyncLLMEngine:
         request_id: str,
         params: BeamSearchParams,
     ) -> AsyncGenerator[RequestOutput, None]:
-
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         ignore_eos = params.ignore_eos
         temperature = params.temperature
         length_penalty = params.length_penalty
+        stop = params.stop
+        stop_token_ids = params.stop_token_ids
 
         tokenizer = await self.get_tokenizer()
         tokenizedPrompt = prompt if isinstance(
@@ -1060,9 +1061,14 @@ class AsyncLLMEngine:
         sort_beams_key = create_sort_beams_key_function(
             tokenizer.eos_token_id, length_penalty)
 
-        beam_search_params = SamplingParams(logprobs=2 * beam_width,
-                                            max_tokens=1,
-                                            temperature=temperature)
+        beam_search_params = SamplingParams(
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            stop=stop,
+            stop_token_ids=stop_token_ids,
+            ignore_eos=ignore_eos
+        )
         all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
         completed = []
 
@@ -1073,10 +1079,9 @@ class AsyncLLMEngine:
             ]
 
             tasks = []
-
-            request_id = f"beam_search-{random_uuid()}"
+            request_id_base = f"beam_search-{random_uuid()}"
             for i, individual_prompt in enumerate(prompts_batch):
-                request_id_item = f"{request_id}-{i}"
+                request_id_item = f"{request_id_base}-{i}"
                 task = asyncio.create_task(
                     collect_from_async_generator(
                         self.generate(individual_prompt, beam_search_params,
@@ -1084,10 +1089,7 @@ class AsyncLLMEngine:
                 tasks.append(task)
 
             output = await asyncio.gather(*tasks)
-
             output = [x[0] for x in output]
-
-            logger.info(output)
 
             new_beams = []
             for i, current_beam in enumerate(all_beams):
@@ -1101,14 +1103,16 @@ class AsyncLLMEngine:
                             cum_logprob=current_beam.cum_logprob +
                             logprob_obj.logprob)
 
-                        if token_id == tokenizer.eos_token_id and \
-                            not ignore_eos:
+                        if result.outputs[0].finish_reason == "stop":
                             completed.append(new_beam)
                         else:
                             new_beams.append(new_beam)
 
             sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
             all_beams = sorted_beams[:beam_width]
+
+            if not all_beams:
+                break
 
         completed.extend(all_beams)
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
@@ -1132,6 +1136,8 @@ class AsyncLLMEngine:
             finished=True,
             prompt_token_ids=tokenizedPrompt,
             prompt_logprobs=None)
+        
+        logger.info(beam_search_output)
 
         yield LLMEngine.validate_output(beam_search_output, RequestOutput)
 
