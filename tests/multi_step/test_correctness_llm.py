@@ -212,10 +212,10 @@ def test_multi_step_llm_w_prompt_logprobs(
 @pytest.mark.parametrize("n_best_of", [
     (1, 2),
     (2, 2),
-    (1, 3),
     (2, 3),
-    (3, 3),
 ])
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
+@pytest.mark.parametrize("enable_prefix_caching", [True, False])
 def test_multi_step_llm_best_of_fallback(
     vllm_runner,
     example_prompts,
@@ -227,6 +227,8 @@ def test_multi_step_llm_best_of_fallback(
     num_prompts: int,
     max_output_len: int,
     n_best_of: Tuple[int, int],
+    enable_chunked_prefill: bool,
+    enable_prefix_caching: bool,
 ) -> None:
     """Test vLLM engine with multi-step & best_of > 1
 
@@ -249,6 +251,8 @@ def test_multi_step_llm_best_of_fallback(
       n_best_of: a tuple of `n` (num seqs to output per :class:`SequenceGroup`) 
                  and `best_of` (num seqs per :class:`SequenceGroup` from which
                  to choose)
+      enable_chunked_prefill
+      enable_prefix_caching
     """
 
     prompts = example_prompts
@@ -285,6 +289,8 @@ def test_multi_step_llm_best_of_fallback(
             tensor_parallel_size=tp_size,
             use_v2_block_manager=True,
             num_scheduler_steps=num_scheduler_steps,
+            enable_chunked_prefill=enable_chunked_prefill,
+            enable_prefix_caching=enable_prefix_caching,
     ) as vllm_model:
         outputs_ms = vllm_model.generate(prompts, sampling_params)
 
