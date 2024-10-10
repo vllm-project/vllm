@@ -1037,6 +1037,18 @@ class SchedulerConfig:
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
 
+        if (not self.use_v2_block_manager \
+            and not envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1):
+            raise ValueError(
+                "The use of BlockSpaceManagerV1 is deprecated and will "
+                "be removed in a future release. Please switch to "
+                "BlockSpaceManagerV2 by setting --use-v2-block-manager to "
+                "True. If you wish to suppress this error temporarily, "
+                "you can set the environment variable "
+                "`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. If your use "
+                "case is not supported in BlockSpaceManagerV2, please "
+                "file an issue with detailed information.")
+
     @property
     def is_multi_step(self) -> bool:
         return self.num_scheduler_steps > 1
