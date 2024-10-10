@@ -307,7 +307,8 @@ def test_causal_conv1d_update_with_batch_gather(with_padding, dim, width,
                                weight,
                                bias,
                                activation=activation,
-                               conv_state_indices=padded_state_indices)
+                               conv_state_indices=padded_state_indices,
+                               pad_slot_id=PAD_SLOT_ID)
     out_ref = causal_conv1d_update_ref(x_ref[:batch_size],
                                        conv_state_ref,
                                        weight,
@@ -397,7 +398,7 @@ def test_causal_conv1d_varlen(with_padding, dim, seqlen, width, has_bias,
 
     out = causal_conv1d_fn(x.squeeze(0), weight, bias, cumsum.cuda(),
                            padded_state_indices, has_initial_states,
-                           final_states, activation)
+                           final_states, activation, PAD_SLOT_ID)
     out_ref = []
     out_ref_b = []
 

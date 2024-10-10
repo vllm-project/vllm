@@ -58,8 +58,8 @@ void set_conv_params_fwd(ConvParamsBase &params,
                          int64_t pad_slot_id,
                          const c10::optional<at::Tensor>& query_start_loc = std::nullopt,
                          const c10::optional<at::Tensor>& cache_indices = std::nullopt,
-                         const c10::optional<at::Tensor>& has_initial_state = std::nullopt
-                         ) {
+                         const c10::optional<at::Tensor>& has_initial_state = std::nullopt) {
+
     // Reset the parameters
     memset(&params, 0, sizeof(params));
 

@@ -594,7 +594,8 @@ def test_selective_state_update_with_batch_indices(with_padding, dim, dstate,
                                  z=z,
                                  dt_bias=dt_bias,
                                  dt_softplus=True,
-                                 state_batch_indices=padded_state_indices)
+                                 state_batch_indices=padded_state_indices,
+                                 pad_slot_id=PAD_SLOT_ID)
     out_ref = selective_state_update_ref(state_ref,
                                          x[:batch_size],
                                          dt[:batch_size],
@@ -694,7 +695,8 @@ def test_selective_state_update_with_heads_with_batch_indices(
                                  z=z,
                                  dt_bias=dt_bias,
                                  dt_softplus=True,
-                                 state_batch_indices=state_indices)
+                                 state_batch_indices=state_indices,
+                                 pad_slot_id=PAD_SLOT_ID)
     out_ref = selective_state_update_ref(state_ref,
                                          x,
                                          dt,
