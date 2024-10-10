@@ -26,6 +26,7 @@ from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import init_vllm_registered_model
@@ -539,6 +540,7 @@ class VisionTransformer(nn.Module):
             image_features: tensor of token features for 
                 all tokens of all images of shape (N_toks, D)
         """
+        print("VisionTransformer.forward", [img.shape for img in images])
         # pass images through initial convolution independently
         patch_embeds_list = [
             self.patch_conv(img.unsqueeze(0).to(self.dtype)) for img in images
@@ -600,13 +602,14 @@ def get_pixtral_hf_num_patches(*, image_size: int, patch_size: int) -> int:
     return grid_length * grid_length
 
 
-def get_pixtral_hf_image_feature_size(hf_config: PixtralVisionConfig) -> int:
+def get_max_pixtral_hf_image_feature_size(
+        hf_config: PixtralVisionConfig) -> int:
     return get_pixtral_hf_num_patches(image_size=hf_config.image_size,
                                       patch_size=hf_config.patch_size)
 
 
 def get_max_pixtral_hf_image_tokens(hf_config: PixtralVisionConfig) -> int:
-    return get_pixtral_hf_image_feature_size(hf_config)
+    return get_max_pixtral_hf_image_feature_size(hf_config)
 
 
 def dummy_seq_data_for_pixtral_hf(
@@ -618,7 +621,7 @@ def dummy_seq_data_for_pixtral_hf(
     image_feature_size_override: Optional[int] = None,
 ):
     if image_feature_size_override is None:
-        image_feature_size = get_pixtral_hf_image_feature_size(hf_config)
+        image_feature_size = get_max_pixtral_hf_image_feature_size(hf_config)
     else:
         image_feature_size = image_feature_size_override
 
@@ -645,6 +648,28 @@ def dummy_image_for_pixtral_hf(
     return {"image": image if num_images == 1 else [image] * num_images}
 
 
+def get_pixtral_hf_image_feature_size(hf_config: PixtralVisionConfig,
+                                      image_width: int, image_height: int):
+    # Adapted from transformers.models.pixtral.image_processing_pixtral.get_resize_output_image_size # noqa: E501
+    # https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/models/pixtral/image_processing_pixtral.py#L180 # noqa: E501
+    max_height, max_width = hf_config.image_size, hf_config.image_size
+    patch_height, patch_width = hf_config.patch_size, hf_config.patch_size
+
+    ratio = max(image_height / max_height, image_width / max_width)
+
+    if ratio > 1:
+        import numpy
+        image_height = int(numpy.ceil(image_height / ratio))
+        image_width = int(numpy.ceil(image_width / ratio))
+
+    from transformers.models.pixtral.image_processing_pixtral import (  # noqa: E501
+        _num_image_tokens)
+    num_height_tokens, num_width_tokens = _num_image_tokens(
+        (image_height, image_width), (patch_height, patch_width))
+
+    return num_height_tokens * num_width_tokens
+
+
 def input_processor_for_pixtral_hf(
     model_config: ModelConfig,
     hf_config: PixtralVisionConfig,
@@ -653,22 +678,33 @@ def input_processor_for_pixtral_hf(
     image_token_id: int,
     image_feature_size_override: Optional[Union[int, List[int]]] = None,
 ):
+    assert image_feature_size_override is None, (
+        "image_feature_size_override is not supported for Pixtral")
+
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
-    if image_feature_size_override is None:
-        image_data = multi_modal_data["image"]
-        if isinstance(image_data, Image.Image):
-            image_feature_size = get_pixtral_hf_image_feature_size(hf_config)
-        elif isinstance(image_data, torch.Tensor):
-            num_images, image_feature_size, hidden_size = image_data.shape
-        else:
-            raise TypeError(f"Invalid image type: {type(image_data)}")
+    image_data = multi_modal_data["image"]
+    if isinstance(image_data, Image.Image):
+        w, h = image_data.size
+        image_feature_size = get_pixtral_hf_image_feature_size(hf_config,
+                                                               image_width=w,
+                                                               image_height=h)
+    elif is_list_of(image_data, Image.Image):
+        image_feature_size = []
+        for image in image_data:
+            w, h = image.size
+            image_feature_size.append(
+                get_pixtral_hf_image_feature_size(hf_config,
+                                                  image_width=w,
+                                                  image_height=h))
+    elif isinstance(image_data, torch.Tensor):
+        num_images, image_feature_size, hidden_size = image_data.shape
     else:
-        image_feature_size = image_feature_size_override
+        raise TypeError(f"Invalid image type: {type(image_data)}")
 
     new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
         tokenizer,
@@ -849,6 +885,8 @@ class PixtralHFVisionModel(nn.Module):
             image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
         """
+        print("PixtralHFVisionModel.forward",
+              [img.shape for img in pixel_values])
         # pass images through initial convolution independently
         patch_embeds_list = [
             self.patch_conv(img.unsqueeze(0).to(self.dtype))

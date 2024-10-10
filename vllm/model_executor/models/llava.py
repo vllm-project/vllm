@@ -37,8 +37,13 @@ from .utils import (flatten_bn, group_weights_with_prefix,
 
 class LlavaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """
+    Shape: `(batch_size * num_images, num_channels, height, width)`
+
+    Note that `height` or `width` may be different per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
+    """
 
 
 class LlavaImageEmbeddingInputs(TypedDict):
@@ -183,12 +188,13 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
             image_feature_size_override=image_feature_size,
         )
     elif isinstance(vision_config, PixtralVisionConfig):
+        # We ignore image_feature_size_override since we have non-uniform
+        # image sizes for Pixtral
         return input_processor_for_pixtral_hf(
             model_config,
             vision_config,
             llm_inputs,
             image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
         )
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -288,6 +294,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_sizes = kwargs.pop("image_sizes", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is None and image_embeds is None:
@@ -297,6 +304,30 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
+
+            # Case for models like PixtralHF that have dynamic image sizes
+            if image_sizes is not None:
+                images = pixel_values
+                if isinstance(images, torch.Tensor):
+                    # if passed as batch take all images
+                    NN, N, B, C, W, H = images.shape
+                    images = images.reshape(NN * N * B, C, W, H)
+                    images = [images[i] for i in range(images.size(0))]
+                elif isinstance(images, list):
+                    # if passed as list flatten lists of tensors
+                    def flatten(lst):
+                        while isinstance(lst, list) and len(lst) == 1:
+                            lst = lst[0]
+                        return lst
+
+                    images = flatten(images)
+                    # print("flattened", [img.shape for img in images])
+
+                # TODO: Add validation based on image_sizes
+                return LlavaImagePixelInputs(
+                    type="pixel_values",
+                    data=images,
+                )
 
             return LlavaImagePixelInputs(
                 type="pixel_values",

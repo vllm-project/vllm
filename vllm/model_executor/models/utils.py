@@ -119,10 +119,16 @@ def flatten_bn(
     The input tensor should have shape ``(B, N, ...)```.
     """
     if isinstance(x, torch.Tensor):
+        print(f"flatten_bn isinstance(x, torch.Tensor), before:{x.shape}, "
+              f"after:{x.flatten(0, 1).shape}")
         return x.flatten(0, 1)
 
     if concat:
-        return torch.cat(x)
+        print("flatten_bn concat")
+        for xi in x[0][0]:
+            print(f"before:{xi.shape}")
+        print(f"after:{torch.cat(x).squeeze().shape}")
+        return torch.cat(x).squeeze()
 
     return [x_n for x_b in x for x_n in x_b]
 
