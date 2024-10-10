@@ -181,9 +181,12 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               num_lookahead_slots: int = 0) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
+        pass
+
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
         pass
 
     class NoFreeBlocksError(ValueError):
@@ -255,10 +258,8 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               device: Device,
-                               num_lookahead_slots: int = 0) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block],
+                                    device: Device) -> int:
         pass
 
     @abstractmethod
@@ -277,4 +278,9 @@ class DeviceAwareBlockAllocator(ABC):
         been dropped due to sliding window.
         There is at most one null block per allocator.
         """
+        pass
+
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
         pass

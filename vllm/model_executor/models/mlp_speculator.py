@@ -6,11 +6,10 @@ import torch.nn as nn
 
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import MLPSpeculatorConfig
 
 SQRT2 = 2**0.5

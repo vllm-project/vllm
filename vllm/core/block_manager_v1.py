@@ -8,6 +8,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
+from vllm.core.block.common import CacheMetricData
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
@@ -60,6 +61,11 @@ class BlockAllocatorBase(ABC):
     def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
         pass
 
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
+        pass
+
 
 class CachedBlockAllocator(BlockAllocatorBase):
     """Manages free physical token blocks for a device.
@@ -85,6 +91,8 @@ class CachedBlockAllocator(BlockAllocatorBase):
 
         self.default_hash_ctr = count()
 
+        self.cache_metric_data = CacheMetricData()
+
     def allocate_block(self, block_hash: int,
                        num_hashed_tokens: int) -> PhysicalTokenBlock:
         if self.current_num_blocks == self.num_blocks:
@@ -105,15 +113,17 @@ class CachedBlockAllocator(BlockAllocatorBase):
                  num_hashed_tokens: int = 0) -> PhysicalTokenBlock:
         if block_hash is None:
             block_hash = next(self.default_hash_ctr)
+
         if block_hash in self.evictor:
             assert block_hash not in self.cached_blocks
             block = self.evictor.remove(block_hash)
             assert block.ref_count == 0
             self.cached_blocks[block_hash] = block
-            block.ref_count += 1
-            assert block.block_hash == block_hash
-            return block
-        if block_hash not in self.cached_blocks:
+
+        if block_hash in self.cached_blocks:
+            self.cache_metric_data.query(hit=True)
+        else:
+            self.cache_metric_data.query(hit=False)
             self.cached_blocks[block_hash] = self.allocate_block(
                 block_hash, num_hashed_tokens)
         block = self.cached_blocks[block_hash]
@@ -149,6 +159,9 @@ class CachedBlockAllocator(BlockAllocatorBase):
         block.block_hash = block_hash
         del self.cached_blocks[old_hash]
         self.cached_blocks[block_hash] = block
+
+    def get_prefix_cache_hit_rate(self) -> float:
+        return self.cache_metric_data.get_hit_rate()
 
 
 class UncachedBlockAllocator(BlockAllocatorBase):
@@ -209,6 +222,9 @@ class UncachedBlockAllocator(BlockAllocatorBase):
         raise NotImplementedError(
             "Invalid codepath for uncached block allocator.")
 
+    def get_prefix_cache_hit_rate(self) -> float:
+        return -1
+
 
 class BlockSpaceManagerV1(BlockSpaceManager):
     """Manages the mapping between logical and physical token blocks."""
@@ -262,12 +278,17 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # request ID
         self.cross_block_tables: Dict[str, BlockTable] = {}
 
-    def _get_seq_num_required_blocks(self, seq: Sequence) -> int:
+    def _get_seq_num_required_blocks(self, seq: Optional[Sequence]) -> int:
         return 0 if seq is None else seq.n_blocks
 
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+    def can_allocate(self,
+                     seq_group: SequenceGroup,
+                     num_lookahead_slots: int = 0) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
+
+        assert (num_lookahead_slots == 0
+                ), "lookahead allocation not supported in BlockSpaceManagerV1"
 
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
@@ -294,13 +315,14 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             return AllocStatus.LATER
 
     def _allocate_sequence(self, \
-                           seq: Sequence, \
+                           seq: Optional[Sequence], \
                            ref_count: int, \
                            is_encoder_decoder: bool = True) -> BlockTable:
         # Allocate new physical token blocks that will store the prompt tokens.
-        num_prompt_blocks = seq.n_blocks
+        num_prompt_blocks = self._get_seq_num_required_blocks(seq)
 
         block_table: BlockTable = BlockTable()
+        assert seq is not None
         for logical_idx in range(num_prompt_blocks):
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
@@ -421,7 +443,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # prefix tokens)
         new_block = self.gpu_allocator.allocate(block_hash, num_hashed_tokens)
 
-        # If the block has is None, then the block is not full.
+        # If the block_hash is None, then the block is not full.
         # If the block is not full, then we expect it to have a refcount of 1.
         if block_hash is None:
             assert new_block.ref_count == 1
@@ -664,14 +686,20 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for block in block_table:
                 block.last_accessed = access_time
 
-    def compute_full_blocks_in_seq(self, seq: Sequence):
+    def compute_full_blocks_in_seq(self, seq: Sequence, token_chunk_size: int):
         if seq.seq_id not in self.block_tables:
             return
-        max_full_block = seq.get_len() // self.block_size - 1
+
+        # When chunked prefill is enabled, the computed full blocks
+        # should be calculated based on the number of computed tokens.
+        max_computed_tokens = (seq.data.get_num_computed_tokens() +
+                               token_chunk_size)
+        computed_full_blocks = max_computed_tokens // self.block_size
+
         block_table = self.block_tables[seq.seq_id]
-        if max_full_block == -1:
+        if computed_full_blocks == 0:
             return
-        for i in reversed(range(max_full_block)):
+        for i in reversed(range(computed_full_blocks)):
             if block_table[i].computed:
                 break
             block_table[i].computed = True
@@ -701,7 +729,15 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         ids_list = [self.get_all_computed_blocks(seq) for seq in seqs]
         return commonprefix([ids for ids in ids_list if ids != []])
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
         if self.enable_caching:
             for seq in seq_group.get_seqs():
-                self.compute_full_blocks_in_seq(seq)
+                self.compute_full_blocks_in_seq(seq, token_chunk_size)
+
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        if device == Device.GPU:
+            return self.gpu_allocator.get_prefix_cache_hit_rate()
+        if device == Device.CPU:
+            return self.cpu_allocator.get_prefix_cache_hit_rate()
+        raise ValueError(f"Invalid device: {device}")

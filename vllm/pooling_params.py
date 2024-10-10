@@ -1,15 +1,18 @@
 from typing import Any, Optional
 
+import msgspec
 
-class PoolingParams:
+
+class PoolingParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """Pooling parameters for pooling.
 
     Attributes:
         additional_data: Any additional data needed for pooling.
     """
-
-    def __init__(self, additional_data: Optional[Any] = None):
-        self.additional_data = additional_data
+    additional_data: Optional[Any] = None
 
     def clone(self) -> "PoolingParams":
         """Returns a deep copy of the PoolingParams instance."""

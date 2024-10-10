@@ -1,6 +1,6 @@
 import functools
 from collections import UserDict
-from typing import Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -9,6 +9,7 @@ from .audio import AudioPlugin
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
                    MultiModalPlugin, MultiModalTokensCalc, NestedTensors)
 from .image import ImagePlugin
+from .video import VideoPlugin
 
 logger = init_logger(__name__)
 
@@ -34,7 +35,7 @@ class MultiModalRegistry:
     :class:`~vllm.multimodal.MultiModalPlugin` for each modality.
     """
 
-    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin())
+    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin())
 
     def __init__(
             self,
@@ -95,8 +96,12 @@ class MultiModalRegistry:
         """
         return self.register_input_mapper("image", mapper)
 
-    def map_input(self, model_config: ModelConfig,
-                  data: MultiModalDataDict) -> MultiModalInputs:
+    def map_input(
+        self,
+        model_config: ModelConfig,
+        data: MultiModalDataDict,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> MultiModalInputs:
         """
         Apply an input mapper to the data passed to the model.
 
@@ -122,7 +127,8 @@ class MultiModalRegistry:
                     f"`--limit-mm-per-prompt`, but found {num_items} items "
                     "in the same prompt.")
 
-            input_dict = plugin.map_input(model_config, data_value)
+            input_dict = plugin.map_input(model_config, data_value,
+                                          mm_processor_kwargs)
             for input_key, input_tensor in input_dict.items():
                 if input_key in merged_dict:
                     raise ValueError(f"The input mappers (keys={set(data)}) "
@@ -137,6 +143,15 @@ class MultiModalRegistry:
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
+        # NOTE - we currently make the assumption that if a model has multiple
+        # supported modalities, they take the same kwargs. For the default,
+        # this could be an issue in the future if it falls back to two HF
+        # resources and we can't inspect the signature easily since it's
+        # getting initialized through the autoclass.
+        #
+        # If this is a problem in the future, we should revisit it, but since
+        # it potentially introduces a lot of complexity for a currently
+        # uncommon case, we do not for simplicity of both use & implementation
         return functools.partial(self.map_input, model_config)
 
     def register_max_multimodal_tokens(

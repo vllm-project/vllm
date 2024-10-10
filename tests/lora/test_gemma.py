@@ -1,7 +1,10 @@
 from typing import List
 
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.utils import is_hip
 
 MODEL_PATH = "google/gemma-7b"
 
@@ -10,7 +13,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     prompts = [
         "Quote: Imagination is",
         "Quote: Be yourself;",
-        "Quote: So many books,",
+        "Quote: Painting is poetry that is seen rather than felt,",
     ]
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=32)
     outputs = llm.generate(
@@ -28,6 +31,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+@pytest.mark.xfail(is_hip(), reason="There can be output mismatch on ROCm")
 def test_gemma_lora(gemma_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -37,7 +41,8 @@ def test_gemma_lora(gemma_lora_files):
     expected_lora_output = [
         "more important than knowledge.\nAuthor: Albert Einstein\n",
         "everyone else is already taken.\nAuthor: Oscar Wilde\n",
-        "so little time.\nAuthor: Frank Zappa\n",
+        "and poetry is painting that is felt rather than seen.\n"
+        "Author: Leonardo da Vinci\n",
     ]
 
     output1 = do_sample(llm, gemma_lora_files, lora_id=1)

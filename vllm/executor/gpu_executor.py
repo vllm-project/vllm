@@ -1,21 +1,25 @@
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.worker.worker_base import WorkerBase, WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 
-def create_worker(worker_module_name, worker_class_name, **kwargs):
+def create_worker(worker_module_name: str, worker_class_name: str,
+                  worker_class_fn: Optional[Callable[[], Type[WorkerBase]]],
+                  **kwargs):
     wrapper = WorkerWrapperBase(
         worker_module_name=worker_module_name,
         worker_class_name=worker_class_name,
+        worker_class_fn=worker_class_fn,
     )
     wrapper.init_worker(**kwargs)
     return wrapper.worker
@@ -62,6 +66,20 @@ class GPUExecutor(ExecutorBase):
             observability_config=self.observability_config,
         )
 
+    def _get_worker_module_and_class(
+            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
+        worker_class_fn = None
+        if self.scheduler_config.is_multi_step:
+            worker_module_name = "vllm.worker.multi_step_worker"
+            worker_class_name = "MultiStepWorker"
+        elif self.speculative_config:
+            worker_module_name = "vllm.spec_decode.spec_decode_worker"
+            worker_class_name = "create_spec_worker"
+        else:
+            worker_module_name = "vllm.worker.worker"
+            worker_class_name = "Worker"
+        return (worker_module_name, worker_class_name, worker_class_fn)
+
     def _get_create_worker_kwargs(
             self,
             local_rank: int = 0,
@@ -69,13 +87,15 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method: Optional[str] = None) -> Dict:
         worker_kwargs = self._get_worker_kwargs(local_rank, rank,
                                                 distributed_init_method)
-        if self.speculative_config is None:
-            worker_kwargs.update(worker_module_name="vllm.worker.worker",
-                                 worker_class_name="Worker")
-        else:
-            worker_kwargs.update(
-                worker_module_name="vllm.spec_decode.spec_decode_worker",
-                worker_class_name="create_spec_worker")
+
+        (worker_module_name, worker_class_name,
+         worker_class_fn) = self._get_worker_module_and_class()
+        worker_kwargs.update(
+            worker_module_name=worker_module_name,
+            worker_class_name=worker_class_name,
+            worker_class_fn=worker_class_fn,
+        )
+
         return worker_kwargs
 
     def _create_worker(self,
@@ -101,6 +121,10 @@ class GPUExecutor(ExecutorBase):
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
+        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
+                           self.model_config.max_model_len)
+        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                    self.model_config.max_model_len, max_concurrency)
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
@@ -149,6 +173,12 @@ class GPUExecutor(ExecutorBase):
         # it's running.
         return
 
+    def start_profile(self) -> None:
+        self.driver_worker.start_profile()
+
+    def stop_profile(self) -> None:
+        self.driver_worker.stop_profile()
+
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
 
@@ -157,5 +187,5 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
         execute_model_req: ExecuteModelRequest,
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = await make_async(self.driver_worker.execute_model
-                                  )(execute_model_req=execute_model_req, )
+                                  )(execute_model_req=execute_model_req)
         return output

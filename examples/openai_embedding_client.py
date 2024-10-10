@@ -19,7 +19,6 @@ responses = client.embeddings.create(
         "The best thing about vLLM is that it supports many different models"
     ],
     model=model,
-    encoding_format="float",
 )
 
 for data in responses.data:

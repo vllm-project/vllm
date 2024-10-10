@@ -8,7 +8,7 @@ from pydantic import Field
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -16,24 +16,31 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
                                               EmbeddingRequest, ErrorResponse,
+                                              LoadLoraAdapterRequest,
                                               ModelCard, ModelList,
                                               ModelPermission,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
-                                              TokenizeRequest)
+                                              TokenizeRequest,
+                                              UnloadLoraAdapterRequest)
 # yapf: enable
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer_group import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import AtomicCounter
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class BaseModelPath:
+    name: str
+    model_path: str
 
 
 @dataclass
@@ -46,6 +53,7 @@ class PromptAdapterPath:
 class LoRAModulePath:
     name: str
     path: str
+    base_model_name: Optional[str] = None
 
 
 AnyRequest = Union[ChatCompletionRequest, CompletionRequest, DetokenizeRequest,
@@ -61,9 +69,9 @@ class OpenAIServing:
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        engine_client: EngineClient,
         model_config: ModelConfig,
-        served_model_names: List[str],
+        base_model_paths: List[BaseModelPath],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
@@ -72,20 +80,24 @@ class OpenAIServing:
     ):
         super().__init__()
 
-        self.async_engine_client = async_engine_client
+        self.engine_client = engine_client
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
 
-        self.served_model_names = served_model_names
+        self.base_model_paths = base_model_paths
 
+        self.lora_id_counter = AtomicCounter(0)
         self.lora_requests = []
         if lora_modules is not None:
             self.lora_requests = [
-                LoRARequest(
-                    lora_name=lora.name,
-                    lora_int_id=i,
-                    lora_path=lora.path,
-                ) for i, lora in enumerate(lora_modules, start=1)
+                LoRARequest(lora_name=lora.name,
+                            lora_int_id=i,
+                            lora_path=lora.path,
+                            base_model_name=lora.base_model_name
+                            if lora.base_model_name
+                            and self._is_model_supported(lora.base_model_name)
+                            else self.base_model_paths[0].name)
+                for i, lora in enumerate(lora_modules, start=1)
             ]
 
         self.prompt_adapter_requests = []
@@ -108,21 +120,23 @@ class OpenAIServing:
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
         model_cards = [
-            ModelCard(id=served_model_name,
+            ModelCard(id=base_model.name,
                       max_model_len=self.max_model_len,
-                      root=self.served_model_names[0],
+                      root=base_model.model_path,
                       permission=[ModelPermission()])
-            for served_model_name in self.served_model_names
+            for base_model in self.base_model_paths
         ]
         lora_cards = [
             ModelCard(id=lora.lora_name,
-                      root=self.served_model_names[0],
+                      root=lora.local_path,
+                      parent=lora.base_model_name if lora.base_model_name else
+                      self.base_model_paths[0].name,
                       permission=[ModelPermission()])
             for lora in self.lora_requests
         ]
         prompt_adapter_cards = [
             ModelCard(id=prompt_adapter.prompt_adapter_name,
-                      root=self.served_model_names[0],
+                      root=self.base_model_paths[0].name,
                       permission=[ModelPermission()])
             for prompt_adapter in self.prompt_adapter_requests
         ]
@@ -152,20 +166,11 @@ class OpenAIServing:
         })
         return json_str
 
-    async def _guided_decode_logits_processor(
-            self, request: Union[ChatCompletionRequest, CompletionRequest],
-            tokenizer: AnyTokenizer) -> Optional[LogitsProcessor]:
-        decoding_config = await self.async_engine_client.get_decoding_config()
-        guided_decoding_backend = request.guided_decoding_backend \
-            or decoding_config.guided_decoding_backend
-        return await get_guided_decoding_logits_processor(
-            guided_decoding_backend, request, tokenizer)
-
     async def _check_model(
         self,
         request: AnyRequest,
     ) -> Optional[ErrorResponse]:
-        if request.model in self.served_model_names:
+        if self._is_model_supported(request.model):
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return None
@@ -183,7 +188,7 @@ class OpenAIServing:
         self, request: AnyRequest
     ) -> Union[Tuple[None, None], Tuple[LoRARequest, None], Tuple[
             None, PromptAdapterRequest]]:
-        if request.model in self.served_model_names:
+        if self._is_model_supported(request.model):
             return None, None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
@@ -366,7 +371,8 @@ class OpenAIServing:
         self,
         request_id: str,
         inputs: Union[str, List[int], TextTokensPrompt],
-        params: Optional[Union[SamplingParams, PoolingParams]],
+        params: Optional[Union[SamplingParams, PoolingParams,
+                               BeamSearchParams]],
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> None:
@@ -403,3 +409,79 @@ class OpenAIServing:
         if logprob.decoded_token is not None:
             return logprob.decoded_token
         return tokenizer.decode(token_id)
+
+    async def _check_load_lora_adapter_request(
+            self, request: LoadLoraAdapterRequest) -> Optional[ErrorResponse]:
+        # Check if both 'lora_name' and 'lora_path' are provided
+        if not request.lora_name or not request.lora_path:
+            return self.create_error_response(
+                message="Both 'lora_name' and 'lora_path' must be provided.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST)
+
+        # Check if the lora adapter with the given name already exists
+        if any(lora_request.lora_name == request.lora_name
+               for lora_request in self.lora_requests):
+            return self.create_error_response(
+                message=
+                f"The lora adapter '{request.lora_name}' has already been"
+                "loaded.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST)
+
+        return None
+
+    async def _check_unload_lora_adapter_request(
+            self,
+            request: UnloadLoraAdapterRequest) -> Optional[ErrorResponse]:
+        # Check if either 'lora_name' or 'lora_int_id' is provided
+        if not request.lora_name and not request.lora_int_id:
+            return self.create_error_response(
+                message=
+                "either 'lora_name' and 'lora_int_id' needs to be provided.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST)
+
+        # Check if the lora adapter with the given name exists
+        if not any(lora_request.lora_name == request.lora_name
+                   for lora_request in self.lora_requests):
+            return self.create_error_response(
+                message=
+                f"The lora adapter '{request.lora_name}' cannot be found.",
+                err_type="InvalidUserInput",
+                status_code=HTTPStatus.BAD_REQUEST)
+
+        return None
+
+    async def load_lora_adapter(
+            self,
+            request: LoadLoraAdapterRequest) -> Union[ErrorResponse, str]:
+        error_check_ret = await self._check_load_lora_adapter_request(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        lora_name, lora_path = request.lora_name, request.lora_path
+        unique_id = self.lora_id_counter.inc(1)
+        self.lora_requests.append(
+            LoRARequest(lora_name=lora_name,
+                        lora_int_id=unique_id,
+                        lora_path=lora_path))
+        return f"Success: LoRA adapter '{lora_name}' added successfully."
+
+    async def unload_lora_adapter(
+            self,
+            request: UnloadLoraAdapterRequest) -> Union[ErrorResponse, str]:
+        error_check_ret = await self._check_unload_lora_adapter_request(request
+                                                                        )
+        if error_check_ret is not None:
+            return error_check_ret
+
+        lora_name = request.lora_name
+        self.lora_requests = [
+            lora_request for lora_request in self.lora_requests
+            if lora_request.lora_name != lora_name
+        ]
+        return f"Success: LoRA adapter '{lora_name}' removed successfully."
+
+    def _is_model_supported(self, model_name):
+        return any(model.name == model_name for model in self.base_model_paths)

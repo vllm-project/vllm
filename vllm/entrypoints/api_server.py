@@ -61,6 +61,7 @@ async def generate(request: Request) -> Response:
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
             prompt = request_output.prompt
+            assert prompt is not None
             text_outputs = [
                 prompt + output.text for output in request_output.outputs
             ]
@@ -80,6 +81,7 @@ async def generate(request: Request) -> Response:
 
     assert final_output is not None
     prompt = final_output.prompt
+    assert prompt is not None
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
     return JSONResponse(ret)
@@ -115,10 +117,10 @@ async def run_server(args: Namespace,
     logger.info("args: %s", args)
 
     app = await init_app(args, llm_engine)
+    assert engine is not None
 
     shutdown_task = await serve_http(
         app,
-        engine=engine,
         host=args.host,
         port=args.port,
         log_level=args.log_level,

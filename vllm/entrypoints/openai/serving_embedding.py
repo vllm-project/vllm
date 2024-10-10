@@ -1,22 +1,22 @@
 import asyncio
 import base64
 import time
-from typing import (AsyncGenerator, AsyncIterator, List, Optional, Tuple,
-                    Union, cast)
+from typing import AsyncGenerator, List, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
+from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.logger import init_logger
-from vllm.outputs import EmbeddingRequestOutput
+from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -24,18 +24,30 @@ logger = init_logger(__name__)
 TypeTokenIDs = List[int]
 
 
+def _get_embedding(
+    output: EmbeddingOutput,
+    encoding_format: Literal["float", "base64"],
+) -> Union[List[float], str]:
+    if encoding_format == "float":
+        return output.embedding
+    elif encoding_format == "base64":
+        # Force to use float32 for base64 encoding
+        # to match the OpenAI python client behavior
+        embedding_bytes = np.array(output.embedding, dtype="float32").tobytes()
+        return base64.b64encode(embedding_bytes).decode("utf-8")
+
+    assert_never(encoding_format)
+
+
 def request_output_to_embedding_response(
         final_res_batch: List[EmbeddingRequestOutput], request_id: str,
         created_time: int, model_name: str,
-        encoding_format: str) -> EmbeddingResponse:
+        encoding_format: Literal["float", "base64"]) -> EmbeddingResponse:
     data: List[EmbeddingResponseData] = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
         prompt_token_ids = final_res.prompt_token_ids
-        embedding = final_res.outputs.embedding
-        if encoding_format == "base64":
-            embedding_bytes = np.array(embedding).tobytes()
-            embedding = base64.b64encode(embedding_bytes).decode("utf-8")
+        embedding = _get_embedding(final_res.outputs, encoding_format)
         embedding_data = EmbeddingResponseData(index=idx, embedding=embedding)
         data.append(embedding_data)
 
@@ -59,15 +71,15 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        engine_client: EngineClient,
         model_config: ModelConfig,
-        served_model_names: List[str],
+        base_model_paths: List[BaseModelPath],
         *,
         request_logger: Optional[RequestLogger],
     ):
-        super().__init__(async_engine_client=async_engine_client,
+        super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         served_model_names=served_model_names,
+                         base_model_paths=base_model_paths,
                          lora_modules=None,
                          prompt_adapters=None,
                          request_logger=request_logger)
@@ -76,8 +88,8 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def create_embedding(
         self,
         request: EmbeddingRequest,
-        raw_request: Optional[Request] = None
-    ) -> Union[ErrorResponse, EmbeddingResponse]:
+        raw_request: Optional[Request] = None,
+    ) -> Union[EmbeddingResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/embeddings/create
@@ -89,8 +101,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        encoding_format = (request.encoding_format
-                           if request.encoding_format else "float")
+        encoding_format = request.encoding_format
         if request.dimensions is not None:
             return self.create_error_response(
                 "dimensions is currently not supported")
@@ -98,6 +109,17 @@ class OpenAIServingEmbedding(OpenAIServing):
         model_name = request.model
         request_id = f"embd-{random_uuid()}"
         created_time = int(time.monotonic())
+
+        truncate_prompt_tokens = None
+
+        if request.truncate_prompt_tokens is not None:
+            if request.truncate_prompt_tokens <= self.max_model_len:
+                truncate_prompt_tokens = request.truncate_prompt_tokens
+            else:
+                return self.create_error_response(
+                    "truncate_prompt_tokens value is "
+                    "greater than max_model_len."
+                    " Please, select a smaller truncation size.")
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
@@ -107,17 +129,14 @@ class OpenAIServingEmbedding(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.async_engine_client.get_tokenizer(
-                lora_request)
+            tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             pooling_params = request.to_pooling_params()
 
             prompts = list(
-                self._tokenize_prompt_input_or_inputs(
-                    request,
-                    tokenizer,
-                    request.input,
-                ))
+                self._tokenize_prompt_input_or_inputs(request, tokenizer,
+                                                      request.input,
+                                                      truncate_prompt_tokens))
 
             for i, prompt_inputs in enumerate(prompts):
                 request_id_item = f"{request_id}-{i}"
@@ -133,11 +152,12 @@ class OpenAIServingEmbedding(OpenAIServing):
                         "Prompt adapter is not supported "
                         "for embedding models")
 
-                generator = self.async_engine_client.encode(
+                generator = self.engine_client.encode(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
+                    priority=request.priority,
                 )
 
                 generators.append(generator)
@@ -145,11 +165,10 @@ class OpenAIServingEmbedding(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        result_generator: AsyncIterator[Tuple[
-            int, EmbeddingRequestOutput]] = merge_async_iterators(
-                *generators,
-                is_cancelled=raw_request.is_disconnected
-                if raw_request else None)
+        result_generator = merge_async_iterators(
+            *generators,
+            is_cancelled=raw_request.is_disconnected if raw_request else None,
+        )
 
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]
@@ -175,7 +194,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         return response
 
-    def _check_embedding_mode(self, embedding_mode: bool):
+    def _check_embedding_mode(self, embedding_mode: bool) -> bool:
         if not embedding_mode:
             logger.warning(
                 "embedding_mode is False. Embedding API will not work.")
