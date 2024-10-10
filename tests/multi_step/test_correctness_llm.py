@@ -245,10 +245,10 @@ def test_multi_step_llm_best_of_fallback(
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
       num_prompts: number of example prompts under test
-      num_logprobs: corresponds to the `logprobs` argument to the OpenAI
-                    completions endpoint; `None` -> 1 logprob returned.
-      best_of: `best_of` sampling param
-      use_beam_search: `use_beam_search` sampling param
+      max_output_len
+      n_best_of: a tuple of `n` (num seqs to output per :class:`SequenceGroup`) 
+                 and `best_of` (num seqs per :class:`SequenceGroup` from which
+                 to choose)
     """
 
     prompts = example_prompts
@@ -319,16 +319,11 @@ def test_multi_step_beam_search_fail(
       example_prompts: test fixture providing example prompts
       model: model under test (same for single- and multi-step engines)
       dtype: tensor datatype for engine to utilize
-      tp_size: degree of tensor-parallelism
-      max_tokens: the maximum number of tokens to generate
       enforce_eager
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
       num_prompts: number of example prompts under test
-      num_logprobs: corresponds to the `logprobs` argument to the OpenAI
-                    completions endpoint; `None` -> 1 logprob returned.
-      best_of: `best_of` sampling param
-      use_beam_search: `use_beam_search` sampling param
+      max_output_len
     """
 
     with pytest.raises(ValueError,
