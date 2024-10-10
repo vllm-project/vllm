@@ -6,15 +6,14 @@ Quickstart
 
 This guide will help you quickly get started with vLLM to:
 
-* Run offline batched inference
-* Start an OpenAI-compatible API server
+* `Run offline batched inference <#offline_batched_inference>`_ 
+* `Run OpenAI-compatible inference <#openai_compatible_server>`_
 
 Prerequisites
 --------------
 - OS: Linux
 - Python: 3.8 - 3.12
 - GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
-
 
 Installation
 --------------
