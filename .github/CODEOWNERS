@@ -9,6 +9,7 @@
 /vllm/worker/worker_base.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
 /vllm/worker/worker.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
 /vllm/model_executor/layers/sampler.py @WoosukKwon @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
+CMakeLists.txt @tlrmchlsmth @WoosukKwon
 
 # Test ownership
 /tests/async_engine @njhill @robertgshaw2-neuralmagic @simon-mo
@@ -24,6 +25,6 @@
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/multi_step @alexm-neuralmagic @SolitaryThinker @comaniac
+/tests/multi_step @alexm-neuralmagic @comaniac
 /tests/weight_loading @mgoin @youkaichao
 /tests/basic_correctness/test_chunked_prefill @rkooo567 @comaniac
