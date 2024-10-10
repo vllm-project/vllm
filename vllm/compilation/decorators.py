@@ -11,6 +11,26 @@ from vllm.utils import supports_dynamo
 
 
 def support_torch_compile(dynamic_arg_dims: Dict[str, Union[int, List[int]]]):
+    """
+    A decorator to add support for compiling the forward method of a class.
+
+    `dynamic_arg_dims` is a dictionary that maps argument names to the dynamic
+    dimensions of the argument. The dynamic dimensions can be either a single
+    integer or a list of integers.
+
+    Depending on the value of arguments:
+
+    - if it is a single integer, the corresponding dimension of the argument
+        will be marked as dynamic.
+    - if it is `None`, ignored.
+    - if it is `IntermediateTensors`, all the tensors in the intermediate
+        tensors will be marked as dynamic.
+    - otherwise, it will raise an error.
+
+    NOTE: if an argument is `None`, it should always be passed as `None` during
+    the lifetime of the model, otherwise, it cannot be captured as a single
+    computation graph.
+    """
 
     def cls_decorator_helper(cls: type):
         # helper to pass `dynamic_arg_dims`` to `_support_torch_compile``
@@ -75,6 +95,10 @@ def _support_torch_compile(cls: type,
                         for tensor in arg.tensors.values():
                             for dim in dims:
                                 torch._dynamo.mark_dynamic(tensor, dim)
+                    else:
+                        raise ValueError(
+                            "Unsupported dynamic dimensions"
+                            f" {dims} for argument {k} with type {type(arg)}.")
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
