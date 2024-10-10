@@ -151,6 +151,13 @@ Text Generation
     - Llama 3.1, Llama 3, Llama 2, LLaMA, Yi
     - :code:`meta-llama/Meta-Llama-3.1-405B-Instruct`, :code:`meta-llama/Meta-Llama-3.1-70B`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-70b-hf`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
+    -
+    - ✅︎
+  * - :code:`MambaForCausalLM`
+    - Mamba
+    - :code:`state-spaces/mamba-130m-hf`, :code:`state-spaces/mamba-790m-hf`, :code:`state-spaces/mamba-2.8b-hf`, etc.
+    - ✅︎
+    -
     - ✅︎
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM

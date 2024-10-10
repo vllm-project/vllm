@@ -27,7 +27,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader, default_weight_loader, sharded_weight_loader)
-from vllm.model_executor.models.interfaces import HasInnerState
+from vllm.model_executor.models.interfaces import (HasInnerState,
+                                                   IsAttentionFree)
 from vllm.model_executor.models.mamba_cache import MambaCacheManager
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
@@ -344,7 +345,7 @@ class MambaModel(nn.Module):
         return hidden_states
 
 
-class MambaForCausalLM(nn.Module, HasInnerState):
+class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

@@ -988,8 +988,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
 
-        self.has_seqlen_agnostic = model_config.contains_seqlen_agnostic_layers(
-            parallel_config)
+        self.has_inner_state = model_config.has_inner_state
 
         # When using CUDA graph, the input block tables must be padded to
         # max_seq_len_to_capture. However, creating the block table in
@@ -1481,7 +1480,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             "previous_hidden_states"] = previous_hidden_states[:
                                                                                batch_size]
 
-                    if self.has_seqlen_agnostic:
+                    if self.has_inner_state:
                         # Only used by Mamba-based models CUDA graph atm (Jamba)
                         capture_inputs.update({
                             "seqlen_agnostic_capture_inputs":
@@ -1630,7 +1629,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
-        } if self.has_seqlen_agnostic else {}
+        } if self.has_inner_state else {}
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch.cuda.Event(enable_timing=True)

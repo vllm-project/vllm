@@ -12,7 +12,8 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.utils import is_hip
 
-from .interfaces import supports_multimodal, supports_pp
+from .interfaces import (has_inner_state, is_attention_free,
+                         supports_multimodal, supports_pp)
 from .interfaces_base import is_embedding_model, is_text_generation_model
 
 logger = init_logger(__name__)
@@ -358,6 +359,32 @@ class ModelRegistry:
                         default=False)
 
         return any(is_pp(arch) for arch in architectures)
+
+    @staticmethod
+    def model_has_inner_state(architectures: Union[str, List[str]]) -> bool:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        has_instate = partial(ModelRegistry._check_stateless,
+                              has_inner_state,
+                              default=False)
+
+        return any(has_instate(arch) for arch in architectures)
+
+    @staticmethod
+    def is_attention_free_model(architectures: Union[str, List[str]]) -> bool:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        is_attn_free = partial(ModelRegistry._check_stateless,
+                               is_attention_free,
+                               default=False)
+
+        return any(is_attn_free(arch) for arch in architectures)
 
 
 if __name__ == "__main__":

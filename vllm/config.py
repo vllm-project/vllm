@@ -1,7 +1,6 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from functools import cached_property
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Mapping,
                     Optional, Tuple, Type, Union)
 
@@ -197,6 +196,9 @@ class ModelConfig:
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 
+        self.is_attention_free = self._init_attention_free()
+        self.has_inner_state = self._init_has_inner_state()
+
         self.override_neuron_config = override_neuron_config if is_neuron(
         ) else None
         self._verify_embedding_mode()
@@ -216,6 +218,14 @@ class ModelConfig:
                              "multimodal models.")
 
         return None
+
+    def _init_attention_free(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_attention_free_model(architectures)
+
+    def _init_has_inner_state(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.model_has_inner_state(architectures)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -406,19 +416,6 @@ class ModelConfig:
                                "pipeline parallelism currently. Disabling it.")
                 self.use_async_output_proc = False
 
-    @cached_property
-    def is_attention_free(self) -> bool:
-        """Returns True if the model has no attention, i.e. the model has no
-        state that grows with the size of the context.
-        """
-
-        # Return true if the model is mamba.
-        # This check should be augmented with more models in the future,
-        # and made more robust if possible.
-        return hasattr(
-            self.hf_text_config,
-            "model_type") and self.hf_text_config.model_type == 'mamba'
-
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
 
@@ -532,36 +529,17 @@ class ModelConfig:
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
         return end - start
 
-    def contains_seqlen_agnostic_layers(
-            self, parallel_config: "ParallelConfig") -> bool:
-        """True for Mamba/SSM models (Jamba)"""
-        return self._get_num_seqlen_agnostic_layers(parallel_config) > 0
-
-    def get_layers_block_type(self,
-                              parallel_config: "ParallelConfig") -> List[str]:
-        num_layers = self.get_num_layers(parallel_config)
-
-        if self.is_attention_free:
-            assert (self.hf_config.model_type == "mamba")
-            return ["mamba"] * num_layers
-
-        # Transformers supports layers_block_type @property
-        return getattr(self.hf_config, "layers_block_type",
-                       ["attention"] * num_layers)
-
     def get_num_attention_layers(self,
                                  parallel_config: "ParallelConfig") -> int:
-        return len([
-            t for t in self.get_layers_block_type(parallel_config)
-            if t == "attention"
-        ])
+        if self.is_attention_free:
+            return 0
 
-    def _get_num_seqlen_agnostic_layers(
-            self, parallel_config: "ParallelConfig") -> int:
-        return len([
-            t for t in self.get_layers_block_type(parallel_config)
-            if t != "attention"
-        ])
+        num_layers = self.get_num_layers(parallel_config)
+
+        # Transformers supports layers_block_type @property
+        layers = getattr(self.hf_config, "layers_block_type",
+                         ["attention"] * num_layers)
+        return len([t for t in layers if t == "attention"])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
