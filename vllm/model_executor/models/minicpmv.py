@@ -425,7 +425,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             vision_hidden_states = torch.tensor([], device=input_ids.device)
         else:
             if image_inputs["type"] == "image_embeds":
-                vision_hidden_states = image_inputs["data"]
+                vision_hidden_states = (image_inputs["data"].type(
+                    vlm_embedding.dtype).to(vlm_embedding.device))
             else:
                 vision_hidden_states = self.get_vision_hidden_states(
                     image_inputs)
