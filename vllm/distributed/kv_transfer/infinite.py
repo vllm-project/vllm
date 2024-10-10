@@ -3,6 +3,7 @@ import hashlib
 import logging
 from typing import Dict, List, Tuple
 import torch
+import os
 
 from infinity import InfinityConnection
 from vllm.attention import AttentionMetadata
@@ -10,6 +11,7 @@ from vllm.distributed.kv_transfer.base import KVCacheTransporterBase
 
 logger = logging.getLogger(__name__)
 
+Default_Infinite_Server = "127.0.0.1"
 
 class InfiniStoreKVCacheTransporter(KVCacheTransporterBase):
 
@@ -22,8 +24,9 @@ class InfiniStoreKVCacheTransporter(KVCacheTransporterBase):
         self.model = model
         self.tokens_per_page = tokens_per_page
         self.conn: InfinityConnection = InfinityConnection()
-        # TODO: Make remote server address configurable
-        self.conn.connect("127.0.0.1")
+       
+        infinite_server = os.environ.get("PD_SEPARATE_STAGE", Default_Infinite_Server)
+        self.conn.connect(infinite_server)
 
     def _compute_kv_cache_block_offsets(
             self, input_ids: torch.Tensor, attn_metadata: AttentionMetadata,
