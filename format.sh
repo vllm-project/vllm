@@ -96,17 +96,7 @@ echo 'vLLM yapf: Done'
 
 # Run mypy
 echo 'vLLM mypy:'
-mypy --follow-imports skip  # Note that this is less strict than CI
-mypy tests --follow-imports skip
-mypy vllm/attention --follow-imports skip
-mypy vllm/distributed --follow-imports skip
-mypy vllm/engine  --follow-imports skip
-mypy vllm/executor --follow-imports skip
-mypy vllm/lora --follow-imports skip
-mypy vllm/model_executor  --follow-imports skip
-mypy vllm/prompt_adapter --follow-imports skip
-mypy vllm/spec_decode --follow-imports skip
-mypy vllm/worker --follow-imports skip
+tools/mypy.sh
 echo 'vLLM mypy: Done'
 
 
@@ -263,7 +253,7 @@ clang_format_changed() {
     MERGEBASE="$(git merge-base origin/main HEAD)"
 
     # Get the list of changed files, excluding the specified ones
-    changed_files=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.h' '*.cpp' '*.cu' '*.cuh' | grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}"))
+    changed_files=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.h' '*.cpp' '*.cu' '*.cuh' | (grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}") || echo -e))
     if [ -n "$changed_files" ]; then
         echo "$changed_files" | xargs -P 5 clang-format -i
     fi
@@ -286,6 +276,9 @@ else
 fi
 echo 'vLLM clang-format: Done'
 
+echo 'vLLM actionlint:'
+tools/actionlint.sh -color
+echo 'vLLM actionlint: Done'
 
 if ! git diff --quiet &>/dev/null; then
     echo 'Reformatted files. Please review and stage the changes.'

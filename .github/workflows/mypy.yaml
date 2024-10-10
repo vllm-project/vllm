@@ -11,15 +11,15 @@ on:
       - main
 
 jobs:
-  ruff:
+  mypy:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v3
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -32,15 +32,4 @@ jobs:
         pip install types-setuptools
     - name: Mypy
       run: |
-        mypy
-        mypy tests --follow-imports skip
-        mypy vllm/attention --follow-imports skip
-        mypy vllm/distributed --follow-imports skip
-        mypy vllm/engine  --follow-imports skip
-        mypy vllm/executor --follow-imports skip
-        mypy vllm/lora --follow-imports skip
-        mypy vllm/model_executor  --follow-imports skip
-        mypy vllm/prompt_adapter --follow-imports skip
-        mypy vllm/spec_decode --follow-imports skip
-        mypy vllm/worker --follow-imports skip
-
+        tools/mypy.sh
