@@ -1601,6 +1601,7 @@ class LLMEngine:
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
+        num_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
         time_per_output_tokens_iter: List[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
@@ -1609,11 +1610,16 @@ class LLMEngine:
         # Request stats
         #   Latency
         time_e2e_requests: List[float] = []
+        time_queue_requests: List[float] = []
+        time_inference_requests: List[float] = []
+        time_prefill_requests: List[float] = []
+        time_decode_requests: List[float] = []
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
         best_of_requests: List[int] = []
         n_requests: List[int] = []
+        max_num_generation_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
         # NOTE: This loop assumes prefill seq_groups are before
@@ -1675,6 +1681,18 @@ class LLMEngine:
                     # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
+                    if (seq_group.metrics.first_scheduled_time is not None and
+                            seq_group.metrics.first_token_time is not None):
+                        time_queue_requests.append(
+                            seq_group.metrics.first_scheduled_time -
+                            seq_group.metrics.arrival_time)
+                        time_prefill_requests.append(
+                            seq_group.metrics.first_token_time -
+                            seq_group.metrics.first_scheduled_time)
+                        time_decode_requests.append(
+                            now - seq_group.metrics.first_token_time)
+                        time_inference_requests.append(
+                            now - seq_group.metrics.first_scheduled_time)
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1682,6 +1700,9 @@ class LLMEngine:
                         seq.get_output_len()
                         for seq in seq_group.get_finished_seqs()
                     ])
+                    max_num_generation_tokens_requests.append(
+                        max(seq.get_output_len()
+                            for seq in seq_group.get_seqs()))
                     if seq_group.sampling_params is not None:
                         best_of_requests.append(
                             seq_group.sampling_params.best_of)
@@ -1700,7 +1721,8 @@ class LLMEngine:
             num_generation_tokens_iter = (
                 actual_num_batched_tokens - num_prompt_tokens_iter +
                 num_generation_tokens_from_prefill_groups)
-
+            num_tokens_iter = (num_generation_tokens_iter +
+                               num_prompt_tokens_iter)
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
         if model_output and (model_output[0].spec_decode_worker_metrics
@@ -1726,6 +1748,7 @@ class LLMEngine:
             # Iteration stats
             num_prompt_tokens_iter=num_prompt_tokens_iter,
             num_generation_tokens_iter=num_generation_tokens_iter,
+            num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
@@ -1734,9 +1757,15 @@ class LLMEngine:
             # Request stats
             #   Latency
             time_e2e_requests=time_e2e_requests,
+            time_queue_requests=time_queue_requests,
+            time_inference_requests=time_inference_requests,
+            time_prefill_requests=time_prefill_requests,
+            time_decode_requests=time_decode_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
+            max_num_generation_tokens_requests=
+            max_num_generation_tokens_requests,
             best_of_requests=best_of_requests,
             n_requests=n_requests,
             finished_reason_requests=finished_reason_requests,

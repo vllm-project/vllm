@@ -39,6 +39,7 @@ class Stats:
     # Iteration stats (should have _iter suffix)
     num_prompt_tokens_iter: int
     num_generation_tokens_iter: int
+    num_tokens_iter: int
     time_to_first_tokens_iter: List[float]
     time_per_output_tokens_iter: List[float]
     num_preemption_iter: int
@@ -46,11 +47,16 @@ class Stats:
     # Request stats (should have _requests suffix)
     #   Latency
     time_e2e_requests: List[float]
+    time_queue_requests: List[float]
+    time_inference_requests: List[float]
+    time_prefill_requests: List[float]
+    time_decode_requests: List[float]
     #   Metadata
     num_prompt_tokens_requests: List[int]
     num_generation_tokens_requests: List[int]
     best_of_requests: List[int]
     n_requests: List[int]
+    max_num_generation_tokens_requests: List[int]
     finished_reason_requests: List[str]
 
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
