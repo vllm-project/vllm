@@ -7,7 +7,8 @@ import torch
 import torch.nn.functional as F
 
 MODELS = [
-    "intfloat/e5-mistral-7b-instruct",
+    "BAAI/bge-base-en-v1.5"
+    # "intfloat/e5-mistral-7b-instruct",
 ]
 
 
@@ -31,7 +32,7 @@ def test_models(
     with hf_runner(model, dtype=dtype, is_embedding_model=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model, dtype=dtype) as vllm_model:
+    with vllm_runner(model, dtype=dtype, max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
 
     similarities = compare_embeddings(hf_outputs, vllm_outputs)

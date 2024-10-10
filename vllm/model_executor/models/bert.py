@@ -269,7 +269,7 @@ class BertSelfAttention(nn.Module):
                            v,
                            kv_cache,
                            attn_metadata,
-                           attn_type=AttentionType.ENCODER)
+                           attn_type=AttentionType.ENCODER_ONLY)
         return output
 
 
