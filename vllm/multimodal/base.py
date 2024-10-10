@@ -430,6 +430,42 @@ class MultiModalPlaceholderMap:
         cls, seq_group: "SequenceGroupMetadata", positions: range
     ) -> Tuple[Optional[MultiModalDataDict], Dict[str,
                                                   "MultiModalPlaceholderMap"]]:
+        """
+        Returns the multi-modal items that intersect with the portion of a
+        prompt (``seq_group``) represented by ``positions``, as well as a
+        ``MultiModalPlaceholderMap`` that relates the multi-modal embedding
+        vectors to their corresponding placeholders.
+
+        Consider the following scenarios:
+
+           Prompt: |AAAA BBBB What's in these images?|
+        Positions: |.................................|
+
+            images      = [A, B]
+            src_ranges  = [(0, 4), (4, 8)]
+            dest_ranges = [(0, 4), (5, 9)]
+
+           Prompt: |AAAA BBBB What's in these images?|
+        Positions: |  .....                          |
+
+            images      = [A, B]
+            src_ranges  = [(2, 4), (4, 8)]
+            dest_ranges = [(0, 2), (3, 7)]
+
+           Prompt: |AAAA BBBB What's in these images?|
+        Positions: |     .........                   |
+
+            images      = [B]
+            src_ranges  = [(0, 4)]
+            dest_ranges = [(0, 4)]
+
+           Prompt: |AAAA BBBB What's in these images?|
+        Positions: |          .......................|
+
+            images      = []
+            src_ranges  = []
+            dest_ranges = []
+        """
         if (not seq_group.multi_modal_data
                 or not seq_group.multi_modal_placeholders):
             return seq_group.multi_modal_data, {}
@@ -456,6 +492,10 @@ class MultiModalPlaceholderMap:
     def append_items_from_seq_group(
             self, positions: range, multi_modal_items: List[_T],
             multi_modal_placeholders: List[PlaceholderRange]) -> List[_T]:
+        """
+        Adds the multi-modal items that intersect ```positions`` to this
+        placeholder map and returns the intersecting items.
+        """
         intersecting_items = []
 
         if len(multi_modal_items) != len(multi_modal_placeholders):
@@ -490,6 +530,12 @@ class MultiModalPlaceholderMap:
         return intersecting_items
 
     def extend(self, other: "MultiModalPlaceholderMap"):
+        """
+        Adds the placeholders from another ``MultiModalPlaceholderMap`` to this
+        instance based on the source and destination tensors being
+        concatenated.
+        """
+
         self.src_ranges.extend(
             range(self.src_len + r.start, self.src_len + r.stop)
             for r in other.src_ranges)
@@ -500,6 +546,11 @@ class MultiModalPlaceholderMap:
         self.dest_len += other.dest_len
 
     def index_map(self) -> "IndexMap":
+        """
+        Finalizes the placeholder map into lists of indices that can be used to
+        index the source and destination tensors.
+        """
+
         src_indices = [i for r in self.src_ranges for i in r]
         dest_indices = [i for r in self.dest_ranges for i in r]
 
