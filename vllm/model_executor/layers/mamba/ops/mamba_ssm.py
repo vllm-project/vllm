@@ -9,6 +9,7 @@ import triton.language as tl
 from packaging import version
 
 from vllm import _custom_ops as ops
+from vllm.attention.backends.utils import PAD_SLOT_ID
 
 TRITON3 = version.parse(triton.__version__) >= version.parse("3.0.0")
 
@@ -50,6 +51,7 @@ def _selective_scan_update_kernel(
     z_ptr,
     out_ptr,
     state_batch_indices_ptr,
+    pad_slot_id,
     # Matrix dimensions
     batch,
     nheads,
@@ -147,7 +149,8 @@ def _selective_scan_update_kernel(
     if HAS_STATE_BATCH_INDICES:
         state = tl.load(state_ptrs,
                         mask=(offs_m[:, None] < dim) &
-                        (offs_n[None, :] < dstate) & (state_batch_idx != -1),
+                        (offs_n[None, :] < dstate) &
+                        (state_batch_idx != pad_slot_id),
                         other=0.0)
     else:
         state = tl.load(state_ptrs,
@@ -188,7 +191,7 @@ def _selective_scan_update_kernel(
         tl.store(state_ptrs,
                  state,
                  mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate) &
-                 (state_batch_idx != -1))
+                 (state_batch_idx != pad_slot_id))
     else:
         tl.store(state_ptrs,
                  state,
@@ -211,7 +214,8 @@ def selective_state_update(state,
                            z=None,
                            dt_bias=None,
                            dt_softplus=False,
-                           state_batch_indices=None):
+                           state_batch_indices=None,
+                           pad_slot_id=PAD_SLOT_ID):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -223,6 +227,12 @@ def selective_state_update(state,
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
+        pad_slot_id: int
+            if cache_indices is passed, lets the kernel identify padded 
+            entries that will not be processed, 
+            for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id] 
+            in this case, the kernel will not process entries at 
+            indices 0 and 3
     Return:
         out: (batch, dim) or (batch, nheads, dim)
     """
@@ -289,6 +299,7 @@ def selective_state_update(state,
             z,
             out,
             state_batch_indices,
+            pad_slot_id,
             batch,
             nheads,
             dim,
@@ -345,9 +356,13 @@ def selective_scan_fn(
         delta_softplus=False,
         query_start_loc=None,
         cache_indices=None,
-        has_initial_state=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        has_initial_state=None,
+        pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
+        applies changes in place.
+    ssm_states: (batch, dim, dstate) or (batch, nheads, dim, dstate)
+        applies changes in place.
     delta: (dim, total_length) for varlen or (batch, dim, seqlen)
     A: (dim, dstate) 
     B: (ngroups, dstate, total_length) for varlen or 
@@ -370,12 +385,14 @@ def selective_scan_fn(
         indicate if the ssm_state at the corresponding index should be 
         used as initial state. Not providing argument assumes 
         there's no initial state
-
+    pad_slot_id: int
+        if cache_indices is passed, lets the kernel identify padding entries 
+        that will not be processed, 
+        for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id] 
+        in this case, the kernel will not process entries at indices 0 and 3
     returns
         output: (dim, total_length) for varlen or (batch, dim, seqlen) 
                 supports inplace replacement
-        last_state has shape (batch, dim, dstate). 
-                supports inplace replacement if ssm_state was provided
     """
     if u.stride(-1) != 1:
         u = u.contiguous()
@@ -400,7 +417,7 @@ def selective_scan_fn(
 
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
                            query_start_loc, cache_indices, has_initial_state,
-                           ssm_states)
+                           ssm_states, pad_slot_id)
 
     if z is None:
         return delta  # output written inplace to delta

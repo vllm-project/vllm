@@ -55,10 +55,11 @@ void set_conv_params_fwd(ConvParamsBase &params,
                          const at::Tensor out,
                          const c10::optional<at::Tensor>& bias,
                          bool silu_activation,
+                         int64_t pad_slot_id,
                          const c10::optional<at::Tensor>& query_start_loc = std::nullopt,
                          const c10::optional<at::Tensor>& cache_indices = std::nullopt,
-                         const c10::optional<at::Tensor>& has_initial_state = std::nullopt) {
-
+                         const c10::optional<at::Tensor>& has_initial_state = std::nullopt
+                         ) {
     // Reset the parameters
     memset(&params, 0, sizeof(params));
 
@@ -66,6 +67,7 @@ void set_conv_params_fwd(ConvParamsBase &params,
     params.dim = dim;
     params.seqlen = seqlen;
     params.width = width;
+    params.pad_slot_id = pad_slot_id;
 
     params.silu_activation = silu_activation;
 
@@ -97,7 +99,10 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                   const c10::optional<at::Tensor> &query_start_loc,
                   const c10::optional<at::Tensor> &cache_indices,
                   const c10::optional<at::Tensor> &has_initial_state,
-                  bool silu_activation) {
+                  bool silu_activation,
+                 // used to identify padding entries if cache_indices provided
+                 // incase of padding, the kernel will return early
+                  int64_t pad_slot_id) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -159,6 +164,7 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
                         bias_,
                         silu_activation, 
+                        pad_slot_id,
                         query_start_loc,
                         cache_indices,
                         has_initial_state
@@ -194,7 +200,10 @@ causal_conv1d_update(const at::Tensor &x,
                      const c10::optional<at::Tensor> &bias_,
                      bool silu_activation,
                      const c10::optional<at::Tensor> &cache_seqlens_,
-                     const c10::optional<at::Tensor> &conv_state_indices_) {
+                     const c10::optional<at::Tensor> &conv_state_indices_,
+                     // used to identify padding entries if cache_indices provided
+                     // incase of padding, the kernel will return early
+                     int64_t pad_slot_id) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -232,7 +241,9 @@ causal_conv1d_update(const at::Tensor &x,
     ConvParamsBase params;
     set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
                         bias_,
-                        silu_activation);
+                        silu_activation,
+                        pad_slot_id
+                        );
     params.conv_state_ptr = conv_state.data_ptr();
     params.conv_state_len = conv_state_len;
     // All stride are in elements, not bytes.
@@ -334,16 +345,18 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         + channel_id * params.out_c_stride;
     float bias_val = params.bias_ptr == nullptr ? 0.f : float(reinterpret_cast<weight_t *>(params.bias_ptr)[channel_id]);
 
+    bool has_initial_state = params.has_initial_state_ptr == nullptr ? false
+        : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id];
+
     int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
     int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
-    
-    // cache_index == -1 is defined as padding and cache shouldn't been written/read
-    input_t *conv_states = params.conv_states_ptr == nullptr || cache_index == -1 ? nullptr
+    // cache_index == params.pad_slot_id is defined as padding, so we exit early
+    if (cache_index == params.pad_slot_id){
+        return;
+    }
+    input_t *conv_states = params.conv_states_ptr == nullptr ? nullptr
         : reinterpret_cast<input_t *>(params.conv_states_ptr) + cache_index * params.conv_states_batch_stride + channel_id * params.conv_states_c_stride;
-
-    bool has_initial_state = params.has_initial_state_ptr == nullptr || conv_states == nullptr ? false
-        : reinterpret_cast<bool *>(params.has_initial_state_ptr)[batch_id] ;
 
     // Thread 0 will load the last elements of the previous chunk, so we initialize those to 0.
     if (tidx == 0) {
@@ -529,7 +542,10 @@ void causal_conv1d_update_kernel(ConvParamsBase params) {
     const int conv_state_batch_coord = params.conv_state_indices_ptr == nullptr
         ? batch_id
         : params.conv_state_indices_ptr[batch_id];
-    if (conv_state_batch_coord == -1) return;
+    // conv_state_batch_coord == params.pad_slot_id is defined as padding so we exit early
+    if (conv_state_batch_coord == params.pad_slot_id){
+        return;
+    }
     input_t *conv_state = reinterpret_cast<input_t *>(params.conv_state_ptr) 
         + conv_state_batch_coord * params.conv_state_batch_stride
         + channel_id * params.conv_state_c_stride;
