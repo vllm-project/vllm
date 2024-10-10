@@ -803,7 +803,7 @@ class SequenceGroup:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
         if self.sampling_params:
-            best_of = self.sampling_params.best_of
+            best_of = self.sampling_params.n
             assert isinstance(best_of, int)
             if best_of > self.num_seqs():
                 # At prompt stage, the sequence group is not yet filled up

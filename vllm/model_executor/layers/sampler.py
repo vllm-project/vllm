@@ -523,9 +523,9 @@ def _random_sample(
         num_parent_seqs = len(seq_ids)
         if is_prompt:
             # Prompt phase.
-            parent_ids = [0] * sampling_params.best_of
+            parent_ids = [0] * sampling_params.n
             next_token_ids = random_samples[
-                sample_idx, :sampling_params.best_of].tolist()
+                sample_idx, :sampling_params.n].tolist()
         else:
             # Generation phase.
             parent_ids = list(range(num_parent_seqs))
@@ -570,7 +570,7 @@ def _beam_search_sample(
         is_prompt = seq_group.is_prompt
         seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
         num_parent_seqs = len(seq_ids)
-        beam_width = sampling_params.best_of
+        beam_width = sampling_params.n
         seq_group_logprobs = logprobs[sample_idx:sample_idx + num_parent_seqs]
         if is_prompt:
             # Prompt phase.
@@ -802,7 +802,7 @@ def _sample_with_torch(
                 if seq_group.is_prompt:
                     sampling_params = seq_group.sampling_params
                     max_best_of_in_batch = max(max_best_of_in_batch,
-                                               sampling_params.best_of)
+                                               sampling_params.n)
             seq_groups_arg = (None if sampling_type == SamplingType.RANDOM else
                               seq_groups)
 

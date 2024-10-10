@@ -1683,8 +1683,6 @@ class LLMEngine:
                         for seq in seq_group.get_finished_seqs()
                     ])
                     if seq_group.sampling_params is not None:
-                        best_of_requests.append(
-                            seq_group.sampling_params.best_of)
                         n_requests.append(seq_group.sampling_params.n)
                     finished_reason_requests.extend([
                         SequenceStatus.get_finished_reason(seq.status)
@@ -1824,8 +1822,6 @@ class LLMEngine:
                                    seq_group.sampling_params.top_p)
             seq_span.set_attribute(SpanAttributes.LLM_REQUEST_MAX_TOKENS,
                                    seq_group.sampling_params.max_tokens)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_BEST_OF,
-                                   seq_group.sampling_params.best_of)
             seq_span.set_attribute(SpanAttributes.LLM_REQUEST_N,
                                    seq_group.sampling_params.n)
             seq_span.set_attribute(SpanAttributes.LLM_USAGE_NUM_SEQUENCES,

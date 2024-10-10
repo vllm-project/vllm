@@ -173,6 +173,7 @@ class SamplingParams(
 
     n: int = 1
     best_of: Optional[int] = None
+    _best_of: Optional[int] = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
@@ -250,7 +251,6 @@ class SamplingParams(
 
         return SamplingParams(
             n=1 if n is None else n,
-            best_of=best_of,
             presence_penalty=0.0
             if presence_penalty is None else presence_penalty,
             frequency_penalty=0.0
@@ -282,7 +282,9 @@ class SamplingParams(
         )
 
     def __post_init__(self) -> None:
-        self.best_of = self.best_of or self.n
+        if self.best_of:
+            self._best_of = self.n
+            self.n = max(self.best_of, self.n)
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
                 "temperature %s is less than %s, which may cause numerical "
@@ -329,10 +331,7 @@ class SamplingParams(
                              f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
-        if not isinstance(self.best_of, int):
-            raise ValueError(f"best_of must be an int, but is of "
-                             f"type {type(self.best_of)}")
-        if self.best_of < self.n:
+        if self.best_of and self.best_of < self.n:
             raise ValueError(f"best_of must be greater than or equal to n, "
                              f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
@@ -385,7 +384,7 @@ class SamplingParams(
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
-        if self.best_of != self.n and self.output_kind == (
+        if self.best_of and self.best_of != self.n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
 
@@ -393,10 +392,6 @@ class SamplingParams(
         if self.n > 1:
             raise ValueError("n must be 1 when using greedy sampling, "
                              f"got {self.n}.")
-        assert isinstance(self.best_of, int)
-        if self.best_of > 1:
-            raise ValueError("best_of must be 1 when using greedy sampling, "
-                             f"got {self.best_of}.")
 
     def update_from_generation_config(
             self,
@@ -453,7 +448,6 @@ class SamplingParams(
     def __repr__(self) -> str:
         return (
             f"SamplingParams(n={self.n}, "
-            f"best_of={self.best_of}, "
             f"presence_penalty={self.presence_penalty}, "
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
