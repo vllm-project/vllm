@@ -136,10 +136,19 @@ endif()
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 list(APPEND LIBS numa)
 =======
 list(APPEND LIBS dnnl numa)
 >>>>>>> ad80d348 (Enabled path for ARM machines)
+=======
+list(APPEND LIBS numa)
+
+# Appending the dnnl library for the AVX2 and AVX512, as it is not utilized by Power architecture.
+if (AVX2_FOUND OR AVX512_FOUND)
+    list(APPEND LIBS dnnl)
+endif()
+>>>>>>> b424c9aa (Enabled path for ARM machines)
 
 #
 # _C extension
