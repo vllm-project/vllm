@@ -758,7 +758,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
-        pixel_values = data["pixel_values"]
+        pixel_values = data["data"]
 
         return self.get_vision_embedding(pixel_values)
 
@@ -846,7 +846,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
-        pixel_values = data["pixel_values"]
+        pixel_values = data["data"]
         tgt_sizes = data["tgt_sizes"]
 
         device = self.vpm.embeddings.position_embedding.weight.device
