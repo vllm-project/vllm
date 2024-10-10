@@ -185,7 +185,7 @@ def sample_sonnet_requests(
         else:
             num_round = num_lines_needed // num_poem_lines
             remainder = num_lines_needed - num_round * num_poem_lines
-            sampled_lines = prefix_lines
+            sampled_lines = "".join(prefix_lines)
             for _ in range(num_round):
                 new_lines = "".join(random.sample(poem_lines, num_poem_lines))
                 sampled_lines += new_lines
