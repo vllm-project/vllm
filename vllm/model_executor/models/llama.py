@@ -51,8 +51,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer, group_weights_with_prefix,
-                    is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -449,6 +448,19 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "lm_head": "output_embeddings"
     }
     embedding_padding_modules = ["lm_head"]
+
+    # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".gate_proj.",
+        ".down_proj.",
+        ".up_proj.",
+        ".q_proj.",
+        ".k_proj.",
+        ".v_proj.",
+        ".o_proj.",
+    ]
+    # in TP, these weights are partitioned along the column dimension (dim=-1)
+    column_parallel_weights_modules = [".down_proj.", ".o_proj."]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -512,7 +524,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
+                self.lm_head = self.lm_head.tie_weights(
+                    self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
@@ -551,25 +564,14 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights = [
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
-            for name, loaded_weight in weights
-        ]
-
-        weights_group = group_weights_with_prefix(weights)
-
-        self.model.load_weights(weights_group["model"])
-
-        if not self.config.tie_word_embeddings:
-            lm_head_dict = dict(self.lm_head.named_parameters())
-            for name, loaded_weight in weights_group["lm_head"]:
-                if is_pp_missing_parameter(name, self.lm_head):
-                    continue
-
-                param = lm_head_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+            for name, loaded_weight in weights)
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         self.model.load_kv_cache_scales(quantization_param_path)
