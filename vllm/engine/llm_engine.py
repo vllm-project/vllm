@@ -1282,6 +1282,7 @@ class LLMEngine:
                     seq.append_token_id(sample.output_token, sample.logprobs)
 
     def _should_force_single_step(self) -> bool:
+        """True if user configured multi-step but there is a best_of > 1 req"""
         return (self.scheduler_config.user_is_multi_step
                 and (not self.scheduler_config.is_multi_step))
 
