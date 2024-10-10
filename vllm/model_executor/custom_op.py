@@ -90,7 +90,7 @@ class CustomOp(nn.Module):
         # specific backend. Currently, we do not support dynamic dispatching.
 
         if envs.VLLM_TEST_COMPILE_NO_CUSTOM_OPS:
-            return self.forward_native
+            return self.forward_compile
 
         if is_hip():
             return self.forward_hip
