@@ -1,11 +1,7 @@
 import argparse
-import numpy as np
 import requests
 from io import BytesIO
-import base64
-from PIL import Image, ImageFile, ImageOps
-import torch
-from typing import Optional
+from PIL import Image, ImageFile
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
@@ -14,7 +10,7 @@ from vllm.sampling_params import SamplingParams
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-def download_image_to_numpy(url):
+def download_image(url: str):
     # Send a GET request to the URL
     response = requests.get(url)
     
@@ -22,13 +18,8 @@ def download_image_to_numpy(url):
     if response.status_code == 200:
         # Open the image from the response content
         image = Image.open(BytesIO(response.content)).convert("RGB")
-
-        image = ImageOps.exif_transpose(image)
         
-        # Convert the image to a NumPy array
-        image_array = np.array(image).astype(np.uint8)
-        
-        return image_array
+        return image
     else:
         raise Exception(f"Failed to download image. Status code: {response.status_code}")
 
@@ -37,11 +28,11 @@ def vllm_generate():
     inputs = [
         {
             "prompt": "Describe this image.",
-            "multi_modal_data": {"image": download_image_to_numpy("https://picsum.photos/id/9/1080/720")}
+            "multi_modal_data": {"image": download_image("https://picsum.photos/id/9/1080/720")}
         },
         {
             "prompt": "Describe what you see in this image.",
-            "multi_modal_data": {"image": download_image_to_numpy("https://picsum.photos/id/23/1080/720")}
+            "multi_modal_data": {"image": download_image("https://picsum.photos/id/23/1080/720")}
         },
     ]
 
@@ -88,24 +79,9 @@ def vllm_chat():
         sampling_params=sampling_params
     )
 
-        # Error: Invalid message role {{ message['role'] }} at index {{ loop.index }}
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
-
-
-def set_tf_memory_growth():
-    import tensorflow as tf
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-
-    if gpus:
-        try:
-            # Set memory growth for each GPU
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            print("Memory growth set for GPUs")
-        except RuntimeError as e:
-            print(e)
 
 
 if __name__ == "__main__":
@@ -124,6 +100,5 @@ if __name__ == "__main__":
         max_tokens=768,
         temperature=0,
     )
-    set_tf_memory_growth()
     vllm_generate()
     vllm_chat()

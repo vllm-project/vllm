@@ -275,6 +275,23 @@ def run_mllama(question, modality):
     return llm, prompt, stop_token_ids
 
 
+# Molmo
+def run_molmo(question, modality):
+    assert modality == "image"
+
+    model_name = "allenai/Molmo-7B-D-0924"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+    )
+
+    prompt = question
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -290,6 +307,7 @@ model_example_map = {
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
     "mllama": run_mllama,
+    "molmo": run_molmo,
 }
 
 
