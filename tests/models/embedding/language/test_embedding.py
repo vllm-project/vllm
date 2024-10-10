@@ -39,11 +39,13 @@ def test_models(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     with hf_runner(model, dtype=dtype, is_embedding_model=True) as hf_model:
-        hf_outputs = hf_model.encode(example_prompts)
+        hf_outputs = hf_model.encode(example_prompts, normalize=False)
 
     with vllm_runner(model, dtype=dtype, max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
 
+    print(f"{hf_outputs[0]=}")
+    print(f"{vllm_outputs[0]=}")
     similarities = compare_embeddings(hf_outputs, vllm_outputs)
     all_similarities = torch.stack(similarities)
     tolerance = 1e-2

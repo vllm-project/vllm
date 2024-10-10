@@ -1,4 +1,5 @@
 from enum import IntEnum
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -30,11 +31,6 @@ class Pooler(nn.Module):
 
     def __init__(self, pooling_type: PoolingType, normalize: bool):
         super().__init__()
-        
-        if pooling_type == PoolingType.MODEL and normalize:
-            raise ValueError(
-                "Unable to have PoolingType.MODEL and normalize = True "
-                "The pooling logic is part of the model defintion.")
 
         self.pooling_type = pooling_type
         self.normalize = normalize
@@ -43,36 +39,33 @@ class Pooler(nn.Module):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
+        model_pooler: Optional[nn.Module] = None,
     ) -> PoolerOutput:
         """Pools specific information from hidden states based on metadata."""
         
-        # If pooling is done by the model, just wrap.
+        prompt_lens = PoolingTensors.from_pooling_metadata(
+            pooling_metadata, hidden_states.device).prompt_lens
+        
         if self.pooling_type is PoolingType.MODEL:
-            return [
-                EmbeddingSequenceGroupOutput(hidden_states[i].tolist()) 
-                for i in range(hidden_states.shape[0])]
-
-        # If pooling is not done by the model, handle it here.
+            assert model_pooler is not None, (
+                "PoolingType.MODEL requires the model to pass its pooler")
+            pooled_data = model_pooler(hidden_states, prompt_lens)
+        elif self.pooling_type == PoolingType.LAST:
+            last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
+            pooled_data = hidden_states[last_token_flat_indices]
+        elif self.pooling_type == PoolingType.ALL:
+            offset = 0
+            pooled_data = []
+            for prompt_len in prompt_lens:
+                pooled_data.append(hidden_states[offset:offset + prompt_len])
+                offset += prompt_len
         else:
-            prompt_lens = PoolingTensors.from_pooling_metadata(
-                pooling_metadata, hidden_states.device).prompt_lens
+            raise ValueError(f"Invalid pooling type: {self.pooling_type}")
 
-            if self.pooling_type == PoolingType.LAST:
-                last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
-                pooled_data = hidden_states[last_token_flat_indices]
-            elif self.pooling_type == PoolingType.ALL:
-                offset = 0
-                pooled_data = []
-                for prompt_len in prompt_lens:
-                    pooled_data.append(hidden_states[offset:offset + prompt_len])
-                    offset += prompt_len
-            else:
-                raise ValueError(f"Invalid pooling type: {self.pooling_type}")
+        if self.normalize:
+            pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
 
-            if self.normalize:
-                pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
-
-            pooled_outputs = [
-                EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data]
+        pooled_outputs = [
+            EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data]
 
         return PoolerOutput(outputs=pooled_outputs)

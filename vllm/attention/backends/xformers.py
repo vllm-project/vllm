@@ -747,7 +747,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # Self-attention block of encoder-only model just
                 # uses the seq_lens directly.
                 elif attn_type == AttentionType.ENCODER_ONLY:
-                    assert attn_metadata.seq_lens is None
+                    assert attn_metadata.seq_lens is not None
 
                     # Encoder self-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
