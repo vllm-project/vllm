@@ -536,7 +536,7 @@ async def benchmark(
         # E.g., "Time to First Token"
         metric_header: str,
     ):
-        # This function print and add statistics of the specified
+        # This function prints and adds statistics of the specified
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
