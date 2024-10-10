@@ -312,6 +312,7 @@ class ColumnParallelLinear(LinearBase):
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
                 in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
         if bias:
+            print(self.output_size_per_partition)
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
                             dtype=params_dtype))
