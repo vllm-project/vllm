@@ -227,9 +227,25 @@ def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
         import cloudpickle
         cloudpickle.register_pickle_by_value(transformers_modules)
 
+        # ray vendors its own version of cloudpickle
         from vllm.executor.ray_utils import ray
         if ray:
             ray.cloudpickle.register_pickle_by_value(transformers_modules)
+
+        # multiprocessing uses pickle to serialize arguments when using spawn
+        # Here we get pickle to use cloudpickle to serialize ModelConfig objects
+        # that contain instances of the custom config class to avoid
+        # serialization problems if the generated module (and model) has a `.`
+        # in its name
+        import multiprocessing
+        import pickle
+
+        from vllm.config import ModelConfig
+
+        def _reduce_modelconfig(mc: ModelConfig):
+            return (pickle.loads, (cloudpickle.dumps(mc), ))
+
+        multiprocessing.reducer.register(ModelConfig, _reduce_modelconfig)
 
     except Exception as e:
         logger.warning(
