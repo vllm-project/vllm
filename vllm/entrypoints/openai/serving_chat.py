@@ -538,6 +538,7 @@ class OpenAIServingChat(OpenAIServing):
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
                         # only happens if we are NOT using guided decoding
+                        tools_called = False
                         if tool_parser:
                             tools_called = len(
                                 tool_parser.prev_tool_call_arr) > 0
@@ -545,7 +546,6 @@ class OpenAIServingChat(OpenAIServing):
                                         ) - 1 if tools_called else 0
                         else:
                             index = 0
-                            tools_called = tool_choice_function_name is not None
 
                         if self._should_check_for_unstreamed_tool_arg_tokens(
                                 delta_message, output) and tool_parser:
@@ -703,7 +703,6 @@ class OpenAIServingChat(OpenAIServing):
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
-                tools_called = True
 
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
