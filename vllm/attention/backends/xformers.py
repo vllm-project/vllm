@@ -295,7 +295,7 @@ def _get_attn_bias(
     elif attn_type == AttentionType.ENCODER:
         return attn_metadata.encoder_attn_bias
     else:
-        # attn_type == AttentionType.ENCODER_DECODER
+        # attn_type == AttentionType.CROSS
         return attn_metadata.cross_attn_bias
 
 
@@ -320,7 +320,7 @@ def _set_attn_bias(
         attn_metadata.attn_bias = attn_bias
     elif attn_type == AttentionType.ENCODER:
         attn_metadata.encoder_attn_bias = attn_bias
-    elif attn_type == AttentionType.ENCODER_DECODER:
+    elif attn_type == AttentionType.CROSS:
         attn_metadata.cross_attn_bias = attn_bias
     else:
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
@@ -364,7 +364,7 @@ def _get_seq_len_block_table_args(
             max_seq_len = attn_metadata.max_decode_seq_len
         return (attn_metadata.seq_lens_tensor, max_seq_len,
                 attn_metadata.block_tables)
-    elif attn_type == AttentionType.ENCODER_DECODER:
+    elif attn_type == AttentionType.CROSS:
         # Enc/dec cross-attention KVs match encoder sequence length;
         # cross-attention utilizes special "cross" block tables
         return (attn_metadata.encoder_seq_lens_tensor,
@@ -510,9 +510,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # selected for the desired attention type
         if (attn_type == AttentionType.ENCODER
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
-            raise AttributeError("Encoder attention requires setting "
-                                 "encoder metadata attributes.")
-        elif (attn_type == AttentionType.ENCODER_DECODER
+            # raise AttributeError("Encoder attention requires setting "
+            #                      "encoder metadata attributes.")
+            
+            assert attn_metadata.num_decode_tokens == 0, (
+                "Chunked prefill should be disabled.")
+            # attn_metadata.encoder_seq_lens = 
+
+        elif (attn_type == AttentionType.CROSS
               and (not attn_metadata.is_all_cross_attn_metadata_set)):
             raise AttributeError("Encoder/decoder cross-attention "
                                  "requires setting cross-attention "
@@ -543,7 +548,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
             if (key is not None) and (value is not None):
 
-                if attn_type == AttentionType.ENCODER_DECODER:
+                if attn_type == AttentionType.CROSS:
                     # Update cross-attention KV cache (prefill-only)
                     # During cross-attention decode, key & value will be None,
                     # preventing this IF-statement branch from running
@@ -705,7 +710,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         attn_bias = _get_attn_bias(attn_metadata, attn_type)
         if attn_bias is None:
             if self.alibi_slopes is None:
-                if (attn_type == AttentionType.ENCODER_DECODER):
+                if (attn_type == AttentionType.CROSS):
                     assert attn_metadata.seq_lens is not None
                     assert attn_metadata.encoder_seq_lens is not None
 

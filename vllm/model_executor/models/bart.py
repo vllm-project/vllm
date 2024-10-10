@@ -73,7 +73,7 @@ class BartLearnedPositionalEmbedding(VocabParallelEmbedding):
     ) -> torch.Tensor:
         """`input_ids' shape is expected to be [bsz x seqlen]."""
 
-        assert attn_type != AttentionType.ENCODER_DECODER
+        assert attn_type != AttentionType.CROSS
 
         return super().forward(positions + self.offset)
 
@@ -369,7 +369,7 @@ class BartCrossAttention(nn.Module):
                                 v,
                                 kv_cache,
                                 attn_metadata,
-                                attn_type=AttentionType.ENCODER_DECODER)
+                                attn_type=AttentionType.CROSS)
 
         output, _ = self.out_proj(attn_output)
         return output

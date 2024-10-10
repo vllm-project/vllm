@@ -293,7 +293,7 @@ def make_qkv(
     head_size: int,
     device: Union[torch.device, str],
     force_kv_seq_lens: Optional[List[int]] = None,
-    attn_type: AttentionType = AttentionType.ENCODER_DECODER,
+    attn_type: AttentionType = AttentionType.CROSS,
     force_max_len: bool = False,
 ) -> Tuple[QKVInputs, QKVInputs, QKVInputs]:
     '''
@@ -344,7 +344,7 @@ def make_qkv(
     kv_seq_lens = None
     if force_kv_seq_lens is not None:
         kv_seq_lens = force_kv_seq_lens
-    elif attn_type != AttentionType.ENCODER_DECODER:
+    elif attn_type != AttentionType.CROSS:
         # K,V seq lens match Q for self-attention
         kv_seq_lens = q_seq_lens
     else:
