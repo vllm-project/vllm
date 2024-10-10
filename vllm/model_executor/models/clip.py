@@ -427,7 +427,7 @@ class CLIPVisionModel(nn.Module):
             quant_config = None
 
         super().__init__()
-    
+
         tp_size = get_tensor_model_parallel_world_size()
         num_heads = config.num_attention_heads
         self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
