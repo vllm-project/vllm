@@ -17,6 +17,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -86,9 +87,9 @@ class JambaMambaMixer(nn.Module):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        self.in_proj = ColumnParallelLinear(self.hidden_size,
-                                            self.intermediate_size * 2,
-                                            bias=self.use_bias)
+        self.in_proj = MergedColumnParallelLinear(self.hidden_size,
+                                                  [self.intermediate_size] * 2,
+                                                  bias=self.use_bias)
         # selective projection used to make dt, B and C input dependent
         self.x_proj = RowParallelLinear(
             self.intermediate_size,
@@ -575,7 +576,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         # Maps between the request id and a dict that maps between the seq_id
         # and its index inside the self.mamba_cache
         self.cache_indices_mapping: Dict[str, Dict[int, int]] = {}
-        self.free_indices = list(range(self.scheduler_config.max_num_seqs))
+        self.free_cache_indices = list(range(self._get_max_batch_size()))
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
@@ -627,17 +628,17 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             # set as pad, do not allocate destination index
             return PAD_SLOT_ID
         elif cur_rid not in self.cache_indices_mapping:
-            destination_index = self.free_indices.pop()
+            destination_index = self.free_cache_indices.pop()
             self.cache_indices_mapping[cur_rid] = {seq_id: destination_index}
             return destination_index
         elif seq_id not in (seq_ids2indices :=
                             self.cache_indices_mapping[cur_rid]):
             # parallel sampling , where n > 1, assume prefill have
-            # already happened now we only need to copy the already
+            # already happened, so we copy the
             # existing cache into the siblings seq_ids caches
             index_exists = next(iter(seq_ids2indices.values()))
             # case of decoding n>1, copy prefill cache to decoding indices
-            destination_index = self.free_indices.pop()
+            destination_index = self.free_cache_indices.pop()
             self._copy_mamba_cache(from_index=index_exists,
                                    to_index=destination_index)
             self.cache_indices_mapping[cur_rid][seq_id] = destination_index
@@ -664,25 +665,25 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """
-        Copy the relevant Mamba cache into the CUDA graph input buffer 
-        that was provided during the capture runs 
-        (JambaForCausalLM.mamba_gc_cache_buffer). 
+        Copy the relevant state_indices into the CUDA graph input buffer 
         """
-        _, gc_state_indices_t = input_buffers["seqlen_agnostic_capture_inputs"]
+        _, input_state_indices_buffer = input_buffers[
+            "seqlen_agnostic_capture_inputs"]
         state_indices = self._release_finished_and_prepare_mamba_cache(
             kwargs["finished_requests_ids"], kwargs["request_ids_to_seq_ids"])
-        cuda_graph_pad_len = gc_state_indices_t.shape[0] - len(state_indices)
+        cuda_graph_pad_len = input_state_indices_buffer.shape[0] - len(
+            state_indices)
         state_indices.extend([PAD_SLOT_ID] * cuda_graph_pad_len)
-        gc_state_indices_t.copy_(
+
+        input_state_indices_buffer.copy_(
             torch.as_tensor(state_indices, dtype=torch.int32, device="cuda"))
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size):
         """
-        Provide the CUDA graph capture runs with a buffer.
-        The buffer is used to maintain the Mamba Cache during the CUDA graph 
-        replay runs.
+        Provide the CUDA graph capture runs with a state_indices buffer.
+        will be used during the CUDA graph decode runs.
         """
-        state_indices_tensor = torch.as_tensor([-1] * batch_size,
+        state_indices_tensor = torch.as_tensor([PAD_SLOT_ID] * batch_size,
                                                dtype=torch.int32,
                                                device="cuda")
         return (self.mamba_cache, state_indices_tensor)
@@ -691,7 +692,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.cache_indices_mapping:
                 for seq_id in self.cache_indices_mapping[req_id]:
-                    self.free_indices.append(
+                    self.free_cache_indices.append(
                         self.cache_indices_mapping[req_id][seq_id])
                 self.cache_indices_mapping.pop(req_id)
 
@@ -710,14 +711,17 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         )
         return conv_state_shape, temporal_state_shape
 
+    def _get_max_batch_size(self):
+        return (_get_graph_batch_size(
+            self.scheduler_config.max_num_seqs
+        ) if self.scheduler_config else max(_BATCH_SIZES_TO_CAPTURE) + 2)
+
     def _prepare_mamba_cache(self):
         dtype = self.lm_head.weight.dtype
         layers_type = self.config.layers_block_type
         mamba_layers = sum(
             [layer_type == "mamba" for layer_type in layers_type])
-        max_batch_size = (_get_graph_batch_size(
-            self.scheduler_config.max_num_seqs) if self.scheduler_config else
-                          max(_BATCH_SIZES_TO_CAPTURE) + 2)
+        max_batch_size = self._get_max_batch_size()
         conv_state_shape, temporal_state_shape = self._get_mamba_cache_shape()
         assert conv_state_shape is not None and temporal_state_shape is not None
 
