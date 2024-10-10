@@ -767,7 +767,7 @@ class LLMEngine:
         Details:
             - Set arrival_time to the current time if it is None.
             - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `best_of` number of :class:`~vllm.Sequence` objects.
+            - Create `n` number of :class:`~vllm.Sequence` objects.
             - Create a :class:`~vllm.SequenceGroup` object
               from the list of :class:`~vllm.Sequence`.
             - Add the :class:`~vllm.SequenceGroup` object to the scheduler.
@@ -1242,8 +1242,7 @@ class LLMEngine:
             if seq_group_metadata.do_sample:
                 assert len(sequence_group_outputs.samples) == 1, (
                     "Async output processor expects a single sample"
-                    " (i.e sampling_params.n == 1 and no "
-                    "sampling_params.best_of > 1)")
+                    " (i.e sampling_params.n == 1)")
                 sample = sequence_group_outputs.samples[0]
 
                 assert len(seq_group.seqs) == 1
@@ -1612,7 +1611,6 @@ class LLMEngine:
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
-        best_of_requests: List[int] = []
         n_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
@@ -1735,7 +1733,6 @@ class LLMEngine:
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
-            best_of_requests=best_of_requests,
             n_requests=n_requests,
             finished_reason_requests=finished_reason_requests,
         )
