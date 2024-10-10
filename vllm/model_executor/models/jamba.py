@@ -712,9 +712,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         return conv_state_shape, temporal_state_shape
 
     def _get_max_batch_size(self):
-        return (_get_graph_batch_size(
-            self.scheduler_config.max_num_seqs
-        ) if self.scheduler_config else max(_BATCH_SIZES_TO_CAPTURE) + 2)
+        return (_get_graph_batch_size(self.scheduler_config.max_num_seqs)
+                if self.scheduler_config else max(_BATCH_SIZES_TO_CAPTURE) + 2)
 
     def _prepare_mamba_cache(self):
         dtype = self.lm_head.weight.dtype

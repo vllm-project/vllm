@@ -1,8 +1,6 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/selective_state_update.py
 
-from typing import Tuple
-
 import torch
 import triton
 import triton.language as tl
@@ -343,21 +341,20 @@ def selective_state_update(state,
     return out
 
 
-def selective_scan_fn(
-        u,
-        ssm_states,
-        delta,
-        A,
-        B,
-        C,
-        D=None,
-        z=None,
-        delta_bias=None,
-        delta_softplus=False,
-        query_start_loc=None,
-        cache_indices=None,
-        has_initial_state=None,
-        pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
+def selective_scan_fn(u,
+                      ssm_states,
+                      delta,
+                      A,
+                      B,
+                      C,
+                      D=None,
+                      z=None,
+                      delta_bias=None,
+                      delta_softplus=False,
+                      query_start_loc=None,
+                      cache_indices=None,
+                      has_initial_state=None,
+                      pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
         applies changes in place.

@@ -276,12 +276,8 @@ def test_state_cleanup(
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_jamba_distributed_produces_identical_generation(
-    vllm_runner,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    example_prompts
-) -> None:
+        vllm_runner, model: str, dtype: str, max_tokens: int,
+        example_prompts) -> None:
 
     with vllm_runner(model, dtype=dtype, tensor_parallel_size=2) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy(example_prompts,

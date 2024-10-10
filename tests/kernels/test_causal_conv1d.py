@@ -115,16 +115,15 @@ def causal_conv1d_update_ref(x,
 @pytest.mark.parametrize("itype", [torch.bfloat16, torch.float])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
-def causal_conv1d_opcheck_fn(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    cu_seq_len: Optional[torch.Tensor] = None,
-    cache_indices: Optional[torch.Tensor] = None,
-    has_initial_state: Optional[torch.Tensor] = None,
-    conv_states: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
-):
+def causal_conv1d_opcheck_fn(x: torch.Tensor,
+                             weight: torch.Tensor,
+                             bias: Optional[torch.Tensor] = None,
+                             cu_seq_len: Optional[torch.Tensor] = None,
+                             cache_indices: Optional[torch.Tensor] = None,
+                             has_initial_state: Optional[torch.Tensor] = None,
+                             conv_states: Optional[torch.Tensor] = None,
+                             activation: Optional[str] = "silu",
+                             pad_slot_id: int = PAD_SLOT_ID):
     """
     x: (batch, dim, seqlen)
     weight: (dim, width)
@@ -142,16 +141,9 @@ def causal_conv1d_opcheck_fn(
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    opcheck(torch.ops._C.causal_conv1d_fwd, (
-        x,
-        weight,
-        bias,
-        conv_states,
-        cu_seq_len,
-        cache_indices,
-        has_initial_state,
-        activation in ["silu", "swish"],
-    ))
+    opcheck(torch.ops._C.causal_conv1d_fwd,
+            (x, weight, bias, conv_states, cu_seq_len, cache_indices,
+             has_initial_state, activation in ["silu", "swish"], pad_slot_id))
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16, torch.float])
@@ -261,15 +253,9 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation,
     assert torch.equal(conv_state, conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
-    opcheck(torch.ops._C.causal_conv1d_update, (
-        x,
-        conv_state,
-        weight,
-        bias,
-        activation in ["silu", "swish"],
-        None,
-        None,
-    ))
+    opcheck(torch.ops._C.causal_conv1d_update,
+            (x, conv_state, weight, bias, activation
+             in ["silu", "swish"], None, None, PAD_SLOT_ID))
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
@@ -373,15 +359,9 @@ def test_causal_conv1d_update_with_batch_gather(dim, width, seqlen, has_bias,
     assert torch.equal(conv_state[conv_state_indices, :], conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
-    opcheck(torch.ops._C.causal_conv1d_update, (
-        x,
-        conv_state,
-        weight,
-        bias,
-        activation in ["silu", "swish"],
-        None,
-        conv_state_indices,
-    ))
+    opcheck(torch.ops._C.causal_conv1d_update,
+            (x, conv_state, weight, bias, activation
+             in ["silu", "swish"], None, conv_state_indices, PAD_SLOT_ID))
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
