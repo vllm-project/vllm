@@ -39,7 +39,7 @@ The first line of this example imports both the :class:`~vllm.LLM` class, the ma
 
     from vllm import LLM, SamplingParams
 
-The next portion defines a list of input prompts and sampling parameters for generation. The `sampling temperature <https://arxiv.org/html/2402.05201v1>`_ is set to ``0.8`` and the `nucleus sampling probability <https://en.wikipedia.org/wiki/Top-p_sampling>`_ is set to 0.95. You can find more information about the sampling parameters `here <https://docs.vllm.ai/en/stable/dev/sampling_params.html>_.
+The next portion defines a list of input prompts and sampling parameters for generation. The `sampling temperature <https://arxiv.org/html/2402.05201v1>`_ is set to ``0.8`` and the `nucleus sampling probability <https://en.wikipedia.org/wiki/Top-p_sampling>`_ is set to 0.95. You can find more information about the sampling parameters `here <https://docs.vllm.ai/en/stable/dev/sampling_params.html>`_.
 
 .. code-block:: python
 
