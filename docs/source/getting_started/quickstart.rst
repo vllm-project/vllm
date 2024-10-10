@@ -31,7 +31,7 @@ Please refer to the :ref:`installation documentation <installation>` for more de
 Offline Batched Inference
 -------------------------
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). The example script for this section can be found  `here <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`_.
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). The example script for this section can be found  `here <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`__.
 
 The first line of this example imports both the :class:`~vllm.LLM` class, the main class for running offline inference with vLLM engine and the :class:`~vllm.SamplingParams` class which specifies the parameters for the sampling process.
 
@@ -39,7 +39,7 @@ The first line of this example imports both the :class:`~vllm.LLM` class, the ma
 
     from vllm import LLM, SamplingParams
 
-The next portion defines a list of input prompts and sampling parameters for generation. The `sampling temperature <https://arxiv.org/html/2402.05201v1>`_ is set to ``0.8`` and the `nucleus sampling probability <https://en.wikipedia.org/wiki/Top-p_sampling>`_ is set to 0.95. You can find more information about the sampling parameters `here <https://docs.vllm.ai/en/stable/dev/sampling_params.html>`_.
+The next portion defines a list of input prompts and sampling parameters for generation. The `sampling temperature <https://arxiv.org/html/2402.05201v1>`_ is set to ``0.8`` and the `nucleus sampling probability <https://en.wikipedia.org/wiki/Top-p_sampling>`_ is set to 0.95. You can find more information about the sampling parameters `here <https://docs.vllm.ai/en/stable/dev/sampling_params.html>`__.
 
 .. code-block:: python
 
@@ -133,7 +133,7 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
                                           prompt="San Francisco is a")
     print("Completion result:", completion)
 
-A more detailed client example can be found `here <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>`_.
+A more detailed client example can be found `here <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>`__.
 
 OpenAI Chat API with vLLM
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
