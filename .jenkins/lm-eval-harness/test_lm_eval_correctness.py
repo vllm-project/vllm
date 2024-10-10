@@ -59,23 +59,80 @@ def launch_lm_eval(eval_config):
     return results
 
 
-def report_performance(task, input_lens, output_lens, time):
+def report_performance(task, input_lens, output_lens, time, record_property):
     assert len(input_lens) == len(output_lens)
     context_lens = [i + o for i, o in zip(input_lens, output_lens)]
     gen_tput = sum(output_lens) / time
+    all_lens = [input_lens, output_lens, context_lens]
+    min_input_tokens, min_output_tokens, min_context_tokens = [
+        min(x) for x in all_lens
+    ]
+    max_input_tokens, max_output_tokens, max_context_tokens = [
+        max(x) for x in all_lens
+    ]
+    mean_input_tokens, mean_output_tokens, mean_context_tokens = [
+        statistics.mean(x) for x in all_lens
+    ]
+    stddev_input_tokens, stddev_output_tokens, stddev_context_tokens = [
+        statistics.stdev(x) for x in all_lens
+    ]
     msg = (
         f'{task} | estimated average generation throughput: {gen_tput:.2f} tokens/s \n'  # noqa: G004, E501
-        f'{task} | input_tokens   | min: {min(input_lens)} | max: {max(input_lens)} | mean: {statistics.mean(input_lens):.2f} | stddev: {statistics.stdev(input_lens):.2f}\n'  # noqa: E501
-        f'{task} | output_tokens  | min: {min(output_lens)} | max: {max(output_lens)} | mean: {statistics.mean(output_lens):.2f} | stddev: {statistics.stdev(output_lens):.2f}\n'  # noqa: E501
-        f'{task} | context_length | min: {min(context_lens)} | max: {max(context_lens)} | mean: {statistics.mean(context_lens):.2f} | stddev: {statistics.stdev(context_lens):.2f}'  # noqa: E501
+        f'{task} | input_tokens   | min: {min_input_tokens} | max: {max_input_tokens} | mean: {mean_input_tokens:.2f} | stddev: {stddev_input_tokens:.2f}\n'  # noqa: E501
+        f'{task} | output_tokens  | min: {min_output_tokens} | max: {max_output_tokens} | mean: {mean_output_tokens:.2f} | stddev: {stddev_output_tokens:.2f}\n'  # noqa: E501
+        f'{task} | context_length | min: {min_context_tokens} | max: {max_context_tokens} | mean: {mean_context_tokens:.2f} | stddev: {stddev_context_tokens:.2f}'  # noqa: E501
     )
+
+    # Log all of these stats to JUnitXML
+    record_property(f"{task}_gen_tput", gen_tput)
+    record_property(f"{task}_input_tokens_min", min_input_tokens)
+    record_property(f"{task}_input_tokens_max", max_input_tokens)
+    record_property(f"{task}_input_tokens_mean", mean_input_tokens)
+    record_property(f"{task}_input_tokens_stddev", stddev_input_tokens)
+
+    record_property(f"{task}_output_tokens_min", min_output_tokens)
+    record_property(f"{task}_output_tokens_max", max_output_tokens)
+    record_property(f"{task}_output_tokens_mean", mean_output_tokens)
+    record_property(f"{task}_output_tokens_stddev", stddev_output_tokens)
+
+    record_property(f"{task}_context_tokens_min", min_context_tokens)
+    record_property(f"{task}_context_tokens_max", max_context_tokens)
+    record_property(f"{task}_context_tokens_mean", mean_context_tokens)
+    record_property(f"{task}_context_tokens_stddev", stddev_context_tokens)
+
     print(msg)
 
 
-def test_lm_eval_correctness():
+def get_current_gaudi_platform():
+    """
+    Inspired by: https://github.com/HabanaAI/Model-References/blob/a87c21f14f13b70ffc77617b9e80d1ec989a3442/PyTorch/computer_vision/classification/torchvision/utils.py#L274
+    """
+    import habana_frameworks.torch.utils.experimental as htexp
+
+    device_type = htexp._get_device_type()
+
+    if device_type == htexp.synDeviceType.synDeviceGaudi:
+        return "Gaudi1"
+    elif device_type == htexp.synDeviceType.synDeviceGaudi2:
+        return "Gaudi2"
+    elif device_type == htexp.synDeviceType.synDeviceGaudi3:
+        return "Gaudi3"
+    else:
+        raise ValueError(
+            f"Unsupported device: the device type is {device_type}.")
+
+
+def test_lm_eval_correctness(record_xml_attribute, record_property):
     try:
         eval_config = yaml.safe_load(
             Path(TEST_DATA_FILE).read_text(encoding="utf-8"))
+
+        # Record JUnitXML test name
+        tasks_str = '_'.join([t['name'] for t in eval_config["tasks"]])
+        platform = get_current_gaudi_platform()
+        testname = (f'test_{Path(TEST_DATA_FILE).stem}_{tasks_str}_{platform}_'
+                    f'tp{TP_SIZE}')
+        record_xml_attribute("name", testname)
 
         # Launch eval requests.
         start_time = time.perf_counter()
@@ -102,7 +159,8 @@ def test_lm_eval_correctness():
             ]
             tokenized_outputs_lens = [len(x) for x in tokenized_outputs]
             report_performance(task['name'], tokenized_inputs_lens,
-                               tokenized_outputs_lens, total_time)
+                               tokenized_outputs_lens, total_time,
+                               record_property)
 
             for metric in task["metrics"]:
                 ground_truth = metric["value"]
@@ -111,6 +169,13 @@ def test_lm_eval_correctness():
                 print(
                     f'{task["name"]} | {metric["name"]}: '
                     f'ground_truth={ground_truth} | measured={measured_value}')
+
+                # Record ground truth and measured value to JUnitXML
+                record_property(
+                    f"{task['name']}_{metric['name']}_ground_truth",
+                    ground_truth)
+                record_property(f"{task['name']}_{metric['name']}_measured",
+                                measured_value)
                 assert numpy.isclose(ground_truth, measured_value, rtol=RTOL)
     except Exception as exc:
         # nasty workaround for a nasty HPU PT bridge bug (SW-204785)

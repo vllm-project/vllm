@@ -48,7 +48,7 @@ do
         LOG_DIR=$TEST_RESULTS_DIR
         LOG_FILENAME="$test_${MODEL_CONFIG}_${RANDOM_SUFFIX}.xml"
         LOG_PATH="${LOG_DIR}/${LOG_FILENAME}"
-        JUNIT_SUFFIX="--junitxml=${LOG_PATH}"
+        JUNIT_SUFFIX="-o junit_family=xunit1 --junitxml=${LOG_PATH}"
     fi
     pytest -s test_lm_eval_correctness.py $JUNIT_SUFFIX || LOCAL_SUCCESS=$?
 
