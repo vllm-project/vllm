@@ -10,7 +10,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
-from vllm.utils import is_cpu
 
 try:
     from vllm.attention.ops.ipex_attn import PagedAttention
