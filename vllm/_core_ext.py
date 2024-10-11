@@ -1,10 +1,8 @@
 import importlib.util
-from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
-
-import ctypes
 import struct
-import torch
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Union
 
 from vllm.logger import init_logger
 
@@ -25,16 +23,9 @@ class NanRepr(Enum):
     EXTD_RANGE_MAX_MIN = 2  # nans are: Exp all 1s, mantissa all 1s
 
 
-# On platforms were we cannot use/build the C++ core extension (i.e. namely
-# neuron and tpu), we define the mock ScalarType class here that partially
-# mimics the C++ ScalarType class.
-#
 # We also use this provide type signatures to the Python LSP for the methods
 # in the C++ ScalarType class. So these type signatures should be kept
 # in sync with csrc/core/scalar_type.hpp
-
-from dataclasses import dataclass
-
 @dataclass(frozen=True)
 class ScalarType:
     """
@@ -85,32 +76,39 @@ class ScalarType:
     """
 
     def _floating_point_max_int(self) -> int:
-        assert (self.mantissa <= 52 and self.exponent <= 11), f"Cannot represent max/min as a double for type {self.__str__()}"
+        assert (
+            self.mantissa <= 52 and self.exponent <= 11
+        ), f"Cannot represent max/min as a double for type {self.__str__()}"
 
         max_mantissa = (1 << self.mantissa) - 1
         if self.nan_repr == NanRepr.EXTD_RANGE_MAX_MIN:
             max_mantissa = max_mantissa - 1
 
         max_exponent = (1 << self.exponent) - 2
-        if self.nan_repr == NanRepr.EXTD_RANGE_MAX_MIN or self.nan_repr == NanRepr.NONE:
-            assert (self.exponent < 11), f"Cannot represent max/min as a double for type {self.__str__()}"
+        if (self.nan_repr == NanRepr.EXTD_RANGE_MAX_MIN
+                or self.nan_repr == NanRepr.NONE):
+            assert (
+                self.exponent < 11
+            ), f"Cannot represent max/min as a double for type {self.__str__()}"
             max_exponent = max_exponent + 1
 
         # adjust the exponent to match that of a double
-        # for now we assume the exponent bias is the standard 2^(e-1) -1, (where e
-        # is the exponent bits), there is some precedent for non-standard biases,
-        # example `float8_e4m3b11fnuz` here: https://github.com/jax-ml/ml_dtypes
-        # but to avoid premature over complication we are just assuming the
-        # standard exponent bias until there is a need to support non-standard
-        # biases
+        # for now we assume the exponent bias is the standard 2^(e-1) -1, (where
+        # e is the exponent bits), there is some precedent for non-standard
+        # biases, example `float8_e4m3b11fnuz` here:
+        # https://github.com/jax-ml/ml_dtypes but to avoid premature over
+        # complication we are just assuming the standard exponent bias until
+        # there is a need to support non-standard biases
         exponent_bias = (1 << (self.exponent - 1)) - 1
-        exponent_bias_double = (1 << 10) - 1   # double e = 11
+        exponent_bias_double = (1 << 10) - 1  # double e = 11
 
-        max_exponent_double = max_exponent - exponent_bias + exponent_bias_double
+        max_exponent_double = (max_exponent - exponent_bias +
+                               exponent_bias_double)
 
         # shift the mantissa into the position for a double and
         # the exponent
-        return (max_mantissa << (52 - self.mantissa)) | (max_exponent_double << 52)
+        return (max_mantissa <<
+                (52 - self.mantissa)) | (max_exponent_double << 52)
 
     def _floating_point_max(self) -> float:
         double_raw = self._floating_point_max_int()
@@ -120,22 +118,25 @@ class ScalarType:
         if self.is_floating_point():
             return self._floating_point_max()
         else:
-            assert (self.size_bits < 64 or self.size_bits == 64 and self.is_signed()), "Cannot represent max as an int"
+            assert (self.size_bits < 64 or self.size_bits == 64
+                    and self.is_signed()), "Cannot represent max as an int"
             return (1 << self.mantissa) - 1
 
     def _raw_min(self) -> Union[int, float]:
         if self.is_floating_point():
-            assert self.is_signed(), "We currently assume all floating point types are signed"
+            assert self.is_signed(
+            ), "We currently assume all floating point types are signed"
             sign_bit_double = 1 << 63
 
             max_raw = self._floating_point_max_int()
             min_raw = max_raw | sign_bit_double
             return struct.unpack('!d', struct.pack('!Q', min_raw))[0]
         else:
-            assert (not self.is_signed() or self.size_bits <= 64), "Cannot represent min as a int64_t"
+            assert (not self.is_signed() or
+                    self.size_bits <= 64), "Cannot represent min as a int64_t"
 
             if self.is_signed():
-                return -(1 << (self.size_bits-1))
+                return -(1 << (self.size_bits - 1))
             else:
                 return 0
 
@@ -206,7 +207,8 @@ class ScalarType:
           - if bias is not present it means its zero
         """
         if self.is_floating_point():
-            ret = "float" + str(self.size_bits) + "_e" + str(self.exponent) + "m" + str(self.mantissa)
+            ret = "float" + str(self.size_bits) + "_e" + str(
+                self.exponent) + "m" + str(self.mantissa)
 
             if not self.is_ieee_754():
                 if self._finite_values_only:
@@ -249,19 +251,18 @@ class ScalarType:
         Create a standard floating point type
         (i.e. follows IEEE 754 conventions).
         """
-        # TORCH_CHECK(mantissa > 0 && exponent > 0);
+        assert (mantissa > 0 and exponent > 0)
         return cls(exponent, mantissa, True, 0)
 
     @classmethod
     def float_(cls, exponent: int, mantissa: int, finite_values_only: bool,
-               nan_repr: int) -> 'ScalarType':
+               nan_repr: NanRepr) -> 'ScalarType':
         """
         Create a non-standard floating point type
         (i.e. does not follow IEEE 754 conventions).
         """
-        #TORCH_CHECK(nan_repr < NAN_REPR_ID_MAX, "Invalid NanRepr");
-        #TORCH_CHECK(mantissa > 0 && exponent > 0);
-        #TORCH_CHECK(nan_repr != NAN_IEEE_754,
-        #        "use `float_IEEE754` constructor for floating point types that "
-        #        "follow IEEE 754 conventions");
-        return cls(exponent, mantissa, True, 0, finite_values_only, NanRepr(nan_repr))
+        assert (mantissa > 0 and exponent > 0)
+        assert (nan_repr != NanRepr.IEEE_754), (
+            "use `float_IEEE754` constructor for floating point types that "
+            "follow IEEE 754 conventions")
+        return cls(exponent, mantissa, True, 0, finite_values_only, nan_repr)

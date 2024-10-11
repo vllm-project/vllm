@@ -17,14 +17,13 @@ class scalar_types:
     uint4 = ScalarType.uint(4, None)
     int8 = ScalarType.int_(8, None)
     uint8 = ScalarType.uint(8, None)
-    float8_e4m3fn = ScalarType.float_(4, 3, True,
-                                      NanRepr.EXTD_RANGE_MAX_MIN.value)
+    float8_e4m3fn = ScalarType.float_(4, 3, True, NanRepr.EXTD_RANGE_MAX_MIN)
     float8_e5m2 = ScalarType.float_IEEE754(5, 2)
     float16_e8m7 = ScalarType.float_IEEE754(8, 7)
     float16_e5m10 = ScalarType.float_IEEE754(5, 10)
 
     # fp6, https://github.com/usyd-fsalab/fp6_llm/tree/main
-    float6_e3m2f = ScalarType.float_(3, 2, True, NanRepr.NONE.value)
+    float6_e3m2f = ScalarType.float_(3, 2, True, NanRepr.NONE)
 
     # "gptq" types
     uint2b2 = ScalarType.uint(2, 2)

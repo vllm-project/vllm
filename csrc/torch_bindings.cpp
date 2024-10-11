@@ -166,7 +166,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Marlin (Dense) Optimized Quantized GEMM for GPTQ.
   ops.def(
       "marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor! workspace, SymInt size_m, SymInt size_n, SymInt size_k) -> Tensor");
+      "Tensor! workspace, SymInt size_m, SymInt size_n, SymInt size_k) -> "
+      "Tensor");
   // conditionally compiled so impl in source file
 
   // Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ.
@@ -229,7 +230,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("ggml_mul_mat_vec_a8", torch::kCUDA, &ggml_mul_mat_vec_a8);
 
   // mmq kernel for GGML.
-  ops.def("ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
+  ops.def(
+      "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
 
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.

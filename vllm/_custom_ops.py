@@ -317,7 +317,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                   b_meta: torch.Tensor, b_scales: torch.Tensor,
                                   workspace: torch.Tensor,
                                   b_q_type: ScalarType, size_m: torch.SymInt,
-                                  size_n: torch.SymInt, size_k: torch.SymInt) -> torch.Tensor:
+                                  size_n: torch.SymInt,
+                                  size_k: torch.SymInt) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
     @register_fake("_C::gptq_marlin_gemm")
@@ -338,7 +339,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
     @register_fake("_C::ggml_dequantize")
-    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int, m: torch.SymInt,
+    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
+                              m: torch.SymInt,
                               n: torch.SymInt) -> torch.Tensor:
         return torch.empty((m, n), dtype=torch.float16, device=W.device)
 
@@ -382,8 +384,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @register_fake("_C::awq_dequantize")
     def _awq_dequantize_fake(qweight: torch.Tensor, scales: torch.Tensor,
-                             zeros: torch.Tensor, split_k_iters: torch.SymInt, thx: int,
-                             thy: int) -> torch.Tensor:
+                             zeros: torch.Tensor, split_k_iters: torch.SymInt,
+                             thx: int, thy: int) -> torch.Tensor:
         in_c = qweight.size(0)
         qout_c = qweight.size(1)
         out_c = qout_c * 8
@@ -429,7 +431,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     @register_fake("_C::fp8_marlin_gemm")
     def _fp8_marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                               b_scales: torch.Tensor, workspace: torch.Tensor,
-                              num_bits: int, size_m: torch.SymInt, size_n: torch.SymInt,
+                              num_bits: int, size_m: torch.SymInt,
+                              size_n: torch.SymInt,
                               size_k: torch.SymInt) -> torch.Tensor:
         return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
 
@@ -828,10 +831,10 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
                              topk_ids: torch.Tensor, b_scales: torch.Tensor,
                              b_zero_points: torch.Tensor, g_idx: torch.Tensor,
                              perm: torch.Tensor, workspace: torch.Tensor,
-                             b_q_type: ScalarType, size_m: torch.SymInt, size_n: torch.SymInt,
-                             size_k: torch.SymInt, is_k_full: bool, num_experts: int,
-                             topk: int, moe_block_size: int,
-                             replicate_input: bool,
+                             b_q_type: ScalarType, size_m: torch.SymInt,
+                             size_n: torch.SymInt, size_k: torch.SymInt,
+                             is_k_full: bool, num_experts: int, topk: int,
+                             moe_block_size: int, replicate_input: bool,
                              apply_weights: bool) -> torch.Tensor:
         return torch.empty((size_m, topk, size_n),
                            dtype=a.dtype,
