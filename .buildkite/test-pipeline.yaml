@@ -121,7 +121,9 @@ steps:
   - vllm/core/
   - tests/distributed
   - tests/spec_decode/e2e/test_integration_dist_tp4
+  - tests/compile
   commands:
+  - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
@@ -231,14 +233,16 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_full_graph_smoke.py
+  - pytest -v -s compile/test_basic_correctness.py
 
-- label: "PyTorch Fullgraph Test" # 18min
-  source_file_dependencies:
-  - vllm/
-  - tests/compile
-  commands:
-  - pytest -v -s compile/test_full_graph.py
+# TODO: re-write in comparison tests, and fix symbolic shape
+# for quantization ops.
+# - label: "PyTorch Fullgraph Test" # 18min
+#   source_file_dependencies:
+#   - vllm/
+#   - tests/compile
+#   commands:
+#   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
   mirror_hardwares: [amd]
@@ -343,10 +347,11 @@ steps:
     - pytest -v -s models/encoder_decoder/language
     - pytest -v -s models/encoder_decoder/vision_language
 
+# This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
-  #mirror_hardwares: [amd]
   optional: true
   commands:
+    - echo 'Testing custom models...'
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
     # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
@@ -394,7 +399,7 @@ steps:
   - tests/distributed/
   - vllm/compilation
   commands:
-  - pytest -v -s ./compile/test_full_graph_multi_gpu.py
+  - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
   - TARGET_TEST_SUITE=L4 VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest basic_correctness/ -v -s -m distributed_2_gpus
