@@ -90,7 +90,7 @@ elseif (ASIMD_FOUND)
         )
         
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+, or ARMv8.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA or ARMv8 support.")
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
