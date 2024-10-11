@@ -71,7 +71,6 @@ Documentation
    getting_started/xpu-installation
    getting_started/quickstart
    getting_started/debugging
-   getting_started/nginx-loadbalancer
    getting_started/examples/examples_index
 
 .. toctree::
@@ -81,6 +80,7 @@ Documentation
    serving/openai_compatible_server
    serving/deploying_with_docker
    serving/deploying_with_k8s
+   serving/deploying_with_nginx
    serving/distributed_serving
    serving/metrics
    serving/env_vars

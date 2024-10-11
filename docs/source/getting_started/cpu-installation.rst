@@ -8,7 +8,8 @@ vLLM initially supports basic model inferencing and serving on x86 CPU platform,
 - Tensor Parallel (``-tp = N``)
 - Quantization (``INT8 W8A8, AWQ``)
 
-FP16 data type and more advanced features on `chunked-prefill`, `prefix-caching` and `FP8 KV cache` are under development and will be available soon.
+.. note::
+    FP16 data type and more advanced features on `chunked-prefill`, `prefix-caching` and `FP8 KV cache` are under development and will be available soon.
 
 Table of contents:
 
@@ -162,4 +163,4 @@ CPU Backend Considerations
          $ VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND="0-31|32-63" vllm serve meta-llama/Llama-2-7b-chat-hf -tp=2 --distributed-executor-backend mp
 
 
-  * Using Data Parallel for maximum throughput: to launch an LLM serving endpoint on each NUMA node along with one additional load balancer to dispatch the requests to those endpoints. Common solutions like `Nginx <nginx-loadbalancer.html>`_ or HAProxy are recommended. Anyscale Ray project provides the feature on LLM `serving <https://docs.ray.io/en/latest/serve/index.html>`_. Here is the example to setup a scalable LLM serving with `Ray Serve <https://github.com/intel/llm-on-ray/blob/main/docs/setup.md>`_.
+  * Using Data Parallel for maximum throughput: to launch an LLM serving endpoint on each NUMA node along with one additional load balancer to dispatch the requests to those endpoints. Common solutions like `Nginx <../serving/deploying_with_nginx.html>`_ or HAProxy are recommended. Anyscale Ray project provides the feature on LLM `serving <https://docs.ray.io/en/latest/serve/index.html>`_. Here is the example to setup a scalable LLM serving with `Ray Serve <https://github.com/intel/llm-on-ray/blob/main/docs/setup.md>`_.
