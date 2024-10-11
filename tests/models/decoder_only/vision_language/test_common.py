@@ -1,6 +1,7 @@
 """Common tests for testing .generate() functionality for single / multiple
 image support for different VLMs in vLLM.
 """
+from enum import Enum
 import itertools
 import re
 from typing import (Any, Callable, Dict, List, NamedTuple, Optional, Tuple,
@@ -8,6 +9,7 @@ from typing import (Any, Callable, Dict, List, NamedTuple, Optional, Tuple,
 
 import pytest
 from PIL.Image import Image
+import torch
 from transformers import (AutoConfig, AutoModelForCausalLM,
                           AutoModelForVision2Seq, AutoTokenizer, BatchEncoding)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
@@ -21,11 +23,26 @@ from ...utils import check_logprobs_close, check_outputs_equal
 
 
 ### Test Info / Common Configuration
+class VlmTestType(Enum):
+    IMAGE = 1
+    MULTI_IMAGE = 2
+    EMBEDDING = 3
+
+# Default scaling factors for single image & embedding tests, respectively
+IMAGE_SIZE_FACTORS=((), (1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0))
+EMBEDDING_SIZE_FACTORS=((), (1.0,), (1.0, 1.0, 1.0),)
+
 class VLMTestInfo(NamedTuple):
     models: Union[Tuple[str], str]
     prompt_formatter: Callable
-    supports_multi_image: bool = False
     img_idx_to_prompt: Callable = lambda idx: "<image>\n"
+
+    # Function for converting ImageAssets to image embeddings; if a VLMTestInfo
+    # object defines this, we run a separate test for embedding with
+    # size_factors 
+    convert_assets_to_embeddings: Callable[[_ImageAssets], torch.Tensor] = None
+    supports_multi_image: bool = False
+
     # Exposed options for vLLM runner; we change these in a several tests,
     # but the defaults are derived from VllmRunner & the engine defaults
     tensor_parallel_size: int = 1
@@ -50,9 +67,11 @@ class VLMTestInfo(NamedTuple):
     max_tokens: Union[int, Tuple[int]] = 128
     num_logprobs: Union[int, Tuple[int]] = 5
     dtype: Union[str] = "half"
-    # No image, single-scale, batched single-scale, batched multi-scale
-    # size_factors: Tuple[float] = ((1.0,),)
-    size_factors: Tuple[float] = ((), (1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0))
+
+    # Image size factors are may be changed, so we add them here.
+    # Embeddings size factors can't be heterogeneous, so they can't
+    # be varied per model.
+    image_size_factors: Tuple[float] = IMAGE_SIZE_FACTORS
 
 
 ### Base prompts / Common formatting utils
@@ -108,19 +127,32 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
 
 
 def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
-                             is_multi_image: bool):
+                             test_type: VlmTestType):
     """Converts all of our VLMTestInfo into an expanded list of parameters."""
-    if is_multi_image:
+    if test_type != VlmTestType.IMAGE:
+        # Only a subset of the tests are enabled; filter based on test type
+        if test_type == VlmTestType.MULTI_IMAGE:
+            filter_func = lambda info: info.supports_multi_image
+        elif test_type == VlmTestType.EMBEDDING:
+            filter_func = lambda info: info.convert_assets_to_embeddings
+
         test_settings = {
             model_type: test_info
             for model_type, test_info in test_settings.items()
-            if test_info.supports_multi_image
+            if filter_func(test_info)
         }
 
     # Ensure that something is wrapped as an iterable it's not already
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e, )
 
     def get_model_type_cases(model_type: str, test_info: VLMTestInfo):
+        size_factors = test_info.image_size_factors
+        # All embedding tests use the same size factors; we currently
+        # don't configure this per test since embeddings can't be
+        # heterogeneous, etc
+        if test_type == VlmTestType.EMBEDDING:
+            size_factors = EMBEDDING_SIZE_FACTORS
+
         # This is essentially the same as nesting a bunch of mark.parametrize
         # decorators, but we do it programmatically to allow overrides for on
         # a per-model basis, while still being able to execute each of these
@@ -132,7 +164,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
                 ensure_wrapped(test_info.max_tokens),
                 ensure_wrapped(test_info.num_logprobs),
                 ensure_wrapped(test_info.dtype),
-                ensure_wrapped(test_info.size_factors),
+                ensure_wrapped(size_factors),
             ))
 
     # Get a list per model type, where each entry contains a tuple of all of
@@ -231,6 +263,10 @@ def get_key_type_post_processor(
         return hf_inputs
     return process
 
+### Funcs for getting embeddings
+def get_llava_embeddings(image_assets: _ImageAssets):
+    return [asset.image_embeds for asset in image_assets]
+
 ###
 # NOTE: Convention here is to map the names of the file containing multimodal
 # models in alphabetical order to test info so that we can easily tell which
@@ -242,7 +278,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "",
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
         vllm_output_post_proc=blip2_vllm_to_hf_output,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForVision2Seq
     ),
     "fuyu": VLMTestInfo(
         models="adept/fuyu-8b",
@@ -254,7 +290,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=2048,
         max_num_seqs=2,
         use_tokenizer_eos=True,
-        size_factors=((), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)),
+        image_size_factors=((), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15))
     ),
     "chameleon": VLMTestInfo(
         models="facebook/chameleon-7b",
@@ -272,6 +308,14 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc = lambda hf_output, model: hf_output[:2],
         comparator=check_outputs_equal,
     ),
+    # Only embedding test has been verified so far
+    "llava": VLMTestInfo(
+        models="llava-hf/llava-1.5-7b-hf",
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        vllm_output_post_proc=llava_vllm_to_hf_output,
+        auto_cls=AutoModelForVision2Seq,
+        convert_assets_to_embeddings=get_llava_embeddings,
+    ),
 
     ## Tests beyond this point have been validated to align with current tests 
     # "intern_vl": VLMTestInfo(
@@ -281,11 +325,6 @@ VLM_TEST_SETTINGS = {
     #     dtype="bfloat16" if is_cpu() else "half",
     #     num_logprobs=10,
     #     max_model_len=4096,
-    # ),
-    # "llava": VLMTestInfo(
-    #     models="llava-hf/llava-1.5-7b-hf",
-    #     prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-    #     vllm_output_post_proc=llava_vllm_to_hf_output,
     # ),
     # "minicpmv": VLMTestInfo(
     #     models="openbmb/MiniCPM-Llama3-V-2_5",
@@ -312,7 +351,7 @@ VLM_TEST_SETTINGS = {
 
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
-    get_parametrized_options(VLM_TEST_SETTINGS, is_multi_image=False))
+    get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.IMAGE))
 def test_single_image_generation(model_type: str, model: str, max_tokens: int,
                                  num_logprobs: int, dtype: str,
                                  size_factors: Tuple[float], hf_runner,
@@ -358,6 +397,101 @@ def test_single_image_generation(model_type: str, model: str, max_tokens: int,
     )
 
 
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
+    get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.EMBEDDING))
+def test_embedding_generation(model_type: str, model: str, max_tokens: int,
+                              num_logprobs: int, dtype: str,
+                              size_factors: Tuple[float], hf_runner,
+                              vllm_runner, image_assets: _ImageAssets):
+    # Grab the model type's global model config to leverage callables
+    test_info = VLM_TEST_SETTINGS[model_type]
+    model_prompts = get_model_prompts(SINGLE_IMAGE_BASE_PROMPTS,
+                                      test_info.img_idx_to_prompt,
+                                      test_info.prompt_formatter)
+
+    images = [asset.pil_image for asset in image_assets]
+    embeddings = test_info.convert_assets_to_embeddings(image_assets)
+    assert len(images) == len(model_prompts)
+
+    # NOTE: Not doing any rescaling here at the moment. All size factors
+    # for embeddings are 1.0 & just dictate the number of images here.
+    inputs = [(
+        [prompt for _ in size_factors],
+        [image for _ in size_factors],
+    ) for image, prompt in zip(images, model_prompts)]
+
+    embeddings = [(
+        [prompt for _ in size_factors],
+        [image for _ in size_factors],
+    ) for image, prompt in zip(embeddings, model_prompts)]
+
+    run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=test_info.tensor_parallel_size,
+        enforce_eager=test_info.enforce_eager,
+        max_model_len=test_info.max_model_len,
+        max_num_seqs=test_info.max_num_seqs,
+        hf_output_post_proc=test_info.hf_output_post_proc,
+        vllm_output_post_proc=test_info.vllm_output_post_proc,
+        auto_cls=test_info.auto_cls,
+        use_tokenizer_eos=test_info.use_tokenizer_eos,
+        postprocess_inputs=test_info.postprocess_inputs,
+        comparator=test_info.comparator,
+        vllm_embeddings=embeddings,
+    )
+
+
+### Multi-image generation tests [only for VLMs that support it]
+# @pytest.mark.skipif(not any(test.supports_multi_image
+#                             for test in VLM_TEST_SETTINGS.values()),
+#                     reason="No models with multi-image tests are enabled.")
+# @pytest.mark.parametrize("size_factors", SIZE_FACTORS)
+# @pytest.mark.parametrize(
+#     "model_type,model,max_tokens,num_logprobs,dtype",
+#     get_parametrized_options(VLM_TEST_SETTINGS, is_multi_image=True))
+# def test_multi_image_generation(model_type: str, model: str, max_tokens: int,
+#                                 num_logprobs: int, dtype: str,
+#                                 size_factors: List[float],
+#                                 hf_runner: Type[HfRunner],
+#                                 vllm_runner: Type[VllmRunner],
+#                                 image_assets: _ImageAssets):
+#     test_info = VLM_TEST_SETTINGS[model_type]
+#     model_prompt = get_model_prompts([MULTI_IMAGE_BASE_PROMPT],
+#                                      test_info.img_idx_to_prompt,
+#                                      test_info.prompt_formatter)[0]
+
+#     images = [asset.pil_image for asset in image_assets]
+
+#     # This is similar to the single image case, but we rescale each of the
+#     # images in the multi-image prompt; currently we only have one model prompt
+#     inputs = [([model_prompt for _ in size_factors],
+#                [[rescale_image_size(image, factor) for image in images]
+#                 for factor in size_factors])]
+
+#     run_test(
+#         hf_runner=hf_runner,
+#         vllm_runner=vllm_runner,
+#         inputs=inputs,
+#         model=model,
+#         dtype=dtype,
+#         max_tokens=max_tokens,
+#         num_logprobs=num_logprobs,
+#         tensor_parallel_size=test_info.tensor_parallel_size,
+#         enforce_eager=test_info.enforce_eager,
+#         max_model_len=test_info.max_model_len,
+#         max_num_seqs=test_info.max_num_seqs,
+#         vllm_output_post_proc=test_info.vllm_output_post_proc,
+#         auto_cls=test_info.auto_cls,
+#     )
+
+
 def run_test(
     *,
     hf_runner: Type[HfRunner],
@@ -377,13 +511,15 @@ def run_test(
     use_tokenizer_eos: bool,
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
     comparator: Callable,
+    vllm_embeddings: Optional[torch.Tensor] = None
 ):
+    # In the case of embeddings, vLLM takes separate input tensors
+    vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
+
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-
-    # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      max_model_len=max_model_len,
                      max_num_seqs=max_num_seqs,
@@ -395,7 +531,7 @@ def run_test(
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=images)
-            for prompts, images in inputs
+            for prompts, images in vllm_inputs
         ]
 
     # Some models need to explicitly pass the eos_token_id off the tokenizer or
@@ -427,6 +563,7 @@ def run_test(
         hf_outputs_per_image = [[
             hf_output_post_proc(res, model) for res in hf_outputs
         ] for hf_outputs in hf_outputs_per_image]
+
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
