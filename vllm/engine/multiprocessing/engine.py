@@ -130,6 +130,9 @@ class MQLLMEngine:
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
                          usage_context: UsageContext, ipc_path: str):
         """Creates an MQLLMEngine from the engine arguments."""
+        # Setup plugins
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
 
         engine_config = engine_args.create_engine_config()
 
