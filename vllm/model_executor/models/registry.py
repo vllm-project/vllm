@@ -417,6 +417,10 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
 
 
 def _run() -> None:
+    # Setup plugins
+    from vllm.plugins import load_general_plugins
+    load_general_plugins()
+
     fn, output_file = pickle.loads(sys.stdin.buffer.read())
 
     result = fn()
