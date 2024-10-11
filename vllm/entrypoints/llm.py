@@ -31,6 +31,9 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs, is_list_of
 
+from vllm_v1.engine.llm_engine import LLMEngine as LLMEngineV1
+from vllm_v1.outputs import RequestOutput as RequestOutputV1
+
 logger = init_logger(__name__)
 
 
@@ -174,8 +177,10 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(
+        self.llm_engine = LLMEngineV1.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
+        # self.llm_engine = LLMEngine.from_engine_args(
+        #     engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
     def get_tokenizer(self) -> AnyTokenizer:
@@ -876,27 +881,24 @@ class LLM:
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
-            step_outputs = self.llm_engine.step()
-            for output in step_outputs:
-                if output.finished:
-                    outputs.append(output)
-                    if use_tqdm:
-                        if isinstance(output, RequestOutput):
-                            # Calculate tokens only for RequestOutput
-                            assert output.prompt_token_ids is not None
-                            total_in_toks += len(output.prompt_token_ids)
-                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
-                            total_out_toks += sum(
-                                len(stp.token_ids) for stp in output.outputs)
-                            out_spd = (total_out_toks /
-                                       pbar.format_dict["elapsed"])
-                            pbar.postfix = (
-                                f"est. speed input: {in_spd:.2f} toks/s, "
-                                f"output: {out_spd:.2f} toks/s")
-                        pbar.update(1)
+            finished_reqs, _ = self.llm_engine.step()
+            for req in finished_reqs:
+                output = RequestOutputV1.from_request(req)
+                outputs.append(output)
+                if use_tqdm:
+                    # Calculate tokens only for RequestOutput
+                    assert output.prompt_token_ids is not None
+                    total_in_toks += len(output.prompt_token_ids)
+                    in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                    total_out_toks += len(output.outputs[0].token_ids)
+                    out_spd = (total_out_toks / pbar.format_dict["elapsed"])
+                    pbar.postfix = (f"est. speed input: {in_spd:.2f} toks/s, "
+                                    f"output: {out_spd:.2f} toks/s")
+                    pbar.update(1)
 
         if use_tqdm:
             pbar.close()
+        self.llm_engine.terminate_detokenizer()
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
