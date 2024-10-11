@@ -358,6 +358,16 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(_mm512_mask_max_ps(reg, mask, reg, b.reg));
   }
 
+  FP32Vec16 min(const FP32Vec16& b) const {
+    return FP32Vec16(_mm512_min_ps(reg, b.reg));
+  }
+
+  FP32Vec16 min(const FP32Vec16& b, const int elem_num) const {
+    constexpr uint32_t M = 0xFFFFFFFF;
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
+    return FP32Vec16(_mm512_mask_min_ps(reg, mask, reg, b.reg));
+  }
+
   FP32Vec16 abs() const {
     return FP32Vec16(_mm512_abs_ps(reg));
   } 
@@ -365,6 +375,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   float reduce_sum() const { return _mm512_reduce_add_ps(reg); }
 
   float reduce_max() const { return _mm512_reduce_max_ps(reg); }
+
+  float reduce_min() const { return _mm512_reduce_min_ps(reg); }
 
   template <int group_size> float reduce_sub_sum(int idx) {
     static_assert(VEC_ELEM_NUM % group_size == 0);

@@ -82,38 +82,74 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
   }
 }
 
-template <typename scalar_t>
+template <bool AZP, typename scalar_t>
 void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
-                                    float* scale, const int num_tokens,
+                                    float* scale, int32_t* azp,
+                                    const int num_tokens,
                                     const int hidden_size) {
   using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
   using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
   constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
 
+  constexpr float i8_min =
+      static_cast<float>(std::numeric_limits<int8_t>::min());
+  constexpr float i8_max =
+      static_cast<float>(std::numeric_limits<int8_t>::max());
+  const cvt_vec_t i8_min_vec(i8_min);
+  const cvt_vec_t i8_max_vec(i8_max);
+
   #pragma omp parallel for
   for (int i = 0; i < num_tokens; ++i) {
-    cvt_vec_t max_abs(0.0);
+    cvt_vec_t max_value(std::numeric_limits<float>::min());
+    cvt_vec_t min_value(std::numeric_limits<float>::max());
     {
       int j = 0;
       for (; j < hidden_size - vec_elem_num; j += vec_elem_num) {
         load_vec_t elems(input + i * hidden_size + j);
         cvt_vec_t elems_fp32(elems);
-        max_abs = max_abs.max(elems_fp32.abs());
+        if constexpr (AZP) {
+          max_value = max_value.max(elems_fp32);
+          min_value = min_value.min(elems_fp32);
+        } else {
+          max_value = max_value.max(elems_fp32.abs());
+        }
       }
 
       load_vec_t elems(input + i * hidden_size + j);
       cvt_vec_t elems_fp32(elems);
 
       if (j + vec_elem_num == hidden_size) {
-        max_abs = max_abs.max(elems_fp32.abs());
+        if constexpr (AZP) {
+          max_value = max_value.max(elems_fp32);
+          min_value = min_value.min(elems_fp32);
+        } else {
+          max_value = max_value.max(elems_fp32.abs());
+        }
       } else {
-        max_abs = max_abs.max(elems_fp32.abs(), hidden_size - j);
+        if constexpr (AZP) {
+          max_value = max_value.max(elems_fp32, hidden_size - j);
+          min_value = min_value.min(elems_fp32, hidden_size - j);
+        } else {
+          max_value = max_value.max(elems_fp32.abs(), hidden_size - j);
+        }
       }
     }
 
-    float scale_val = max_abs.reduce_max() / 127.0f;
-    scale[i] = scale_val;
+    float scale_val, azp_val;
+    if constexpr (AZP) {
+      float max_scalar = max_value.reduce_max();
+      float min_scalar = min_value.reduce_min();
+      scale_val = (max_scalar - min_scalar) / 255.0f;
+      azp_val = std::nearbyint(-128.0f - min_scalar / scale_val);
+      azp[i] = static_cast<int32_t>(azp_val);
+      scale[i] = scale_val;
+    } else {
+      scale_val = max_value.reduce_max() / 127.0f;
+      scale[i] = scale_val;
+    }
+
     const cvt_vec_t inv_scale(1.0 / scale_val);
+    const cvt_vec_t azp_vec(azp_val);
 
     {
       int j = 0;
@@ -121,6 +157,11 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
         load_vec_t elems(input + i * hidden_size + j);
         cvt_vec_t elems_fp32(elems);
         elems_fp32 = (elems_fp32 * inv_scale);
+
+        if constexpr (AZP) {
+          elems_fp32 = elems_fp32 + azp_vec;
+        }
+        elems_fp32 = elems_fp32.clamp(i8_min_vec, i8_max_vec);
         vec_op::INT8Vec16 elems_int8(elems_fp32);
         elems_int8.save(output + i * hidden_size + j);
       }
@@ -128,6 +169,11 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
       load_vec_t elems(input + i * hidden_size + j);
       cvt_vec_t elems_fp32(elems);
       elems_fp32 = (elems_fp32 * inv_scale);
+
+      if constexpr (AZP) {
+        elems_fp32 = elems_fp32 + azp_vec;
+      }
+      elems_fp32 = elems_fp32.clamp(i8_min_vec, i8_max_vec);
       vec_op::INT8Vec16 elems_int8(elems_fp32);
 
       if (j + vec_elem_num == hidden_size) {
@@ -139,15 +185,19 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
   }
 }
 
-template <bool PerChannel, typename scalar_t> 
-void static_quant_epilogue(const float* input, scalar_t* output, const float a_scale, const float* b_scale, const int32_t* azp_with_adj, const int num_tokens, const int hidden_size) {
+template <bool PerChannel, typename scalar_t>
+void static_quant_epilogue(const float* input, scalar_t* output,
+                           const float a_scale, const float* b_scale,
+                           const int32_t* azp_with_adj, const int num_tokens,
+                           const int hidden_size) {
   CPU_KERNEL_GUARD_IN(dynamic_output_scale_impl)
   using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
-  using azp_adj_load_vec_t = typename KernelVecType<scalar_t>::azp_adj_load_vec_type;
+  using azp_adj_load_vec_t =
+      typename KernelVecType<scalar_t>::azp_adj_load_vec_type;
   using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
   constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
 
-#pragma omp parallel for
+  #pragma omp parallel for
   for (int i = 0; i < num_tokens; ++i) {
     cvt_vec_t a_scale_vec(a_scale);
     cvt_vec_t b_scale_vec(*b_scale);
@@ -170,18 +220,18 @@ void static_quant_epilogue(const float* input, scalar_t* output, const float a_s
       elems_out.save(output + i * hidden_size + j);
     }
 
-     cvt_vec_t elems_fp32(input + i * hidden_size + j);
-      azp_adj_load_vec_t azp_adj_vec(azp_with_adj + j);
-      cvt_vec_t azp_adj_fp32(azp_adj_vec);
+    cvt_vec_t elems_fp32(input + i * hidden_size + j);
+    azp_adj_load_vec_t azp_adj_vec(azp_with_adj + j);
+    cvt_vec_t azp_adj_fp32(azp_adj_vec);
 
-      if constexpr (PerChannel) {
-        b_scale_vec = cvt_vec_t(b_scale + j);
-        scale_vec = b_scale_vec * a_scale_vec;
-      }
+    if constexpr (PerChannel) {
+      b_scale_vec = cvt_vec_t(b_scale + j);
+      scale_vec = b_scale_vec * a_scale_vec;
+    }
 
-      elems_fp32 = elems_fp32 - scale_vec * azp_adj_fp32;
+    elems_fp32 = elems_fp32 - scale_vec * azp_adj_fp32;
 
-      load_vec_t elems_out(elems_fp32);
+    load_vec_t elems_out(elems_fp32);
 
     if (j + vec_elem_num == hidden_size) {
       elems_out.save(output + i * hidden_size + j);
@@ -191,22 +241,48 @@ void static_quant_epilogue(const float* input, scalar_t* output, const float a_s
   }
 }
 
-template <bool Bias, typename scalar_t>
-void dynamic_output_scale_impl(const float* input, scalar_t* output,
-                               const float* scale, const scalar_t* bias,
-                               const int num_tokens, const int hidden_size) {
-  CPU_KERNEL_GUARD_IN(dynamic_output_scale_impl)
+template <bool AZP, bool PerChannel, bool Bias, typename scalar_t>
+void dynamic_quant_epilogue(const float* input, scalar_t* output,
+                            const float* a_scale, const float* b_scale,
+                            const int32_t* azp, const int32_t* azp_with_adj,
+                            const scalar_t* bias, const int num_tokens,
+                            const int hidden_size) {
+  CPU_KERNEL_GUARD_IN(dynamic_quant_epilogue)
   using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
+  using azp_adj_load_vec_t =
+      typename KernelVecType<scalar_t>::azp_adj_load_vec_type;
   using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
   constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
 
   #pragma omp parallel for
   for (int i = 0; i < num_tokens; ++i) {
     int j = 0;
-    cvt_vec_t token_scale_vec(scale[i]);
+    cvt_vec_t token_scale_vec(a_scale[i]);
+    cvt_vec_t token_zp_scale_vec;
+    if constexpr (AZP) {
+      float zp_scale_val = a_scale[i] * static_cast<float>(azp[i]);
+      if constexpr (!PerChannel) {
+        zp_scale_val *= *b_scale;
+      }
+      token_zp_scale_vec = cvt_vec_t(zp_scale_val);
+    }
+
     for (; j < hidden_size - vec_elem_num; j += vec_elem_num) {
       cvt_vec_t elems_fp32(input + i * hidden_size + j);
       elems_fp32 = elems_fp32 * token_scale_vec;
+
+      if constexpr (AZP) {
+        azp_adj_load_vec_t azp_adj(azp_with_adj + j);
+        cvt_vec_t azp_adj_fp32(azp_adj);
+        azp_adj_fp32 = azp_adj_fp32 * token_zp_scale_vec;
+
+        if constexpr (PerChannel) {
+          cvt_vec_t b_scale_vec(b_scale + j);
+          azp_adj_fp32 = azp_adj_fp32 * b_scale_vec;
+        }
+
+        elems_fp32 = elems_fp32 - azp_adj_fp32;
+      }
 
       if constexpr (Bias) {
         load_vec_t bias_vec(bias + j);
@@ -220,6 +296,19 @@ void dynamic_output_scale_impl(const float* input, scalar_t* output,
 
     cvt_vec_t elems_fp32(input + i * hidden_size + j);
     elems_fp32 = elems_fp32 * token_scale_vec;
+
+    if constexpr (AZP) {
+      azp_adj_load_vec_t azp_adj(azp_with_adj + j);
+      cvt_vec_t azp_adj_fp32(azp_adj);
+      azp_adj_fp32 = azp_adj_fp32 * token_zp_scale_vec;
+
+      if constexpr (PerChannel) {
+        cvt_vec_t b_scale_vec(b_scale + j);
+        azp_adj_fp32 = azp_adj_fp32 * b_scale_vec;
+      }
+
+      elems_fp32 = elems_fp32 - azp_adj_fp32;
+    }
 
     if constexpr (Bias) {
       load_vec_t bias_vec(bias + j);
@@ -246,19 +335,27 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
 
 template <typename scalar_t>
 void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
-                                    float* scale, const int num_tokens,
+                                    float* scale, int32_t* azp,
+                                    const int num_tokens,
                                     const int hidden_size) {
   TORCH_CHECK(false, "dynamic_scaled_int8_quant_impl requires AVX512 support.")
 }
 
-template <bool PerChannel, typename scalar_t> 
-void static_quant_epilogue(const float* input, scalar_t* output, const float a_scale, const float* b_scale, const int32_t* azp_with_adj, const int num_tokens, const int hidden_size) {
+template <bool PerChannel, typename scalar_t>
+void static_quant_epilogue(const float* input, scalar_t* output,
+                           const float a_scale, const float* b_scale,
+                           const int32_t* azp_with_adj, const int num_tokens,
+                           const int hidden_size) {
   TORCH_CHECK(false, "static_quant_epilogue requires AVX512 support.")
 }
 
 template <typename scalar_t>
-void dynamic_output_scale_impl() {
-  TORCH_CHECK(false, "dynamic_output_scale_impl requires AVX512 support.")
+void dynamic_quant_epilogue(const float* input, scalar_t* output,
+                            const float* a_scale, const float* b_scale,
+                            const int32_t* azp, const int32_t* azp_with_adj,
+                            const scalar_t* bias, const int num_tokens,
+                            const int hidden_size) {
+  TORCH_CHECK(false, "dynamic_quant_epilogue requires AVX512 support.")
 }
 #endif
 }  // namespace
@@ -304,14 +401,15 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
           a.size(1), (float*)(0), b_scales.data_ptr<float>(), 0,
           b_scales.numel());
       if (bias.has_value()) {
-        dynamic_output_scale_impl<true>(
+        dynamic_quant_epilogue<false, true, true>(
             tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-            a_scales.data_ptr<float>(), bias->data_ptr<scalar_t>(), c.size(0),
-            c.size(1));
+            a_scales.data_ptr<float>(), (float*)0, (int32_t*)0, (int32_t*)0,
+            bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
       } else {
-        dynamic_output_scale_impl<false>(
+        dynamic_quant_epilogue<false, true, false>(
             tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-            a_scales.data_ptr<float>(), (scalar_t*)(0), c.size(0), c.size(1));
+            a_scales.data_ptr<float>(), (float*)0, (int32_t*)0, (int32_t*)0,
+            (scalar_t*)(0), c.size(0), c.size(1));
       }
     } else {
       // per-tensor
@@ -332,14 +430,14 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
   });
 }
 
-void int8_scaled_mm_azp(torch::Tensor& c,               // [M, OC], row-major
-                    const torch::Tensor& a,         // [M, IC], row-major
-                    const torch::Tensor& b,         // [IC, OC], column-major
-                    const torch::Tensor& a_scales,  // [1] or [M]
-                    const torch::Tensor& b_scales,  // [1] or [OC]
-                    const torch::Tensor& azp_adj, // [OC]
-                    const c10::optional<torch::Tensor>& azp, // [1] or [M]
-                    const c10::optional<torch::Tensor>& bias  // [OC]
+void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
+                        const torch::Tensor& a,  // [M, IC], row-major
+                        const torch::Tensor& b,  // [IC, OC], column-major
+                        const torch::Tensor& a_scales,            // [1] or [M]
+                        const torch::Tensor& b_scales,            // [1] or [OC]
+                        const torch::Tensor& azp_adj,             // [OC]
+                        const c10::optional<torch::Tensor>& azp,  // [1] or [M]
+                        const c10::optional<torch::Tensor>& bias  // [OC]
 ) {
   CPU_KERNEL_GUARD_IN(cutlass_scaled_mm_azp)
   // Checks for conformality
@@ -373,10 +471,8 @@ void int8_scaled_mm_azp(torch::Tensor& c,               // [M, OC], row-major
               "currently bias dtype must match output dtype ", c.dtype());
 
   VLLM_DISPATCH_FLOATING_TYPES(c.scalar_type(), "int8_scaled_mm_azp", [&] {
-    torch::Tensor tmp_fp32_out =
-          torch::empty_like(c, ::at::ScalarType::Float);
+    torch::Tensor tmp_fp32_out = torch::empty_like(c, ::at::ScalarType::Float);
     if (a_scales.numel() != 1) {
-      TORCH_CHECK(false, "per-token azp is unsupported")
       // per-token
       // Note: oneDNN doesn't support per-token activation quantization
       DNNLPrimitiveHelper<true>::gemm_s8s8_jit(
@@ -385,38 +481,66 @@ void int8_scaled_mm_azp(torch::Tensor& c,               // [M, OC], row-major
           a.size(1), (float*)(0), b_scales.data_ptr<float>(), 0,
           b_scales.numel());
       if (bias.has_value()) {
-        dynamic_output_scale_impl<true>(
-            tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-            a_scales.data_ptr<float>(), bias->data_ptr<scalar_t>(), c.size(0),
-            c.size(1));
+        if (b_scales.numel() != 1) {
+          // Per-Channel
+          dynamic_quant_epilogue<true, true, true>(
+              tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+              a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+              azp->data_ptr<int32_t>(), azp_adj.data_ptr<int32_t>(),
+              bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
+        } else {
+          // Per-Tensor
+          dynamic_quant_epilogue<true, false, true>(
+              tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+              a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+              azp->data_ptr<int32_t>(), azp_adj.data_ptr<int32_t>(),
+              bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
+        }
       } else {
-        dynamic_output_scale_impl<false>(
-            tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-            a_scales.data_ptr<float>(), (scalar_t*)(0), c.size(0), c.size(1));
+        if (b_scales.numel() != 1) {
+          // Per-Channel
+          dynamic_quant_epilogue<true, true, false>(
+              tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+              a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+              azp->data_ptr<int32_t>(), azp_adj.data_ptr<int32_t>(),
+              (scalar_t*)(0), c.size(0), c.size(1));
+        } else {
+          // Per-Tensor
+          dynamic_quant_epilogue<true, false, false>(
+              tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+              a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+              azp->data_ptr<int32_t>(), azp_adj.data_ptr<int32_t>(),
+              (scalar_t*)(0), c.size(0), c.size(1));
+        }
       }
     } else {
       // per-tensor
       if (bias.has_value()) {
         DNNLPrimitiveHelper<false>::gemm_s8s8_jit(
-            a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), tmp_fp32_out.data_ptr<float>(),
-            bias->data_ptr<scalar_t>(), a.size(0), b.size(1), a.size(1),
-            a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
-            a_scales.numel(), b_scales.numel());
+            a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
+            tmp_fp32_out.data_ptr<float>(), bias->data_ptr<scalar_t>(),
+            a.size(0), b.size(1), a.size(1), a_scales.data_ptr<float>(),
+            b_scales.data_ptr<float>(), a_scales.numel(), b_scales.numel());
       } else {
         DNNLPrimitiveHelper<false>::gemm_s8s8_jit(
-            a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), tmp_fp32_out.data_ptr<float>(),
-            (void*)(0), a.size(0), b.size(1), a.size(1),
-            a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+            a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
+            tmp_fp32_out.data_ptr<float>(), (void*)(0), a.size(0), b.size(1),
+            a.size(1), a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
             a_scales.numel(), b_scales.numel());
       }
-      
+
       if (b_scales.numel() != 1) {
         // Per-Channel
-        static_quant_epilogue<true>(tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(), *a_scales.data_ptr<float>(), b_scales.data_ptr<float>(), azp_adj.data_ptr<int32_t>(), a.size(0), b.size(1));
-      }
-      else {
+        static_quant_epilogue<true>(
+            tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+            *a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+            azp_adj.data_ptr<int32_t>(), a.size(0), b.size(1));
+      } else {
         // Per-Tensor
-        static_quant_epilogue<false>(tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(), *a_scales.data_ptr<float>(), b_scales.data_ptr<float>(), azp_adj.data_ptr<int32_t>(), a.size(0), b.size(1));
+        static_quant_epilogue<false>(
+            tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
+            *a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
+            azp_adj.data_ptr<int32_t>(), a.size(0), b.size(1));
       }
     }
   });
@@ -459,14 +583,20 @@ void dynamic_scaled_int8_quant(
   CPU_KERNEL_GUARD_IN(dynamic_scaled_int8_quant)
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
-  TORCH_CHECK(!azp.has_value(), "Zero point is not supported on CPU.");
 
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_impl", [&] {
-        dynamic_scaled_int8_quant_impl(
-            input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-            scale.data_ptr<float>(), num_tokens, hidden_size);
+        if (azp.has_value()) {
+          dynamic_scaled_int8_quant_impl<true>(
+              input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
+              scale.data_ptr<float>(), azp->data_ptr<int32_t>(), num_tokens,
+              hidden_size);
+        } else {
+          dynamic_scaled_int8_quant_impl<false>(
+              input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
+              scale.data_ptr<float>(), (int32_t*)(0), num_tokens, hidden_size);
+        }
       });
 }
