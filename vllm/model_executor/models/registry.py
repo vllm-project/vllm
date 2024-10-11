@@ -90,6 +90,13 @@ _EMBEDDING_MODELS = {
     "RobertaModel": ("roberta_embedding", "RobertaEmbeddingModel"),
 }
 
+_ENCODER_MODELS = [
+    "BertForMaskedLM",
+    "BertModel",
+    "RobertaForMaskedLM",
+    "RobertaModel",
+]
+
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
@@ -342,6 +349,15 @@ class ModelRegistry:
                          default=False)
 
         return any(is_emb(arch) for arch in architectures)
+    
+    @staticmethod
+    def is_encoder_model(architectures: Union[str, List[str]]) -> bool:
+        if isinstance(architectures, str):
+            architectures = [architectures]
+        if not architectures:
+            logger.warning("No model architectures are specified")
+
+        return any(arch in _ENCODER_MODELS for arch in architectures)
 
     @staticmethod
     def is_multimodal_model(architectures: Union[str, List[str]]) -> bool:

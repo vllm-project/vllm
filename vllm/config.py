@@ -558,10 +558,7 @@ class ModelConfig:
 
     @property
     def is_encoder_model(self) -> bool:
-        is_encoder_decoder = getattr(self.hf_config, "is_encoder_decoder",
-                                     False)
-        is_decoder = getattr(self.hf_config, "is_decoder", False)
-        return is_encoder_decoder is False and is_decoder is False
+        return ModelRegistry.is_encoder_model(self.hf_config.architectures)
 
     @property
     def is_embedding_model(self) -> bool:
