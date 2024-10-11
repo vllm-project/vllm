@@ -179,6 +179,7 @@ class LLM:
         )
         # FIXME:
         engine_args.max_num_seqs = max(engine_args.max_num_seqs, 2048)
+        engine_args.enable_chunked_prefill = False
         self.llm_engine = LLMEngineV1.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
         # self.llm_engine = LLMEngine.from_engine_args(
