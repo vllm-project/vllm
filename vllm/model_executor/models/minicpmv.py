@@ -360,7 +360,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.version = get_version_by_config(self.config)
         self.llm = self.init_llm(config, cache_config, quant_config)
-        self.vpm = self.init_vision_module()
+        self.vpm = self.init_vision_module(config, quant_config)
         param_dtype = torch.get_default_dtype()
         self.vpm.to(dtype=param_dtype)
         self.vision_dim = (self.vpm.embed_dim if self.version == (2, 0) else
@@ -596,7 +596,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> nn.Module:
         raise NotImplementedError
 
-    def init_vision_module(self) -> nn.Module:
+    def init_vision_module(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig],
+    ) -> nn.Module:
         raise NotImplementedError
 
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
@@ -642,7 +646,11 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                                        quant_config=quant_config),
                           name="model")
 
-    def init_vision_module(self) -> nn.Module:
+    def init_vision_module(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig],
+    ) -> nn.Module:
         # TODO :refactor this vision model
         try:
             import timm
@@ -766,8 +774,13 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                      quant_config=quant_config),
                           name="model")
 
-    def init_vision_module(self) -> nn.Module:
-        model = Idefics2VisionTransformer(self.config.vision_config)
+    def init_vision_module(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig],
+    ) -> nn.Module:
+        model = Idefics2VisionTransformer(config.vision_config,
+                                          quant_config=quant_config)
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
@@ -878,9 +891,13 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                                      quant_config=quant_config),
                           name="model")
 
-    def init_vision_module(self) -> nn.Module:
-
-        model = Idefics2VisionTransformer(self.config.vision_config)
+    def init_vision_module(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig],
+    ) -> nn.Module:
+        model = Idefics2VisionTransformer(config.vision_config,
+                                          quant_config=quant_config)
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
