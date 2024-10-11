@@ -341,7 +341,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
 
-    def get_cached_blocks(self, block_hashes: List[int]) -> List[int]:
+    def get_allocated_cached_blocks(self, block_hashes: List[int]) -> List[int]:
         return []
 
 

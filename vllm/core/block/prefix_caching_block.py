@@ -8,6 +8,7 @@ from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
+from vllm.sequence import Sequence
 
 PrefixHash = int
 
@@ -162,6 +163,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         cached_block_id = self._cached_blocks.get(block_hash, None)
         if cached_block_id is not None:
             # Initialize a block that points to cached data
+            # print(
+            #     f"reuse block_hash={block_hash} from cached_block_id: {cached_block_id}"
+            # )
             block: Block = self._block_pool.init_block(
                 prev_block=prev_block,
                 token_ids=token_ids,
@@ -172,6 +176,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self.metric_data.query(hit=True)
             self._incr_refcount_cached_block(block)
             return block
+
+        # print(
+        #     f"alloc from new block(block_hash: {block_hash}), get_num_free_blocks: {self.get_num_free_blocks()}"
+        # )
         self.metric_data.query(hit=False)
 
         # No cached block => Allocate a new block
@@ -216,7 +224,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
-
+        # print(
+        #     f"Allocating mutable block: get_num_free_blocks: {self.get_num_free_blocks()}"
+        # )
         block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
@@ -287,6 +297,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """First tries to allocate a block id from the hashless allocator,
         and if there are no blocks, then tries to evict an unused cached block.
         """
+        # print(f"allocating block_id: get_num_free_blocks: {self.get_num_free_blocks()}")
         hashless_block_id = self._maybe_allocate_hashless_block_id()
         if hashless_block_id is not None:
             return hashless_block_id
@@ -407,8 +418,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert device is None
         # The number of free blocks is the number of hashless free blocks
         # plus the number of blocks evictor could free from its list.
-        return self._hashless_allocator.get_num_free_blocks(
-        ) + self.evictor.num_blocks
+        return self._hashless_allocator.get_num_free_blocks() + (
+            self.evictor.num_blocks
+        )
 
     def get_num_total_blocks(self) -> int:
         return self._hashless_allocator.get_num_total_blocks()
@@ -499,6 +511,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             return src_block_id
 
         self._free_block_id(block)
+        # print(
+        #     f"Allocating block for COW: get_num_free_blocks: {self.get_num_free_blocks()}"
+        # )
         trg_block_id = self._allocate_block_id()
 
         self._cow_tracker.record_cow(src_block_id, trg_block_id)
@@ -662,13 +677,50 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
             block.block_id = block_id  # Assign block_id
 
-    def get_cached_blocks(self, block_hashes: List[PrefixHash]) -> List[PrefixHash]:
+    def get_allocated_cached_blocks(self, block_hashes: List[PrefixHash]) -> List[PrefixHash]:
+        """
+        Get the list of blocks that are already computed and allocated so that they can
+        be shared by multiple sequences, and no needed to be allocated again.
+
+        INVARIANCE:
+            For a sequence of blocks, it's also guaranteed that if a block is allocated (i.e.
+            block_is_active_computed(block_hash) == True), then the previous block must also be
+            allocated (i.e. block_is_active_computed(prev_block_hash) == True).
+
+            This is because we allocate and free entire sequence of blocks atomically (no partial
+            sequence is allocated or freed). Therefore, because block hash includes the previous
+            block's hash, if a current block is allocated, this means the previous block must also
+            be allocated.
+
+        NOTE: we exclude computed blocks in evictor because they are already freed even if they
+        are cached. They would still have to be allocated by a sequence. If not, consider a
+        scenario with a seqeuence of 3 token blocks, and a block pool of only 2 blocks:
+            [b0, b1, b2], where b0 and b1 are computed but evicted, b2 is not computed.
+            So b0, b1 are the 2 free blocks, in evictor.
+        When deciding how many more blocks need to be allocated for this sequence, it should be
+        all 3 blocks (b0, b1, b2) rather than just 1 block (b2).
+        """
         # Search for the longest prefix in `block_hashes` that are present cached blocks.
-        # TODO(rickyx): this could be made to binary search.
-        for i, block_hash in enumerate(block_hashes):
+        def block_is_active_computed(block_hash: PrefixHash) -> bool:
             if block_hash not in self._cached_blocks:
-                return block_hashes[:i]
-        return block_hashes
+                return False
+
+            cached_block_id = self._cached_blocks[block_hash]
+            if cached_block_id in self.evictor:
+                return False
+
+            # We only consider the blocks that are marked as computed.
+            if not self._block_tracker[cached_block_id].computed:
+                return False
+
+            return True
+
+        from bisect import bisect_left
+
+        idx = bisect_left(
+            block_hashes, True, key=lambda x: not block_is_active_computed(x)
+        )
+        return block_hashes[:idx]
 
 
 class PrefixCachingBlock(Block):
@@ -936,12 +988,6 @@ class ComputedBlocksTracker:
         """
         assert seq_id in self._cached_computed_seq_blocks
         del self._cached_computed_seq_blocks[seq_id]
-
-    def update_seq(self, seq_id: int, computed_tokens: List[int]):
-        pass
-
-    def get_cached_computed_blocks(self, seq_id: int) -> List[int]:
-        pass
 
     def get_cached_computed_blocks_and_update(
             self, seq_id: int, block_ids: List[int]) -> List[int]:

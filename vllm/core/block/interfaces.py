@@ -204,7 +204,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_cached_blocks(self, block_hashes: List[int]) -> List[int]:
+    def get_allocated_cached_blocks(self, block_hashes: List[int]) -> List[int]:
         pass
 
     class NoFreeBlocksError(ValueError):
@@ -304,5 +304,7 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_cached_blocks(self, block_hashes: List[int], device: Device) -> List[int]:
+    def get_allocated_cached_blocks(
+        self, block_hashes: List[int], device: Device
+    ) -> List[int]:
         pass

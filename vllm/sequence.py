@@ -162,6 +162,7 @@ class SequenceData(msgspec.Struct,
                                    ...] = msgspec.field(default_factory=tuple)
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
+    _num_prefix_cached_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
@@ -295,6 +296,12 @@ class SequenceData(msgspec.Struct,
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
         return self._num_computed_tokens
+
+    def set_num_prefix_cached_tokens(self, num_new_cached_tokens: int):
+        self._num_prefix_cached_tokens = num_new_cached_tokens
+
+    def get_num_prefix_cached_tokens(self) -> int:
+        return self._num_prefix_cached_tokens
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
@@ -587,6 +594,9 @@ class Sequence:
             num_full_prompt_blocks:
         ]
 
+    def set_num_prefix_cached_tokens(self, num_prefix_cached_tokens: int):
+        self.data.set_num_prefix_cached_tokens(num_prefix_cached_tokens)
+
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
 
@@ -647,6 +657,9 @@ class Sequence:
         new_seq.seq_id = new_seq_id
         return new_seq
 
+    def get_num_computed_tokens(self) -> int:
+        return self.data.get_num_computed_tokens()
+
     def get_num_new_tokens(self) -> int:
         """Get the number of new tokens to be computed.
 
@@ -656,10 +669,18 @@ class Sequence:
         """
         if self.data.stage == SequenceStage.DECODE:
             return 1
-        return self.data.get_num_uncomputed_tokens()
+
+        num_computed_tokens = self.data.get_num_computed_tokens()
+        return self.data.get_len() - num_computed_tokens
+
+    def get_num_cached_tokens(self) -> int:
+        return self.data.get_num_prefix_cached_tokens()
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
+
+    def is_from_decoder_prompt(self) -> bool:
+        return self.from_decoder_prompt
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "

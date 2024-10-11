@@ -1,5 +1,5 @@
 import math
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from vllm.core.block.common import BlockList
 from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
@@ -308,9 +308,12 @@ class BlockTable:
             assert len(tail_token_ids) == 1
             assert block_hashes[-1] is None
             cur_token_ids = tail_token_ids[0]
-
-            block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block, device=device)
+            try:
+                block = self._allocator.allocate_mutable_block(
+                    prev_block=prev_block, device=device
+                )
+            except Exception as e:
+                breakpoint()
             block.append_token_ids(cur_token_ids, block_hash=None)
 
             blocks.append(block)

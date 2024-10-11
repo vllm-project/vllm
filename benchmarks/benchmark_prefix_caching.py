@@ -115,8 +115,9 @@ def main(args):
     input_length_range = tuple(map(int, args.input_length_range.split(':')))
     random.seed(args.seed)
     if args.dataset_path is not None:
-        print(f"Start to sample {args.num_prompts} prompts"
-              "from {args.dataset_path}")
+        print(
+            f"Start to sample {args.num_prompts} prompts " f"from {args.dataset_path}"
+        )
         filtered_datasets = sample_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
@@ -129,13 +130,18 @@ def main(args):
         filtered_datasets = [(PROMPT, prompt_len, args.output_len)
                              ] * args.num_prompts
 
-    llm = LLM(model=args.model,
-              tokenizer_mode='auto',
-              trust_remote_code=True,
-              enforce_eager=True,
-              use_v2_block_manager=args.use_v2_block_manager,
-              tensor_parallel_size=args.tensor_parallel_size,
-              enable_prefix_caching=args.enable_prefix_caching)
+    llm = LLM(
+        model=args.model,
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        enforce_eager=True,
+        use_v2_block_manager=args.use_v2_block_manager,
+        tensor_parallel_size=args.tensor_parallel_size,
+        enable_prefix_caching=args.enable_prefix_caching,
+        disable_log_stats=False,
+        max_num_batched_tokens=4096 * 2,
+        enable_chunked_prefill=True,
+    )
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 

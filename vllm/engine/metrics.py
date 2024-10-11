@@ -450,8 +450,9 @@ class PrometheusStatLogger(StatLoggerBase):
                           stats.num_preemption_iter)
         self._log_counter(self.metrics.counter_prompt_tokens,
                           stats.num_prompt_tokens_iter)
-        self._log_counter(self.metrics.counter_generation_tokens,
-                          stats.num_generation_tokens_iter)
+        self._log_counter(
+            self.metrics.counter_generation_tokens, stats.num_generation_tokens_iter
+        )
         self._log_histogram(self.metrics.histogram_time_to_first_token,
                             stats.time_to_first_tokens_iter)
         self._log_histogram(self.metrics.histogram_time_per_output_token,

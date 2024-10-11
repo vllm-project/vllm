@@ -115,25 +115,28 @@ def create_dummy_prompt_encoder_decoder(
 
 
 def create_seq_group(
-        seq_prompt_len: int = 1024,
-        seq_output_lens: GenericSequence[int] = (128, ),
-        request_id: str = '0',
-        seq_id_start: int = 0,
-        sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
-
-    assert len(seq_output_lens) > 0
+    seq_prompt_len: int = 1024,
+    seq_output_lens: GenericSequence[int] = (128,),
+    request_id: str = "0",
+    seq_id_start: int = 0,
+    sampling_params: Optional[SamplingParams] = None,
+    prompt_token_ids: Optional[List[int]] = None,
+    block_size: int = 16,
+) -> SequenceGroup:
 
     if sampling_params is None:
         sampling_params = SamplingParams()
 
-    prompt_token_ids = [0] * seq_prompt_len
+    if prompt_token_ids is None:
+        assert seq_prompt_len > 0
+        prompt_token_ids = [0] * seq_prompt_len
 
     seqs: List[Sequence] = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):
         seq = Sequence(
             seq_id=seq_id_start + seq_id_offset,
             inputs={"prompt_token_ids": prompt_token_ids},
-            block_size=16,
+            block_size=block_size,
         )
 
         for i in range(output_len):

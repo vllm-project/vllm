@@ -159,12 +159,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             prev_block, block_token_ids, block_hashes
         )
 
-    def get_cached_blocks(
+    def get_allocated_cached_blocks(
         self,
         block_hashes: List[int],
         device: Device,
     ) -> List[int]:
-        return self._allocators[device].get_cached_blocks(block_hashes)
+        return self._allocators[device].get_allocated_cached_blocks(block_hashes)
 
     def allocate_immutable_block(self, prev_block: Optional[Block],
                                  token_ids: List[int],

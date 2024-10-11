@@ -764,3 +764,73 @@ class TestPrefixCachingBlockAllocator:
             blocks.append(prev_block)
 
         return blocks
+
+    @staticmethod
+    def create_immutable_chain_with_hashes(
+        block_size: int,
+        block_hashes: List[int],
+        allocator: PrefixCachingBlockAllocator,
+    ) -> List[PrefixCachingBlock]:
+        """Helper method which creates a chain of blocks with explicit hashes."""
+        blocks: List[Block] = []
+
+        prev_block = None
+        for block_hash in block_hashes:
+            # We don't need actual token_ids, so we pass an empty list
+            prev_block = allocator.allocate_immutable_block(
+                prev_block=prev_block,
+                token_ids=list(range(block_size)),  # Just placeholder
+                block_hash=block_hash,
+            )
+            blocks.append(prev_block)
+
+        return blocks
+
+    @staticmethod
+    def test_get_cached_blocks():
+        """
+        This test checks that `get_cached_blocks` returns the correct prefix of
+        block hashes for a given list of block hashes.
+        """
+
+        block_size = 16
+        num_blocks = 5
+        allocator = PrefixCachingBlockAllocator(
+            block_size=block_size, num_blocks=num_blocks
+        )
+
+        # 1. Allocate a list of blocks
+        block_hashes = [random.randint(1, 1000000) for _ in range(num_blocks)]
+        blocks = TestPrefixCachingBlockAllocator.create_immutable_chain_with_hashes(
+            block_size=block_size,
+            block_hashes=block_hashes,
+            allocator=allocator,
+        )
+
+        # Verify that all blocks have been allocated
+        assert len(blocks) == num_blocks
+        assert all(isinstance(block, PrefixCachingBlock) for block in blocks)
+        assert all(block.content_hash is not None for block in blocks)
+
+        # 2. Test different prefixes of cached blocks
+        test_cases = [
+            ([], []),  # No blocks cached
+            ([block_hashes[0]], [block_hashes[0]]),  # First block cached
+            (block_hashes[:3], block_hashes[0:3]),  # First three blocks cached
+            (block_hashes, block_hashes),  # All blocks cached
+        ]
+
+        for cached_hashes, expected_cached_blocks in test_cases:
+            # Check if get_cached_blocks returns the correct prefix
+            result = allocator.get_cached_blocks(cached_hashes)
+            assert (
+                result == expected_cached_blocks
+            ), f"Expected {expected_cached_blocks}, but got {result}, with test case {cached_hashes}. blcok hashes = {block_hashes}"
+
+        # Test with some non-existent hashes
+        non_existent_hash = max(block_hashes) + 1
+        test_hashes = block_hashes[:3] + [non_existent_hash] + block_hashes[3:]
+        result = allocator.get_cached_blocks(test_hashes)
+        assert (
+            result == block_hashes[0:3]
+        ), f"Expected {block_hashes[0:3]}, but got {result}"
