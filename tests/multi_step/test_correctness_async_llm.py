@@ -1,16 +1,13 @@
 # Test the AsyncLLMEngine with multi-step-decoding
 from typing import List, Optional
-import asyncio
 
 import pytest
-from vllm import SamplingParams
+
 from tests.kernels.utils import override_backend_env_variable
 
 from ..models.utils import check_logprobs_close
 from ..utils import (completions_with_server_args, get_client_text_generations,
                      get_client_text_logprob_generations)
-
-from ..models.utils import check_outputs_equal
 
 MODELS = [
     "JackFram/llama-160m",
@@ -227,7 +224,8 @@ async def test_multi_step_pp_smoke(
     test_generations = get_client_text_generations(test_completions)
 
     assert ref_generations == test_generations
-    
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize("pp_size", [1])
@@ -310,7 +308,7 @@ async def test_multi_step_llm_best_of_fallback_async_server(
     ]
 
     # Requests will share a random seed
-    seed=42
+    seed = 42
 
     # Spin up client/server & issue completion API requests.
     # Default `max_wait_seconds` is 240 but was empirically
