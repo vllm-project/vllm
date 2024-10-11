@@ -20,15 +20,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
-from functools import lru_cache, partial
-from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
-                    Tuple, Type, TypedDict, Union)
-from array import array
 from functools import lru_cache
+from typing import (Iterable, List, Mapping, Optional, Tuple, TypedDict,
+                    Union)
 import torch
 import torch.nn as nn
 import numpy as np
-from transformers import Qwen2AudioEncoder, Qwen2AudioConfig, Qwen2AudioEncoderConfig
+from transformers import Qwen2AudioEncoder, Qwen2AudioConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -36,7 +34,6 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
@@ -44,8 +41,7 @@ from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.logger import init_logger
 from .interfaces import SupportsMultiModal
 
@@ -55,6 +51,7 @@ _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
     "language_model.model": "language_model",
 }
+
 
 # # === Audio Inputs === #
 class Qwen2AudioInputs(TypedDict):
@@ -67,9 +64,12 @@ class Qwen2AudioInputs(TypedDict):
     """Shape: `(num_audios, 3000)`
     """
 
+
 # === Audio Encoder === #
 
+
 class Qwen2AudioMultiModalProjector(nn.Module):
+
     def __init__(self, audio_hidden_size: int, text_hidden_size: int):
         super().__init__()
         self.linear = nn.Linear(audio_hidden_size, text_hidden_size, bias=True)
@@ -78,7 +78,9 @@ class Qwen2AudioMultiModalProjector(nn.Module):
         hidden_states = self.linear(audio_features)
         return hidden_states
 
-def dummy_data_for_qwen2_audio(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
+
+def dummy_data_for_qwen2_audio(ctx: InputContext, seq_len: int,
+                               mm_counts: Mapping[str, int]):
     num_audios = mm_counts["audio"]
     max_llm_audio_tokens = get_max_qwen2_audio_audio_tokens(ctx) * num_audios
     if seq_len - max_llm_audio_tokens - 2 < 0:
@@ -93,8 +95,11 @@ def dummy_data_for_qwen2_audio(ctx: InputContext, seq_len: int, mm_counts: Mappi
         (audio_token_index, max_llm_audio_tokens),
         (0, seq_len - max_llm_audio_tokens),
     )
-    dummy_audio = np.full((max_llm_audio_tokens*2*2*160,), 0.)
-    return dummy_seqdata, {"audio": dummy_audio if num_audios == 1 else [dummy_audio] * num_audios}
+    dummy_audio = np.full((max_llm_audio_tokens * 2 * 2 * 160, ), 0.)
+    return dummy_seqdata, {
+        "audio": dummy_audio if num_audios == 1 else [dummy_audio] * num_audios
+    }
+
 
 def get_processor(
     processor_name: str,
@@ -133,23 +138,29 @@ def get_processor(
 
     return processor
 
+
 cached_get_processor = lru_cache(get_processor)
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.LongTensor):
     """
-    Computes the output length of the convolutional layers and the output length of the audio encoder
+    Computes the output length of the convolutional layers
+    and the output length of the audio encoder
     """
     input_lengths = (input_lengths - 1) // 2 + 1
     output_lengths = (input_lengths - 2) // 2 + 1
     return input_lengths, output_lengths
 
+
 def get_max_qwen2_audio_audio_tokens(ctx: InputContext) -> int:
-    max_source_position = ctx.model_config.hf_config.audio_config.max_source_positions
+    max_source_position = (
+        ctx.model_config.hf_config.audio_config.max_source_positions)
     output_lengths = (max_source_position - 2) // 2 + 1
     return output_lengths
 
-def input_processor_for_qwen2_audio(ctx: InputContext, llm_inputs: LLMInputs) -> LLMInputs:
+
+def input_processor_for_qwen2_audio(ctx: InputContext,
+                                    llm_inputs: LLMInputs) -> LLMInputs:
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "audio" not in multi_modal_data:
         return llm_inputs
@@ -159,16 +170,16 @@ def input_processor_for_qwen2_audio(ctx: InputContext, llm_inputs: LLMInputs) ->
     if len(audios) == 0:
         return llm_inputs
 
-    audio_inputs = processor.feature_extractor(
-        audios, sampling_rate=16000, return_attention_mask=True, padding="max_length")
-    
+    audio_inputs = processor.feature_extractor(audios,
+                                               sampling_rate=16000,
+                                               return_attention_mask=True,
+                                               padding="max_length")
 
     feature_attention_mask = audio_inputs.pop("attention_mask")
     input_features = audio_inputs['input_features']
 
     audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
-        feature_attention_mask.sum(-1)
-    )
+        feature_attention_mask.sum(-1))
 
     audio_token_index = ctx.model_config.hf_config.audio_token_index
 
@@ -177,13 +188,15 @@ def input_processor_for_qwen2_audio(ctx: InputContext, llm_inputs: LLMInputs) ->
     new_input_ids = []
     audio_num = input_ids.count(audio_token_index)
     assert len(input_features) == audio_num, \
-        f'The text input contains {audio_num} audio tokens, but {len(input_features)} audios provided'
+        (f'The text input contains {audio_num} audio tokens, '
+         f'but {len(input_features)} audios provided')
     start = 0
     for audio_idx in range(audio_num):
         end = input_ids.index(audio_token_index, start)
         new_input_ids.extend(input_ids[start:end])  # text part
 
-        new_input_ids.extend([audio_token_index] * audio_output_lengths[audio_idx])
+        new_input_ids.extend([audio_token_index] *
+                             audio_output_lengths[audio_idx])
         start = end + 1
     new_input_ids.extend(input_ids[start:])
 
@@ -193,6 +206,7 @@ def input_processor_for_qwen2_audio(ctx: InputContext, llm_inputs: LLMInputs) ->
         multi_modal_data=multi_modal_data,
     )
 
+
 def input_mapper_for_qwen2_audio(
     ctx: InputContext,
     multi_modal_data: Union[np.ndarray, List[np.ndarray]],
@@ -201,29 +215,38 @@ def input_mapper_for_qwen2_audio(
     processor = cached_get_processor(ctx.model_config.model)
     audio_feature_extractor = processor.feature_extractor
     if audio_feature_extractor is None:
-        raise RuntimeError("No HuggingFace audio_feature_extractor is available "
-                           "to process the audio object")
+        raise RuntimeError(
+            "No HuggingFace audio_feature_extractor is available "
+            "to process the audio object")
 
     if len(multi_modal_data) == 0:
-        batch_data = {'input_features': torch.tensor([]), 'feature_attention_mask': torch.tensor([])}
+        batch_data = {
+            'input_features': torch.tensor([]),
+            'feature_attention_mask': torch.tensor([])
+        }
         return batch_data
     try:
-        batch_data = audio_feature_extractor(multi_modal_data, sampling_rate=16000, return_attention_mask=True, padding="max_length",return_tensors="pt").data
-        batch_data["feature_attention_mask"] = batch_data.pop(
-            "attention_mask"
-        )
+        batch_data = audio_feature_extractor(multi_modal_data,
+                                             sampling_rate=16000,
+                                             return_attention_mask=True,
+                                             padding="max_length",
+                                             return_tensors="pt").data
+        batch_data["feature_attention_mask"] = batch_data.pop("attention_mask")
     except Exception:
         logger.error("Failed to process audio (%s)", multi_modal_data)
         raise
 
-    
     return MultiModalInputs(batch_data)
+
 
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen2_audio)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen2_audio)
-@MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_qwen2_audio)
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens("audio", get_max_qwen2_audio_audio_tokens)
+@MULTIMODAL_REGISTRY.register_input_mapper("audio",
+                                           input_mapper_for_qwen2_audio)
+@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
+    "audio", get_max_qwen2_audio_audio_tokens)
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
+
     def __init__(self,
                  config: Qwen2AudioConfig,
                  multimodal_config: MultiModalConfig,
@@ -235,13 +258,13 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.multimodal_config = multimodal_config
 
         self.audio_tower = Qwen2AudioEncoder(config.audio_config)
-        self.multi_modal_projector = Qwen2AudioMultiModalProjector(config.audio_config.d_model, config.text_config.hidden_size)
+        self.multi_modal_projector = Qwen2AudioMultiModalProjector(
+            config.audio_config.d_model, config.text_config.hidden_size)
 
         self.quant_config = quant_config
 
-        self.language_model = Qwen2Model(
-            config.text_config, cache_config, quant_config
-        )
+        self.language_model = Qwen2Model(config.text_config, cache_config,
+                                         quant_config)
         self.unpadded_vocab_size = config.text_config.vocab_size
         if config.text_config.tie_word_embeddings:
             self.lm_head = self.language_model.embed_tokens
@@ -266,70 +289,76 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
             return torch.concat(list(mm_input))
         else:
             return torch.concat(mm_input)
-    
-    def _parse_and_validate_audio_input(self, **kwargs: object) -> Optional[Qwen2AudioInputs]:
+
+    def _parse_and_validate_audio_input(
+            self, **kwargs: object) -> Optional[Qwen2AudioInputs]:
         input_features = kwargs.pop('input_features', None)
         feature_attention_mask = kwargs.pop('feature_attention_mask', None)
         if input_features is None:
             return None
-        input_features = self._validate_and_reshape_mm_tensor(input_features, 'input_features')
-        feature_attention_mask = self._validate_and_reshape_mm_tensor(feature_attention_mask, 'feature_attention_mask')
+        input_features = self._validate_and_reshape_mm_tensor(
+            input_features, 'input_features')
+        feature_attention_mask = self._validate_and_reshape_mm_tensor(
+            feature_attention_mask, 'feature_attention_mask')
         if not isinstance(input_features, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio input features. "
-                                 f"Got type: {type(input_features)}")
-        return Qwen2AudioInputs(input_features=input_features, feature_attention_mask=feature_attention_mask)
-    
+            raise ValueError("Incorrect type of audio input features. "
+                             f"Got type: {type(input_features)}")
+        return Qwen2AudioInputs(input_features=input_features,
+                                feature_attention_mask=feature_attention_mask)
+
     def _process_audio_input(self,
                              audio_input: Qwen2AudioInputs) -> torch.Tensor:
-
 
         input_features = audio_input["input_features"]
         feature_attention_mask = audio_input["feature_attention_mask"]
 
-        audio_feat_lengths, audio_output_lengths = self.audio_tower._get_feat_extract_output_lengths(
-                feature_attention_mask.sum(-1)
-            )
+        audio_feat_lengths, audio_output_lengths = (
+            self.audio_tower._get_feat_extract_output_lengths(
+            feature_attention_mask.sum(-1)))
 
         batch_size, _, max_mel_seq_len = input_features.shape
         max_seq_len = (max_mel_seq_len - 2) // 2 + 1
         # Create a sequence tensor of shape (batch_size, max_seq_len)
-        seq_range = (
-            torch.arange(0, max_seq_len, dtype=audio_feat_lengths.dtype, device=audio_feat_lengths.device)
-                .unsqueeze(0)
-                .expand(batch_size, max_seq_len)
-        )
-        lengths_expand = audio_feat_lengths.unsqueeze(-1).expand(batch_size, max_seq_len)
+        seq_range = (torch.arange(
+            0,
+            max_seq_len,
+            dtype=audio_feat_lengths.dtype,
+            device=audio_feat_lengths.device).unsqueeze(0).expand(
+                batch_size, max_seq_len))
+        lengths_expand = audio_feat_lengths.unsqueeze(-1).expand(
+            batch_size, max_seq_len)
         # Create mask
         padding_mask = seq_range >= lengths_expand
 
-        audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
-            batch_size, 1, max_seq_len, max_seq_len
-        )
+        audio_attention_mask_ = padding_mask.view(
+            batch_size, 1, 1, max_seq_len).expand(batch_size, 1, max_seq_len,
+                                                  max_seq_len)
         audio_attention_mask = audio_attention_mask_.to(
-            dtype=self.audio_tower.conv1.weight.dtype, device=self.audio_tower.conv1.weight.device
-        )
+            dtype=self.audio_tower.conv1.weight.dtype,
+            device=self.audio_tower.conv1.weight.device)
         audio_attention_mask[audio_attention_mask_] = float("-inf")
 
-        audio_outputs = self.audio_tower(input_features, attention_mask=audio_attention_mask)
+        audio_outputs = self.audio_tower(input_features,
+                                         attention_mask=audio_attention_mask)
         selected_audio_feature = audio_outputs.last_hidden_state
         audio_features = self.multi_modal_projector(selected_audio_feature)
         num_audios, max_audio_tokens, embed_dim = audio_features.shape
-        audio_features_mask = torch.arange(max_audio_tokens).expand(num_audios, max_audio_tokens).to(
-            audio_output_lengths.device
-        ) < audio_output_lengths.unsqueeze(1)
-        masked_audio_features = audio_features[audio_features_mask].view(-1, embed_dim)
+        audio_features_mask = torch.arange(max_audio_tokens).expand(
+            num_audios, max_audio_tokens
+        ).to(audio_output_lengths.device) < audio_output_lengths.unsqueeze(1)
+        masked_audio_features = audio_features[audio_features_mask].view(
+            -1, embed_dim)
 
         return masked_audio_features
-        
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            **kwargs: object,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        **kwargs: object,
     ) -> SamplerOutput:
         if intermediate_tensors is not None:
             input_ids = None
@@ -347,7 +376,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
                 inputs_embeds[mask, :] = masked_audio_features
 
                 input_ids = None
-        
+
         result = self.language_model(
             input_ids=input_ids,
             positions=positions,
@@ -364,9 +393,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
         return logits
 
     def sample(
-            self,
-            logits: torch.Tensor,
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
@@ -384,7 +413,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if self.config.text_config.tie_word_embeddings and "lm_head.weight" in name:
+            if (self.config.text_config.tie_word_embeddings
+                    and "lm_head.weight" in name):
                 continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
