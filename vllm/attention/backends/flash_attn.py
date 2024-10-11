@@ -111,11 +111,8 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Maximum query length in the batch.
     max_query_len: Optional[int]
 
-    # Number of query tokens for each request in the batch.
-    # Currently, we require that all requests have the same number of query
-    # tokens during the decoding phase. When speculavie decoding is enabled,
-    # decode_query_len might be greater than 1. In all other cases, it is 1.
-    decode_query_len: int
+    # Max number of query tokens among request in the batch.
+    decode_query_len: Optional[int]
 
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
@@ -126,11 +123,11 @@ class FlashAttentionMetadata(AttentionMetadata):
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
-    query_start_loc: torch.Tensor
+    query_start_loc: Optional[torch.Tensor]
     # (batch_size + 1,). The cumulative sequence lengths of the sequences in
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
-    seq_start_loc: torch.Tensor
+    seq_start_loc: Optional[torch.Tensor]
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
@@ -718,6 +715,7 @@ def unified_flash_attention(
         # Decoding run.
         # Use flash_attn_varlen_func kernel for speculative decoding
         # because different queries might have different lengths.
+        assert decode_meta.decode_query_len is not None
         if decode_meta.decode_query_len > 1:
             decode_output = flash_attn_varlen_func(
                 q=decode_query,

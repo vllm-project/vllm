@@ -121,10 +121,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
 
-    # Number of query tokens for each request in the batch.
-    # Currently, we require that all requests have the same number of query
-    # tokens during the decoding phase. When speculavie decoding is enabled,
-    # decode_query_len might be greater than 1. In all other cases, it is 1.
+    # Max number of query tokens among request in the batch.
     decode_query_len: Optional[int] = None
 
     _cached_prefill_metadata: Optional["ROCmFlashAttentionMetadata"] = None
