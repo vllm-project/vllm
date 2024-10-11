@@ -1,9 +1,10 @@
-# tests/models/decoder_only/vision_language/test_glm4v.py
-import pytest
 from typing import List, Optional, Tuple, Type
+
+import pytest
+
 from vllm.multimodal.utils import rescale_image_size
-from ....conftest import (IMAGE_ASSETS, HfRunner, 
-                          PromptImageInput, VllmRunner)
+
+from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
@@ -15,6 +16,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 models = ["THUDM/glm-4v-9b"]
 target_dtype = "bfloat16"
+
 
 def run_test(
     hf_runner: Type[HfRunner],
@@ -30,15 +32,14 @@ def run_test(
     distributed_executor_backend: Optional[str] = None,
 ):
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(
-            model,
-            max_model_len=4096,
-            max_num_seqs=1,
-            dtype=dtype,
-            limit_mm_per_prompt={"image": mm_limit},
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend=distributed_executor_backend,
-            enforce_eager=True) as vllm_model:
+    with vllm_runner(model,
+                     max_model_len=4096,
+                     max_num_seqs=1,
+                     dtype=dtype,
+                     limit_mm_per_prompt={"image": mm_limit},
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
         stop_token_ids = [151329, 151336, 151338]
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
@@ -52,12 +53,12 @@ def run_test(
         hf_model.model.get_output_embeddings = lambda: \
             hf_model.model.transformer.output_layer
         hf_outputs_per_image = [
-            hf_model.generate_greedy_logprobs_limit(prompts,
-                                                    max_tokens,
-                                                    num_logprobs=num_logprobs,
-                                                    images=images,
-                                                    )
-            for prompts, images in inputs
+            hf_model.generate_greedy_logprobs_limit(
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                images=images,
+            ) for prompts, images in inputs
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
@@ -68,6 +69,7 @@ def run_test(
             name_0="hf",
             name_1="vllm",
         )
+
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
