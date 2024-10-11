@@ -20,6 +20,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -68,7 +69,7 @@ class MPTAttention(nn.Module):
         else:
             self.total_num_kv_heads = self.total_num_heads
         assert not config.attn_config["prefix_lm"]
-        assert config.attn_config["alibi"]
+        assert config.attn_config["alibi"] or config.attn_config["rope"]
 
         # pylint: disable=invalid-name
         self.Wqkv = QKVParallelLinear(
@@ -105,13 +106,24 @@ class MPTAttention(nn.Module):
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        # Create the alibi slopes and slice them.
-        tp_rank = get_tensor_model_parallel_rank()
-        head_start = tp_rank * self.num_heads
-        head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _get_alibi_slopes(self.total_num_heads,
-                                         self.alibi_bias_max)
-        alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+
+        alibi_slopes = None
+        self.rotary_emb = None
+        if config.attn_config["alibi"]:
+            # Create the alibi slopes and slice them.
+            tp_rank = get_tensor_model_parallel_rank()
+            head_start = tp_rank * self.num_heads
+            head_end = (tp_rank + 1) * self.num_heads
+            alibi_slopes = _get_alibi_slopes(self.total_num_heads,
+                                             self.alibi_bias_max)
+            alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+        elif config.attn_config["rope"]:
+            self.rotary_emb = get_rope(
+                config.d_model // config.n_heads,
+                rotary_dim=config.d_model // config.n_heads,
+                max_position=config.max_seq_len,
+                base=config.attn_config["rope_theta"],
+            )
 
         self.head_dim = self.d_model // self.total_num_heads
         scaling = self.head_dim**-0.5
@@ -129,7 +141,6 @@ class MPTAttention(nn.Module):
         position_ids: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        del position_ids  # unused.
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
@@ -137,6 +148,8 @@ class MPTAttention(nn.Module):
         if self.qk_ln:
             q = self.q_ln(q)
             k = self.k_ln(k)
+        if self.rotary_emb:
+            q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.out_proj(attn_output)
         return output
