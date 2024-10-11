@@ -240,6 +240,7 @@ async def test_multi_step_pp_smoke(
 ])
 @pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
 @pytest.mark.parametrize("is_async", [True])
+@pytest.mark.parametrize("num_logprobs", [None, 5])
 @pytest.mark.asyncio
 async def test_multi_step_llm_best_of_fallback_async_server(
     monkeypatch,
@@ -255,6 +256,7 @@ async def test_multi_step_llm_best_of_fallback_async_server(
     best_of: int,
     attention_backend: str,
     is_async: bool,
+    num_logprobs: Optional[int],
 ) -> None:
     """Test vLLM engine with multi-step & best_of > 1
 
@@ -318,7 +320,7 @@ async def test_multi_step_llm_best_of_fallback_async_server(
         prompts,
         model,
         server_args + distributed_args,
-        None,
+        num_logprobs,
         max_wait_seconds=5 * 240,
         best_of=best_of,
         n=n,
@@ -329,7 +331,7 @@ async def test_multi_step_llm_best_of_fallback_async_server(
         prompts,
         model,
         ms_server_args + distributed_args,
-        None,
+        num_logprobs,
         max_wait_seconds=5 * 240,
         best_of=best_of,
         n=n,
