@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo wget numactl gcc-10 g++-10 libtcmalloc-minimal4 libnuma-dev libc6 \
+    && apt-get install -y ccache software-properties-common git curl sudo \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
@@ -48,6 +48,7 @@ COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
+
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -91,22 +92,6 @@ ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
-ENV VLLM_CPU_DISABLE_AVX512="true"
-
-# install oneDNN
-RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
-
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
-    cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \ 
-    -DONEDNN_BUILD_DOC=OFF \ 
-    -DONEDNN_BUILD_EXAMPLES=OFF \ 
-    -DONEDNN_BUILD_TESTS=OFF \ 
-    -DONEDNN_BUILD_GRAPH=OFF \ 
-    -DONEDNN_ENABLE_WORKLOAD=INFERENCE \ 
-    -DONEDNN_ENABLE_PRIMITIVE=MATMUL && \
-    cmake --build ./oneDNN/build --target install --config Release
-
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \

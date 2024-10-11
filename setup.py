@@ -286,6 +286,10 @@ def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
 
+def _build_custom_ops() -> bool:
+    return _is_cuda() or _is_hip() or _is_cpu()
+
+
 def _build_core_ext() -> bool:
     return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu())
 
@@ -465,15 +469,7 @@ if _is_cuda():
     ext_modules.append(
         CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
 
-# CUDA, HIP and CPU need custom ops
-if _is_cpu():
-    ext_modules.append(CMakeExtension(name="vllm._C_cpu"))
-elif _is_cuda():
-    # Cuda backend also needs cpu ops to support
-    # heterogeneous speculative decoding.
-    ext_modules.append(CMakeExtension(name="vllm._C"))
-    ext_modules.append(CMakeExtension(name="vllm._C_cpu"))
-elif _is_hip():
+if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {

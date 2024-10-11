@@ -101,21 +101,16 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+#
+# Forward the non-CUDA device extensions to external CMake scripts.
+#
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
-    NOT VLLM_TARGET_DEVICE STREQUAL "rocm" AND
-    NOT VLLM_TARGET_DEVICE STREQUAL "cpu")
-    return()
-endif()
-
-#
-# The CUDA device extensions need CPU CMake scripts to support Heterogeneous Speculative Decoding.
-#
-if (NOT HIP_FOUND AND CUDA_FOUND)
-    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
-endif()
-
-if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
+    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    else()
+        return()
+    endif()
     return()
 endif()
 
