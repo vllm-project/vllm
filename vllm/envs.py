@@ -206,6 +206,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
     "VLLM_TORCH_COMPILE_LEVEL":
     lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
+    # Fine-grained control over which custom ops to enable.
+    # Use 'all' to enable all, 'none' to disable all.
+    # Also specify a list of custom op names to enable,
+    # or disable if the name is prefixed with a '-'.
+    # Examples:
+    # - 'all,-op1' to enable all except op1
+    # - 'none,op1,op2' to enable only op1 and op2
+    # By default, all custom ops are enabled when running without Inductor
+    # and disabled when running with Inductor (compile_level >= Inductor).
     "VLLM_ENABLE_CUSTOM_OPS":
     lambda: os.environ.get("VLLM_ENABLE_CUSTOM_OPS", "").replace(" ", "").
     split(","),
