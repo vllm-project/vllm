@@ -206,8 +206,10 @@ class FlashAttentionMetadata(AttentionMetadata):
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=self.query_start_loc[self.num_prefills:],
-            seq_start_loc=self.seq_start_loc[self.num_prefills:],
+            query_start_loc=self.query_start_loc[self.num_prefills:]
+            if self.query_start_loc is not None else None,
+            seq_start_loc=self.seq_start_loc[self.num_prefills:]
+            if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
