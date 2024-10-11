@@ -230,6 +230,7 @@ async def test_multi_step_pp_smoke(
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.executor.gpu_executor import GPUExecutor, GPUExecutorAsync
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -246,7 +247,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 @pytest.mark.parametrize("enable_chunked_prefill", [True, False])
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
 @pytest.mark.asyncio
-async def test_multi_step_llm_best_of_fallback_async(
+def test_multi_step_llm_best_of_fallback_async(
     vllm_runner,
     example_prompts,
     model: str,
@@ -300,26 +301,40 @@ async def test_multi_step_llm_best_of_fallback_async(
         seed=42,
     )
 
-        # prompt = (
-        # "You are a helpful assistant. How do I build a car from cardboard and "
-        # "paper clips? Is there an easy to follow video tutorial available "
-        # "online for free?")
-        # prompt2 = (
-        #     " Please recommend to me some resources where I can learn not only to "
-        #     "handle technical difficulties of building a car, but also "
-        #     "decoration.")
+    prompt = (
+    "You are a helpful assistant. How do I build a car from cardboard and "
+    "paper clips? Is there an easy to follow video tutorial available "
+    "online for free?")
+    prompt2 = (
+        " Please recommend to me some resources where I can learn not only to "
+        "handle technical difficulties of building a car, but also "
+        "decoration.")
 
 
     engine_args = AsyncEngineArgs(model=model,
                                   block_size=16,
                                   use_v2_block_manager=True,
-                                  num_scheduler_steps=8)
+                                  num_scheduler_steps=8,
+                                  distributed_executor_backend=GPUExecutorAsync)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     # sampling_params = SamplingParams(max_tokens=2,
     #                                  temperature=1.0,
     #                                  best_of=3,
     #                                  n=2)
+    engine.start_background_loop()
+    x=None
+    try:
+        #engine.add_request("0", "foo", sampling_params)
+        #asyncio.run(engine.engine_step(0))
+        l =engine.generate(prompt,sampling_params,"0")
+
+        print(x)
+    except Exception as e:
+        x=e
+        print("error")
+    finally:
+        engine.shutdown_background_loop()
     
-    engine.add_request("0", "foo", sampling_params)
-    asyncio.run(engine.engine_step(0))
+    if x is not None:
+        raise x
