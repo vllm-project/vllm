@@ -3,6 +3,7 @@ image support for different VLMs in vLLM.
 """
 from enum import Enum
 import itertools
+import os
 import re
 from typing import (Any, Callable, Dict, List, NamedTuple, Optional, Tuple,
                     Type, Union)
@@ -16,7 +17,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
-from vllm.utils import identity, is_cpu, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import identity, is_cpu, is_hip, STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close, check_outputs_equal
@@ -88,7 +89,8 @@ SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
-
+# phi3v testing
+MULTI_IMAGE_BASE_PROMPT = f"{TEST_IMG_PLACEHOLDER}{TEST_IMG_PLACEHOLDER}Describe these images."
 
 def replace_test_img_placeholders(prompt: str,
                                   img_idx_to_prompt: Callable) -> str:
@@ -345,6 +347,20 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=minicmpv_trunc_hf_output,
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id]
     ),
+    "phi3v": VLMTestInfo(
+        models="microsoft/Phi-3.5-vision-instruct",
+        supports_multi_image=True,
+        img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
+        vllm_output_post_proc=phi3v_vllm_to_hf_output,
+        num_logprobs=10,
+        max_model_len=4096,
+        max_num_seqs=2,
+        use_tokenizer_eos=True,
+        # use eager mode for hf runner, since phi3v didn't work with flash_attn
+        model_kwargs={"_attn_implementation": "eager"},
+    ),
+
     ## Tests above this point have been validated to align with current tests 
 
     # "intern_vl": VLMTestInfo(
@@ -355,14 +371,6 @@ VLM_TEST_SETTINGS = {
     #     num_logprobs=10,
     #     max_model_len=4096,
     # ),
-    # "phi3v": VLMTestInfo(
-    #     models="microsoft/Phi-3.5-vision-instruct",
-    #     supports_multi_image=True,
-    #     img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
-    #     prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
-    #     vllm_output_post_proc=phi3v_vllm_to_hf_output,
-    #     num_logprobs=10,
-    # ),
     # "qwen": VLMTestInfo(
     #     models="Qwen/Qwen-VL",
     #     supports_multi_image=True,
@@ -372,7 +380,6 @@ VLM_TEST_SETTINGS = {
 }
 # yapf: enable
 
-# @pytest.mark.skip("Disabled for testing multi-image")
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
     get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.IMAGE))
@@ -420,6 +427,7 @@ def test_single_image_generation(model_type: str, model: str, max_tokens: int,
         comparator=test_info.comparator,
         get_stop_token_ids=test_info.get_stop_token_ids,
         limit_mm_per_prompt={"image": 1},
+        model_kwargs=test_info.model_kwargs,
     )
 
 
@@ -476,6 +484,7 @@ def test_embedding_generation(model_type: str, model: str, max_tokens: int,
         get_stop_token_ids=test_info.get_stop_token_ids,
         vllm_embeddings=embeddings,
         limit_mm_per_prompt={"image": 1},
+        model_kwargs=test_info.model_kwargs,
     )
 
 
@@ -524,6 +533,7 @@ def test_multi_image_generation(model_type: str, model: str, max_tokens: int,
         comparator=test_info.comparator,
         get_stop_token_ids=test_info.get_stop_token_ids,
         limit_mm_per_prompt={"image": 2},
+        model_kwargs=test_info.model_kwargs,
     )
 
 
@@ -549,7 +559,15 @@ def run_test(
     get_stop_token_ids: Optional[Callable],
     limit_mm_per_prompt: Dict[str, int],
     vllm_embeddings: Optional[torch.Tensor]=None,
+    model_kwargs: Optional[Dict[str, Any]]=None,
 ):
+    # This hack is needed for phi3v models
+    # ROCm Triton FA can run into shared memory issues with these models,
+    # use other backends in the meantime
+    # FIXME (mattwong, gshtrasb, hongxiayan)
+    if is_hip():
+        os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
+
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
@@ -585,7 +603,9 @@ def run_test(
     if use_tokenizer_eos:
         opt_hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
 
-    hf_model = hf_runner(model, dtype=dtype, auto_cls=auto_cls, postprocess_inputs=postprocess_inputs) 
+    hf_model = hf_runner(model, dtype=dtype, auto_cls=auto_cls,
+                         postprocess_inputs=postprocess_inputs,
+                         model_kwargs=model_kwargs)
     with hf_model, torch.no_grad():
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
