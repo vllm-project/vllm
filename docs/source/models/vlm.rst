@@ -25,7 +25,7 @@ The :class:`~vllm.LLM` class can be instantiated in much the same way as languag
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptType`:
 
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
-* ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
+* ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`.
 
 .. code-block:: python
 
@@ -34,7 +34,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptT
 
     # Load the image using PIL.Image
     image = PIL.Image.open(...)
-    
+
     # Single prompt inference
     outputs = llm.generate({
         "prompt": prompt,
@@ -57,18 +57,25 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptT
         print(generated_text)
 
     # Inference with image embeddings as input with additional parameters
-    # Specifically, we are conducting a trial run of Qwen2VL with the new input format, as the model utilizes additional parameters for calculating positional encoding.
-    image_embeds = torch.load(...) # torch.Tensor of shape (1, image_feature_size, hidden_size of LM)
-    image_grid_thw = torch.load(...) # torch.Tensor of shape (1, 3)
+    # Specifically, we are conducting a trial run of Qwen2VL and MiniCPM-V with the new input format, which utilizes additional parameters.
+    mm_data = {}
+
+    image_embeds = torch.load(...) # torch.Tensor of shape (num_images, image_feature_size, hidden_size of LM)
+    # For Qwen2VL, image_grid_thw is needed to calculate positional encoding.
     mm_data['image'] = {
         "image_embeds": image_embeds,
-        "image_grid_thw":  image_grid_thw,
+        "image_grid_thw": torch.load(...) # torch.Tensor of shape (1, 3),
+    }
+    # For MiniCPM-V, image_size_list is needed to calculate details of the sliced image.
+    mm_data['image'] = {
+        "image_embeds": image_embeds,
+        "image_size_list": [image.size] # list of image sizes
     }
     outputs = llm.generate({
         "prompt": prompt,
         "multi_modal_data": mm_data,
     })
-    
+
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
@@ -116,7 +123,7 @@ Instead of passing in a single image, you can pass in a list of images.
 .. code-block:: python
 
     # Refer to the HuggingFace repo for the correct format to use
-    prompt = "<|user|>\n<image_1>\n<image_2>\nWhat is the content of each image?<|end|>\n<|assistant|>\n"
+    prompt = "<|user|>\n<|image_1|>\n<|image_2|>\nWhat is the content of each image?<|end|>\n<|assistant|>\n"
 
     # Load the images using PIL.Image
     image1 = PIL.Image.open(...)
@@ -134,6 +141,33 @@ Instead of passing in a single image, you can pass in a list of images.
         print(generated_text)
 
 A code example can be found in `examples/offline_inference_vision_language_multi_image.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language_multi_image.py>`_.
+
+Multi-image input can be extended to perform video captioning. We show this with `Qwen2-VL <https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct>`_ as it supports videos:
+
+.. code-block:: python
+
+    # Specify the maximum number of frames per video to be 4. This can be changed.
+    llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
+
+    # Create the request payload.
+    video_frames = ... # load your video making sure it only has the number of frames specified earlier.
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this set of frames. Consider the frames to be a part of the same video."},
+        ],
+    }
+    for i in range(len(video_frames)):
+        base64_image = encode_image(video_frames[i]) # base64 encoding.
+        new_image = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        message["content"].append(new_image)
+
+    # Perform inference and log output.
+    outputs = llm.chat([message])
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
 
 Online Inference
 ----------------
