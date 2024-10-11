@@ -347,7 +347,7 @@ Text Generation
     - 
     - ✅︎
   * - :code:`ChatGLMModel`
-    - GLM-4v
+    - GLM-4V
     - Image
     - :code:`THUDM/glm-4v-9b` etc.
     - 
