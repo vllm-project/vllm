@@ -115,7 +115,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Currently, we require that all requests have the same number of query
     # tokens during the decoding phase. When speculavie decoding is enabled,
     # decode_query_len might be greater than 1. In all other cases, it is 1.
-    decode_query_len: Optional[int]
+    decode_query_len: int
 
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
@@ -126,11 +126,11 @@ class FlashAttentionMetadata(AttentionMetadata):
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
-    query_start_loc: Optional[torch.Tensor]
+    query_start_loc: torch.Tensor
     # (batch_size + 1,). The cumulative sequence lengths of the sequences in
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
-    seq_start_loc: Optional[torch.Tensor]
+    seq_start_loc: torch.Tensor
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
@@ -206,8 +206,8 @@ class FlashAttentionMetadata(AttentionMetadata):
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=None,
-            seq_start_loc=None,
+            query_start_loc=self.query_start_loc[self.num_prefills:],
+            seq_start_loc=self.seq_start_loc[self.num_prefills:],
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
@@ -714,20 +714,36 @@ def unified_flash_attention(
 
     if decode_meta := attn_metadata.decode_metadata:
         # Decoding run.
-        _, num_head, head_dim = decode_query.shape
-        decode_query = decode_query.reshape(-1, decode_meta.decode_query_len,
-                                            num_head, head_dim)
-        decode_output = flash_attn_with_kvcache(
-            q=decode_query,
-            k_cache=key_cache,
-            v_cache=value_cache,
-            block_table=decode_meta.block_tables,
-            cache_seqlens=decode_meta.seq_lens_tensor,
-            softmax_scale=softmax_scale,
-            causal=True,
-            alibi_slopes=alibi_slopes,
-            softcap=logits_soft_cap,
-        ).squeeze(1)
+        # Use flash_attn_varlen_func kernel for speculative decoding
+        # because different queries might have different lengths.
+        if decode_meta.decode_query_len > 1:
+            decode_output = flash_attn_varlen_func(
+                q=decode_query,
+                k=key_cache,
+                v=value_cache,
+                cu_seqlens_q=decode_meta.query_start_loc,
+                max_seqlen_q=decode_meta.decode_query_len,
+                cu_seqlens_k=decode_meta.seq_start_loc,
+                max_seqlen_k=decode_meta.max_decode_seq_len,
+                softmax_scale=softmax_scale,
+                causal=True,
+                alibi_slopes=alibi_slopes,
+                softcap=logits_soft_cap,
+                block_table=decode_meta.block_tables,
+            )
+        else:
+            # Use flash_attn_with_kvcache for normal decoding.
+            decode_output = flash_attn_with_kvcache(
+                q=decode_query.unsqueeze(1),
+                k_cache=key_cache,
+                v_cache=value_cache,
+                block_table=decode_meta.block_tables,
+                cache_seqlens=decode_meta.seq_lens_tensor,
+                softmax_scale=softmax_scale,
+                causal=True,
+                alibi_slopes=alibi_slopes,
+                softcap=logits_soft_cap,
+            ).squeeze(1)
 
     if prefill_output is None:
         assert decode_output is not None
@@ -739,7 +755,6 @@ def unified_flash_attention(
     # Chunked prefill does not work with speculative decoding.
     # Therefore, the query length for decode should be 1 in chunked prefill.
     assert decode_meta is not None
-    assert decode_meta.decode_query_len == 1
     decode_output = decode_output.squeeze(1)
     output = torch.cat([prefill_output, decode_output], dim=0)
     return output.view(num_tokens, hidden_size)
