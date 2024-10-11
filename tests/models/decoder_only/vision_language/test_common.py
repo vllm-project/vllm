@@ -49,9 +49,13 @@ class VLMTestInfo(NamedTuple):
     enforce_eager: bool = True
     max_model_len: int = 1024
     max_num_seqs: int = 256
-    use_tokenizer_eos: bool = False
+    # Optional callable which gets a list of token IDs from the model tokenizer
+    get_stop_token_ids: Optional[Callable] = None
+
     # Exposed options for HF runner
     model_kwargs: Optional[Dict[str, Any]] = None
+     # Indicates we should explicitly pass the EOS from the tokeniezr
+    use_tokenizer_eos: bool = False
     auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM
     # Callable to pass to the HF runner to run on inputs 
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding] = identity
@@ -177,7 +181,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
     return list(itertools.chain(*cases_by_model_type))
 
 
-### Sanitation utilities for different models
+### Post-processors for vLLM outputs
 def blip2_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
                                                Optional[SampleLogprobs]],
                             model: str):
@@ -249,6 +253,16 @@ def phi3v_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
     return hf_output_ids, hf_output_str, out_logprobs
 
+### Post-processors for HF outputs
+def minicmpv_trunc_hf_output(hf_output: Tuple[List[int], str,
+                                              Optional[SampleLogprobs]],
+                             model: str):
+    output_ids, output_str, out_logprobs = hf_output
+    if output_str.endswith("<|eot_id|>"):
+        output_str = output_str.split("<|eot_id|>")[0]
+    return output_ids, output_str, out_logprobs
+
+
 ### Common postprocessors to run on HF BatchEncoding
 # NOTE: It would be helpful to rewrite this to be configured in the test info,
 # but built inside of the test so that we don't need to specify the dtype twice
@@ -262,6 +276,10 @@ def get_key_type_post_processor(
         hf_inputs[hf_inp_key] = hf_inputs[hf_inp_key].to(torch_dtype)
         return hf_inputs
     return process
+
+
+def wrap_inputs_post_processor(hf_inputs: BatchEncoding) -> BatchEncoding:
+    return BatchEncoding({"model_inputs": hf_inputs})
 
 ### Funcs for getting embeddings
 def get_llava_embeddings(image_assets: _ImageAssets):
@@ -316,8 +334,19 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         convert_assets_to_embeddings=get_llava_embeddings,
     ),
+    "minicpmv": VLMTestInfo(
+        models="openbmb/MiniCPM-Llama3-V-2_5",
+        supports_multi_image=True,
+        img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        postprocess_inputs=wrap_inputs_post_processor,
+        max_model_len=4096,
+        max_num_seqs=2,
+        hf_output_post_proc=minicmpv_trunc_hf_output,
+        get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id]
+    ),
+    ## Tests above this point have been validated to align with current tests 
 
-    ## Tests beyond this point have been validated to align with current tests 
     # "intern_vl": VLMTestInfo(
     #     models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
     #     supports_multi_image=True,
@@ -325,12 +354,6 @@ VLM_TEST_SETTINGS = {
     #     dtype="bfloat16" if is_cpu() else "half",
     #     num_logprobs=10,
     #     max_model_len=4096,
-    # ),
-    # "minicpmv": VLMTestInfo(
-    #     models="openbmb/MiniCPM-Llama3-V-2_5",
-    #     supports_multi_image=True,
-    #     img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
-    #     prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
     # ),
     # "phi3v": VLMTestInfo(
     #     models="microsoft/Phi-3.5-vision-instruct",
@@ -349,6 +372,7 @@ VLM_TEST_SETTINGS = {
 }
 # yapf: enable
 
+# @pytest.mark.skip("Disabled for testing multi-image")
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
     get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.IMAGE))
@@ -394,9 +418,14 @@ def test_single_image_generation(model_type: str, model: str, max_tokens: int,
         use_tokenizer_eos=test_info.use_tokenizer_eos,
         postprocess_inputs=test_info.postprocess_inputs,
         comparator=test_info.comparator,
+        get_stop_token_ids=test_info.get_stop_token_ids,
+        limit_mm_per_prompt={"image": 1},
     )
 
 
+@pytest.mark.skipif(not any(test.convert_assets_to_embeddings
+                            for test in VLM_TEST_SETTINGS.values()),
+                    reason="No models with image embedding tests are enabled.")
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
     get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.EMBEDDING))
@@ -444,52 +473,58 @@ def test_embedding_generation(model_type: str, model: str, max_tokens: int,
         use_tokenizer_eos=test_info.use_tokenizer_eos,
         postprocess_inputs=test_info.postprocess_inputs,
         comparator=test_info.comparator,
+        get_stop_token_ids=test_info.get_stop_token_ids,
         vllm_embeddings=embeddings,
+        limit_mm_per_prompt={"image": 1},
     )
 
 
 ### Multi-image generation tests [only for VLMs that support it]
-# @pytest.mark.skipif(not any(test.supports_multi_image
-#                             for test in VLM_TEST_SETTINGS.values()),
-#                     reason="No models with multi-image tests are enabled.")
-# @pytest.mark.parametrize("size_factors", SIZE_FACTORS)
-# @pytest.mark.parametrize(
-#     "model_type,model,max_tokens,num_logprobs,dtype",
-#     get_parametrized_options(VLM_TEST_SETTINGS, is_multi_image=True))
-# def test_multi_image_generation(model_type: str, model: str, max_tokens: int,
-#                                 num_logprobs: int, dtype: str,
-#                                 size_factors: List[float],
-#                                 hf_runner: Type[HfRunner],
-#                                 vllm_runner: Type[VllmRunner],
-#                                 image_assets: _ImageAssets):
-#     test_info = VLM_TEST_SETTINGS[model_type]
-#     model_prompt = get_model_prompts([MULTI_IMAGE_BASE_PROMPT],
-#                                      test_info.img_idx_to_prompt,
-#                                      test_info.prompt_formatter)[0]
+@pytest.mark.skipif(not any(test.supports_multi_image
+                            for test in VLM_TEST_SETTINGS.values()),
+                    reason="No models with multi-image tests are enabled.")
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
+    get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.MULTI_IMAGE))
+def test_multi_image_generation(model_type: str, model: str, max_tokens: int,
+                                 num_logprobs: int, dtype: str,
+                                 size_factors: Tuple[float], hf_runner,
+                                 vllm_runner, image_assets: _ImageAssets):
+    test_info = VLM_TEST_SETTINGS[model_type]
+    model_prompt = get_model_prompts([MULTI_IMAGE_BASE_PROMPT],
+                                     test_info.img_idx_to_prompt,
+                                     test_info.prompt_formatter)[0]
 
-#     images = [asset.pil_image for asset in image_assets]
 
-#     # This is similar to the single image case, but we rescale each of the
-#     # images in the multi-image prompt; currently we only have one model prompt
-#     inputs = [([model_prompt for _ in size_factors],
-#                [[rescale_image_size(image, factor) for image in images]
-#                 for factor in size_factors])]
+    images = [asset.pil_image for asset in image_assets]
 
-#     run_test(
-#         hf_runner=hf_runner,
-#         vllm_runner=vllm_runner,
-#         inputs=inputs,
-#         model=model,
-#         dtype=dtype,
-#         max_tokens=max_tokens,
-#         num_logprobs=num_logprobs,
-#         tensor_parallel_size=test_info.tensor_parallel_size,
-#         enforce_eager=test_info.enforce_eager,
-#         max_model_len=test_info.max_model_len,
-#         max_num_seqs=test_info.max_num_seqs,
-#         vllm_output_post_proc=test_info.vllm_output_post_proc,
-#         auto_cls=test_info.auto_cls,
-#     )
+    # This is similar to the single image case, but we rescale each of the
+    # images in the multi-image prompt; currently we only have one model prompt
+    inputs = [([model_prompt for _ in size_factors],
+               [[rescale_image_size(image, factor) for image in images]
+                for factor in size_factors])]
+
+    run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=test_info.tensor_parallel_size,
+        enforce_eager=test_info.enforce_eager,
+        max_model_len=test_info.max_model_len,
+        max_num_seqs=test_info.max_num_seqs,
+        hf_output_post_proc=test_info.hf_output_post_proc,
+        vllm_output_post_proc=test_info.vllm_output_post_proc,
+        auto_cls=test_info.auto_cls,
+        use_tokenizer_eos=test_info.use_tokenizer_eos,
+        postprocess_inputs=test_info.postprocess_inputs,
+        comparator=test_info.comparator,
+        get_stop_token_ids=test_info.get_stop_token_ids,
+        limit_mm_per_prompt={"image": 2},
+    )
 
 
 def run_test(
@@ -511,26 +546,35 @@ def run_test(
     use_tokenizer_eos: bool,
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
     comparator: Callable,
-    vllm_embeddings: Optional[torch.Tensor] = None
+    get_stop_token_ids: Optional[Callable],
+    limit_mm_per_prompt: Dict[str, int],
+    vllm_embeddings: Optional[torch.Tensor]=None,
 ):
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
+    opt_vllm_kwargs = {}
+    if get_stop_token_ids is not None:
+        opt_vllm_kwargs["stop_token_ids"] = get_stop_token_ids(tokenizer)
+
     with vllm_runner(model,
                      max_model_len=max_model_len,
                      max_num_seqs=max_num_seqs,
                      dtype=dtype,
+                     limit_mm_per_prompt=limit_mm_per_prompt,
                      tensor_parallel_size=tensor_parallel_size,
                      enforce_eager=enforce_eager) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=images)
+                                                images=images,
+                                                **opt_vllm_kwargs)
             for prompts, images in vllm_inputs
         ]
 
@@ -539,16 +583,16 @@ def run_test(
     # agree on the EOS, and pull it off the tokenizer if requested.
     opt_hf_kwargs = {}
     if use_tokenizer_eos:
-        opt_hf_kwargs["eos_token_id"] = AutoTokenizer.from_pretrained(
-            model
-        ).eos_token_id
+        opt_hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
 
-    with hf_runner(model, dtype=dtype, auto_cls=auto_cls, postprocess_inputs=postprocess_inputs) as hf_model:
+    hf_model = hf_runner(model, dtype=dtype, auto_cls=auto_cls, postprocess_inputs=postprocess_inputs) 
+    with hf_model, torch.no_grad():
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=images,
+                                                    tokenizer=tokenizer,
                                                     **opt_hf_kwargs)
             for prompts, images in inputs
         ]
