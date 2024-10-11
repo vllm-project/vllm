@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.forward_context import get_forward_context
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -137,48 +137,111 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
-        num_tokens, hidden_size = query.shape
-        # Reshape the query, key, and value tensors.
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
-
-        if kv_cache is not None:
-            key_cache = kv_cache[0]
-            value_cache = kv_cache[1]
-
-            # Reshape the input keys and values and store them in the cache.
-            # If kv_cache is not provided, the new key and value tensors are
-            # not cached. This happens during the initial memory profiling run.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                kv_cache[0],
-                kv_cache[1],
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                k_scale,
-                v_scale,
-            )
-
-        if (attn_metadata.block_table is None
-                or attn_metadata.block_table.numel() == 0):
-            # Profiling run.
-            output = torch.empty_like(query)
-            return output
-
-        output = flash_attn_varlen_func(  # noqa
-            q=query,
-            k=key_cache,
-            v=value_cache,
-            cu_seqlens_q=attn_metadata.query_start_loc,
-            max_seqlen_q=attn_metadata.max_query_len,
-            cu_seqlens_k=attn_metadata.seq_start_loc,
-            max_seqlen_k=attn_metadata.max_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            alibi_slopes=self.alibi_slopes,
-            block_table=attn_metadata.block_table,
-            softcap=self.logits_soft_cap,
+        output = torch.ops.vllm.unified_flash_attention(
+            query,
+            key,
+            value,
+            self.num_heads,
+            self.head_size,
+            self.num_kv_heads,
+            kv_cache,
+            self.kv_cache_dtype,
+            k_scale,
+            v_scale,
+            self.scale,
+            self.sliding_window,
+            self.alibi_slopes,
+            self.logits_soft_cap,
         )
-        return output.view(num_tokens, hidden_size)
+        return output
+
+
+@torch.library.custom_op("vllm::unified_flash_attention",
+                         mutates_args=["kv_cache"])
+def unified_flash_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    kv_cache: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+    softmax_scale: float,
+    window_size: Optional[List[int]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    logits_soft_cap: Optional[float] = None,
+) -> torch.Tensor:
+    current_metadata = get_forward_context()
+    assert current_metadata is not None
+    assert isinstance(current_metadata, FlashAttentionMetadata)
+    attn_metadata: FlashAttentionMetadata = current_metadata
+
+    num_tokens, hidden_size = query.shape
+    # Reshape the query, key, and value tensors.
+    query = query.view(-1, num_heads, head_size)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
+
+    if kv_cache is not None:
+        key_cache = kv_cache[0]
+        value_cache = kv_cache[1]
+
+        # Reshape the input keys and values and store them in the cache.
+        # If kv_cache is not provided, the new key and value tensors are
+        # not cached. This happens during the initial memory profiling run.
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key,
+            value,
+            kv_cache[0],
+            kv_cache[1],
+            attn_metadata.slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+
+    if (attn_metadata.block_table is None
+            or attn_metadata.block_table.numel() == 0):
+        # Profiling run.
+        output = torch.empty_like(query)
+        return output
+
+    output = flash_attn_varlen_func(  # noqa
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=attn_metadata.query_start_loc,
+        max_seqlen_q=attn_metadata.max_query_len,
+        cu_seqlens_k=attn_metadata.seq_start_loc,
+        max_seqlen_k=attn_metadata.max_seq_len,
+        softmax_scale=softmax_scale,
+        causal=True,
+        alibi_slopes=alibi_slopes,
+        window_size=window_size,
+        block_table=attn_metadata.block_table,
+        softcap=logits_soft_cap,
+    )
+    return output.view(num_tokens, hidden_size)
+
+
+@unified_flash_attention.register_fake
+def _(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    kv_cache: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+    softmax_scale: float,
+    window_size: Optional[List[int]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    logits_soft_cap: Optional[float] = None,
+) -> torch.Tensor:
+    return torch.empty_like(query)

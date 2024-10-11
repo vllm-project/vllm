@@ -17,6 +17,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import (DeviceMemoryProfiler, is_pin_memory_available, cdiv,
                         STR_DTYPE_TO_TORCH_DTYPE)
 from vllm.multimodal import MultiModalDataDict
+from vllm.forward_context import set_forward_context
 
 from vllm_v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm_v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -308,12 +309,13 @@ class GPUModelRunner:
         inputs = self._prepare_inputs(scheduler_output)
         input_ids, positions, attn_metadata, logits_indices = inputs
 
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            kv_caches=self.kv_caches,
-            attn_metadata=attn_metadata,
-        )
+        with set_forward_context(attn_metadata):
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                kv_caches=self.kv_caches,
+                attn_metadata=attn_metadata,
+            )
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)
 
