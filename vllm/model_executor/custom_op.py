@@ -3,7 +3,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils import is_cpu, is_hip, is_xpu
-from vllm.platforms import current_platform
 
 
 class CustomOp(nn.Module):
