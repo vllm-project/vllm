@@ -103,7 +103,6 @@ class TTExecutor(ExecutorBase):
 class TTExecutorAsync(TTExecutor, ExecutorAsyncBase):
 
     def __init__(self, *args, **kwargs):
-        logger.warning("TTExecutorAsync currently executes models synchronously since TT models are not yet thread safe.")
         super().__init__(*args, **kwargs)
 
     async def execute_model_async(
