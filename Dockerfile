@@ -181,8 +181,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /etc/environment && \
-    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.6/flashinfer-0.1.6+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl && \
-    python3 -m pip install intel_extension_for_pytorch==2.4.0
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.6/flashinfer-0.1.6+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
 COPY examples examples
 #################### vLLM installation IMAGE ####################
 
@@ -214,6 +213,10 @@ FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer 'modelscope!=1.15.0' bitsandbytes>=0.44.0 timm==0.9.10
+
+# install ipex for speculative decoding with cpu draft model
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install intel_extension_for_pytorch==2.4.0
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
