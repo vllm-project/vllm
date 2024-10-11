@@ -20,7 +20,7 @@ class RMSNorm(CustomOp):
         eps: float = 1e-6,
         var_hidden_size: Optional[int] = None,
     ) -> None:
-        super().__init__()
+        super().__init__("rms_norm")
 
         self.hidden_size = hidden_size
         self.variance_epsilon = eps
@@ -135,7 +135,7 @@ class GemmaRMSNorm(CustomOp):
         hidden_size: int,
         eps: float = 1e-6,
     ) -> None:
-        super().__init__()
+        super().__init__("gemma_rms_norm")
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
