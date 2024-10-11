@@ -8,30 +8,31 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise)
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import (ScaledMMLinearKernel, ScaledMMLinearLayerConfig)
+from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
+                                   ScaledMMLinearLayerConfig)
+
 
 class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
-    
+
     @classmethod
     def get_min_capability(cls) -> Optional[int]:
         return 75
 
     @classmethod
-    def can_implement(cls,
-                      c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-        
-        if (not current_platform.is_cuda() and 
-            not current_platform.is_cpu()):
-            return False, f"CutlassScaledMM requires running on CUDA or CPU."
+    def can_implement(
+            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
 
-        return True
+        if (not current_platform.is_cuda() and not current_platform.is_cpu()):
+            return False, "CutlassScaledMM requires running on CUDA or CPU."
+
+        return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # Cutlass kernels need transposed weight.
         weight = getattr(layer, self.w_q_name)
         replace_parameter(
-            layer, self.w_q_name, 
+            layer, self.w_q_name,
             torch.nn.Parameter(weight.t().data, requires_grad=False))
 
         # WEIGHT SCALE
@@ -61,10 +62,8 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 # reconstruct the ranges
                 int8_traits = torch.iinfo(torch.int8)
                 azps = input_zero_point.to(dtype=torch.int32)
-                range_max = (input_scale *
-                             (int8_traits.max - azps)).max()
-                range_min = (input_scale *
-                             (int8_traits.min - azps)).min()
+                range_max = (input_scale * (int8_traits.max - azps)).max()
+                range_min = (input_scale * (int8_traits.min - azps)).min()
 
                 scale = (range_max - range_min) / (int8_traits.max -
                                                    int8_traits.min)
@@ -75,9 +74,8 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 # AZP loaded as int8 but used as int32
                 azp = (int8_traits.min -
                        range_min / scale).to(dtype=torch.int32)
-                replace_parameter(
-                    layer, self.i_zp_name,
-                    torch.nn.Parameter(azp, requires_grad=False))
+                replace_parameter(layer, self.i_zp_name,
+                                  torch.nn.Parameter(azp, requires_grad=False))
 
         else:
             setattr(layer, self.i_s_name, None)
@@ -88,7 +86,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # static and dynamic quantization.
         # For more details, see csrc/quantization/cutlass_w8a8/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/8d59dbb00044a588cab96bcdc028006ed922eb06/csrc/quantization/cutlass_w8a8/Epilogues.md
-        if not self.input_symmetric:
+        if not self.config.input_symmetric:
             layer.azp_adj = layer.weight.sum(dim=0,
                                              keepdim=True,
                                              dtype=torch.int32)
@@ -100,7 +98,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         w_q, w_s, i_s, i_zp, azp_adj = self._get_weight_params(layer)
-        
+
         # ops.scaled_int8_quant supports both dynamic and static quant:
         # * dynamic, i_s is None and x_s computed from x.
         # * static, i_s is scalar and x_s is i_s.

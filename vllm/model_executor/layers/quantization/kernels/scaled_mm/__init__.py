@@ -3,12 +3,11 @@ from typing import Dict, List, Optional, Type
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassScaledMMLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearKernel, ScaledMMLinearLayerConfig)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
     XLAScaledMMLinearKernel)
-
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (
-    ScaledMMLinearKernel, ScaledMMLinearLayerConfig)
-from vllm.platforms import current_platform, PlatformEnum
+from vllm.platforms import PlatformEnum, current_platform
 
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
@@ -17,9 +16,11 @@ _POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
 
+
 def choose_scaled_mm_linear_kernel(
         config: ScaledMMLinearLayerConfig,
-        compute_capability: Optional[int] = None) -> Type[ScaledMMLinearKernel]:
+        compute_capability: Optional[int] = None
+) -> Type[ScaledMMLinearKernel]:
     """
     Choose an ScalledMMLinearKernel that can implement the given config for the 
     given compute capability. Attempts to choose the best kernel in terms of 
@@ -38,7 +39,7 @@ def choose_scaled_mm_linear_kernel(
     Returns:
         Type[ScaledMMLinearKernel]: Chosen kernel.
     """
-    
+
     if compute_capability is None:
         compute_capability = current_platform.get_device_capability()
 
@@ -49,14 +50,18 @@ def choose_scaled_mm_linear_kernel(
             failure_reasons.append(
                 f' {kernel.__name__} disabled by environment variable')
             continue
-        
-        if (compute_capability is not None and 
-            kernel.get_min_capability() > compute_capability):
-            failure_reasons.append(
-                f"{kernel.__name__} requires capability "
-                f"{kernel.get_min_capability()}, current compute capability "
-                f"is {compute_capability}")
-            continue
+
+        # If the current platform uses compute_capability,
+        # make sure the kernel supports the compute cability.
+        if compute_capability is not None:
+            kernel_min_capability = kernel.get_min_capability()
+            if (kernel_min_capability is not None
+                    and kernel_min_capability > compute_capability):
+                failure_reasons.append(
+                    f"{kernel.__name__} requires capability "
+                    f"{kernel_min_capability}, current compute capability "
+                    f"is {compute_capability}")
+                continue
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:

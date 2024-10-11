@@ -1,14 +1,16 @@
 from typing import Optional, Tuple
 
 import torch
-import torch_xla.experimental.xla_quantized_matmul
+import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise)
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
+                                   ScaledMMLinearLayerConfig)
+
 
 class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
@@ -17,32 +19,31 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         return None
 
     @classmethod
-    def can_implement(cls,
-                      c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-        
+    def can_implement(
+            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+
         if not current_platform.is_tpu():
-            return False, f"ScaledMMXLA requires running on TPU."
+            return False, "ScaledMMXLA requires running on TPU."
 
         if c.is_static_input_scheme:
-            return False, f"ScaledMMXLA requires dynamic activation scales."
-        
+            return False, "ScaledMMXLA requires dynamic activation scales."
+
         if not c.input_symmetric:
             return False, "ScaledMMXLA requires symmetric activation scales."
 
         if not c.is_channelwise:
             return False, "ScaledMMXLA requires channelwise weight scales"
 
-        return True, ""
+        return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # Cutlass kernels need transposed weight.
         weight = getattr(layer, self.w_q_name)
-        
+
         # [out, in] (different than cutlass_scaled_mm)
-        replace_parameter(
-            layer, self.w_q_name, 
-            torch.nn.Parameter(weight.data, requires_grad=False))
+        replace_parameter(layer, self.w_q_name,
+                          torch.nn.Parameter(weight.data, requires_grad=False))
 
         # WEIGHT SCALE
         # XLA kernels support only per-tensor and per-channel.
@@ -60,7 +61,6 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
             layer, self.w_s_name,
             torch.nn.Parameter(weight_scale.data, requires_grad=False))
 
-
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
@@ -70,5 +70,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         assert i_zp is None
         assert i_azp_adj is None
 
-        return torch.ops.xla.quantized_matmul(
-            x, w_q, w_s, quantize_activation=True)
+        return torch.ops.xla.quantized_matmul(x,
+                                              w_q,
+                                              w_s,
+                                              quantize_activation=True)
