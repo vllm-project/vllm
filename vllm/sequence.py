@@ -803,14 +803,14 @@ class SequenceGroup:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
         if self.sampling_params:
-            best_of = self.sampling_params.best_of
-            assert isinstance(best_of, int)
-            if best_of > self.num_seqs():
+            n = self.sampling_params.n
+            assert isinstance(n, int)
+            if n > self.num_seqs():
                 # At prompt stage, the sequence group is not yet filled up
                 # and only have one sequence running. However, in the
-                # generation stage, we will have `best_of` sequences
+                # generation stage, we will have `n` sequences
                 # running.
-                return best_of
+                return n
         # At sampling stages, return the number of actual sequences
         # that are not finished yet.
         return self.num_unfinished_seqs()

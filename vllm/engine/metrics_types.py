@@ -49,7 +49,6 @@ class Stats:
     #   Metadata
     num_prompt_tokens_requests: List[int]
     num_generation_tokens_requests: List[int]
-    best_of_requests: List[int]
     n_requests: List[int]
     finished_reason_requests: List[str]
 

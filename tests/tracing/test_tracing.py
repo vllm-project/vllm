@@ -98,8 +98,6 @@ def test_traces(trace_service):
         SpanAttributes.LLM_REQUEST_TOP_P) == sampling_params.top_p
     assert attributes.get(
         SpanAttributes.LLM_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
-    assert attributes.get(
-        SpanAttributes.LLM_REQUEST_BEST_OF) == sampling_params.best_of
     assert attributes.get(SpanAttributes.LLM_REQUEST_N) == sampling_params.n
     assert attributes.get(SpanAttributes.LLM_USAGE_PROMPT_TOKENS) == len(
         outputs[0].prompt_token_ids)
@@ -155,8 +153,6 @@ def test_traces_with_detailed_steps(trace_service):
         SpanAttributes.LLM_REQUEST_TOP_P) == sampling_params.top_p
     assert attributes.get(
         SpanAttributes.LLM_REQUEST_MAX_TOKENS) == sampling_params.max_tokens
-    assert attributes.get(
-        SpanAttributes.LLM_REQUEST_BEST_OF) == sampling_params.best_of
     assert attributes.get(SpanAttributes.LLM_REQUEST_N) == sampling_params.n
     assert attributes.get(SpanAttributes.LLM_USAGE_PROMPT_TOKENS) == len(
         outputs[0].prompt_token_ids)
