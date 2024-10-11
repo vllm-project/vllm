@@ -306,7 +306,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         workspace: torch.Tensor, b_q_type: ScalarType,
                         size_m: int, size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
-                                            workspace, b_q_type, size_m,
+                                            workspace, b_q_type.id, size_m,
                                             size_n, size_k)
 
 
@@ -580,7 +580,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      has_zp: bool = False,
                      use_fp32_reduce: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
-                                         g_idx, perm, workspace, b_q_type,
+                                         g_idx, perm, workspace, b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
                                          has_zp, use_fp32_reduce)
 
@@ -596,7 +596,7 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 # machete
 def machete_supported_schedules(b_type: ScalarType) -> List[str]:
-    return torch.ops._C.machete_supported_schedules(b_type)
+    return torch.ops._C.machete_supported_schedules(b_type.id)
 
 
 def machete_gemm(
@@ -611,13 +611,13 @@ def machete_gemm(
     beta: Optional[float] = None,
     schedule: Optional[str] = None,
 ) -> torch.Tensor:
-    return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
+    return torch.ops._C.machete_gemm(a, b_q, b_type.id, b_scales, b_zeros,
                                      b_group_size, c, alpha, beta, schedule)
 
 
 def machete_prepack_B(b_q_weight: torch.Tensor,
                       b_type: ScalarType) -> torch.Tensor:
-    return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
+    return torch.ops._C.machete_prepack_B(b_q_weight, b_type.id)
 
 
 if hasattr(torch.ops._C, "permute_cols"):

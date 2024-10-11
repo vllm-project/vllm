@@ -1,19 +1,7 @@
-import importlib.util
 import struct
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
-
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-core_C_available = importlib.util.find_spec('._core_C', 'vllm') is not None
-
-# for now
-try:
-    import vllm._core_C  # noqa: F401
-except ImportError as e:
-    logger.warning("Failed to import from vllm._core_C with %r", e)
 
 
 # Mirrors enum in `core/scalar_type.hpp`
@@ -141,7 +129,30 @@ class ScalarType:
                 return 0
 
     @property
-    def size_bits(self):
+    def id(self) -> int:
+        val = 0
+        offset = 0
+
+        def or_and_advance(member, bit_width):
+            nonlocal val
+            nonlocal offset
+            bit_mask = (1 << bit_width) - 1
+            val = val | (int(member) & bit_mask) << offset
+            offset = offset + bit_width
+
+        or_and_advance(self.exponent, 8)
+        or_and_advance(self.mantissa, 8)
+        or_and_advance(self.signed, 1)
+        or_and_advance(self.bias, 32)
+        or_and_advance(self._finite_values_only, 1)
+        or_and_advance(self.nan_repr.value, 8)
+
+        #assert offset < 64
+
+        return val
+
+    @property
+    def size_bits(self) -> int:
         return self.exponent + self.mantissa + int(self.signed)
 
     def min(self) -> Union[int, float]:

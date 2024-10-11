@@ -174,25 +174,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "gptq_marlin_24_gemm(Tensor a, Tensor b_q_weight, Tensor b_meta, "
       "Tensor b_scales, Tensor workspace, "
-      "__torch__.torch.classes._core_C.ScalarType b_q_type, "
+      "int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k) -> Tensor");
   //  conditionally compiled so impl in source file
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
-  ops.def(
-      "machete_supported_schedules("
-      "   __torch__.torch.classes._core_C.ScalarType btype"
-      ") -> str[]");
+  ops.def("machete_supported_schedules(int btype) -> str[]");
   ops.def(
       "machete_gemm(Tensor A, Tensor B,"
-      "             __torch__.torch.classes._core_C.ScalarType btype,"
+      "             int btype,"
       "             Tensor? scales, Tensor? zeros, int? group_size,"
       "             Tensor? C, float? alpha, float? beta, str? schedule)"
       "-> Tensor");
-  ops.def(
-      "machete_prepack_B(Tensor B,"
-      "                  __torch__.torch.classes._core_C.ScalarType btype)"
-      "-> Tensor");
+  ops.def("machete_prepack_B(Tensor B, int btype) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
@@ -202,7 +196,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
       "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor workspace, "
-      "__torch__.torch.classes._core_C.ScalarType b_q_type, "
+      "int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
       "bool has_zp, bool use_fp32_reduce) -> Tensor");
   // conditionally compiled so impl registration is in source file
