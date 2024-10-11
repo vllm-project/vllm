@@ -305,7 +305,6 @@ def _compare_tp(
         if model_name in TEST_MODELS
     ],
 )
-@fork_new_process_for_each_test
 def test_tp_language_generation(
     model_name: str,
     parallel_setup: ParallelSetup,
@@ -332,7 +331,6 @@ def test_tp_language_generation(
         if model_name in TEST_MODELS
     ],
 )
-@fork_new_process_for_each_test
 def test_tp_language_embedding(
     model_name: str,
     parallel_setup: ParallelSetup,
@@ -359,7 +357,6 @@ def test_tp_language_embedding(
         if model_name in TEST_MODELS
     ],
 )
-@fork_new_process_for_each_test
 def test_tp_multimodal_generation(
     model_name: str,
     parallel_setup: ParallelSetup,

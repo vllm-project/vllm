@@ -13,8 +13,6 @@ from vllm.model_executor.models.registry import (_EMBEDDING_MODELS,
                                                  ModelRegistry)
 from vllm.platforms import current_platform
 
-from ..utils import fork_new_process_for_each_test
-
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
 def test_registry_imports(model_arch):
@@ -35,7 +33,6 @@ def test_registry_imports(model_arch):
                                                   in _MULTIMODAL_MODELS)
 
 
-@fork_new_process_for_each_test
 @pytest.mark.parametrize("model_arch,is_mm,init_cuda", [
     ("LlamaForCausalLM", False, False),
     ("MllamaForConditionalGeneration", True, False),
@@ -55,7 +52,6 @@ def test_registry_is_multimodal(model_arch, is_mm, init_cuda):
                 stacklevel=2)
 
 
-@fork_new_process_for_each_test
 @pytest.mark.parametrize("model_arch,is_pp,init_cuda", [
     ("MLPSpeculatorPreTrainedModel", False, False),
     ("DeepseekV2ForCausalLM", True, False),

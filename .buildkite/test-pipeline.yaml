@@ -317,7 +317,8 @@ steps:
   commands:
     - pip install -e ./plugins/vllm_add_dummy_model
     - pytest -v -s --streamed-fork models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
+    - pytest -v -s --streamed-fork models/test_registry.py
+    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py --ignore=models/test_registry.py
 
 - label: Decoder-only Language Models Test # 1h36min
   #mirror_hardwares: [amd]
