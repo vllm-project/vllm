@@ -1,3 +1,4 @@
+import copy
 from collections import defaultdict
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
@@ -82,7 +83,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_alpha,
         disable_logprobs=speculative_config.disable_logprobs,
         disable_log_stats=speculative_config.disable_log_stats,
-    )
+        cpu_draft_worker=speculative_config.cpu_draft_worker)
 
     return spec_decode_worker
 
@@ -125,6 +126,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         typical_acceptance_sampler_posterior_alpha: float,
         disable_logprobs: bool,
         disable_log_stats: bool,
+        cpu_draft_worker: Optional[bool],
     ) -> "SpecDecodeWorker":
 
         allow_zero_draft_token_step = True
@@ -141,10 +143,29 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 'parallel_config']
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
-
             if draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "mlp_speculator":
                 proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
+            elif cpu_draft_worker:
+                cpu_draft_worker_kwargs = copy.deepcopy(draft_worker_kwargs)
+                from vllm.executor.cpu_executor import (
+                    _verify_and_get_cache_config, _verify_and_get_model_config,
+                    _verify_and_get_scheduler_config)
+                cpu_draft_worker_kwargs[
+                    "cache_config"] = _verify_and_get_cache_config(
+                        cpu_draft_worker_kwargs["cache_config"])
+                cpu_draft_worker_kwargs[
+                    "model_config"] = _verify_and_get_model_config(
+                        cpu_draft_worker_kwargs["model_config"])
+                cpu_draft_worker_kwargs[
+                    "scheduler_config"] = _verify_and_get_scheduler_config(
+                        cpu_draft_worker_kwargs["scheduler_config"])
+
+                cpu_draft_worker_kwargs["device_config"].device = torch.device(
+                    "cpu")
+                cpu_draft_worker_kwargs["device_config"].device_type = "cpu"
+                cpu_draft_worker_kwargs.pop("observability_config")
+                proposer_worker = MultiStepWorker(**cpu_draft_worker_kwargs)
             elif draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
@@ -353,7 +374,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(
+            self) -> Tuple[int, int, Optional[int], Optional[int]]:
         """Determine the number of cache blocks to use.
 
         This is done by profiling the scorer model (which is typically the
@@ -369,19 +391,40 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_cache_block_size_bytes = (
             self.proposer_worker.get_cache_block_size_bytes())
 
-        new_num_gpu_blocks = split_num_cache_blocks_evenly(
-            scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
-            num_gpu_blocks)
-        return new_num_gpu_blocks, num_cpu_blocks
+        draft_num_gpu_blocks = None
+        draft_num_cpu_blocks = None
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+        if hasattr(
+                self.proposer_worker, "device_config"
+        ) and self.proposer_worker.device_config.device.type == "cpu":
+            draft_num_gpu_blocks, draft_num_cpu_blocks = (
+                self.proposer_worker.determine_num_available_blocks())
+        else:
+            num_gpu_blocks = split_num_cache_blocks_evenly(
+                scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
+                num_gpu_blocks)
+
+        return num_gpu_blocks, num_cpu_blocks, draft_num_gpu_blocks, \
+                draft_num_cpu_blocks
+
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
+                         num_cpu_blocks: int,
+                         draft_num_gpu_blocks=None,
+                         draft_num_cpu_blocks=None) -> None:
         """Initialize the cache engine of the scorer and proposer workers.
         """
         self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                             num_cpu_blocks=num_cpu_blocks)
-        self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
-                                              num_cpu_blocks=num_cpu_blocks)
+
+        if draft_num_gpu_blocks is None:
+            draft_num_gpu_blocks = num_gpu_blocks
+        if draft_num_cpu_blocks is None:
+            draft_num_cpu_blocks = num_cpu_blocks
+
+        self.proposer_worker.initialize_cache(
+            num_gpu_blocks=draft_num_gpu_blocks,
+            num_cpu_blocks=draft_num_cpu_blocks)
 
     @torch.inference_mode()
     def execute_model(
@@ -558,7 +601,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
-
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]

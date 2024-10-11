@@ -1013,6 +1013,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
+            self.device.type,
         ) if num_attn_heads else None
         if self.attn_backend:
             self.attn_state = self.attn_backend.get_state_cls()(

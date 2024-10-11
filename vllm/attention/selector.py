@@ -95,6 +95,7 @@ def get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    device=None,
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
@@ -107,7 +108,7 @@ def get_attn_backend(
 
     backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
                                 sliding_window, dtype, kv_cache_dtype,
-                                block_size)
+                                block_size, device)
     if backend == _Backend.FLASH_ATTN:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
@@ -123,7 +124,7 @@ def get_attn_backend(
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
-        assert is_cpu(), RuntimeError(
+        assert is_cpu() or device == "cpu", RuntimeError(
             "Torch SDPA backend is only used for the CPU device.")
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
@@ -158,6 +159,7 @@ def which_attn_to_use(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    device=None,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
     # Default case.
@@ -178,7 +180,7 @@ def which_attn_to_use(
         if backend_by_env_var is not None:
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
-    if is_cpu():
+    if is_cpu() or device == "cpu":
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA

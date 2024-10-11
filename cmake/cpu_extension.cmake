@@ -92,7 +92,7 @@ if (AVX2_FOUND OR AVX512_FOUND)
 endif()
 
 #
-# _C extension
+# _C_cpu extension
 #
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
@@ -114,7 +114,7 @@ endif()
 #
 
 define_gpu_extension_target(
-    _C
+    _C_cpu
     DESTINATION vllm
     LANGUAGE CXX
     SOURCES ${VLLM_EXT_SRC}

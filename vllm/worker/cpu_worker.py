@@ -8,7 +8,7 @@ import vllm.envs as envs
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, PromptAdapterConfig,
-                         SchedulerConfig)
+                         SchedulerConfig, SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -63,6 +63,7 @@ class CPUCacheEngine:
             self.model_config.dtype,
             cache_config.cache_dtype,
             self.block_size,
+            "cpu",
         )
 
         # Initialize the cache.
@@ -135,6 +136,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         lora_config: Optional[LoRAConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -148,6 +150,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.prompt_adapter_config = prompt_adapter_config
+        self.speculative_config = speculative_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -213,8 +216,10 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return self.model_config.is_encoder_decoder_model
 
     def init_device(self) -> None:
+        self.device = torch.device("cpu")
         if self.local_omp_cpuid != "all":
-            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+            ret = torch.ops._C_cpu_utils.init_cpu_threads_env(
+                self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
 
@@ -224,6 +229,14 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def load_model(self):
         self.model_runner.load_model()
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_runner.vocab_size
+
+    @property
+    def max_model_len(self) -> int:
+        return self.model_config.max_model_len
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of blocks available for the KV cache.
@@ -358,7 +371,15 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         )
 
         # A small all_reduce for warmup.
-        torch.distributed.all_reduce(torch.zeros(1).cpu())
+        try:
+            torch.distributed.all_reduce(torch.zeros(1).cpu())
+        except Exception as e:
+            logger.warning(
+                "torch.distributed.all_reduce failed because of %s. "
+                "Custom allreduce do not support CPU backend. You may run "
+                "heterogeneous speculative decoding, please notice it does "
+                "not support TP or PP for now if the target model and the "
+                "draft model are on different devices", e)
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
