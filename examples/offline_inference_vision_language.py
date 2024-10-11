@@ -301,7 +301,8 @@ def run_mllama(question: str, modality: str):
 
 
 # GLM-4v
-def run_glm4v(question):
+def run_glm4v(question: str, modality: str):
+    assert modality == "image"
     model_name = "THUDM/glm-4v-9b"
 
     llm = LLM(model=model_name,

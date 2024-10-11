@@ -346,6 +346,12 @@ Text Generation
     - :code:`adept/fuyu-8b` etc.
     - 
     - ✅︎
+  * - :code:`ChatGLMModel`
+    - GLM-4v
+    - Image
+    - :code:`THUDM/glm-4v-9b` etc.
+    - 
+    - ✅︎
   * - :code:`InternVLChatModel`
     - InternVL2
     - Image\ :sup:`E+`
