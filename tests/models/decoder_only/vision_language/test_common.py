@@ -36,6 +36,17 @@ class VlmTestType(Enum):
     MULTI_IMAGE = 2
     EMBEDDING = 3
 
+# TODO - Sizes may be provided as either sizes or scaling factors. 
+class SizeType:
+    SIZE_FACTOR = 1
+    FIXED_SIZE = 2
+class ImageSizeWrapper:
+    type: SizeType
+    # A size factor is a wrapper of 0+ floats,
+    # while a fixed size contains 2 integers
+    data: Union[Tuple[float], Tuple[int ,int]]
+
+
 # Default scaling factors for single image & embedding tests, respectively
 IMAGE_SIZE_FACTORS=((), (1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0))
 EMBEDDING_SIZE_FACTORS=((), (1.0,), (1.0, 1.0, 1.0),)
@@ -44,6 +55,10 @@ class VLMTestInfo(NamedTuple):
     models: Union[Tuple[str], str]
     prompt_formatter: Callable
     img_idx_to_prompt: Callable = lambda idx: "<image>\n"
+
+    # TODO - Overrides for single / multi-image prompts, respectively
+    single_image_prompt: Tuple[str] = None
+    multi_image_prompt: str = None
 
     # Function for converting ImageAssets to image embeddings; if a VLMTestInfo
     # object defines this, we run a separate test for embedding with
@@ -80,10 +95,13 @@ class VLMTestInfo(NamedTuple):
     num_logprobs: Union[int, Tuple[int]] = 5
     dtype: Union[str] = "half"
 
-    # Image size factors are may be changed, so we add them here.
-    # Embeddings size factors can't be heterogeneous, so they can't
-    # be varied per model.
+    # Fixed image sizes / image size factors; most tests use image_size_factors
+    # The values provided for these two fields will be stacked and expanded
+    # such that each model will consider each image size factor / image size
+    # once per tests (much like concatenating and wrapping in one parametrize
+    # call)
     image_size_factors: Tuple[float] = IMAGE_SIZE_FACTORS
+    image_sizes: Tuple[float] = None
 
     # Hack for updating a prompt to take into a local path; currently only used
     # for Qwen-VL, which requires encoding the image path / url into the prompt
@@ -101,6 +119,17 @@ SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
     "cherry_blossom":
     f"{TEST_IMG_PLACEHOLDER}What is the season?",
 })
+
+# Prompts for paligemma; these are pretty different, and the existing tests
+# fail the logprobs checks. Probably a good idea to add a utility to patch
+# the prompts for the tests if needed, so that we can handle this / the custom
+# stuff for llava anyway.
+SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
+    "stop_sign": f"{TEST_IMG_PLACEHOLDER}caption es",
+    "cherry_blossom": f"{TEST_IMG_PLACEHOLDER}What is in the picture?",
+})
+
+
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
 
@@ -288,6 +317,34 @@ def phi3v_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
     return hf_output_ids, hf_output_str, out_logprobs
 
+
+
+def paligemma_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+                                         Optional[SampleLogprobs]],
+                                model: str):
+    """Sanitize vllm output to be comparable with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    config = AutoConfig.from_pretrained(model)
+    image_token_id = config.image_token_index
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eos_token_id = tokenizer.eos_token_id
+
+    hf_output_ids = [
+        token_id for idx, token_id in enumerate(output_ids)
+        if token_id != image_token_id or output_ids[idx - 1] != image_token_id
+    ]
+
+    hf_output_str = output_str
+
+    if hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+
+    return hf_output_ids, hf_output_str, out_logprobs
+
+
+
 ### Post-processors for HF outputs
 def minicmpv_trunc_hf_output(hf_output: Tuple[List[int], str,
                                               Optional[SampleLogprobs]],
@@ -432,15 +489,19 @@ VLM_TEST_SETTINGS = {
         max_model_len=1024,
         max_num_seqs=2,
         prompt_path_encoder=qwen_prompt_path_encoder,
-        skip=False
     ),
 
     ## Tests above this point have been validated to align with current tests 
     "paligemma": VLMTestInfo(
         models="google/paligemma-3b-mix-224",
         dtype="half" if is_hip() else ["half", "float"],
+        # <image> is the paligemma placeholder, which is contained in the
+        # default; careful not to pass it in the prompt, or it'll be a mismatch
+        img_idx_to_prompt = lambda idx: "",
         prompt_formatter=identity,
         auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=paligemma_vllm_to_hf_output,
+        skip=False
     )
 
     # "intern_vl": VLMTestInfo(
@@ -514,6 +575,11 @@ def test_single_image_generation(tmp_path: PosixPath, model_type: str,
         model_kwargs=test_info.model_kwargs,
     )
 
+def test_video_generation():
+    raise NotImplementedError("Video model test wrapper not implemented")
+
+def test_quantized_models():
+    raise NotImplementedError("Quantized model test wrapper not implemented")
 
 @pytest.mark.skipif(not any(test.convert_assets_to_embeddings
                             for test in VLM_TEST_SETTINGS.values()),
@@ -706,7 +772,6 @@ def run_test(
         hf_outputs_per_image = [[
             hf_output_post_proc(res, model) for res in hf_outputs
         ] for hf_outputs in hf_outputs_per_image]
-
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
