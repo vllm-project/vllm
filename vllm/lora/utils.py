@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List, Optional, Set, Tuple, Type
+from typing import List, Optional, Set, Tuple, Type, Union
 
 import huggingface_hub
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
@@ -114,7 +114,7 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_regex_target_modules(reg_str: str,
+def is_regex_target_modules(load_modules: Union[str, List[str]],
                             expected_lora_modules: List[str]) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions, 
@@ -133,8 +133,13 @@ def is_regex_target_modules(reg_str: str,
     def is_subset(sub_list, full_list):
         return set(sub_list).issubset(set(full_list))
 
-    if is_valid_regex(reg_str):
-        match = re.search(r"\((.*?)\)\$?$", reg_str)
+    # Similar to PEFT's processing logic, regex-related operations are only
+    #  executed when the load_modules is a `str`.
+    if not isinstance(load_modules, str):
+        return False
+
+    if is_valid_regex(load_modules):
+        match = re.search(r"\((.*?)\)\$?$", load_modules)
         if match:
             suffix = match.group(1).split("|")
             return is_subset(suffix, expected_lora_modules)
