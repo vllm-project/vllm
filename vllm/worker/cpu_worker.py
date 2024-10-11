@@ -217,9 +217,9 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def init_device(self) -> None:
         self.device = torch.device("cpu")
-        if self.local_omp_cpuid != "all":
-            ret = torch.ops._C_cpu_utils.init_cpu_threads_env(
-                self.local_omp_cpuid)
+        if self.local_omp_cpuid != "all" and hasattr(torch.ops._C_utils,
+                                                     "init_cpu_threads_env"):
+            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
 
