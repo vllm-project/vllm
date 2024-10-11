@@ -363,9 +363,11 @@ class SiglipEncoderLayer(nn.Module):
         num_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = SiglipParallelAttention(config,
-                                                     quant_config=quant_config,
-                                                     prefix=f"{prefix}.self_attn")
+            self.self_attn = SiglipParallelAttention(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
         else:
             self.self_attn = SiglipSdpaAttention(config)
 

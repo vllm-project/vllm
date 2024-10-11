@@ -841,10 +841,11 @@ class MllamaTextModel(nn.Module):
             else:
                 # TODO: force LlamaDecoderLayer to config.attention_bias=False
                 layers.append(
-                    LlamaDecoderLayer(config,
-                                      cache_config=cache_config,
-                                      quant_config=quant_config,
-                                      prefix=f"{prefix}.layers.{layer_idx}",
+                    LlamaDecoderLayer(
+                        config,
+                        cache_config=cache_config,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.layers.{layer_idx}",
                     ))
 
         self.layers = nn.ModuleList(layers)

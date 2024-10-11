@@ -282,9 +282,11 @@ class BlipEncoderLayer(nn.Module):
         num_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = BlipParallelAttention(config,
-                                                   quant_config=quant_config,
-                                                   prefix=f"{prefix}.self_attn")
+            self.self_attn = BlipParallelAttention(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
         else:
             # Blip doesn't have SDPA attention implemented in transformers
             # use eager attention instead for cpu backend
