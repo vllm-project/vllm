@@ -52,6 +52,7 @@ SystemEnv = namedtuple(
         'vllm_version',  # vllm specific field
         'vllm_build_flags',  # vllm specific field
         'gpu_topo',  # vllm specific field
+        'env_vars',
     ])
 
 DEFAULT_CONDA_PATTERNS = {
@@ -512,6 +513,8 @@ def is_xnnpack_available():
     else:
         return "N/A"
 
+def get_env_vars():
+    return "\n".join("{}={}".format(k, v) for k, v in os.environ.items())
 
 def get_env_info():
     run_lambda = run
@@ -583,6 +586,7 @@ def get_env_info():
         vllm_version=vllm_version,
         vllm_build_flags=vllm_build_flags,
         gpu_topo=gpu_topo,
+        env_vars=get_env_vars(),
     )
 
 
@@ -631,6 +635,7 @@ vLLM Build Flags:
 {vllm_build_flags}
 GPU Topology:
 {gpu_topo}
+{env_vars}
 """.strip()
 
 
