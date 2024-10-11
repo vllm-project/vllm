@@ -57,12 +57,19 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptT
         print(generated_text)
 
     # Inference with image embeddings as input with additional parameters
-    # Specifically, we are conducting a trial run of Qwen2VL with the new input format, as the model utilizes additional parameters for calculating positional encoding.
-    image_embeds = torch.load(...) # torch.Tensor of shape (1, image_feature_size, hidden_size of LM)
-    image_grid_thw = torch.load(...) # torch.Tensor of shape (1, 3)
+    # Specifically, we are conducting a trial run of Qwen2VL and MiniCPM-V with the new input format, which utilizes additional parameters.
+    mm_data = {}
+
+    image_embeds = torch.load(...) # torch.Tensor of shape (num_images, image_feature_size, hidden_size of LM)
+    # For Qwen2VL, image_grid_thw is needed to calculate positional encoding.
     mm_data['image'] = {
         "image_embeds": image_embeds,
-        "image_grid_thw":  image_grid_thw,
+        "image_grid_thw": torch.load(...) # torch.Tensor of shape (1, 3),
+    }
+    # For MiniCPM-V, image_size_list is needed to calculate details of the sliced image.
+    mm_data['image'] = {
+        "image_embeds": image_embeds,
+        "image_size_list": [image.size] # list of image sizes
     }
     outputs = llm.generate({
         "prompt": prompt,
