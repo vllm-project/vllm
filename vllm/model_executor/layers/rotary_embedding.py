@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
+from vllm.transformers_utils.config import patch_rope_scaling_dict
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -901,6 +902,9 @@ def get_rope(
     if dtype is None:
         dtype = torch.get_default_dtype()
     if rope_scaling is not None:
+        # Backwards compatibility
+        patch_rope_scaling_dict(rope_scaling)
+
         # Transforms every value that is a list into a tuple for caching calls
         rope_scaling_tuple = {
             k: tuple(v) if isinstance(v, list) else v
@@ -920,8 +924,7 @@ def get_rope(
         rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
                                      is_neox_style, dtype)
     else:
-        scaling_type = rope_scaling[
-            "type"] if "type" in rope_scaling else rope_scaling["rope_type"]
+        scaling_type = rope_scaling["rope_type"]
 
         if scaling_type == "llama3":
             scaling_factor = rope_scaling["factor"]
