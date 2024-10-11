@@ -661,10 +661,6 @@ class AsyncLLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
-        # Setup plugins
-        from vllm.plugins import load_general_plugins
-        load_general_plugins()
-
         # Create the engine configs.
         if engine_config is None:
             engine_config = engine_args.create_engine_config()
