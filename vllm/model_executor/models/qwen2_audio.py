@@ -20,29 +20,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
-from functools import lru_cache
-from typing import (Iterable, List, Mapping, Optional, Tuple, TypedDict,
-                    Union)
-import torch
-import torch.nn as nn
-import numpy as np
-from transformers import Qwen2AudioEncoder, Qwen2AudioConfig
+from functools import lru_cache 
+from typing import Iterable, List, Mapping, Optional, Tuple, TypedDict, Union
 
-from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+import numpy as np 
+import torch 
+import torch.nn as nn 
+from transformers import Qwen2AudioConfig, Qwen2AudioEncoder
+
+from vllm.attention import AttentionMetadata 
+from vllm.config import CacheConfig, MultiModalConfig 
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs 
+from vllm.logger import init_logger 
+from vllm.model_executor.layers.logits_processor import LogitsProcessor 
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.layers.sampler import Sampler,SamplerOutput 
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead 
+from vllm.model_executor.model_loader.weight_utils import (default_weight_loader, 
+                                                           maybe_remap_kv_scale_name)
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.sequence import IntermediateTensors, SequenceData
-from vllm.logger import init_logger
+
 from .interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
@@ -314,7 +315,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         audio_feat_lengths, audio_output_lengths = (
             self.audio_tower._get_feat_extract_output_lengths(
-            feature_attention_mask.sum(-1)))
+                feature_attention_mask.sum(-1)))
 
         batch_size, _, max_mel_seq_len = input_features.shape
         max_seq_len = (max_mel_seq_len - 2) // 2 + 1
