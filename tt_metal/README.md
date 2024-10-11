@@ -2,7 +2,7 @@
 ## vLLM and tt-metal Branches
 Git-checkout the following branches in each repo separately:
 - vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [3f7beb2](https://github.com/tenstorrent/vllm/tree/3f7beb23cbaf3be2e104061905da5f91644e5a68))
-- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [f521af0](https://github.com/tenstorrent/tt-metal/tree/f521af0061bf53567942b7a27fd89aa300ec16ce))
+- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [f0b2483](https://github.com/tenstorrent/tt-metal/tree/f0b2483529a55d1101eb142ae1c70eec5260ecf7))
 
 ## Environment Creation
 

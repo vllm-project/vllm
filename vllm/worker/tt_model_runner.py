@@ -92,6 +92,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
+        trace_mode: bool = True,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -104,6 +105,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
+
+        self.trace_mode = trace_mode  # whether to use ttnn tracing for model execution
+        self.execute_trace_kwargs = None  # kw args for trace execution (populated during first decode execution)
 
     def load_model(self) -> None:
         # Note: using custom TT loader instead of selecting from default vllm loaders
@@ -234,6 +238,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     block_tables,
                     torch.zeros(batch_pad_len, block_tables.shape[1], dtype=torch.int32, device="cpu")
                 ])
+            
+            # Pad block_tables to max num blocks so ttnn tracing can work (requires constant shape)
+            if self.trace_mode:
+                block_tables = torch.cat([
+                    block_tables,
+                    torch.zeros(block_tables.shape[0], self.cache_config.num_gpu_blocks - block_tables.shape[1], dtype=torch.int32, device="cpu")
+                ], dim=1)
         
         return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables, unpadded_batch_size, tt_sampling_params)
 
@@ -257,7 +268,35 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             "prompt_lens": model_input.prompt_lens,
         }
         
-        logits = self.model.forward(**execute_model_kwargs)  # [batch_size, seq_len, vocab_size]
+        is_decode = model_input.prompt_lens is None
+        
+        if self.trace_mode and is_decode:  # Trace mode for decode
+            # Remove prompt_lens from execute_model_kwargs since it's not used for decode
+            execute_model_kwargs.pop("prompt_lens")
+            
+            # Capture trace for the first decode execution
+            if self.execute_trace_kwargs is None:
+                logger.info("Capturing trace for first decode execution")
+                trace_id, tt_inp, rot_mat, cache_idxs_tt, tt_logits, tt_page_table = self.model.capture_trace(
+                    **execute_model_kwargs
+                )
+                self.execute_trace_kwargs = {
+                    "trace_id": trace_id,
+                    "tt_inp": tt_inp,
+                    "rot_mat": rot_mat,
+                    "cache_idxs_tt": cache_idxs_tt,
+                    "tt_logits": tt_logits,
+                    "tt_page_table": tt_page_table,
+                }
+            
+            # Remove kv_cache from execute_model_kwargs since it doesn't need to be copied to device for trace execution
+            execute_model_kwargs.pop("kv_cache")
+            
+            logits = self.model.decode_forward_trace(
+                **execute_model_kwargs, **self.execute_trace_kwargs
+            )
+        else:
+            logits = self.model.forward(**execute_model_kwargs)  # [batch_size, seq_len, vocab_size]
 
         # Note: for other devices, vLLM applies vllm.model_executor.layers.logits_processor::LogitsProcessor::_apply_logits_processors on logits, we don't use this
         # Note: for other devices, vLLM applies vllm.model_executor.layers.sampler::Sampler for sampling tokens, we don't use this
@@ -293,3 +332,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         assert not sampling_params.use_beam_search, "Currently not supporting beam search"
         assert sampling_params.logprobs is None, "Currently not supporting logprobs"
         assert sampling_params.prompt_logprobs is None, "Currently not supporting prompt_logprobs"
+
+    ## Destructor (used to delete ttnn trace if using trace mode)
+    
+    def __del__(self):
+        if self.trace_mode and self.execute_trace_kwargs is not None:
+            self.model.delete_trace(self.execute_trace_kwargs["trace_id"])
+        
+        if hasattr(super(TTModelRunner, self), '__del__'):
+            super().__del__()

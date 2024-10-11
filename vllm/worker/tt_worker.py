@@ -181,13 +181,16 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
+        self.trace_mode = True  # whether to use ttnn tracing for model execution, TODO: make this configurable
+
         self.model_runner: TTModelRunner = TTModelRunner(
             model_config,
             parallel_config,
             scheduler_config,
             device_config,
             cache_config,
-            load_config
+            load_config,
+            trace_mode=self.trace_mode,
         )
         
         self.cache_engine: List[TTCacheEngine]
@@ -371,7 +374,10 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return dispatch_core_type
     
     def _open_t3k_mesh_device(self):
-        device_params = {}
+        if self.trace_mode:
+            device_params = {"trace_region_size": 14227456}  # TODO: make this configurable
+        else:
+            device_params = {}
         mesh_device = ttnn.open_mesh_device(
             ttnn.MeshShape(2, 4),
             dispatch_core_type=self._get_dispatch_core_type(),
@@ -398,6 +404,8 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     ## Destructor (used to close devices)
     
     def __del__(self):
+        del self.model_runner  # Delete model runner first in case there are model arifacts (e.g ttnn trace)
+        
         if self.mesh_device:
             devices = self.mesh_device.get_devices()
             
