@@ -12,12 +12,9 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.utils import is_cpu
 
-if is_cpu():
-    try:
-        from vllm.attention.ops.ipex_attn import PagedAttention
-    except ImportError:
-        from vllm.attention.ops.paged_attn import PagedAttention
-else:
+try:
+    from vllm.attention.ops.ipex_attn import PagedAttention
+except ImportError:
     from vllm.attention.ops.paged_attn import PagedAttention
 
 
