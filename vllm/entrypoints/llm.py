@@ -517,10 +517,13 @@ class LLM:
         # Handle multi and single conversations
         if is_list_of(messages, list):
             # messages is List[List[...]]
-            list_of_messages = messages
+            list_of_messages = cast(List[List[ChatCompletionMessageParam]],
+                                    messages)
         else:
             # messages is List[...]
-            list_of_messages = [messages]
+            list_of_messages = [
+                cast(List[ChatCompletionMessageParam], messages)
+            ]
 
         prompts: List[Union[TokensPrompt, TextPrompt]] = []
 

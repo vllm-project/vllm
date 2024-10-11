@@ -616,7 +616,7 @@ def _random_sample(
         same as the length of selected_seq_groups. If the corresponding
         seq_group has do_sample=False, tuple contains ([], [])
     """
-    # Find the maximum best_of value of the prompt phase requests.
+    # Find the maximum n value of the prompt phase requests.
     random_samples = random_samples.cpu()
     sample_idx = 0
     results: SampleResultType = []
@@ -631,9 +631,9 @@ def _random_sample(
         num_parent_seqs = len(seq_ids)
         if is_prompt:
             # Prompt phase.
-            parent_ids = [0] * sampling_params.best_of
+            parent_ids = [0] * sampling_params.n
             next_token_ids = random_samples[
-                sample_idx, :sampling_params.best_of].tolist()
+                sample_idx, :sampling_params.n].tolist()
         else:
             # Generation phase.
             parent_ids = list(range(num_parent_seqs))
@@ -678,7 +678,7 @@ def _beam_search_sample(
         is_prompt = seq_group.is_prompt
         seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
         num_parent_seqs = len(seq_ids)
-        beam_width = sampling_params.best_of
+        beam_width = sampling_params.n
         seq_group_logprobs = logprobs[sample_idx:sample_idx + num_parent_seqs]
         if is_prompt:
             # Prompt phase.
@@ -905,12 +905,11 @@ def _sample_with_torch(
                                              greedy_samples)
 
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            max_best_of_in_batch = 1
+            max_n_in_batch = 1
             for seq_group in seq_groups:
                 if seq_group.is_prompt:
                     sampling_params = seq_group.sampling_params
-                    max_best_of_in_batch = max(max_best_of_in_batch,
-                                               sampling_params.best_of)
+                    max_n_in_batch = max(max_n_in_batch, sampling_params.n)
             seq_groups_arg = (None if sampling_type == SamplingType.RANDOM else
                               seq_groups)
 
@@ -920,13 +919,13 @@ def _sample_with_torch(
                         probs[long_sample_indices],
                         sampling_tensors.top_ks[long_sample_indices],
                         sampling_tensors.top_ps[long_sample_indices],
-                        max_best_of_in_batch,
+                        max_n_in_batch,
                         seq_groups_arg,
                     )
             else:
                 multinomial_samples[sampling_type] = _multinomial(
                     probs[long_sample_indices],
-                    max_best_of_in_batch,
+                    max_n_in_batch,
                     seq_groups=seq_groups_arg)
 
             if sampled_token_ids_tensor is not None:
