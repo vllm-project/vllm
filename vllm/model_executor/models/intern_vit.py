@@ -304,9 +304,11 @@ class InternVisionEncoderLayer(nn.Module):
         self.attn = self._init_attn(config,
                                     quant_config,
                                     num_dummy_heads=num_dummy_heads,
-                                    prefix=prefix)
+                                    prefix=f"{prefix}.attn")
 
-        self.mlp = InternMLP(config, quant_config=quant_config, prefix=prefix)
+        self.mlp = InternMLP(config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.mlp")
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim,
                                              eps=config.layer_norm_eps)
         self.norm2 = NORM2FN[self.norm_type](self.embed_dim,
@@ -374,8 +376,8 @@ class InternVisionEncoder(nn.Module):
             InternVisionEncoderLayer(config,
                                      quant_config,
                                      num_dummy_heads=num_dummy_heads,
-                                     prefix=prefix)
-            for _ in range(num_hidden_layers)
+                                     prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(self, inputs_embeds: torch.Tensor):
@@ -412,7 +414,7 @@ class InternVisionModel(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
-            prefix=prefix,
+            prefix=f"{prefix}.encoder",
         )
 
     def get_input_embeddings(self):

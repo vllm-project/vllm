@@ -305,12 +305,14 @@ class CLIPEncoderLayer(nn.Module):
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
             self.self_attn = CLIPParallelAttention(config,
                                                    quant_config=quant_config,
-                                                   prefix=prefix)
+                                                   prefix=f"{prefix}.self_attn")
         else:
             self.self_attn = CLIPSdpaAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
-        self.mlp = CLIPMLP(config, quant_config=quant_config, prefix=prefix)
+        self.mlp = CLIPMLP(config,
+                           quant_config=quant_config,
+                           prefix=f"{prefix}.mlp")
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
@@ -357,7 +359,8 @@ class CLIPEncoder(nn.Module):
         self.layers = nn.ModuleList([
             CLIPEncoderLayer(config=config,
                              quant_config=quant_config,
-                             prefix=prefix) for _ in range(num_hidden_layers)
+                             prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(self, inputs_embeds: torch.Tensor):
@@ -394,7 +397,7 @@ class CLIPVisionTransformer(nn.Module):
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
-            prefix=prefix,
+            prefix=f"{prefix}.encoder",
         )
 
         num_hidden_layers = config.num_hidden_layers
@@ -458,7 +461,7 @@ class CLIPVisionModel(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=prefix,
+            prefix=f"{prefix}.vision_model",
         )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:

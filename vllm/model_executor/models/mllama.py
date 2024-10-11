@@ -371,7 +371,9 @@ class MllamaVisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         self.self_attn = MllamaVisionSdpaAttention(config)
-        self.mlp = CLIPMLP(config, quant_config=quant_config, prefix=prefix)
+        self.mlp = CLIPMLP(config,
+                           quant_config=quant_config,
+                           prefix=f"{prefix}.mlp")
 
         self.input_layernorm = nn.LayerNorm(self.hidden_size,
                                             eps=config.norm_eps)
@@ -423,7 +425,8 @@ class MllamaVisionEncoder(nn.Module):
             MllamaVisionEncoderLayer(config,
                                      quant_config=quant_config,
                                      is_gated=is_gated,
-                                     prefix=prefix) for _ in range(num_layers)
+                                     prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_layers)
         ])
         self.output_hidden_states = output_hidden_states or []
 
@@ -501,14 +504,14 @@ class MllamaVisionModel(nn.Module):
             config.num_hidden_layers,
             is_gated=False,
             output_hidden_states=config.intermediate_layers_indices,
-            prefix=prefix,
+            prefix=f"{prefix}.transformer",
         )
         self.global_transformer = MllamaVisionEncoder(
             config,
             quant_config,
             config.num_global_layers,
             is_gated=True,
-            prefix=prefix,
+            prefix=f"{prefix}.global_transformer",
         )
 
     def apply_class_embedding(self,
@@ -756,7 +759,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             config=config,
             layer_idx=layer_idx,
             quant_config=quant_config,
-            prefix=prefix,
+            prefix=f"{prefix}.cross_attn",
         )
 
         self.input_layernorm = RMSNorm(config.hidden_size,
@@ -768,7 +771,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
-            prefix=prefix,
+            prefix=f"{prefix}.mlp",
         )
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
@@ -833,7 +836,7 @@ class MllamaTextModel(nn.Module):
                         config,
                         layer_idx,
                         quant_config=quant_config,
-                        prefix=prefix,
+                        prefix=f"{prefix}.layers.{layer_idx}",
                     ))
             else:
                 # TODO: force LlamaDecoderLayer to config.attention_bias=False
@@ -841,7 +844,8 @@ class MllamaTextModel(nn.Module):
                     LlamaDecoderLayer(config,
                                       cache_config=cache_config,
                                       quant_config=quant_config,
-                                      prefix=prefix))
+                                      prefix=f"{prefix}.layers.{layer_idx}",
+                    ))
 
         self.layers = nn.ModuleList(layers)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

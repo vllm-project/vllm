@@ -365,7 +365,7 @@ class SiglipEncoderLayer(nn.Module):
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
             self.self_attn = SiglipParallelAttention(config,
                                                      quant_config=quant_config,
-                                                     prefix=prefix)
+                                                     prefix=f"{prefix}.self_attn")
         else:
             self.self_attn = SiglipSdpaAttention(config)
 
@@ -374,7 +374,7 @@ class SiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
-            prefix=prefix,
+            prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
@@ -418,7 +418,8 @@ class SiglipEncoder(nn.Module):
         self.layers = nn.ModuleList([
             SiglipEncoderLayer(config,
                                quant_config=quant_config,
-                               prefix=prefix) for _ in range(num_hidden_layers)
+                               prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
@@ -451,7 +452,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
                                       eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(config=config,
                              quant_config=quant_config,
-                             prefix=prefix)
+                             prefix=f"{prefix}.mlp")
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         batch_size = hidden_state.shape[0]
@@ -487,7 +488,7 @@ class SiglipVisionTransformer(nn.Module):
             config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
-            prefix=prefix,
+            prefix=f"{prefix}.encoder",
         )
 
         num_hidden_layers = config.num_hidden_layers
@@ -513,7 +514,7 @@ class SiglipVisionTransformer(nn.Module):
             self.head = SiglipMultiheadAttentionPoolingHead(
                 config=config,
                 quant_config=quant_config,
-                prefix=prefix,
+                prefix=f"{prefix}.head",
             )
 
     def forward(
@@ -567,7 +568,7 @@ class SiglipVisionModel(nn.Module):
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=prefix,
+            prefix=f"{prefix}.vision_model",
         )
 
     def get_input_embeddings(self) -> nn.Module:

@@ -284,14 +284,16 @@ class BlipEncoderLayer(nn.Module):
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
             self.self_attn = BlipParallelAttention(config,
                                                    quant_config=quant_config,
-                                                   prefix=prefix)
+                                                   prefix=f"{prefix}.self_attn")
         else:
             # Blip doesn't have SDPA attention implemented in transformers
             # use eager attention instead for cpu backend
             self.self_attn = BlipAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
-        self.mlp = BlipMLP(config, quant_config=quant_config, prefix=prefix)
+        self.mlp = BlipMLP(config,
+                           quant_config=quant_config,
+                           prefix=f"{prefix}.mlp")
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
@@ -338,7 +340,8 @@ class BlipEncoder(nn.Module):
         self.layers = nn.ModuleList([
             BlipEncoderLayer(config=config,
                              quant_config=quant_config,
-                             prefix=prefix) for _ in range(num_hidden_layers)
+                             prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(self, inputs_embeds: torch.Tensor):
@@ -379,7 +382,7 @@ class BlipVisionModel(nn.Module):
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
-            prefix=prefix,
+            prefix=f"{prefix}.encoder",
         )
 
         num_hidden_layers = config.num_hidden_layers
