@@ -1,7 +1,7 @@
 
 ## vLLM and tt-metal Branches
 Git-checkout the following branches in each repo separately:
-- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [3f7beb2](https://github.com/tenstorrent/vllm/tree/3f7beb23cbaf3be2e104061905da5f91644e5a68))
+- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [523b632](https://github.com/tenstorrent/vllm/tree/523b63271c70cca8651f4d53abecefdf48a74ee9))
 - tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [f0b2483](https://github.com/tenstorrent/tt-metal/tree/f0b2483529a55d1101eb142ae1c70eec5260ecf7))
 
 ## Environment Creation
@@ -56,7 +56,7 @@ To generate tokens for sample prompts:
 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py
 ```
 
-To measure performance for a single batch (with the default prompt length of 127 tokens):
+To measure performance for a single batch (with the default prompt length of 128 tokens):
 ```python
 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --measure_perf
 ```
