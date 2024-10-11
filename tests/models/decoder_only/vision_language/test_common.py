@@ -14,10 +14,10 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
-from vllm.utils import identity, is_cpu
+from vllm.utils import identity, is_cpu, STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from ...utils import check_logprobs_close
+from ...utils import check_logprobs_close, check_outputs_equal
 
 
 ### Test Info / Common Configuration
@@ -36,12 +36,14 @@ class VLMTestInfo(NamedTuple):
     # Exposed options for HF runner
     model_kwargs: Optional[Dict[str, Any]] = None
     auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM
+    # Callable to pass to the HF runner to run on inputs 
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding] = identity
-    # By default, vllm to hf output is just an identity on the first arg,
-    # but we allow passing the model name since a lot of tests need it
-    # for things like the tokenizer.
-    vllm_to_hf_output: Optional[Callable] = None
 
+    # Post processors that if defined, will run oun the outputs of the
+    # vLLM and HF runner, respectively (useful for sanitization, etc).
+    vllm_output_post_proc: Optional[Callable] = None
+    hf_output_post_proc: Optional[Callable] = None
+    comparator: Callable = check_logprobs_close
     # Default expandable params per test; these defaults can be overridden in
     # instances of this object; the complete set of test cases for the model
     # is all combinations of .models + all fields below
@@ -49,6 +51,7 @@ class VLMTestInfo(NamedTuple):
     num_logprobs: Union[int, Tuple[int]] = 5
     dtype: Union[str] = "half"
     # No image, single-scale, batched single-scale, batched multi-scale
+    # size_factors: Tuple[float] = ((1.0,),)
     size_factors: Tuple[float] = ((), (1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0))
 
 
@@ -214,6 +217,19 @@ def phi3v_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
     return hf_output_ids, hf_output_str, out_logprobs
 
+### Common postprocessors to run on HF BatchEncoding
+# NOTE: It would be helpful to rewrite this to be configured in the test info,
+# but built inside of the test so that we don't need to specify the dtype twice
+def get_key_type_post_processor(
+        hf_inp_key: str,
+        dtype: str
+    ) -> Callable[[BatchEncoding], BatchEncoding]:
+    """Gets a handle to a post processor which converts a """
+    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+    def process(hf_inputs: BatchEncoding):
+        hf_inputs[hf_inp_key] = hf_inputs[hf_inp_key].to(torch_dtype)
+        return hf_inputs
+    return process
 
 ###
 # NOTE: Convention here is to map the names of the file containing multimodal
@@ -225,14 +241,14 @@ VLM_TEST_SETTINGS = {
         models="Salesforce/blip2-opt-2.7b",
         img_idx_to_prompt=lambda idx: "",
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
-        vllm_to_hf_output=blip2_vllm_to_hf_output,
+        vllm_output_post_proc=blip2_vllm_to_hf_output,
         auto_cls=AutoModelForVision2Seq,
     ),
     "fuyu": VLMTestInfo(
         models="adept/fuyu-8b",
         img_idx_to_prompt=lambda idx: "",
         prompt_formatter=lambda img_prompt: f"{img_prompt}\n",
-        vllm_to_hf_output=fuyu_vllm_to_hf_output,
+        vllm_output_post_proc=fuyu_vllm_to_hf_output,
         dtype="bfloat16" if is_cpu() else "half",
         num_logprobs=10,
         max_model_len=2048,
@@ -240,18 +256,24 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         size_factors=((), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)),
     ),
+    "chameleon": VLMTestInfo(
+        models="facebook/chameleon-7b",
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        dtype="bfloat16",
+        postprocess_inputs=get_key_type_post_processor(
+            "pixel_values", 
+            "bfloat16"
+        ),
+        max_model_len=4096,
+        max_tokens=8,
+        auto_cls=AutoModelForVision2Seq,
+        # For chameleon, we only compare the sequences
+        vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
+        hf_output_post_proc = lambda hf_output, model: hf_output[:2],
+        comparator=check_outputs_equal,
+    ),
+
     ## Tests beyond this point have been validated to align with current tests 
-
-
-    ## WIP
-    # "chameleon":
-    # VLMTestInfo(
-    #     models="facebook/chameleon-7b",
-    #     prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-    #     dtype="bfloat16",
-    #     max_model_len=4096,
-    #     auto_cls=AutoModelForVision2Seq,
-    # ),
     # "intern_vl": VLMTestInfo(
     #     models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
     #     supports_multi_image=True,
@@ -263,7 +285,7 @@ VLM_TEST_SETTINGS = {
     # "llava": VLMTestInfo(
     #     models="llava-hf/llava-1.5-7b-hf",
     #     prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-    #     vllm_to_hf_output=llava_vllm_to_hf_output,
+    #     vllm_output_post_proc=llava_vllm_to_hf_output,
     # ),
     # "minicpmv": VLMTestInfo(
     #     models="openbmb/MiniCPM-Llama3-V-2_5",
@@ -276,7 +298,7 @@ VLM_TEST_SETTINGS = {
     #     supports_multi_image=True,
     #     img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
     #     prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
-    #     vllm_to_hf_output=phi3v_vllm_to_hf_output,
+    #     vllm_output_post_proc=phi3v_vllm_to_hf_output,
     #     num_logprobs=10,
     # ),
     # "qwen": VLMTestInfo(
@@ -327,10 +349,14 @@ def test_single_image_generation(model_type: str, model: str, max_tokens: int,
         enforce_eager=test_info.enforce_eager,
         max_model_len=test_info.max_model_len,
         max_num_seqs=test_info.max_num_seqs,
-        vllm_to_hf_output=test_info.vllm_to_hf_output,
+        hf_output_post_proc=test_info.hf_output_post_proc,
+        vllm_output_post_proc=test_info.vllm_output_post_proc,
         auto_cls=test_info.auto_cls,
         use_tokenizer_eos=test_info.use_tokenizer_eos,
+        postprocess_inputs=test_info.postprocess_inputs,
+        comparator=test_info.comparator,
     )
+
 
 def run_test(
     *,
@@ -345,9 +371,12 @@ def run_test(
     enforce_eager: bool,
     max_model_len: int,
     max_num_seqs: int,
-    vllm_to_hf_output: Optional[Callable],
+    hf_output_post_proc: Optional[Callable],
+    vllm_output_post_proc: Optional[Callable],
     auto_cls: Type[_BaseAutoModelClass],
     use_tokenizer_eos: bool,
+    postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
+    comparator: Callable,
 ):
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -378,7 +407,7 @@ def run_test(
             model
         ).eos_token_id
 
-    with hf_runner(model, dtype=dtype, auto_cls=auto_cls) as hf_model:
+    with hf_runner(model, dtype=dtype, auto_cls=auto_cls, postprocess_inputs=postprocess_inputs) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
@@ -388,15 +417,22 @@ def run_test(
             for prompts, images in inputs
         ]
 
-    # Sanitize the VLLM outputs if needed
-    if vllm_to_hf_output is not None:
+    # Apply output processing / sanitation to the vLLM and HF runner results
+    if vllm_output_post_proc is not None:
         vllm_outputs_per_image = [[
-            vllm_to_hf_output(res, model) for res in vllm_outputs
+            vllm_output_post_proc(res, model) for res in vllm_outputs
         ] for vllm_outputs in vllm_outputs_per_image]
+
+    if hf_output_post_proc is not None:
+        hf_outputs_per_image = [[
+            hf_output_post_proc(res, model) for res in hf_outputs
+        ] for hf_outputs in hf_outputs_per_image]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
-        check_logprobs_close(
+        # This is usually check_logprobs_close, but it's passed through to
+        # allow things like check_outputs_equal where needed
+        comparator(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_outputs,
             name_0="hf",
