@@ -64,7 +64,9 @@ def run_inference_perf(
         print("Measuring performance with dummy prompts of length", input_prompt_len)
         prompt_token_ids = [[0]*input_prompt_len]*max_seqs_in_batch  # dummy prompts
     sampling_params = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
-    sampling_params.max_tokens = 2  # 1 prefill output token + 1 decode output token
+    
+    # Set an arbitrary max_tokens to simulate generating multiple tokens consecutively
+    sampling_params.max_tokens = 33  # 1 prefill output token + 32 decode output tokens
     
     # Compile run
     print("Starting compile run")
@@ -74,8 +76,8 @@ def run_inference_perf(
 
     # Inference runs
     print("Starting inference runs")
-    N_warmup = 5
-    N_inference = 15
+    N_warmup = 1
+    N_inference = 5
     for i in tqdm(range(N_inference), desc="Inference runs"):
         if i == N_warmup:  # Reset stats after warmup
             llm.llm_engine.stat_loggers['global'].reset()
@@ -105,7 +107,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompts_json", type=str, default="tt_metal/prompts.json", help="Path to JSON file containing prompts")
     parser.add_argument("--measure_perf", action="store_true", help="Measure performance")
-    parser.add_argument("--perf_prompt_len", type=int, default=127, help="Length of dummy prompts for performance measurement")
+    parser.add_argument("--perf_prompt_len", type=int, default=128, help="Length of dummy prompts for performance measurement")
+    parser.add_argument("--greedy_sampling", action="store_true", help="Use greedy decoding instead of top-k/p")
     args = parser.parse_args()
 
-    run_inference(args.prompts_json, measure_perf=args.measure_perf, perf_prompt_len=args.perf_prompt_len)
+    run_inference(
+        args.prompts_json,
+        measure_perf=args.measure_perf,
+        perf_prompt_len=args.perf_prompt_len,
+        greedy_sampling=args.greedy_sampling
+    )
