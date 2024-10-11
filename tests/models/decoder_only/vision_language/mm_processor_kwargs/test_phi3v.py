@@ -1,5 +1,5 @@
 """Tests for phi3v's multimodal preprocessing kwargs."""
-from typing import Callable, Optional
+from typing import Optional
 
 import pytest
 import torch
