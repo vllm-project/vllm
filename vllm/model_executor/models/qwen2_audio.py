@@ -20,25 +20,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
-from functools import lru_cache 
+from functools import lru_cache
 from typing import Iterable, List, Mapping, Optional, Tuple, TypedDict, Union
 
-import numpy as np 
-import torch 
-import torch.nn as nn 
+import numpy as np
+import torch
+import torch.nn as nn
 from transformers import Qwen2AudioConfig, Qwen2AudioEncoder
 
-from vllm.attention import AttentionMetadata 
-from vllm.config import CacheConfig, MultiModalConfig 
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs 
-from vllm.logger import init_logger 
-from vllm.model_executor.layers.logits_processor import LogitsProcessor 
+from vllm.attention import AttentionMetadata
+from vllm.config import CacheConfig, MultiModalConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.logger import init_logger
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler,SamplerOutput 
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead 
-from vllm.model_executor.model_loader.weight_utils import (default_weight_loader, 
-                                                           maybe_remap_kv_scale_name)
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
