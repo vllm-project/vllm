@@ -521,7 +521,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.prompt_adapter_config = prompt_adapter_config
         self.return_hidden_states = return_hidden_states
         self.observability_config = observability_config
-        self.profiler = HabanaHighLevelProfiler()
 
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
@@ -557,6 +556,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.inc_initialized_successfully = False
 
         # Profiler stats
+        self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
         self.seen_configs: set = set()
         self._mem_margin: Optional[int] = None
@@ -1767,8 +1767,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         """
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             assert seq_group_metadata_list is not None
-            self.profiler_counter_helper.capture_seq_group_metadata_stats(
-                seq_group_metadata_list=seq_group_metadata_list)
+            if self.profiler.enabled:
+                self.profiler_counter_helper.capture_seq_group_metadata_stats(
+                    seq_group_metadata_list=seq_group_metadata_list)
             model_input, sampling_metadata = self.prepare_input_tensors(
                 seq_group_metadata_list)
             assert model_input.attn_metadata is not None
