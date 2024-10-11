@@ -177,6 +177,8 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             **kwargs,
         )
+        # FIXME:
+        engine_args.max_num_seqs = max(engine_args.max_num_seqs, 2048)
         self.llm_engine = LLMEngineV1.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
         # self.llm_engine = LLMEngine.from_engine_args(
