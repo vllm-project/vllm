@@ -386,10 +386,12 @@ class _ModelRegistry:
     ) -> bool:
         return self.inspect_model_cls(architectures).supports_pp
 
-    def model_has_inner_state(self, architectures: Union[str, List[str]]) -> bool:
+    def model_has_inner_state(self, architectures: Union[str,
+                                                         List[str]]) -> bool:
         return self.inspect_model_cls(architectures).has_inner_state
 
-    def is_attention_free_model(self, architectures: Union[str, List[str]]) -> bool:
+    def is_attention_free_model(self, architectures: Union[str,
+                                                           List[str]]) -> bool:
         return self.inspect_model_cls(architectures).is_attention_free
 
 
