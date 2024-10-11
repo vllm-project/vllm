@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 from collections import namedtuple
+from vllm.envs import environment_variables
 
 try:
     import torch
@@ -514,12 +515,12 @@ def is_xnnpack_available():
         return "N/A"
 
 def get_env_vars():
-    BLACK_LIST = ('HUGGINGFACE_HUB_TOKEN')
     env_vars = ''
+    BLACK_LIST=('S3_SECRET_ACCESS_KEY', 'VLLM_API_KEY', 'S3_ACCESS_KEY_ID')
     for k, v in os.environ.items():
         if k in BLACK_LIST:
             continue
-        if "TOKEN" in k:
+        if k not in environment_variables:
             continue
         env_vars = env_vars + "{}={}".format(k, v) + "\n"
     return env_vars
