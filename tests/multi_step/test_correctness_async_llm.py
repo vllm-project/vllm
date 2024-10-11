@@ -165,7 +165,7 @@ async def test_multi_step_pp_smoke(
     Args:
       tp_size: degree of tensor-parallelism
       pp_size: degree of pipeline-parallelism
-      eager_mode
+      monkeypatch: fixture which we use to temporarily override backend env var
     """
 
     model = "JackFram/llama-160m"
@@ -242,7 +242,7 @@ async def test_multi_step_pp_smoke(
 @pytest.mark.parametrize("is_async", [True])
 @pytest.mark.parametrize("num_logprobs", [None, 5])
 @pytest.mark.asyncio
-async def test_multi_step_llm_best_of_fallback_async_server(
+async def test_multi_step_llm_best_of_fallback_async(
     monkeypatch,
     example_prompts,
     model: str,
@@ -258,7 +258,7 @@ async def test_multi_step_llm_best_of_fallback_async_server(
     is_async: bool,
     num_logprobs: Optional[int],
 ) -> None:
-    """Test vLLM engine with multi-step & best_of > 1
+    """Test vLLM server with multi-step & best_of > 1
 
     Currently multi-step scheduling does not support best_of > 1 or
     beam search,
@@ -267,21 +267,22 @@ async def test_multi_step_llm_best_of_fallback_async_server(
     scheduling rather than failing.
 
     Args:
-      vllm_runner: vLLM model runner fixture
+      monkeypatch: fixture which we use to temporarily override backend env var
       example_prompts: test fixture providing example prompts
       model: model under test (same for single- and multi-step engines)
-      dtype: tensor datatype for engine to utilize
       tp_size: degree of tensor-parallelism
-      max_tokens: the maximum number of tokens to generate
+      pp_size: degree of pipeline-parallelism
       enforce_eager
+      max_tokens: the maximum number of tokens to generate
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
       num_prompts: number of example prompts under test
       max_output_len
-      n_best_of: a tuple of `n` (num seqs to output per
-                 :class:`SequenceGroup`)
-                 and `best_of` (num seqs per :class:`SequenceGroup` from which
-                 to choose)
+      n: num seqs to output per :class:`SequenceGroup`
+      best_of: num seqs per :class:`SequenceGroup` from which to choose
+      attention_backend
+      is_async: if True, use async output processor
+      num_logprobs: number of logprobs to return per token
     """
 
     override_backend_env_variable(monkeypatch, attention_backend)
@@ -352,6 +353,6 @@ async def test_multi_step_llm_best_of_fallback_async_server(
     check_logprobs_close(
         outputs_0_lst=ref_text_logprobs,
         outputs_1_lst=test_text_logprobs,
-        name_0="hf",
-        name_1="vllm",
+        name_0="single-step",
+        name_1="multi-step",
     )
