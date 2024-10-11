@@ -227,114 +227,131 @@ async def test_multi_step_pp_smoke(
     test_generations = get_client_text_generations(test_completions)
 
     assert ref_generations == test_generations
-
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.executor.gpu_executor import GPUExecutor, GPUExecutorAsync
-
+    
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("tp_size", [1])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("pp_size", [1])
+@pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("max_output_len", [7])
 @pytest.mark.parametrize("n,best_of", [
-    (1, 2),
+    (1, 3),
     (2, 2),
     (2, 3),
 ])
-@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
-@pytest.mark.parametrize("enable_prefix_caching", [True, False])
+@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
+@pytest.mark.parametrize("is_async", [True])
 @pytest.mark.asyncio
-def test_multi_step_llm_best_of_fallback_async(
-    vllm_runner,
+async def test_multi_step_llm_best_of_fallback_async_server(
+    monkeypatch,
     example_prompts,
     model: str,
-    dtype: str,
     tp_size: int,
+    pp_size: int,
     enforce_eager: int,
     num_scheduler_steps: int,
     num_prompts: int,
     max_output_len: int,
     n: int,
     best_of: int,
-    enable_chunked_prefill: bool,
-    enable_prefix_caching: bool,
+    attention_backend: str,
+    is_async: bool,
 ) -> None:
     """Test vLLM engine with multi-step & best_of > 1
 
-    Currently multi-step scheduling does not support best_of > 1 or beam search,
-    however the default behavior is for the engine to fall back on single-step
+    Currently multi-step scheduling does not support best_of > 1 or
+    beam search,
+    however the default behavior is for the engine to fall back
+    on single-step
     scheduling rather than failing.
-    
+
     Args:
       vllm_runner: vLLM model runner fixture
       example_prompts: test fixture providing example prompts
       model: model under test (same for single- and multi-step engines)
       dtype: tensor datatype for engine to utilize
       tp_size: degree of tensor-parallelism
-      max_output_len: the maximum number of tokens to generate
+      max_tokens: the maximum number of tokens to generate
       enforce_eager
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
       num_prompts: number of example prompts under test
       max_output_len
-      n: num seqs to output per :class:`SequenceGroup`
-      best_of: num seqs per :class:`SequenceGroup` from which to choose
-      enable_chunked_prefill
-      enable_prefix_caching
+      n_best_of: a tuple of `n` (num seqs to output per
+                 :class:`SequenceGroup`)
+                 and `best_of` (num seqs per :class:`SequenceGroup` from which
+                 to choose)
     """
 
-    # prompts = example_prompts
-    # if len(prompts) < num_prompts:
-    #     prompts = prompts * ((num_prompts // len(prompts)) + 1)
-    # prompts = prompts[:num_prompts]
-    # assert len(prompts) == num_prompts
+    override_backend_env_variable(monkeypatch, attention_backend)
 
-    sampling_params = SamplingParams(
-        max_tokens=max_output_len,
-        ignore_eos=True,
-        temperature=1.0,
-        n=n,
+    prompts = example_prompts
+    if len(prompts) < num_prompts:
+        prompts = prompts * ((num_prompts // len(prompts)) + 1)
+    prompts = prompts[:num_prompts]
+    assert len(prompts) == num_prompts
+
+    server_args = DEFAULT_SERVER_ARGS + ["--enforce-eager"]
+    ms_server_args = DEFAULT_SERVER_ARGS + \
+        ["--num-scheduler-steps", f"{num_scheduler_steps}"]
+
+    if not is_async:
+        ms_server_args += ["--disable-async-output-proc"]
+
+    if enforce_eager:
+        ms_server_args.append("--enforce-eager")
+
+    distributed_args = [
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--pipeline-parallel-size",
+        str(pp_size),
+    ]
+
+    # Requests will share a random seed
+    seed=42
+
+    # Spin up client/server & issue completion API requests.
+    # Default `max_wait_seconds` is 240 but was empirically
+    # was raised 3x to 720 *just for this test* due to
+    # observed timeouts in GHA CI
+    ref_completions = await completions_with_server_args(
+        prompts,
+        model,
+        server_args + distributed_args,
+        None,
+        max_wait_seconds=5 * 240,
         best_of=best_of,
-        seed=42,
+        n=n,
+        max_tokens=max_output_len,
+        temperature=1.0,
+        seed=seed)
+    test_completions = await completions_with_server_args(
+        prompts,
+        model,
+        ms_server_args + distributed_args,
+        None,
+        max_wait_seconds=5 * 240,
+        best_of=best_of,
+        n=n,
+        max_tokens=max_output_len,
+        temperature=1.0,
+        seed=seed)
+
+    # Assert multi-step scheduling produces identical tokens
+    # to single-step scheduling.
+    ref_generations = get_client_text_generations(ref_completions)
+    test_generations = get_client_text_generations(test_completions)
+    assert ref_generations == test_generations
+
+    # Assert multi-step scheduling produces nearly-identical logprobs
+    # to single-step scheduling.
+    ref_text_logprobs = get_client_text_logprob_generations(ref_completions)
+    test_text_logprobs = get_client_text_logprob_generations(test_completions)
+    check_logprobs_close(
+        outputs_0_lst=ref_text_logprobs,
+        outputs_1_lst=test_text_logprobs,
+        name_0="hf",
+        name_1="vllm",
     )
-
-    prompt = (
-    "You are a helpful assistant. How do I build a car from cardboard and "
-    "paper clips? Is there an easy to follow video tutorial available "
-    "online for free?")
-    prompt2 = (
-        " Please recommend to me some resources where I can learn not only to "
-        "handle technical difficulties of building a car, but also "
-        "decoration.")
-
-
-    engine_args = AsyncEngineArgs(model=model,
-                                  block_size=16,
-                                  use_v2_block_manager=True,
-                                  num_scheduler_steps=8,
-                                  distributed_executor_backend=GPUExecutorAsync)
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
-
-    # sampling_params = SamplingParams(max_tokens=2,
-    #                                  temperature=1.0,
-    #                                  best_of=3,
-    #                                  n=2)
-    engine.start_background_loop()
-    x=None
-    try:
-        #engine.add_request("0", "foo", sampling_params)
-        #asyncio.run(engine.engine_step(0))
-        l =engine.generate(prompt,sampling_params,"0")
-
-        print(x)
-    except Exception as e:
-        x=e
-        print("error")
-    finally:
-        engine.shutdown_background_loop()
-    
-    if x is not None:
-        raise x

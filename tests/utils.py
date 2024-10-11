@@ -615,6 +615,10 @@ async def completions_with_server_args(
     num_logprobs: Optional[int],
     max_wait_seconds: int = 240,
     max_tokens: Union[int, list] = 5,
+    best_of: Optional[int] = None,
+    n: Optional[int] = None,
+    temperature: float = 0,
+    seed: Optional[int] = None,
 ) -> List[Completion]:
     '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
@@ -647,10 +651,13 @@ async def completions_with_server_args(
         client = server.get_async_client()
         outputs = [ client.completions.create(model=model_name,
                                               prompt=[p],
-                                              temperature=0,
+                                              temperature=temperature,
                                               stream=False,
                                               max_tokens=max_tok,
-                                              logprobs=num_logprobs) \
+                                              logprobs=num_logprobs,
+                                              best_of=best_of,
+                                              n=n,
+                                              seed=seed) \
                     for p, max_tok in zip(prompts, max_tokens) ]
         outputs = await asyncio.gather(*outputs)
 
@@ -663,8 +670,7 @@ def get_client_text_generations(completions: List[Completion]) -> List[str]:
     '''Extract generated tokens from the output of a
     request made to an Open-AI-protocol completions endpoint.
     '''
-    assert all([len(x.choices) == 1 for x in completions])
-    return [x.choices[0].text for x in completions]
+    return [c.text for x in completions for c in x.choices]
 
 
 def get_client_text_logprob_generations(
