@@ -157,10 +157,18 @@ Note:
 
 
 class PlaceholderRange(TypedDict):
-    """A placeholder for multi-modal data."""
+    """
+    A placeholder for multi-modal data.
+
+    For example:
+        Prompt: AAAA BBBB What is in these images?
+        Images A and B will have:
+            A: { "offset": 0, "length": 4 }
+            B: { "offset": 5, "length": 4 }
+    """
 
     offset: int
-    """The start index of the placeholder."""
+    """The start index of the placeholder in the prompt."""
 
     length: int
     """The length of the placeholder."""
@@ -400,7 +408,7 @@ class MultiModalPlaceholderMap:
     src_ranges: List[range]
     """
     The indices of the multi-modal embeddings that will replace the
-    corresponding placeholder embeddings pointed to be ``dest_ranges``.
+    corresponding placeholder embeddings pointed to by ``dest_ranges``.
     """
 
     src_len: int
