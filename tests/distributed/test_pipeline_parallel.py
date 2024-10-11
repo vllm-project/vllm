@@ -114,7 +114,7 @@ class PPTestSettings:
 GENERATION_MODEL_SETTINGS = {
     # [DETAILED TESTS]
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
-    "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True), # noqa: E501
+    "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True),  # noqa: E501
     # [FAST TESTS]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
