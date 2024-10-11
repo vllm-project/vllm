@@ -514,7 +514,15 @@ def is_xnnpack_available():
         return "N/A"
 
 def get_env_vars():
-    return "\n".join("{}={}".format(k, v) for k, v in os.environ.items())
+    BLACK_LIST = ('HUGGINGFACE_HUB_TOKEN')
+    env_vars = ''
+    for k, v in os.environ.items():
+        if k in BLACK_LIST:
+            continue
+        if "TOKEN" in k:
+            continue
+        env_vars = env_vars + "{}={}".format(k, v) + "\n"
+    return env_vars
 
 def get_env_info():
     run_lambda = run
@@ -635,6 +643,7 @@ vLLM Build Flags:
 {vllm_build_flags}
 GPU Topology:
 {gpu_topo}
+
 {env_vars}
 """.strip()
 
