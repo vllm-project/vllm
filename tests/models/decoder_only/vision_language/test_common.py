@@ -48,6 +48,8 @@ class VLMTestInfo(NamedTuple):
     max_tokens: Union[int, Tuple[int]] = 128
     num_logprobs: Union[int, Tuple[int]] = 5
     dtype: Union[str] = "half"
+    # No image, single-scale, batched single-scale, batched multi-scale
+    size_factors: Tuple[float] = ((), (1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0))
 
 
 ### Base prompts / Common formatting utils
@@ -60,16 +62,6 @@ SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
-SIZE_FACTORS = (
-    # No image
-    (),
-    # Single-scale
-    (1.0,),
-    # Single-scale, batched
-    (1.0, 1.0, 1.0),
-    # Multi-scale
-    (0.25, 0.5, 1.0),
-) # yapf: disable
 
 
 def replace_test_img_placeholders(prompt: str,
@@ -137,6 +129,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
                 ensure_wrapped(test_info.max_tokens),
                 ensure_wrapped(test_info.num_logprobs),
                 ensure_wrapped(test_info.dtype),
+                ensure_wrapped(test_info.size_factors),
             ))
 
     # Get a list per model type, where each entry contains a tuple of all of
@@ -235,16 +228,72 @@ VLM_TEST_SETTINGS = {
         vllm_to_hf_output=blip2_vllm_to_hf_output,
         auto_cls=AutoModelForVision2Seq,
     ),
+    "fuyu": VLMTestInfo(
+        models="adept/fuyu-8b",
+        img_idx_to_prompt=lambda idx: "",
+        prompt_formatter=lambda img_prompt: f"{img_prompt}\n",
+        vllm_to_hf_output=fuyu_vllm_to_hf_output,
+        dtype="bfloat16" if is_cpu() else "half",
+        num_logprobs=10,
+        max_model_len=2048,
+        max_num_seqs=2,
+        use_tokenizer_eos=True,
+        size_factors=((), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)),
+    ),
+    ## Tests beyond this point have been validated to align with current tests 
+
+
+    ## WIP
+    # "chameleon":
+    # VLMTestInfo(
+    #     models="facebook/chameleon-7b",
+    #     prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+    #     dtype="bfloat16",
+    #     max_model_len=4096,
+    #     auto_cls=AutoModelForVision2Seq,
+    # ),
+    # "intern_vl": VLMTestInfo(
+    #     models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
+    #     supports_multi_image=True,
+    #     prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+    #     dtype="bfloat16" if is_cpu() else "half",
+    #     num_logprobs=10,
+    #     max_model_len=4096,
+    # ),
+    # "llava": VLMTestInfo(
+    #     models="llava-hf/llava-1.5-7b-hf",
+    #     prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+    #     vllm_to_hf_output=llava_vllm_to_hf_output,
+    # ),
+    # "minicpmv": VLMTestInfo(
+    #     models="openbmb/MiniCPM-Llama3-V-2_5",
+    #     supports_multi_image=True,
+    #     img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
+    #     prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+    # ),
+    # "phi3v": VLMTestInfo(
+    #     models="microsoft/Phi-3.5-vision-instruct",
+    #     supports_multi_image=True,
+    #     img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
+    #     prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
+    #     vllm_to_hf_output=phi3v_vllm_to_hf_output,
+    #     num_logprobs=10,
+    # ),
+    # "qwen": VLMTestInfo(
+    #     models="Qwen/Qwen-VL",
+    #     supports_multi_image=True,
+    #     img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
+    #     prompt_formatter=lambda img_prompt: f"{img_prompt} ",
+    # ),
 }
 # yapf: enable
 
-@pytest.mark.parametrize("size_factors", SIZE_FACTORS)
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype",
+    "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
     get_parametrized_options(VLM_TEST_SETTINGS, is_multi_image=False))
 def test_single_image_generation(model_type: str, model: str, max_tokens: int,
                                  num_logprobs: int, dtype: str,
-                                 size_factors: List[float], hf_runner,
+                                 size_factors: Tuple[float], hf_runner,
                                  vllm_runner, image_assets: _ImageAssets):
     # Grab the model type's global model config to leverage callables
     test_info = VLM_TEST_SETTINGS[model_type]
@@ -282,51 +331,6 @@ def test_single_image_generation(model_type: str, model: str, max_tokens: int,
         auto_cls=test_info.auto_cls,
         use_tokenizer_eos=test_info.use_tokenizer_eos,
     )
-
-
-### Multi-image generation tests [only for VLMs that support it]
-# @pytest.mark.skipif(not any(test.supports_multi_image
-#                             for test in VLM_TEST_SETTINGS.values()),
-#                     reason="No models with multi-image tests are enabled.")
-# @pytest.mark.parametrize("size_factors", SIZE_FACTORS)
-# @pytest.mark.parametrize(
-#     "model_type,model,max_tokens,num_logprobs,dtype",
-#     get_parametrized_options(VLM_TEST_SETTINGS, is_multi_image=True))
-# def test_multi_image_generation(model_type: str, model: str, max_tokens: int,
-#                                 num_logprobs: int, dtype: str,
-#                                 size_factors: List[float],
-#                                 hf_runner: Type[HfRunner],
-#                                 vllm_runner: Type[VllmRunner],
-#                                 image_assets: _ImageAssets):
-#     test_info = VLM_TEST_SETTINGS[model_type]
-#     model_prompt = get_model_prompts([MULTI_IMAGE_BASE_PROMPT],
-#                                      test_info.img_idx_to_prompt,
-#                                      test_info.prompt_formatter)[0]
-
-#     images = [asset.pil_image for asset in image_assets]
-
-#     # This is similar to the single image case, but we rescale each of the
-#     # images in the multi-image prompt; currently we only have one model prompt
-#     inputs = [([model_prompt for _ in size_factors],
-#                [[rescale_image_size(image, factor) for image in images]
-#                 for factor in size_factors])]
-
-#     run_test(
-#         hf_runner=hf_runner,
-#         vllm_runner=vllm_runner,
-#         inputs=inputs,
-#         model=model,
-#         dtype=dtype,
-#         max_tokens=max_tokens,
-#         num_logprobs=num_logprobs,
-#         tensor_parallel_size=test_info.tensor_parallel_size,
-#         enforce_eager=test_info.enforce_eager,
-#         max_model_len=test_info.max_model_len,
-#         max_num_seqs=test_info.max_num_seqs,
-#         vllm_to_hf_output=test_info.vllm_to_hf_output,
-#         auto_cls=test_info.auto_cls,
-#     )
-
 
 def run_test(
     *,
