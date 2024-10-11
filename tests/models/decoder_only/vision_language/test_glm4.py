@@ -61,7 +61,11 @@ def run_test(
                 return hf_processor(*args, **kwargs)
 
             return hf_processor.apply_chat_template(
-                [{"role": "user", "image": images, "content": text}],
+                [{
+                    "role": "user",
+                    "image": images,
+                    "content": text
+                }],
                 add_generation_prompt=True,
                 tokenize=True,
                 return_dict=True,
