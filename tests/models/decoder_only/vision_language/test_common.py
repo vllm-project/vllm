@@ -4,6 +4,7 @@ image support for different VLMs in vLLM.
 from enum import Enum
 import itertools
 import os
+from pathlib import PosixPath
 import re
 from typing import (Any, Callable, Dict, List, NamedTuple, Optional, Tuple,
                     Type, Union)
@@ -22,6 +23,12 @@ from vllm.utils import identity, is_cpu, is_hip, STR_DTYPE_TO_TORCH_DTYPE
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close, check_outputs_equal
 
+# This hack is needed for phi3v & paligemma models
+# ROCm Triton FA can run into shared memory issues with these models,
+# use other backends in the meantime
+# FIXME (mattwong, gshtrasb, hongxiayan)
+if is_hip():
+    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 ### Test Info / Common Configuration
 class VlmTestType(Enum):
@@ -78,6 +85,13 @@ class VLMTestInfo(NamedTuple):
     # be varied per model.
     image_size_factors: Tuple[float] = IMAGE_SIZE_FACTORS
 
+    # Hack for updating a prompt to take into a local path; currently only used
+    # for Qwen-VL, which requires encoding the image path / url into the prompt
+    # for HF runner
+    prompt_path_encoder: Optional[Callable[[PosixPath, str, Union[_ImageAssets, List[_ImageAssets]]], str]] = None  # noqa: E501
+
+    # Toggle for disabling instances of this class
+    skip: bool = True
 
 ### Base prompts / Common formatting utils
 TEST_IMG_PLACEHOLDER = "<image>"
@@ -89,8 +103,7 @@ SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
-# phi3v testing
-MULTI_IMAGE_BASE_PROMPT = f"{TEST_IMG_PLACEHOLDER}{TEST_IMG_PLACEHOLDER}Describe these images."
+
 
 def replace_test_img_placeholders(prompt: str,
                                   img_idx_to_prompt: Callable) -> str:
@@ -131,22 +144,31 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
         model_prompts.append(model_prompt)
     return model_prompts
 
+def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
+                               test_type: VlmTestType):
+    # Filter based on type of test; assume single image is supported everywhere
+    filter_func = lambda _: True
 
+    if test_type == VlmTestType.MULTI_IMAGE:
+        # Multi-image requires explicit enablement
+        filter_func = lambda info: info.supports_multi_image
+    elif test_type == VlmTestType.EMBEDDING:
+        # Embedding requires an explicit func to get embeddings to pass to vLLM
+        filter_func = lambda info: info.convert_assets_to_embeddings is not None
+
+    # Drop anything that is either unimplemented for the test config/disabled
+    test_settings = {
+        model_type: test_info
+        for model_type, test_info in test_settings.items()
+        if filter_func(test_info) and not test_info.skip
+    }
+    return test_settings
+
+        
 def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
                              test_type: VlmTestType):
     """Converts all of our VLMTestInfo into an expanded list of parameters."""
-    if test_type != VlmTestType.IMAGE:
-        # Only a subset of the tests are enabled; filter based on test type
-        if test_type == VlmTestType.MULTI_IMAGE:
-            filter_func = lambda info: info.supports_multi_image
-        elif test_type == VlmTestType.EMBEDDING:
-            filter_func = lambda info: info.convert_assets_to_embeddings
-
-        test_settings = {
-            model_type: test_info
-            for model_type, test_info in test_settings.items()
-            if filter_func(test_info)
-        }
+    test_settings = get_filtered_test_settings(test_settings, test_type)
 
     # Ensure that something is wrapped as an iterable it's not already
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e, )
@@ -211,6 +233,17 @@ def fuyu_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return output_ids, hf_output_str, out_logprobs
 
 
+def qwen_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+                                              Optional[SampleLogprobs]],
+                           model: str):
+    """Sanitize vllm output [qwen models] to be comparable with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    hf_output_str = output_str + "<|endoftext|>"
+
+    return output_ids, hf_output_str, out_logprobs
+
+
 def llava_vllm_to_hf_output(vllm_output: Tuple[List[int], str,
                                                Optional[SampleLogprobs]],
                             model: str):
@@ -264,6 +297,36 @@ def minicmpv_trunc_hf_output(hf_output: Tuple[List[int], str,
         output_str = output_str.split("<|eot_id|>")[0]
     return output_ids, output_str, out_logprobs
 
+### path encoder hacks for HF models
+def qwen_prompt_path_encoder(
+    tmp_path: PosixPath,
+    prompt: str,
+    assets: Union[_ImageAssets, List[_ImageAssets]]
+) -> str:
+    """Given a temporary dir path, export one or more image assets into the
+    tempdir & replace its contents with the local path to the string so that
+    the HF version of Qwen-VL can resolve the path and load the image ni its
+    forward() call.
+
+    Args:
+        tmp_path: Tempdir for test under consideration.
+        prompt: Prompt with image placeholders.
+        assets: List of image assets whose len equals the num placeholders.
+    """
+    # Ensure that the number of placeholders matches the number of assets;
+    # If this is not true, the test is probably written incorrectly.
+    assert prompt.count("<img></img>") == len(assets)
+
+    # Replace the placeholders with local paths to the exported assets
+    for asset in assets:
+        image_tmp_path = tmp_path / f"{asset.name}.jpg"
+        asset.pil_image.save(image_tmp_path)
+        prompt = prompt.replace(
+            "<img></img>",
+            f"<img>{image_tmp_path}</img>",
+            1,
+        )
+    return prompt
 
 ### Common postprocessors to run on HF BatchEncoding
 # NOTE: It would be helpful to rewrite this to be configured in the test info,
@@ -360,8 +423,25 @@ VLM_TEST_SETTINGS = {
         # use eager mode for hf runner, since phi3v didn't work with flash_attn
         model_kwargs={"_attn_implementation": "eager"},
     ),
+    "qwen": VLMTestInfo(
+        models="Qwen/Qwen-VL",
+        supports_multi_image=True,
+        vllm_output_post_proc=qwen_vllm_to_hf_output,
+        img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
+        prompt_formatter=identity,
+        max_model_len=1024,
+        max_num_seqs=2,
+        prompt_path_encoder=qwen_prompt_path_encoder,
+        skip=False
+    ),
 
     ## Tests above this point have been validated to align with current tests 
+    "paligemma": VLMTestInfo(
+        models="google/paligemma-3b-mix-224",
+        dtype="half" if is_hip() else ["half", "float"],
+        prompt_formatter=identity,
+        auto_cls=AutoModelForVision2Seq,
+    )
 
     # "intern_vl": VLMTestInfo(
     #     models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
@@ -371,19 +451,14 @@ VLM_TEST_SETTINGS = {
     #     num_logprobs=10,
     #     max_model_len=4096,
     # ),
-    # "qwen": VLMTestInfo(
-    #     models="Qwen/Qwen-VL",
-    #     supports_multi_image=True,
-    #     img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
-    #     prompt_formatter=lambda img_prompt: f"{img_prompt} ",
-    # ),
 }
 # yapf: enable
 
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
     get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.IMAGE))
-def test_single_image_generation(model_type: str, model: str, max_tokens: int,
+def test_single_image_generation(tmp_path: PosixPath, model_type: str,
+                                 model: str, max_tokens: int,
                                  num_logprobs: int, dtype: str,
                                  size_factors: Tuple[float], hf_runner,
                                  vllm_runner, image_assets: _ImageAssets):
@@ -392,6 +467,15 @@ def test_single_image_generation(model_type: str, model: str, max_tokens: int,
     model_prompts = get_model_prompts(SINGLE_IMAGE_BASE_PROMPTS,
                                       test_info.img_idx_to_prompt,
                                       test_info.prompt_formatter)
+
+    # For models that require a local path / URL encoded in the image; export
+    # assets and encode into tmp_path for this test. This should be avoided
+    # where possible (currently needed for Qwen-VL).
+    if test_info.prompt_path_encoder is not None:
+        model_prompts = [
+            test_info.prompt_path_encoder(tmp_path, prompt, [asset])
+            for prompt, asset in zip(model_prompts, image_assets)
+        ]
 
     images = [asset.pil_image for asset in image_assets]
     assert len(images) == len(model_prompts)
@@ -495,7 +579,7 @@ def test_embedding_generation(model_type: str, model: str, max_tokens: int,
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_factors",
     get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.MULTI_IMAGE))
-def test_multi_image_generation(model_type: str, model: str, max_tokens: int,
+def test_multi_image_generation(tmp_path: PosixPath,model_type: str, model: str, max_tokens: int,
                                  num_logprobs: int, dtype: str,
                                  size_factors: Tuple[float], hf_runner,
                                  vllm_runner, image_assets: _ImageAssets):
@@ -504,6 +588,8 @@ def test_multi_image_generation(model_type: str, model: str, max_tokens: int,
                                      test_info.img_idx_to_prompt,
                                      test_info.prompt_formatter)[0]
 
+    if test_info.prompt_path_encoder is not None:
+        model_prompt = test_info.prompt_path_encoder(tmp_path, model_prompt, image_assets)
 
     images = [asset.pil_image for asset in image_assets]
 
@@ -561,13 +647,6 @@ def run_test(
     vllm_embeddings: Optional[torch.Tensor]=None,
     model_kwargs: Optional[Dict[str, Any]]=None,
 ):
-    # This hack is needed for phi3v models
-    # ROCm Triton FA can run into shared memory issues with these models,
-    # use other backends in the meantime
-    # FIXME (mattwong, gshtrasb, hongxiayan)
-    if is_hip():
-        os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
-
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
