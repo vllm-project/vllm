@@ -49,8 +49,6 @@ class CustomOp(nn.Module):
 
     def forward_cpu(self, *args, **kwargs):
         # By default, we assume that CPU ops are compatible with CUDA ops.
-        if current_platform.is_cuda():
-            return self.forward_native(*args, **kwargs)
         return self.forward_cuda(*args, **kwargs)
 
     def forward_tpu(self, *args, **kwargs):
@@ -69,7 +67,7 @@ class CustomOp(nn.Module):
         # Dynamic patch forward by input tensor device
         cpu_device = contain_cpu_tensor(args) or contain_cpu_tensor(kwargs)
         if cpu_device:
-            return self.forward_cpu(*args, **kwargs)
+            return self.forward_native(*args, **kwargs)
         else:
             return self.forward_cuda(*args, **kwargs)
 
