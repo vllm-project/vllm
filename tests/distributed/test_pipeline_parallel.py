@@ -114,7 +114,7 @@ class PPTestSettings:
 GENERATION_MODEL_SETTINGS = {
     # [DETAILED TESTS]
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
-    "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.detailed(trust_remote_code=True), # noqa: E501
+    "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True), # noqa: E501
     # [FAST TESTS]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
@@ -156,7 +156,6 @@ GENERATION_MODEL_SETTINGS = {
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "microsoft/phi-2": PPTestSettings.fast(),
-    "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.fast(multi_node_only=True),  # noqa: E501
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
