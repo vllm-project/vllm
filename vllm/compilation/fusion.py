@@ -61,7 +61,7 @@ def empty_fp8(*args, **kwargs):
 def get_patterns():
     my_patterns = PatternMatcherPass(pass_name="fusion_pass")
 
-    inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda")]
+    inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda", dtype=torch.float32)]
     register_replacement(rms_pattern_static, rms_replacement_static, inputs, fwd_only, my_patterns)
 
     matches = []
@@ -71,7 +71,7 @@ def get_patterns():
         return False
 
     # with residual
-    inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda")]
+    inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda", dtype=torch.float32)]
     register_replacement(rms_pattern_residual_static, rms_replacement_residual_static, inputs, fwd_only, my_patterns,
                          extra_check=record_match_fn)
 
