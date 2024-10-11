@@ -42,10 +42,10 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             is_channelwise=(self.strategy == QuantizationStrategy.CHANNEL),
             is_static_input_scheme=self.is_static_input_scheme,
             input_symmetric=self.input_symmetric)
-        
+
         kernel_type = choose_scaled_mm_linear_kernel(
             scaled_mm_linear_kernel_config)
-        
+
         if kernel_type.__name__ not in self._kernel_backends_being_used:
             logger.info("Using %s for CompressedTensorsW8A8Int8",
                         kernel_type.__name__)
@@ -102,7 +102,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                                   i_s_param_name="input_scale",
                                   i_zp_param_name="input_zero_point",
                                   azp_adj_param_name="azp_adj")
-    
+
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from the format the kernel may want. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

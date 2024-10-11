@@ -19,7 +19,7 @@ sampling_params = SamplingParams(temperature=0.7,
 
 # Set `enforce_eager=True` to avoid ahead-of-time compilation.
 # In real workloads, `enforace_eager` should be `False`.
-llm = LLM(model="neuralmagic/Meta-Llama-3.1-8B-Instruct-quantized.w8a8", 
+llm = LLM(model="neuralmagic/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
           enforce_eager=False,
           max_model_len=1024)
 outputs = llm.generate(prompts, sampling_params)
