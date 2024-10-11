@@ -51,16 +51,22 @@ def run_test(
                                                 stop_token_ids=stop_token_ids)
             for prompts, images in inputs
         ]
+
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_processor = hf_model.processor
         patch_padding_side(hf_processor)
 
-        def processor(*args, images=None, **kwargs):
-            processed_inputs = hf_processor(*args, **kwargs)
-            if images is not None:
-                processed_inputs["images"] = images
+        def processor(*args, text="", images=None, **kwargs):
+            if images is None:
+                return hf_processor(*args, **kwargs)
 
-            return processed_inputs
+            return hf_processor.apply_chat_template(
+                [{"role": "user", "image": images, "content": text}],
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                **kwargs,
+            )
 
         hf_model.processor = processor
         hf_model.model.get_output_embeddings = lambda: \
