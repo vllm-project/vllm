@@ -183,6 +183,8 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
+
+        # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
