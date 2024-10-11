@@ -6,7 +6,8 @@ import torch.cuda
 from vllm.model_executor.models import (is_embedding_model,
                                         is_text_generation_model,
                                         supports_multimodal)
-from vllm.model_executor.models.registry import (_EMBEDDING_MODELS,
+from vllm.model_executor.models.registry import (_EMBEDDING_MODELS_DECODER,
+                                                 _EMBEDDING_MODELS_ENCODER,
                                                  _MULTIMODAL_MODELS,
                                                  _SPECULATIVE_DECODING_MODELS,
                                                  _TEXT_GENERATION_MODELS,
@@ -28,8 +29,9 @@ def test_registry_imports(model_arch):
             model_arch in _TEXT_GENERATION_MODELS
             or model_arch in _MULTIMODAL_MODELS)
 
-        assert is_embedding_model(model_cls) is (model_arch
-                                                 in _EMBEDDING_MODELS)
+        assert is_embedding_model(model_cls) is (
+            model_arch in _EMBEDDING_MODELS_DECODER
+            or model_arch in _EMBEDDING_MODELS_ENCODER)
 
         assert supports_multimodal(model_cls) is (model_arch
                                                   in _MULTIMODAL_MODELS)

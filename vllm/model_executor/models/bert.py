@@ -5,6 +5,7 @@ from torch import nn
 from transformers import BertConfig
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention.backends.xformers import XFormersImpl
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -24,6 +25,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 class BertEmbedding(nn.Module):
 
     def __init__(self, config: BertConfig):
+
         super().__init__()
         self.size = config.hidden_size
         self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
@@ -213,6 +215,11 @@ class BertSelfAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn")
+
+        if not isinstance(self.attn.impl, XFormersImpl):
+            raise ValueError(
+                "Encoder-only models currently require XFORMERS attention "
+                "backend. Set VLLM_ATTENTION_BACKEND=XFORMERS to use BERT.")
 
     def forward(
         self,

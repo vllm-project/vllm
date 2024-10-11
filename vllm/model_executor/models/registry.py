@@ -81,10 +81,14 @@ _TEXT_GENERATION_MODELS = {
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
 }
 
-_EMBEDDING_MODELS = {
+_EMBEDDING_MODELS_DECODER= {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
     "Gemma2Model": ("gemma2_embedding", "Gemma2EmbeddingModel"),
+
+}
+
+_EMBEDDING_MODELS_ENCODER = {
     "BertModel": ("bert", "BertEmbeddingModel"),
 }
 
@@ -119,7 +123,8 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _MODELS = {
     **_TEXT_GENERATION_MODELS,
-    **_EMBEDDING_MODELS,
+    **_EMBEDDING_MODELS_DECODER,
+    **_EMBEDDING_MODELS_ENCODER,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
 }
