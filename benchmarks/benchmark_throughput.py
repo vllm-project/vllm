@@ -113,6 +113,7 @@ def run_vllm(
         distributed_executor_backend=distributed_executor_backend,
         load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
+        max_num_seqs=args.max_num_seqs,
         use_v2_block_manager=use_v2_block_manager,
         disable_async_output_proc=disable_async_output_proc,
     )
@@ -172,7 +173,7 @@ async def run_vllm_async(
     device: str,
     enable_prefix_caching: bool,
     enable_chunked_prefill: bool,
-    max_num_batched_tokens: int,
+    eax_num_batched_tokens: int,
     distributed_executor_backend: Optional[str],
     gpu_memory_utilization: float = 0.9,
     num_scheduler_steps: int = 1,
@@ -474,6 +475,10 @@ if __name__ == "__main__":
     parser.add_argument("--use-v2-block-manager",
                         action='store_true',
                         help="Enable block manager v2.")
+    parser.add_argument('--max-num-seqs',
+                        type=int,
+                        default=256,
+                        help="Max number of sequences a model can run in a single batch")
     parser.add_argument(
         "--enable-prefix-caching",
         action='store_true',
