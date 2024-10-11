@@ -56,7 +56,7 @@ class LogitsProcessor(nn.Module):
         else:
             if sampling_metadata is not None:
                 hidden_states = _prune_hidden_states(hidden_states,
-                                                    sampling_metadata)
+                                                     sampling_metadata)
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, lm_head, embedding_bias)
