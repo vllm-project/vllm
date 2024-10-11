@@ -15,7 +15,7 @@ def contain_cpu_tensor(data):
     elif isinstance(data, dict):
         return any(contain_cpu_tensor(item) for item in data.values())
 
-    return None
+    return False
 
 
 class CustomOp(nn.Module):
