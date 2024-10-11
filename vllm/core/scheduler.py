@@ -1205,7 +1205,7 @@ class Scheduler:
         # async_output_proc is allowed only when we have a single sequence
         # in the sequence group
         no_single_seq = seq_group.sampling_params is None or (
-            seq_group.sampling_params.best_of == 1)
+            seq_group.sampling_params.n == 1)
         return no_single_seq
 
     def schedule(
