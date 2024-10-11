@@ -210,6 +210,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
     lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
 
+    # Internal flag to control whether we use custom op
+    # with dynamic tensor-driven patch forward
+    "VLLM_DYNAMIC_FORWARD":
+    lambda: int(os.environ.get("VLLM_DYNAMIC_FORWARD", "0")),
+
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(

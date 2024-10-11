@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import json
+import os
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
                     Tuple, Type, Union)
@@ -1009,6 +1010,11 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
             cpu_draft_worker=self.cpu_draft_worker,
         )
+
+        if self.cpu_draft_worker:
+            os.environ['VLLM_DYNAMIC_FORWARD'] = "1"
+        else:
+            os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
 
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
