@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple, Type
 import pytest
 
 from vllm.multimodal.utils import rescale_image_size
+from vllm.transformers_utils.tokenizer import patch_padding_side
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
@@ -51,6 +52,17 @@ def run_test(
             for prompts, images in inputs
         ]
     with hf_runner(model, dtype=dtype) as hf_model:
+        hf_processor = hf_model.processor
+        patch_padding_side(hf_processor)
+
+        def processor(*args, images=None, **kwargs):
+            processed_inputs = hf_processor(*args, **kwargs)
+            if images is not None:
+                processed_inputs["images"] = images
+
+            return processed_inputs
+
+        hf_model.processor = processor
         hf_model.model.get_output_embeddings = lambda: \
             hf_model.model.transformer.output_layer
         hf_outputs_per_image = [
