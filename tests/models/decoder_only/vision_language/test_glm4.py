@@ -5,6 +5,7 @@ import pytest
 from vllm.multimodal.utils import rescale_image_size
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
+from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
@@ -34,7 +35,7 @@ def run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      max_model_len=2048,
-                     max_num_seqs=1,
+                     max_num_seqs=2,
                      dtype=dtype,
                      limit_mm_per_prompt={"image": mm_limit},
                      tensor_parallel_size=tensor_parallel_size,
@@ -71,6 +72,7 @@ def run_test(
         )
 
 
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",

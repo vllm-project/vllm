@@ -306,8 +306,8 @@ def run_glm4v(question: str, modality: str):
     model_name = "THUDM/glm-4v-9b"
 
     llm = LLM(model=model_name,
-              tensor_parallel_size=1,
-              max_model_len=8192,
+              max_model_len=2048,
+              max_num_seqs=2,
               trust_remote_code=True,
               enforce_eager=True)
     prompt = question
