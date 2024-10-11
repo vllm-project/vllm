@@ -153,8 +153,8 @@ def fix_functionalization(graph: fx.Graph):
         graph.erase_node(node)
 
     # debug code, if we want to see the graph after the transformation
-    with open("after.py", "w") as f:
-        print(graph.python_code(root_module="self", verbose=True).src, file=f)
+    # with open("after.py", "w") as f:
+    #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
 
 def wrap_inductor(graph, example_inputs, additional_inductor_config):
