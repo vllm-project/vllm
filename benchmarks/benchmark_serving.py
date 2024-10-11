@@ -462,6 +462,7 @@ async def benchmark(
             logprobs=logprobs,
             best_of=best_of,
             multi_modal_content=mm_content,
+            ignore_eos=ignore_eos,
         )
         tasks.append(
             asyncio.create_task(
