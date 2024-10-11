@@ -816,6 +816,9 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
+        # (Check for Guided Decoding)
         if seq_group.sampling_params.logits_processors:
             assert len(seq_group.sampling_params.logits_processors) == 0, (
                 "Logits Processors are not supported in multi-step decoding")

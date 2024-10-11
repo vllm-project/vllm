@@ -28,6 +28,8 @@ class CPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "cpu"
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         assert self.lora_config is None, "cpu backend doesn't support LoRA"
 
         #
@@ -324,6 +326,8 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
     if config.dtype == torch.float16:
         logger.warning("float16 is not supported on CPU, casting to bfloat16.")
         config.dtype = torch.bfloat16
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
     if not config.enforce_eager:
         logger.warning(
             "CUDA graph is not supported on CPU, fallback to the eager "
@@ -334,6 +338,8 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
 
 def _verify_and_get_scheduler_config(
         config: SchedulerConfig) -> SchedulerConfig:
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
     if config.chunked_prefill_enabled:
         logger.warning("Chunked prefill is not supported on CPU, disable it.")
         config.chunked_prefill_enabled = False
@@ -342,6 +348,8 @@ def _verify_and_get_scheduler_config(
 
 
 def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
     if config.enable_prefix_caching:
         logger.warning("Prefix caching is not supported on CPU, disable it.")
         config.enable_prefix_caching = False
