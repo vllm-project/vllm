@@ -1200,7 +1200,7 @@ class Scheduler:
         """Schedule queued requests."""
         # Configure the (non-)use of multi-step scheduling
         # in this step
-        self._configure_multi_step_accounting_for_best_of()
+        self._maybe_disable_multi_step_by_sampling_params()
         if self.scheduler_config.chunked_prefill_enabled:
             return self._schedule_chunked_prefill()
         else:
