@@ -242,7 +242,6 @@ class ModelConfig:
         # generation or embedding model
         if "Phi3VForCausalLM" in architectures:
             # Match both remote and local names
-            print(self.model)
             embedding_mode = "/VLM2Vec" in self.model
         else:
             embedding_mode = ModelRegistry.is_embedding_model(architectures)
