@@ -29,14 +29,16 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
@@ -526,6 +528,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.language_model = LlamaForCausalLM(config, cache_config,
                                                quant_config)
 
+        # The same model class supports both language generation and embedding
+        # because the architecture name is the same
+        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
@@ -681,6 +687,13 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         hf_to_vllm_mapper = WeightsMapper(
