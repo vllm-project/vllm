@@ -4,7 +4,7 @@ import enum
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property, reduce
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
@@ -1378,3 +1378,39 @@ class ExecuteModelRequest(
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
             async_callback=self.async_callback)
+
+
+@dataclass
+class SeqGroupHolder:
+    group_id: str  # the original request id before splitting
+
+    # all the request ids that are part of this group
+    seq_ids: Set[str] = field(default_factory=set)
+
+    # all the finished requests
+    finished_reqs: List[SequenceGroup] = field(default_factory=list)
+
+    def maybe_finish_and_assemble(
+            self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
+        self.seq_ids.remove(seq_group.request_id)
+        self.finished_reqs.append(seq_group)
+        if len(self.seq_ids) == 0:
+            params = self.finished_reqs[0].sampling_params
+            assert params is not None
+            params.n = len(self.finished_reqs)
+            assembled_seq_group = SequenceGroup(
+                request_id=self.group_id,
+                seqs=[x.seqs[0] for x in self.finished_reqs],
+                sampling_params=params,
+                arrival_time=self.finished_reqs[0].arrival_time,
+                lora_request=self.finished_reqs[0].lora_request,
+                trace_headers=self.finished_reqs[0].trace_headers,
+                prompt_adapter_request=self.finished_reqs[0].
+                prompt_adapter_request,
+                priority=self.finished_reqs[0].priority,
+                embeddings=self.finished_reqs[0].embeddings,
+                pooling_params=self.finished_reqs[0].pooling_params,
+            )
+            return assembled_seq_group
+        else:
+            return None

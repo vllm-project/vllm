@@ -1,13 +1,13 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
-                           SequenceGroup, SequenceStatus)
+                           SeqGroupHolder, SequenceGroup, SequenceStatus)
 
 
 @dataclass
@@ -114,8 +114,10 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
-    def from_seq_group(cls, seq_group: SequenceGroup,
-                       use_cache: bool) -> Optional["RequestOutput"]:
+    def from_seq_group(
+        cls, seq_group: SequenceGroup, use_cache: bool,
+        group_id_to_holders: Dict[str, SeqGroupHolder]
+    ) -> Optional["RequestOutput"]:
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
             raise ValueError(
@@ -125,6 +127,17 @@ class RequestOutput:
         if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY and (
                 not finished):
             return None
+
+        if finished and seq_group.request_id in group_id_to_holders:
+            # parallel sampling can not stream the output
+            assert sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
+            holder: SeqGroupHolder = group_id_to_holders[seq_group.request_id]
+            del group_id_to_holders[seq_group.request_id]
+            assembled_seq_group = holder.maybe_finish_and_assemble(seq_group)
+            # only part of the request is finished
+            if assembled_seq_group is None:
+                return None
+            seq_group = assembled_seq_group
 
         # Init cache (if needed)
         if use_cache and seq_group.cached_request_output is None:
@@ -309,10 +322,13 @@ class EmbeddingRequestOutput:
 class RequestOutputFactory:
 
     @staticmethod
-    def create(seq_group: SequenceGroup, use_cache: bool = False):
+    def create(seq_group: SequenceGroup,
+               group_id_to_holders: Dict[str, SeqGroupHolder],
+               use_cache: bool = False):
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
-            return RequestOutput.from_seq_group(seq_group, use_cache)
+            return RequestOutput.from_seq_group(seq_group, use_cache,
+                                                group_id_to_holders)
