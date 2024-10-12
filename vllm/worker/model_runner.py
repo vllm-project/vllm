@@ -1003,13 +1003,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             dtype=np.int32)
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
-            self.model_config.get_sliding_window(),
-            self.model_config.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
-            self.model_config.is_attention_free,
-            self.device.type
-        )
+            self.model_config.get_sliding_window(), self.model_config.dtype,
+            self.kv_cache_dtype, self.block_size,
+            self.model_config.is_attention_free, self.device.type)
         self.attn_state = self.attn_backend.get_state_cls()(
             weakref.proxy(self))
 
