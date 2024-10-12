@@ -118,11 +118,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
 
-    # Number of query tokens for each request in the batch.
-    # Currently, we require that all requests have the same number of query
-    # tokens during the decoding phase. When speculavie decoding is enabled,
-    # decode_query_len might be greater than 1. In all other cases, it is 1.
-    decode_query_len: Optional[int] = None
+    # Max number of query tokens among request in the batch.
+    max_decode_query_len: Optional[int] = None
 
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
