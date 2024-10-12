@@ -236,14 +236,12 @@ steps:
   commands:
   - pytest -v -s compile/test_basic_correctness.py
 
-# TODO: re-write in comparison tests, and fix symbolic shape
-# for quantization ops.
-# - label: "PyTorch Fullgraph Test" # 18min
-#   source_file_dependencies:
-#   - vllm/
-#   - tests/compile
-#   commands:
-#   - pytest -v -s compile/test_full_graph.py
+- label: "PyTorch Fullgraph Test" # 18min
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
   mirror_hardwares: [amd]
