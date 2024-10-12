@@ -1,3 +1,4 @@
+import copy
 import time
 from collections import deque
 from contextlib import contextmanager
@@ -792,12 +793,13 @@ class LLMEngine:
         """
 
         if isinstance(params, SamplingParams) and params.n > 1:
+            params = copy.deepcopy(params)
             n = params.n
             params.n = 1
             params.output_kind = RequestOutputKind.FINAL_ONLY
             holder = SeqGroupHolder(request_id)
             for i in range(n):
-                request_id_i = f"{request_id}_{i}"
+                request_id_i = f"{request_id}_parallel_sample_{i}"
                 holder.seq_ids.add(request_id_i)
                 self.add_request(
                     request_id_i,
@@ -811,6 +813,7 @@ class LLMEngine:
                     inputs=inputs,
                 )  # type: ignore
                 self.group_id_to_holders[request_id_i] = holder
+            return
 
         if inputs is not None:
             prompt = inputs
