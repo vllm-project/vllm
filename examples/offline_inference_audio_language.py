@@ -41,6 +41,7 @@ def run_ultravox(question, audio_count):
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
+
 # Qwen2-Audio
 def run_qwen2_audio(question, audio_count): 
     model_name = "Qwen/Qwen2-Audio-7B-Instruct"
@@ -57,6 +58,7 @@ def run_qwen2_audio(question, audio_count):
               "<|im_start|>assistant\n")
     stop_token_ids = None
     return llm, prompt, stop_token_ids
+
 
 model_example_map = {"ultravox": run_ultravox, "qwen2_audio": run_qwen2_audio}
 
