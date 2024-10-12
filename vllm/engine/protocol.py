@@ -1,6 +1,6 @@
 import asyncio
-from typing import (AsyncGenerator, List, Mapping, Optional, Protocol, Union,
-                    runtime_checkable)
+from abc import ABC, abstractmethod
+from typing import AsyncGenerator, List, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig
@@ -20,26 +20,30 @@ from vllm.utils import collect_from_async_generator, random_uuid
 logger = init_logger(__name__)
 
 
-@runtime_checkable
-class EngineClient(Protocol):
+class EngineClient(ABC):
     """Protocol class for Clients to Engine"""
 
     @property
+    @abstractmethod
     def is_running(self) -> bool:
         ...
 
     @property
+    @abstractmethod
     def is_stopped(self) -> bool:
         ...
 
     @property
+    @abstractmethod
     def errored(self) -> bool:
         ...
 
     @property
+    @abstractmethod
     def dead_error(self) -> BaseException:
         ...
 
+    @abstractmethod
     def generate(
         self,
         prompt: PromptType,
@@ -101,8 +105,6 @@ class EngineClient(Protocol):
 
             output = [x[0] for x in output]
 
-            logger.info(output)
-
             new_beams = []
             for i, current_beam in enumerate(all_beams):
                 result = output[i]
@@ -147,10 +149,9 @@ class EngineClient(Protocol):
             prompt_token_ids=tokenizedPrompt,
             prompt_logprobs=None)
 
-        logger.info(beam_search_output)
-
         yield beam_search_output
 
+    @abstractmethod
     def encode(
         self,
         prompt: PromptType,
@@ -163,6 +164,7 @@ class EngineClient(Protocol):
         """Generate outputs for a request from an embedding model."""
         ...
 
+    @abstractmethod
     async def abort(self, request_id: str) -> None:
         """Abort a request.
 
@@ -170,14 +172,17 @@ class EngineClient(Protocol):
             request_id: The unique id of the request.
         """
 
+    @abstractmethod
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
         ...
 
+    @abstractmethod
     async def get_decoding_config(self) -> DecodingConfig:
         ...
         """Get the decoding configuration of the vLLM engine."""
 
+    @abstractmethod
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
@@ -185,9 +190,11 @@ class EngineClient(Protocol):
         """Get the appropriate tokenizer for the request"""
         ...
 
+    @abstractmethod
     async def is_tracing_enabled(self) -> bool:
         ...
 
+    @abstractmethod
     async def do_log_stats(
         self,
         scheduler_outputs: Optional[SchedulerOutputs] = None,
@@ -195,14 +202,17 @@ class EngineClient(Protocol):
     ) -> None:
         ...
 
+    @abstractmethod
     async def check_health(self) -> None:
         """Raise if unhealthy"""
         ...
 
+    @abstractmethod
     async def start_profile(self) -> None:
         """Start profiling the engine"""
         ...
 
+    @abstractmethod
     async def stop_profile(self) -> None:
         """Start profiling the engine"""
         ...

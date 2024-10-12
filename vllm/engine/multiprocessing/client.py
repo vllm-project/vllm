@@ -2,8 +2,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
-                    Union, overload)
+from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
+                    Optional, Union, overload)
 
 import cloudpickle
 import zmq
@@ -13,6 +13,7 @@ from zmq.asyncio import Socket
 
 from vllm import PoolingParams
 from vllm.config import DecodingConfig, EngineConfig, ModelConfig
+from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -31,6 +32,7 @@ from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -341,6 +343,16 @@ class MQLLMEngineClient(EngineClient):
         with suppress(MQClientClosedError):
             await self._send_one_way_rpc_request(
                 request=RPCAbortRequest(request_id), socket=self.input_socket)
+
+    async def do_log_stats(
+        self,
+        scheduler_outputs: Optional[SchedulerOutputs] = None,
+        model_output: Optional[List[SamplerOutput]] = None,
+    ) -> None:
+        """
+        Ignore do_log_stats (handled on MQLLMEngine polling)
+        """
+        pass
 
     async def check_health(self):
         """
