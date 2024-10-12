@@ -254,6 +254,7 @@ def test_gptq_marlin_gemm(
     assert max_diff < 0.04
 
 
+# TODO: find better way to test this?
 @torch.compile(fullgraph=True)
 def marlin_24_gemm_tester(a_input, marlin_24_q_w_comp, marlin_24_meta,
                           marlin_24_s, scratch, quant_type, size_m, size_n,
