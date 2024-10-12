@@ -43,7 +43,7 @@ def run_ultravox(question, audio_count):
 
 
 # Qwen2-Audio
-def run_qwen2_audio(question, audio_count): 
+def run_qwen2_audio(question, audio_count):
     model_name = "Qwen/Qwen2-Audio-7B-Instruct"
 
     llm = LLM(model=model_name,
