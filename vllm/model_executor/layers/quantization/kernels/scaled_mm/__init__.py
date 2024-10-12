@@ -41,7 +41,8 @@ def choose_scaled_mm_linear_kernel(
     """
 
     if compute_capability is None:
-        compute_capability = current_platform.get_device_capability()
+        _cc = current_platform.get_device_capability()
+        compute_capability = _cc[0] * 10 + _cc[1]
 
     failure_reasons = []
     for kernel in _POSSIBLE_KERNELS[current_platform._enum]:

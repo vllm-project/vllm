@@ -1,7 +1,6 @@
 from typing import Optional, Tuple
 
 import torch
-import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -70,6 +69,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         assert i_zp is None
         assert i_azp_adj is None
 
+        import torch_xla.experimental.xla_quantized_matmul # noqa: F401
         return torch.ops.xla.quantized_matmul(x,
                                               w_q,
                                               w_s,
