@@ -45,12 +45,10 @@ def run_ultravox(question, audio_count):
 def run_qwen2_audio(question, audio_count): 
     model_name = "Qwen/Qwen2-Audio-7B-Instruct"
 
-    llm = LLM(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"audio": audio_count}
-    )
+    llm = LLM(model=model_name,
+              max_model_len=4096,
+              max_num_seqs=5,
+              limit_mm_per_prompt={"audio": audio_count})
 
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
               "<|im_start|>user\n"
@@ -60,10 +58,7 @@ def run_qwen2_audio(question, audio_count):
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
-model_example_map = {
-    "ultravox": run_ultravox,
-    "qwen2_audio": run_qwen2_audio
-}
+model_example_map = {"ultravox": run_ultravox, "qwen2_audio": run_qwen2_audio}
 
 
 def main(args):
