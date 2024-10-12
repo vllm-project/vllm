@@ -27,7 +27,6 @@ from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
-from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
@@ -47,7 +46,7 @@ from vllm.utils import is_list_of
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    PPMissingLayer, merge_multimodal_embeddings)
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -386,23 +385,28 @@ def dummy_data_for_phi3v(ctx: InputContext,
     return seq_data, mm_data
 
 
-# Reserve this function to also handle placeholders for additional images
-# [ref: PR #5820]
 @lru_cache
-def _get_image_placeholder_token_ids(model_config: ModelConfig,
-                                     idx: int) -> List[int]:
+def _get_image_placeholder_token_id_candidates(
+    model_config: ModelConfig,
+    idx: int,
+) -> List[List[int]]:
     assert idx > 0
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
+    # This is used when the image token is at the start of the string
+    start_candidate = tokenizer.encode(f"<|image_{idx}|>",
+                                       add_special_tokens=False)
+
+    # This is used when the image token is in the middle of the string
     # We need to get the token for "<", not "▁<"
     # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
     a_token_id, = tokenizer.encode("a", add_special_tokens=False)
-    a_token_id_, *image_placeholder_token_ids = tokenizer.encode(
-        f"a<|image_{idx}|>", add_special_tokens=False)
+    a_token_id_, *middle_candidate = tokenizer.encode(f"a<|image_{idx}|>",
+                                                      add_special_tokens=False)
     assert a_token_id == a_token_id_
 
-    return image_placeholder_token_ids
+    return [start_candidate, middle_candidate]
 
 
 def input_processor_for_phi3v(ctx: InputContext,
@@ -462,16 +466,20 @@ def input_processor_for_phi3v(ctx: InputContext,
 
     prompt_token_ids = llm_inputs["prompt_token_ids"].copy()
 
-    # masked place_holder with image token id
+    print("prompt_token_ids (old)", prompt_token_ids)
+
+    # masked placeholder with image token id
     for idx in image_idx:
-        image_token_ids = _get_image_placeholder_token_ids(model_config,
-                                                           idx=idx)
-        for i in range(len(prompt_token_ids) - len(image_token_ids) + 1):
-            if prompt_token_ids[i:i + len(image_token_ids)] == image_token_ids:
-                prompt_token_ids[i:i + len(image_token_ids)] = [
-                    _IMAGE_TOKEN_ID
-                ] * len(image_token_ids)
-                break
+        candidates = _get_image_placeholder_token_id_candidates(model_config,
+                                                                idx=idx)
+
+        for candidate in candidates:
+            for i in range(len(prompt_token_ids) - len(candidate) + 1):
+                if prompt_token_ids[i:i + len(candidate)] == candidate:
+                    prompt_token_ids[i:i +
+                                     len(candidate)] = ([_IMAGE_TOKEN_ID] *
+                                                        len(candidate))
+                    break
 
     # merge consecutive tag ids
     merged_token_ids: List[int] = []

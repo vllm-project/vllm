@@ -18,4 +18,4 @@ outputs = llm.encode({"prompt": prompt, "multi_modal_data": {"image": image}})
 
 # Print the outputs.
 for output in outputs:
-    print(output.outputs.embedding)  # list of ??? floats
+    print(output.outputs.embedding)  # list of 3072 floats
