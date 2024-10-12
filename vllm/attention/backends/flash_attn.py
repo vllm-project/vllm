@@ -112,7 +112,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     max_query_len: Optional[int]
 
     # Max number of query tokens among request in the batch.
-    decode_query_len: Optional[int]
+    max_decode_query_len: Optional[int]
 
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
@@ -170,9 +170,9 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
-            decode_query_len=0,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
+            max_decode_query_len=0,
             max_decode_seq_len=0,
             query_start_loc=self.query_start_loc[:self.num_prefills + 1],
             seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
@@ -199,7 +199,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            decode_query_len=self.decode_query_len,
+            max_decode_query_len=self.max_decode_query_len,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
@@ -412,9 +412,9 @@ class FlashAttentionMetadataBuilder(
         max_query_len = max(query_lens)
         decode_query_lens = query_lens[self.num_prefills:]
         if len(decode_query_lens) > 0:
-            decode_query_len = max(decode_query_lens)
+            max_decode_query_len = max(decode_query_lens)
         else:
-            decode_query_len = 1
+            max_decode_query_len = 1
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
@@ -467,7 +467,7 @@ class FlashAttentionMetadataBuilder(
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
-            decode_query_len=decode_query_len,
+            max_decode_query_len=max_decode_query_len,
             max_prefill_seq_len=max_prefill_seq_len,
             max_decode_seq_len=max_decode_seq_len,
             query_start_loc=query_start_loc,
@@ -715,14 +715,14 @@ def unified_flash_attention(
         # Decoding run.
         # Use flash_attn_varlen_func kernel for speculative decoding
         # because different queries might have different lengths.
-        assert decode_meta.decode_query_len is not None
-        if decode_meta.decode_query_len > 1:
+        assert decode_meta.max_decode_query_len is not None
+        if decode_meta.max_decode_query_len > 1:
             decode_output = flash_attn_varlen_func(
                 q=decode_query,
                 k=key_cache,
                 v=value_cache,
                 cu_seqlens_q=decode_meta.query_start_loc,
-                max_seqlen_q=decode_meta.decode_query_len,
+                max_seqlen_q=decode_meta.max_decode_query_len,
                 cu_seqlens_k=decode_meta.seq_start_loc,
                 max_seqlen_k=decode_meta.max_decode_seq_len,
                 softmax_scale=softmax_scale,

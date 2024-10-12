@@ -187,7 +187,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     use_cuda_graph: bool
 
     # Max number of query tokens for among request in the batch.
-    decode_query_len: Optional[int] = None
+    max_decode_query_len: Optional[int] = None
 
     _cached_prefill_metadata: Optional[
         "BlocksparseFlashAttentionMetadata"] = None

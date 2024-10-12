@@ -122,7 +122,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     context_lens_tensor: Optional[torch.Tensor]
 
     # Max number of query tokens among request in the batch.
-    decode_query_len: Optional[int] = None
+    max_decode_query_len: Optional[int] = None
 
     _cached_prefill_metadata: Optional["ROCmFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["ROCmFlashAttentionMetadata"] = None
