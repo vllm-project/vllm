@@ -1,17 +1,18 @@
 # enable python only development
 # copy compiled files to the current directory directly
 
+import argparse
 import os
 import shutil
 import subprocess
 import sys
 import warnings
-import argparse
 
-parser = argparse.ArgumentParser(description="Development mode for python-only code")
+parser = argparse.ArgumentParser(
+    description="Development mode for python-only code")
 parser.add_argument('-q',
-                    '--quit-dev', 
-                    action='store_true', 
+                    '--quit-dev',
+                    action='store_true',
                     help='Set the flag to quit development mode')
 args = parser.parse_args()
 
@@ -52,9 +53,10 @@ try:
     from setuptools_scm import get_version
     get_version(write_to="vllm/_version.py")
 except ImportError:
-    warnings.warn("To avoid warnings related to vllm._version, "
-                  "you should install setuptools-scm by pip install setuptools-scm",
-                  stacklevel=2)
+    warnings.warn(
+        "To avoid warnings related to vllm._version, "
+        "you should install setuptools-scm by pip install setuptools-scm",
+        stacklevel=2)
 
 if not args.quit_dev:
     for file in files_to_copy:
@@ -76,11 +78,15 @@ else:
     vllm_symlink_path = os.path.join(package_path, "vllm")
     vllm_backup_path = os.path.join(package_path, "vllm_pre_built")
     current_vllm_path = os.path.join(cwd, "vllm")
-    
+
     print(f"Unlinking {current_vllm_path} to {vllm_symlink_path}")
-    assert os.path.islink(vllm_symlink_path), f"not in dev mode: {vllm_symlink_path} is not a symbolic link"
-    assert current_vllm_path == os.readlink(vllm_symlink_path), "current directory is not the source code of package"
+    assert os.path.islink(
+        vllm_symlink_path
+    ), f"not in dev mode: {vllm_symlink_path} is not a symbolic link"
+    assert current_vllm_path == os.readlink(
+        vllm_symlink_path
+    ), "current directory is not the source code of package"
     os.unlink(vllm_symlink_path)
 
-    print(f"Recovering backup package from {vllm_backup_path} to {vllm_symlink_path}")
+    print(f"Recovering backup from {vllm_backup_path} to {vllm_symlink_path}")
     os.rename(vllm_backup_path, vllm_symlink_path)
