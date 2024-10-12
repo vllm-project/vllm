@@ -185,6 +185,8 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
+
+        # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
@@ -919,6 +921,7 @@ class EngineArgs:
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
+            is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
@@ -952,13 +955,9 @@ class EngineArgs:
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
                 use_spec_decode = self.speculative_model is not None
-                has_seqlen_agnostic_layers = (
-                    model_config.contains_seqlen_agnostic_layers(
-                        parallel_config))
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
-                        and not self.enable_prompt_adapter
-                        and not has_seqlen_agnostic_layers):
+                        and not self.enable_prompt_adapter):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -1011,11 +1010,14 @@ class EngineArgs:
             cpu_draft_worker=self.cpu_draft_worker,
         )
 
+        # Use dynamic forward patch is draft worker is on CPU
         if self.cpu_draft_worker:
             os.environ['VLLM_DYNAMIC_FORWARD'] = "1"
         else:
             os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
 
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
