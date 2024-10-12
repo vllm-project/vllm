@@ -14,9 +14,8 @@ def check_embeddings_close(
 ) -> None:
     assert len(embeddings_0_lst) == len(embeddings_1_lst)
 
-    for prompt_idx, (embeddings_0,
-                     embeddings_1) in enumerate(zip(embeddings_0_lst,
-                                                    embeddings_1_lst)):
+    for prompt_idx, (embeddings_0, embeddings_1) in enumerate(
+            zip(embeddings_0_lst, embeddings_1_lst)):
         assert len(embeddings_0) == len(embeddings_1)
 
         sim = F.cosine_similarity(torch.tensor(embeddings_0),
@@ -28,4 +27,3 @@ def check_embeddings_close(
                     f"\n{name_1}:\t{embeddings_1!r}")
 
         assert sim >= 1 - tol, fail_msg
-
