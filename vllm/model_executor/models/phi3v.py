@@ -710,4 +710,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             })
 
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        autoloaded_weights = loader.load_weights(weights,
+                                                 mapper=hf_to_vllm_mapper)
+
+        # The HF config doesn't specify whether these are tied,
+        # so we detect it this way
+        if "embed_tokens" not in autoloaded_weights:
+            self.embed_tokens = self.language_model.model.embed_tokens
