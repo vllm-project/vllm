@@ -237,7 +237,17 @@ class ModelConfig:
 
     def _verify_embedding_mode(self) -> None:
         architectures = getattr(self.hf_config, "architectures", [])
-        self.embedding_mode = ModelRegistry.is_embedding_model(architectures)
+
+        # TODO: Allow the same model architecture to be specified as either
+        # generation or embedding model
+        if "Phi3VForCausalLM" in architectures:
+            # Match both remote and local names
+            print(self.model)
+            embedding_mode = "/VLM2Vec" in self.model
+        else:
+            embedding_mode = ModelRegistry.is_embedding_model(architectures)
+
+        self.embedding_mode = embedding_mode
 
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)

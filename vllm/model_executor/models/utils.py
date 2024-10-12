@@ -177,7 +177,8 @@ class AutoWeightsLoader:
                                  child_weights)
             else:
                 if not self._can_ignore_unexpected(prefix):
-                    msg = f"There is no module or parameter named '{prefix}'"
+                    msg = (f"There is no module or parameter named '{prefix}' "
+                           f"in {type(self.module).__name__}")
                     raise ValueError(msg)
 
     def load_weights(
