@@ -55,7 +55,7 @@ try:
 except ImportError:
     warnings.warn(
         "To avoid warnings related to vllm._version, "
-        "you should install setuptools-scm by pip install setuptools-scm",
+        "you should install setuptools-scm by `pip install setuptools-scm`",
         stacklevel=2)
 
 if not args.quit_dev:
