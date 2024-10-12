@@ -86,9 +86,12 @@ _TEXT_GENERATION_MODELS = {
 }
 
 _EMBEDDING_MODELS = {
+    # [Text-only]
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    # [Multimodal]
+    "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
 }
 
 _MULTIMODAL_MODELS = {
