@@ -168,6 +168,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         elif modality == "audio":
             if model_type == "ultravox":
                 return "<|reserved_special_token_0|>"
+            if model_type == "qwen2_audio":
+                return f"Audio {current_count}: <|audio_bos|><|AUDIO|><|audio_eos|>"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
             if model_type == "qwen2_vl":
