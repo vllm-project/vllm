@@ -23,7 +23,7 @@ class MPLinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls) -> Optional[int]:
         raise NotImplementedError
 
     @classmethod
