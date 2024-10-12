@@ -236,7 +236,7 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
         "lm_head",
     ]
 
-    # `embedding_modules`` and `embedding_padding_modules`
+    # `embedding_modules` and `embedding_padding_modules`
     # are inherited from MiniCPMForCausalLM
 
     def _init_model(self):
