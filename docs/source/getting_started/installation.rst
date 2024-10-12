@@ -84,6 +84,8 @@ Latest code can contain bugs and may not be stable. Please use it with caution.
 Build from source
 ==================
 
+.. _python-only-build:
+
 Python-only build (without compilation)
 ----------------------------------------
 
@@ -114,6 +116,23 @@ The script will:
 
 Now, you can edit the Python code in the current directory, and the changes will be reflected when you run vLLM.
 
+Once you have finished editing or want to install another vLLM wheel, you should exit the development environment using `the same script <https://github.com/vllm-project/vllm/blob/main/python_only_dev.py>`_ with the ``--quit-dev``(or ``-q`` for short) flag:
+
+.. code-block:: console
+
+    $ python python_only_dev.py --quit-dev
+
+The script with ``--quit-dev`` flag will:
+
+* Remove the symbolic link from the current directory to the vLLM package.
+* Restore the original vLLM package from the backup.
+
+If you update the vLLM wheel and want to rebuild from the source and make further edits, you will need to start `all above <#python-only-build>`_ over again.
+
+.. note::
+
+    There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
+    It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to `the above section <#install-the-latest-code>`_ for instructions on how to install a specified wheel.
 
 Full build (with compilation)
 ---------------------------------
