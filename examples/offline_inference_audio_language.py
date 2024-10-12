@@ -53,7 +53,8 @@ def run_qwen2_audio(question, audio_count):
     )
 
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              "<|im_start|>user\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>"
+              "<|im_start|>user\n"
+              "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
               f"{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
     stop_token_ids = None
