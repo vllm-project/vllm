@@ -1,3 +1,4 @@
+import dataclasses
 import time
 from collections import deque
 from contextlib import contextmanager
@@ -59,6 +60,40 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
+
+
+@dataclasses.dataclass
+class SeqGroupHolder:
+    group_id: str  # the original request id before splitting
+
+    # all the request ids that are part of this group
+    seq_ids: Set[str] = dataclasses.field(default_factory=set)
+
+    # all the finished requests
+    finished_reqs: List[SequenceGroup] = dataclasses.field(
+        default_factory=list)
+
+    def maybe_finish_and_assemble(
+            self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
+        self.seq_ids.remove(seq_group.request_id)
+        self.finished_reqs.append(seq_group)
+        if len(self.seq_ids) == 0:
+            assembled_seq_group = SequenceGroup(
+                request_id=self.group_id,
+                seqs=[x.seqs[0] for x in self.finished_reqs],
+                sampling_params=self.finished_reqs[0].sampling_params,
+                arrival_time=self.finished_reqs[0].arrival_time,
+                lora_request=self.finished_reqs[0].lora_request,
+                trace_headers=self.finished_reqs[0].trace_headers,
+                prompt_adapter_request=self.finished_reqs[0].
+                prompt_adapter_request,
+                priority=self.finished_reqs[0].priority,
+                embeddings=self.finished_reqs[0].embeddings,
+                pooling_params=self.finished_reqs[0].pooling_params,
+            )
+            return assembled_seq_group
+        else:
+            return None
 
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
@@ -474,6 +509,8 @@ class LLMEngine:
                 ),
             ))
 
+        self.group_id_to_holders: Dict[str, SeqGroupHolder] = {}
+
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
 
@@ -788,6 +825,27 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+
+        if isinstance(params, SamplingParams) and params.n > 1:
+            n = params.n
+            params.n = 1
+            holder = SeqGroupHolder(request_id)
+            for i in range(n):
+                request_id_i = f"{request_id}_{i}"
+                holder.seq_ids.add(request_id_i)
+                self.add_request(
+                    request_id_i,
+                    prompt=prompt,
+                    params=params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=priority,
+                    inputs=inputs,
+                )  # type: ignore
+                self.group_id_to_holders[request_id_i] = holder
+
         if inputs is not None:
             prompt = inputs
         assert prompt is not None and params is not None
@@ -1131,6 +1189,15 @@ class LLMEngine:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             seq_group = scheduled_seq_group.seq_group
+            assembled_seq_group = self._maybe_finish_seq_in_group(seq_group)
+            if assembled_seq_group is not None:
+                # change seq_group for later code
+                seq_group = assembled_seq_group
+                # change scheduled_seq_group
+                scheduled_seq_group.seq_group = seq_group
+            else:
+                continue
+
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group, use_cache=self.use_cached_outputs)
@@ -1171,6 +1238,15 @@ class LLMEngine:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             seq_group = scheduled_seq_group.seq_group
+            assembled_seq_group = self._maybe_finish_seq_in_group(seq_group)
+            if assembled_seq_group is not None:
+                # change seq_group for later code
+                seq_group = assembled_seq_group
+                # change scheduled_seq_group
+                scheduled_seq_group.seq_group = seq_group
+            else:
+                continue
+
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group, use_cache=self.use_cached_outputs)
@@ -1189,6 +1265,13 @@ class LLMEngine:
             params = seq_group.sampling_params
             if params is not None and params.output_kind == (
                     RequestOutputKind.DELTA) and not seq_group.is_finished():
+                continue
+
+            assembled_seq_group = self._maybe_finish_seq_in_group(seq_group)
+            if assembled_seq_group is not None:
+                # change seq_group for later code
+                seq_group = assembled_seq_group
+            else:
                 continue
 
             request_output = RequestOutputFactory.create(
@@ -1213,6 +1296,15 @@ class LLMEngine:
             # Tracing
             self.do_tracing(scheduler_outputs)
 
+        return None
+
+    def _maybe_finish_seq_in_group(
+            self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
+        if seq_group.request_id in self.group_id_to_holders:
+            holder = self.group_id_to_holders[seq_group.request_id]
+            del self.group_id_to_holders[seq_group.request_id]
+            assembled_seq_group = holder.maybe_finish_and_assemble(seq_group)
+            return assembled_seq_group
         return None
 
     def _advance_to_next_step(
