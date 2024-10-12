@@ -1,13 +1,11 @@
 import os
 from typing import List, Optional, Type
 
-from vllm.model_executor.layers.quantization.kernels.machete import (
-    MacheteLinearKernel)
-from vllm.model_executor.layers.quantization.kernels.marlin import (
-    MarlinLinearKernel)
-from vllm.model_executor.layers.quantization.kernels.MPLinearKernel import (
-    MPLinearKernel, MPLinearLayerConfig)
 from vllm.platforms import current_platform
+
+from .machete import MacheteLinearKernel
+from .marlin import MarlinLinearKernel
+from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [
