@@ -327,6 +327,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             backend=self.guided_decoding_backend,
             whitespace_pattern=self.guided_whitespace_pattern)
 
+        output_kind = RequestOutputKind.FINAL_ONLY
+        if self.stream and self.n == 1 and self.best_of is None:
+            output_kind = RequestOutputKind.DELTA
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -349,8 +352,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            output_kind=RequestOutputKind.DELTA if self.stream \
-                else RequestOutputKind.FINAL_ONLY,
+            output_kind=output_kind,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias)
 
@@ -620,7 +622,9 @@ class CompletionRequest(OpenAIBaseModel):
             json_object=guided_json_object,
             backend=self.guided_decoding_backend,
             whitespace_pattern=self.guided_whitespace_pattern)
-
+        output_kind = RequestOutputKind.FINAL_ONLY
+        if self.stream and self.n == 1 and self.best_of is None:
+            output_kind = RequestOutputKind.DELTA
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -643,8 +647,7 @@ class CompletionRequest(OpenAIBaseModel):
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            output_kind=RequestOutputKind.DELTA if self.stream \
-                else RequestOutputKind.FINAL_ONLY,
+            output_kind=output_kind,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids)
