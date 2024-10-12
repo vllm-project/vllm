@@ -1010,7 +1010,7 @@ class EngineArgs:
             cpu_draft_worker=self.cpu_draft_worker,
         )
 
-        # Use dynamic forward patch is draft worker is on CPU
+        # Use dynamic forward patch if draft worker is on CPU
         if self.cpu_draft_worker:
             os.environ['VLLM_DYNAMIC_FORWARD'] = "1"
         else:
