@@ -71,9 +71,8 @@ def check_full_graph_support(model,
 
     # Inductor doesn't support fp8/gptq_marlin_24 yet.
     quantization = model_kwargs.get("quantization")
-    if (quantization == "fp8" or quantization == "gptq_marlin"
-            or quantization == "gptq_marlin_24"
-        ) and optimization_level >= CompilationLevel.INDUCTOR:
+    if (quantization == "fp8"
+            and optimization_level >= CompilationLevel.INDUCTOR):
         return
 
     prompts = [
