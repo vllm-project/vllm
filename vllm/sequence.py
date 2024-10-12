@@ -1411,6 +1411,8 @@ class SeqGroupHolder:
                 embeddings=self.finished_reqs[0].embeddings,
                 pooling_params=self.finished_reqs[0].pooling_params,
             )
+            assembled_seq_group.cached_request_output = self.finished_reqs[
+                0].cached_request_output
             return assembled_seq_group
         else:
             return None

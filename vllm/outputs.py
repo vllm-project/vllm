@@ -137,7 +137,8 @@ class RequestOutput:
             # only part of the request is finished
             if assembled_seq_group is None:
                 return None
-            seq_group = assembled_seq_group
+            return cls.from_seq_group(assembled_seq_group, use_cache,
+                                      group_id_to_holders)
 
         # Init cache (if needed)
         if use_cache and seq_group.cached_request_output is None:
