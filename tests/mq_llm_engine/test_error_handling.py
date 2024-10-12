@@ -59,15 +59,7 @@ async def test_evil_forward(tmp_socket):
         await asyncio.sleep(2.0)
         await client.check_health()
 
-        # Throws an error in first forward pass.
-        with pytest.raises(RAISED_ERROR):
-            async for _ in client.generate(prompt="Hello my name is",
-                                           sampling_params=SamplingParams(),
-                                           request_id=uuid.uuid4()):
-                pass
-        assert client.errored
-
-        # Engine is errored, should get ENGINE_DEAD_ERROR.
+        # Throws an error that should get ENGINE_DEAD_ERROR.
         with pytest.raises(MQEngineDeadError):
             async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=SamplingParams(),

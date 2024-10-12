@@ -204,8 +204,20 @@ class MQLLMEngineClient:
                     # (and record only the first one)
                     if is_engine_errored and not self._errored_with:
                         self._errored_with = exception
+                        # If engine is errored, no matter the type of exception
+                        # it will no longer be able to receive new requests,
+                        # therefore we have to inform that the current
+                        # processed requests failed as well. Send back a dead
+                        # engine error give this feedback and also give a
+                        # 'hint' to the server to shutdown next.
+                        exception = self.dead_error
 
                     if request_id is None:
+                        # If request_id is None, then the engine raised an
+                        # exception for a batch, and we may not know the
+                        # request that caused it, neither if it was actually
+                        # caused by any of them (e.g. CUDA OOM). Therefore we
+                        # broadcast the same exception for all requests.
                         for queue_i in tuple(self.output_queues.values()):
                             queue_i.put_nowait(exception)
                     else:
