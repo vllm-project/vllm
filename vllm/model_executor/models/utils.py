@@ -176,8 +176,7 @@ class AutoWeightsLoader:
                                              child_modules[child_prefix],
                                              child_weights)
             elif child_prefix in child_params:
-                yield from self._load_param(prefix,
-                                            child_params[child_prefix],
+                yield from self._load_param(prefix, child_params[child_prefix],
                                             child_weights)
             else:
                 if not self._can_ignore_unexpected(prefix):

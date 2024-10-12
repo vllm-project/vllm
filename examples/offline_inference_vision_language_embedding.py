@@ -14,9 +14,7 @@ llm = LLM(
 )
 
 # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-outputs = llm.encode(
-    {"prompt": prompt, "multi_modal_data": {"image": image}}
-)
+outputs = llm.encode({"prompt": prompt, "multi_modal_data": {"image": image}})
 
 # Print the outputs.
 for output in outputs:
