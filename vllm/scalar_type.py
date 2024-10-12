@@ -147,7 +147,8 @@ class ScalarType:
         or_and_advance(self._finite_values_only, 1)
         or_and_advance(self.nan_repr.value, 8)
 
-        #assert offset < 64
+        assert offset <= 64, \
+            f"ScalarType fields too big {offset} to fit into an int64"
 
         return val
 
