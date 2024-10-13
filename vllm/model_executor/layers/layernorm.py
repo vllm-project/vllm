@@ -19,6 +19,7 @@ class RMSNorm(CustomOp):
         hidden_size: int,
         eps: float = 1e-6,
         var_hidden_size: Optional[int] = None,
+        is_learnable: bool = True
     ) -> None:
         super().__init__()
 
@@ -26,9 +27,11 @@ class RMSNorm(CustomOp):
         self.variance_epsilon = eps
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
-
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-
+        if is_learnable:
+            self.register_parameter("weight", nn.Parameter(torch.ones(hidden_size)))
+        else:
+            self.register_buffer('weight', torch.ones(hidden_size), persistent = False)
+            
     def forward_native(
         self,
         x: torch.Tensor,
