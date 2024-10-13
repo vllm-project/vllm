@@ -64,9 +64,9 @@ def test_get_sliding_window():
 
 
 def test_rope_customization():
-    TEST_ROPE_SCALING = {"type": "dynamic", "factor": 2.0}
+    TEST_ROPE_SCALING = {"rope_type": "dynamic", "factor": 2.0}
     TEST_ROPE_THETA = 16_000_000.0
-    LONGCHAT_ROPE_SCALING = {"type": "linear", "factor": 8.0}
+    LONGCHAT_ROPE_SCALING = {"rope_type": "linear", "factor": 8.0}
 
     llama_model_config = ModelConfig(
         "meta-llama/Meta-Llama-3-8B-Instruct",

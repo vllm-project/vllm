@@ -28,7 +28,6 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.transformers_utils.config import patch_rope_scaling_dict
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -902,9 +901,6 @@ def get_rope(
     if dtype is None:
         dtype = torch.get_default_dtype()
     if rope_scaling is not None:
-        # Backwards compatibility
-        patch_rope_scaling_dict(rope_scaling)
-
         # Transforms every value that is a list into a tuple for caching calls
         rope_scaling_tuple = {
             k: tuple(v) if isinstance(v, list) else v
