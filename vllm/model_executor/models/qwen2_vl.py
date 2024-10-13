@@ -64,6 +64,7 @@ from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import get_processor
 from vllm.utils import is_cpu
 
@@ -1061,8 +1062,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             if image_input is None and video_input is None:
                 inputs_embeds = None
             else:
-                rope_scaling = getattr(self.config, "rope_scaling", {})
-                if rope_scaling.get("type", None) == "mrope":
+                if uses_mrope(self.config):
                     assert positions.ndim == 2 and positions.size(0) == 3, (
                         "multimodal section rotary embedding requires "
                         f"(3, seq_len) positions, but got {positions.size()}")

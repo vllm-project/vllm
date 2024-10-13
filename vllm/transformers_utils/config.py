@@ -118,6 +118,12 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
+def uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model with this config uses M-ROPE."""
+    rope_scaling = getattr(config, "rope_scaling", {})
+    return "mrope_section" in rope_scaling
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -205,8 +211,6 @@ def get_config(
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
-    patch_rope_scaling(config)
-
     for key, value in [
         ("rope_scaling", rope_scaling),
         ("rope_theta", rope_theta),
@@ -219,6 +223,8 @@ def get_config(
                 value,
             )
             config.update({key: value})
+
+    patch_rope_scaling(config)
 
     return config
 
