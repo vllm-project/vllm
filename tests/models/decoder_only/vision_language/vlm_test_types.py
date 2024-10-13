@@ -17,22 +17,18 @@ from ...utils import check_logprobs_close
 # meta image tag; will be replaced by the appropriate tag for the model
 TEST_IMG_PLACEHOLDER = "<vlm_image>"
 
+# yapf: disable
 SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    f"{TEST_IMG_PLACEHOLDER}What's the content of the image?",
-    "cherry_blossom":
-    f"{TEST_IMG_PLACEHOLDER}What is the season?",
+    "stop_sign": f"{TEST_IMG_PLACEHOLDER}What's the content of the image?",
+    "cherry_blossom": f"{TEST_IMG_PLACEHOLDER}What is the season?",
 })
+
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
 
 IMAGE_SIZE_FACTORS = ((), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0))
-EMBEDDING_SIZE_FACTORS = (
-    (),
-    (1.0, ),
-    (1.0, 1.0, 1.0),
-)
-
+EMBEDDING_SIZE_FACTORS = ((), (1.0, ), (1.0, 1.0, 1.0))
 VllmOutput = Tuple[List[int], str, Optional[SampleLogprobs]]
+# yapf: enable
 
 
 class VlmTestType(Enum):
@@ -67,7 +63,12 @@ class VLMTestInfo(NamedTuple):
 
     img_idx_to_prompt: Callable = lambda idx: "<image>\n"
 
-    # TODO - Overrides for just the prompts to fix paligemma
+    # HACK - currently, this is exposed so that we can pass an override for the
+    # prompt to paligemma so that we can match the existing prompt, because the
+    # default prompt fails the logprobs check.
+    # If a different value is passed here, it should be of length 2 so that it
+    # can be zipped up with the same assets.
+    single_image_prompts: Tuple[str, str] = SINGLE_IMAGE_BASE_PROMPTS
 
     # Function for converting ImageAssets to image embeddings;
     # We need to define this explicitly for embedding tests
