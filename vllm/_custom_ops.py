@@ -697,14 +697,21 @@ def scaled_fp8_quant(
 
     return output, scale
 
+
 # semi structured fp8
 def semi_structured_fp8_compress(input: torch.Tensor) -> torch.Tensor:
     assert input.dtype == torch.float8_e4m3fn
     return torch.ops._C.cslt_compress_fp8_semi_structured(input)
 
-def semi_structured_fp8_mm(A_compressed: torch.Tensor, B_dense: torch.Tensor, bias: Optional[torch.Tensor], transpose_result: bool = False) -> torch.Tensor:
+
+def semi_structured_fp8_mm(A_compressed: torch.Tensor,
+                           B_dense: torch.Tensor,
+                           bias: Optional[torch.Tensor] = None,
+                           transpose_result: bool = False) -> torch.Tensor:
     assert A_compressed.dtype == torch.float8_e4m3fn
-    return torch.ops._C.cslt_mm_fp8_semi_structured(A_compressed, B_dense, bias, transpose_result)
+    return torch.ops._C.cslt_mm_fp8_semi_structured(A_compressed, B_dense,
+                                                    bias, transpose_result)
+
 
 # semi structured fp8
 def semi_structured_fp8_compress(input: torch.Tensor) -> torch.Tensor:

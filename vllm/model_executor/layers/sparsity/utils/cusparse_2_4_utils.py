@@ -3,6 +3,9 @@ from packaging.version import Version
 from torch.sparse import (SparseSemiStructuredTensor,
                           SparseSemiStructuredTensorCUSPARSELT,
                           to_sparse_semi_structured)
+from torch.sparse import (SparseSemiStructuredTensor,
+                          SparseSemiStructuredTensorCUSPARSELT,
+                          to_sparse_semi_structured)
 
 from vllm import _custom_ops as ops
 from vllm._custom_ops import (semi_structured_fp8_compress,
@@ -37,7 +40,7 @@ def compress_to_torch_sparse_semi_structured_mat(pruned_tensor: torch.Tensor):
     else:
         return to_sparse_semi_structured(pruned_tensor)
 
-#  
+
 def decompress_torch_sparse_semi_structured_mat(packed_tensor: torch.Tensor):
     '''
     Unpacks the cusparseLt packed tensor into pruned tensor
@@ -134,17 +137,6 @@ def semi_structured_sparse_dense_gemm_scaled(a_packed: torch.Tensor,
                                   alpha=scale_a * scale_b,
                                   bias=bias,
                                   transpose_result=False)
-
-
-# test utils
-def dense_matmul(A, B, dtype):
-    if dtype in [torch.int8, torch.float8_e4m3fn]:
-        scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-        scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-        return ops.cutlass_scaled_mm(A, B, scale_a, scale_b,
-                                     torch.bfloat16).to(dtype)
-    else:
-        return A @ B
 
 
 # test utils
