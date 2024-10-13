@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import torch
 
@@ -146,13 +146,6 @@ class MambaCacheManager:
                                                finished_requests_ids)
             for req_id, seq_ids in request_ids_to_seq_ids.items()
             for seq_id in seq_ids
-        ]
-
-    def _get_all_occupied_indices(self):
-        return [
-            cache_idx
-            for seq_ids2indices in self.mamba_cache_indices_mapping.values()
-            for cache_idx in seq_ids2indices.values()
         ]
 
     def _release_finished_requests(self,

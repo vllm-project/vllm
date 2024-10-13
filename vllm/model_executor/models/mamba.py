@@ -1,6 +1,5 @@
 # coding=utf-8
 """PyTorch MAMBA model."""
-from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -405,16 +404,18 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                 self.lm_head.weight.dtype, self.config.num_hidden_layers,
                 max_batch_size, *self._get_mamba_cache_shape())
 
-
-        mamba_cache_tensors, state_indices_tensor = self.mamba_cache.current_run_tensors(
-            input_ids, attn_metadata, **kwargs)
+        (
+            mamba_cache_tensors,
+            state_indices_tensor,
+        ) = self.mamba_cache.current_run_tensors(input_ids, attn_metadata,
+                                                 **kwargs)
 
         mamba_cache_params = MambaCacheParams(mamba_cache_tensors[0],
                                               mamba_cache_tensors[1],
                                               state_indices_tensor)
 
         hidden_states = self.backbone(input_ids, positions, kv_caches,
-                                   attn_metadata, mamba_cache_params)
+                                      attn_metadata, mamba_cache_params)
 
         return hidden_states
 

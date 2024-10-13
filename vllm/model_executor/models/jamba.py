@@ -1,6 +1,5 @@
 # coding=utf-8
 """Inference-only Jamba model."""
-from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -8,7 +7,6 @@ from torch import nn
 from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -30,7 +28,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader, default_weight_loader, sharded_weight_loader)
-from vllm.model_executor.models.mamba_cache import MambaCacheManager, MambaCacheParams
+from vllm.model_executor.models.mamba_cache import (
+    MambaCacheManager,
+    MambaCacheParams,
+)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
@@ -577,10 +578,13 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             self.mamba_cache = MambaCacheManager(
                 self.lm_head.weight.dtype, num_mamba_layers, max_batch_size,
                 *self._get_mamba_cache_shape())
-
-        mamba_cache_tensors, state_indices_tensor = self.mamba_cache.current_run_tensors(
-            input_ids, attn_metadata, **kwargs)
-
+        (mamba_cache_tensors,
+            state_indices_tensor,
+        ) = self.mamba_cache.current_run_tensors(
+            input_ids,
+            attn_metadata,
+            **kwargs
+        )
         mamba_cache_params = MambaCacheParams(mamba_cache_tensors[0],
                                               mamba_cache_tensors[1],
                                               state_indices_tensor)
