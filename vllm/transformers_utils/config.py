@@ -92,11 +92,13 @@ def file_or_path_exists(model: Union[str, Path], config_name, revision,
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is None:
-        return
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        patch_rope_scaling(text_config)
 
-    patch_rope_scaling_dict(rope_scaling)
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is not None:
+        patch_rope_scaling_dict(rope_scaling)
 
 
 def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
