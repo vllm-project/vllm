@@ -3,8 +3,7 @@ image support for different VLMs in vLLM.
 """
 import os
 from pathlib import PosixPath
-from typing import (Any, Callable, Dict, List, Optional, Tuple,
-                    Type, Union)
+from typing import (Any, Callable, Dict, List, Optional, Tuple, Type, Union)
 
 import pytest
 from PIL.Image import Image
@@ -57,7 +56,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
         postprocess_inputs=vlm_utils.get_key_type_post_processor(
-            "pixel_values", 
+            "pixel_values",
             "bfloat16"
         ),
         # For chameleon, we only compare the sequences
@@ -93,18 +92,18 @@ VLM_TEST_SETTINGS = {
             inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs_llava(),
             limit_mm_per_prompt={"image": 4},
         ),
-        skip=False,
     ),
     "minicpmv": VLMTestInfo(
         models="openbmb/MiniCPM-Llama3-V-2_5",
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
-        test_type=(VlmTestType.IMAGE, VlmTestType.MULTI_IMAGE),
+        test_type=(VlmTestType.MULTI_IMAGE),
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         postprocess_inputs=vlm_utils.wrap_inputs_post_processor,
         hf_output_post_proc=vlm_utils.minicmpv_trunc_hf_output,
+        skip=False,
     ),
     "phi3v": VLMTestInfo(
         models="microsoft/Phi-3.5-vision-instruct",
@@ -142,7 +141,7 @@ VLM_TEST_SETTINGS = {
         dtype="half" if is_hip() else ["half", "float"],
     ),
 
-    # Tests above this point have been validated to align with current tests 
+    # Tests above this point have been validated to align with current tests
     "intern_vl": VLMTestInfo(
         models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
@@ -153,6 +152,7 @@ VLM_TEST_SETTINGS = {
     ),
 }
 # yapf: enable
+
 
 ### Test wrappers
 # Wrappers around the core test running func for:
@@ -166,7 +166,8 @@ VLM_TEST_SETTINGS = {
 # consumed by parametrize()
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
-    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS, test_type=VlmTestType.IMAGE))
+    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
+                                       test_type=VlmTestType.IMAGE))
 def test_single_image_generation(tmp_path: PosixPath, model_type: str,
                                  model: str, max_tokens: int,
                                  num_logprobs: int, dtype: str,
@@ -174,11 +175,9 @@ def test_single_image_generation(tmp_path: PosixPath, model_type: str,
                                  vllm_runner, image_assets: _ImageAssets):
     # Grab the model type's global model config to leverage callables
     test_info = VLM_TEST_SETTINGS[model_type]
-    model_prompts = vlm_utils.get_model_prompts(
-        SINGLE_IMAGE_BASE_PROMPTS,
-        test_info.img_idx_to_prompt,
-        test_info.prompt_formatter
-    )
+    model_prompts = vlm_utils.get_model_prompts(SINGLE_IMAGE_BASE_PROMPTS,
+                                                test_info.img_idx_to_prompt,
+                                                test_info.prompt_formatter)
 
     # For models that require a local path / URL encoded in the image; export
     # assets and encode into tmp_path for this test. This should be avoided
@@ -194,31 +193,30 @@ def test_single_image_generation(tmp_path: PosixPath, model_type: str,
 
     inputs = build_single_image_inputs(images, model_prompts, size_wrapper)
 
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": 1},
-        size_factors=size_wrapper,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             limit_mm_per_prompt={"image": 1},
+             size_factors=size_wrapper,
+             **test_info.get_non_parametrized_runner_kwargs())
 
-def test_video_generation():
-    raise NotImplementedError("Video model test wrapper not implemented")
 
-def test_quantized_models():
-    raise NotImplementedError("Quantized model test wrapper not implemented")
+# def test_video_generation():
+#     raise NotImplementedError("Video model test wrapper not implemented")
+
+
+# def test_quantized_models():
+#     raise NotImplementedError("Quantized model test wrapper not implemented")
+
 
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
-    vlm_utils.get_parametrized_options(
-        VLM_TEST_SETTINGS, test_type=VlmTestType.EMBEDDING
-    )
-)
+    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
+                                       test_type=VlmTestType.EMBEDDING))
 def test_embedding_generation(model_type: str, model: str, max_tokens: int,
                               num_logprobs: int, dtype: str,
                               size_wrapper: ImageSizeWrapper, hf_runner,
@@ -242,43 +240,41 @@ def test_embedding_generation(model_type: str, model: str, max_tokens: int,
     assert len(images) == len(model_prompts)
 
     inputs = build_single_image_inputs(images, model_prompts, size_wrapper)
-    vllm_embeddings = build_single_image_inputs(embeds, model_prompts, size_wrapper)
+    vllm_embeddings = build_single_image_inputs(embeds, model_prompts,
+                                                size_wrapper)
 
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        vllm_embeddings=vllm_embeddings,
-        limit_mm_per_prompt={"image": 1},
-        size_factors=size_wrapper,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             vllm_embeddings=vllm_embeddings,
+             limit_mm_per_prompt={"image": 1},
+             size_factors=size_wrapper,
+             **test_info.get_non_parametrized_runner_kwargs())
+
 
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
-    vlm_utils.get_parametrized_options(
-        VLM_TEST_SETTINGS,
-        test_type=VlmTestType.MULTI_IMAGE
-    )
-)
-def test_multi_image_generation(tmp_path: PosixPath,model_type: str, model: str, max_tokens: int,
-                                 num_logprobs: int, dtype: str,
-                                 size_wrapper: ImageSizeWrapper, hf_runner,
-                                 vllm_runner, image_assets: _ImageAssets):
+    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
+                                       test_type=VlmTestType.MULTI_IMAGE))
+def test_multi_image_generation(tmp_path: PosixPath, model_type: str,
+                                model: str, max_tokens: int, num_logprobs: int,
+                                dtype: str, size_wrapper: ImageSizeWrapper,
+                                hf_runner, vllm_runner,
+                                image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
 
-    model_prompts = vlm_utils.get_model_prompts(
-        [MULTI_IMAGE_BASE_PROMPT],
-        test_info.img_idx_to_prompt,
-        test_info.prompt_formatter
-    )
+    model_prompts = vlm_utils.get_model_prompts([MULTI_IMAGE_BASE_PROMPT],
+                                                test_info.img_idx_to_prompt,
+                                                test_info.prompt_formatter)
 
     if test_info.prompt_path_encoder is not None:
-        model_prompt = test_info.prompt_path_encoder(tmp_path, model_prompt, image_assets)
+        model_prompts = [test_info.prompt_path_encoder(
+            tmp_path, model_prompt, image_assets
+        ) for model_prompt in model_prompts]
 
     images = [asset.pil_image for asset in image_assets]
 
@@ -289,29 +285,24 @@ def test_multi_image_generation(tmp_path: PosixPath,model_type: str, model: str,
         size_wrapper=size_wrapper,
     )
 
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": len(images)},
-        size_factors=size_wrapper,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             limit_mm_per_prompt={"image": len(images)},
+             size_factors=size_wrapper,
+             **test_info.get_non_parametrized_runner_kwargs())
 
 
-@pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype",
-    vlm_utils.get_parametrized_options(
-        VLM_TEST_SETTINGS, test_type=VlmTestType.CUSTOM_INPUTS
-    )
-)
+@pytest.mark.parametrize("model_type,model,max_tokens,num_logprobs,dtype",
+                         vlm_utils.get_parametrized_options(
+                             VLM_TEST_SETTINGS,
+                             test_type=VlmTestType.CUSTOM_INPUTS))
 def test_custom_inputs(model_type: str, model: str, max_tokens: int,
-                       num_logprobs: int, dtype: str, hf_runner,
-                       vllm_runner):
+                       num_logprobs: int, dtype: str, hf_runner, vllm_runner):
 
     test_info = VLM_TEST_SETTINGS[model_type]
     custom_test_opts = test_info.custom_test_opts
@@ -324,18 +315,16 @@ def test_custom_inputs(model_type: str, model: str, max_tokens: int,
     limit_mm_per_prompt = custom_test_opts.limit_mm_per_prompt
 
     assert inputs is not None and limit_mm_per_prompt is not None
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-        size_factors=None,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             limit_mm_per_prompt=limit_mm_per_prompt,
+             size_factors=None,
+             **test_info.get_non_parametrized_runner_kwargs())
 
 
 ### Core test implementation & details
@@ -362,8 +351,8 @@ def run_test(
     get_stop_token_ids: Optional[Callable],
     limit_mm_per_prompt: Dict[str, int],
     size_factors=None,
-    vllm_embeddings: Optional[torch.Tensor]=None,
-    model_kwargs: Optional[Dict[str, Any]]=None,
+    vllm_embeddings: Optional[torch.Tensor] = None,
+    model_kwargs: Optional[Dict[str, Any]] = None,
 ):
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
@@ -400,7 +389,9 @@ def run_test(
     if use_tokenizer_eos:
         opt_hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
 
-    hf_model = hf_runner(model, dtype=dtype, auto_cls=auto_cls,
+    hf_model = hf_runner(model,
+                         dtype=dtype,
+                         auto_cls=auto_cls,
                          postprocess_inputs=postprocess_inputs,
                          model_kwargs=model_kwargs)
     with hf_model, torch.no_grad():
@@ -428,10 +419,25 @@ def run_test(
         size_factors.data if size_factors is not None else None,
         is_new=True,
         export_info=[
-            {"config": {"inputs": inputs, "max_tokens": max_tokens, "num_logprobs": num_logprobs}},
-            {"hf_runner": {"dtype": dtype, "model": model}},
-            {"hf_out": hf_outputs_per_image},
-            {"vllm_out": vllm_outputs_per_image},
+            {
+                "config": {
+                    "inputs": inputs,
+                    "max_tokens": max_tokens,
+                    "num_logprobs": num_logprobs
+                }
+            },
+            {
+                "hf_runner": {
+                    "dtype": dtype,
+                    "model": model
+                }
+            },
+            {
+                "hf_out": hf_outputs_per_image
+            },
+            {
+                "vllm_out": vllm_outputs_per_image
+            },
         ],
     )
 
@@ -446,13 +452,14 @@ def run_test(
             name_1="vllm",
         )
 
+
 def _process_runner_outputs(
-        model,
-        first_runner_outputs,
-        second_runner_outputs,
-        quantized_model=None,
-        first_runner_processor=None,
-        second_runner_processor=None,
+    model,
+    first_runner_outputs,
+    second_runner_outputs,
+    quantized_model=None,
+    first_runner_processor=None,
+    second_runner_processor=None,
 ):
     # In the case of quantization tests, we have two vLLM runners with one
     # running the quantized model, so they should have the same post-processor
@@ -466,21 +473,21 @@ def _process_runner_outputs(
 
     if first_runner_processor is not None:
         first_runner_outputs = _process_outputs(first_runner_processor, model,
-                                               first_runner_outputs)
+                                                first_runner_outputs)
     if second_runner_processor is not None:
-        second_runner_outputs = _process_outputs(second_runner_processor, model,
-                                                second_runner_outputs)
+        second_runner_outputs = _process_outputs(second_runner_processor,
+                                                 model, second_runner_outputs)
     return first_runner_outputs, second_runner_outputs
 
 
 def _process_outputs(output_processor, model, outputs_per_image):
     """Applies a model specific post-processor function to a runner's output"""
-    return [[
-        output_processor(res, model) for res in outputs
-    ] for outputs in outputs_per_image]
+    return [[output_processor(res, model) for res in outputs]
+            for outputs in outputs_per_image]
 
 
-def build_single_image_inputs(images, model_prompts, size_wrapper: ImageSizeWrapper):
+def build_single_image_inputs(images, model_prompts,
+                              size_wrapper: ImageSizeWrapper):
     # For every image / prompt pair, get a pair containing two lists of
     # length size_factors, where the first contains duplicates of the model
     # prompt [str], and the second contains copies of the image after being
@@ -489,29 +496,33 @@ def build_single_image_inputs(images, model_prompts, size_wrapper: ImageSizeWrap
     # NOTE: rescaling preserves the image aspect ratio.
     return [(
         [prompt for _ in size_wrapper.data],
-        apply_size_scaling(image, size_wrapper),
+        [apply_size_scaling(image, size, size_wrapper.type) for size in size_wrapper.data],
     ) for image, prompt in zip(images, model_prompts)]
 
-def build_multi_image_inputs(image_lists, model_prompts, size_wrapper: ImageSizeWrapper):
-    return [(
-        [prompt for _ in size_wrapper.data],
-        [apply_size_scaling(image, size_wrapper) for image in images],
-    ) for images, prompt in zip(image_lists, model_prompts)]
 
-def apply_size_scaling(image, size_wrapper: ImageSizeWrapper):
-    """Applies a size scaler to each image; this can be a an image size factor,
+def build_multi_image_inputs(image_lists, model_prompts,
+                             size_wrapper: ImageSizeWrapper):
+    return [
+        (
+            [prompt for _ in size_wrapper.data],
+            [[apply_size_scaling(image, size, size_wrapper.type) for image in images] for size in size_wrapper.data],
+        ) for images, prompt in zip(image_lists, model_prompts)
+    ]
+
+
+def apply_size_scaling(image, size: Union[Tuple[float], Tuple[int, int]], size_type: SizeType):
+    """Applies a size scaler to one image; this can be a an image size factor,
     which scales the image while maintaining the aspect ratio"""
     # Special case for embeddings; if it's a tensor, it's only valid if we
     # are considering size factors at constant scale, i.e., we just clone
     # the tensor
     if isinstance(image, torch.Tensor):
-        assert size_wrapper.type == SizeType.SIZE_FACTOR and all(x==1 for x in size_wrapper.data)
-        return [image for _ in size_wrapper.data]
-
-    if size_wrapper.type == SizeType.SIZE_FACTOR:
+        assert size_type == SizeType.SIZE_FACTOR and size == 1
+        return image
+    if size_type == SizeType.SIZE_FACTOR:
         # We have a list of image size factors
-        return [rescale_image_size(image, factor) for factor in size_wrapper.data]
-    elif size_wrapper.type == SizeType.FIXED_SIZE:
+        return rescale_image_size(image, size)
+    elif size_type == SizeType.FIXED_SIZE:
         # We have a list of fixed sizes
-        return [image.resize(size) for size in size_wrapper.data]
+        return image.resize(size)
     raise ValueError("ImageSizeWrapper type must be FIXED_SIZE or SIZE_FACTOR")
