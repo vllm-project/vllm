@@ -2,19 +2,22 @@
 for running tests, e.g., output sanitizers to make HF outputs more easily
 comparable to vLLM, etc.
 """
-import re
 import itertools
+import re
 from pathlib import PosixPath
-from typing import Tuple, List, Callable, Union, Dict, Optional, Iterable
-from transformers import AutoTokenizer, AutoConfig, BatchEncoding
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-from ....conftest import _ImageAssets, IMAGE_ASSETS
+from transformers import AutoConfig, AutoTokenizer, BatchEncoding
+
 from vllm.multimodal.utils import rescale_image_size
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.sequence import SampleLogprobs
-from .vlm_test_types import (VllmOutput, VLMTestInfo, VlmTestType,
-                            EMBEDDING_SIZE_FACTORS, TEST_IMG_PLACEHOLDER,
-                            SizeType, ImageSizeWrapper)
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+
+from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets
+from .vlm_test_types import (EMBEDDING_SIZE_FACTORS, TEST_IMG_PLACEHOLDER,
+                             ImageSizeWrapper, SizeType, VllmOutput,
+                             VLMTestInfo, VlmTestType)
+
 
 ####### vLLM output processors functions
 def blip2_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
@@ -133,13 +136,14 @@ def get_llava_embeddings(image_assets: _ImageAssets):
 # but built inside of the test so that we don't need to specify the dtype twice
 def get_key_type_post_processor(
         hf_inp_key: str,
-        dtype: str
-    ) -> Callable[[BatchEncoding], BatchEncoding]:
+        dtype: str) -> Callable[[BatchEncoding], BatchEncoding]:
     """Gets a handle to a post processor which converts a """
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+
     def process(hf_inputs: BatchEncoding):
         hf_inputs[hf_inp_key] = hf_inputs[hf_inp_key].to(torch_dtype)
         return hf_inputs
+
     return process
 
 
@@ -149,10 +153,8 @@ def wrap_inputs_post_processor(hf_inputs: BatchEncoding) -> BatchEncoding:
 
 ####### Prompt path encoders for models that need models on disk
 def qwen_prompt_path_encoder(
-    tmp_path: PosixPath,
-    prompt: str,
-    assets: Union[_ImageAssets, List[_ImageAssets]]
-) -> str:
+        tmp_path: PosixPath, prompt: str, assets: Union[List[ImageAsset],
+                                                        _ImageAssets]) -> str:
     """Given a temporary dir path, export one or more image assets into the
     tempdir & replace its contents with the local path to the string so that
     the HF version of Qwen-VL can resolve the path and load the image in its
@@ -183,6 +185,7 @@ def qwen_prompt_path_encoder(
 # Most of these help us handle image tags and configure things
 # that would normally be handled by parametrize(), since we want
 # to be able to adapt settings like num_logprobs on a per-model basis
+
 
 def replace_test_img_placeholders(prompt: str,
                                   img_idx_to_prompt: Callable) -> str:
@@ -233,11 +236,10 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
             continue
         # Otherwise check if the test has the right type & keep if it does
         if test_type == test_info.test_type or (
-            isinstance(test_info.test_type, Iterable)
-            and test_type in test_info.test_type
-        ):
+                isinstance(test_info.test_type, Iterable)
+                and test_type in test_info.test_type):
             # Embedding tests need to have a conversion func in their test info
-            if test_type ==  VlmTestType.EMBEDDING:
+            if test_type == VlmTestType.EMBEDDING:
                 assert test_info.convert_assets_to_embeddings is not None
             # Custom test inputs need to explicitly define the mm limit/inputs
             if test_type == VlmTestType.CUSTOM_INPUTS:
@@ -270,9 +272,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
         # No sizes passed for custom inputs, since inputs are directly provided
         if test_type != VlmTestType.CUSTOM_INPUTS:
             iterables.append(get_wrapped_test_sizes(test_info, test_type))
-        return list(
-            itertools.product(*iterables)
-        )
+        return list(itertools.product(*iterables))
 
     # Get a list per model type, where each entry contains a tuple of all of
     # that model type's cases, then flatten them into the top level so that
@@ -284,7 +284,9 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
     return list(itertools.chain(*cases_by_model_type))
 
 
-def get_wrapped_test_sizes(test_info: VLMTestInfo, test_type: VlmTestType) -> Tuple[ImageSizeWrapper]:
+def get_wrapped_test_sizes(
+        test_info: VLMTestInfo,
+        test_type: VlmTestType) -> Tuple[ImageSizeWrapper, ...]:
     """Given a test info which may have size factors or fixed sizes, wrap them
     and combine them into an iterable, each of which will be used in parameter
     expansion.
@@ -295,22 +297,27 @@ def get_wrapped_test_sizes(test_info: VLMTestInfo, test_type: VlmTestType) -> Tu
     """
     # If it is an embedding test, we always use the EMBEDDING_SIZE_FACTORS
     if test_type == VlmTestType.EMBEDDING:
-        return [
-            ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor) for factor in EMBEDDING_SIZE_FACTORS
-        ]
+        return tuple([
+            ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor)
+            for factor in EMBEDDING_SIZE_FACTORS
+        ])
     # Custom inputs have preprocessed inputs
     elif test_type == VlmTestType.CUSTOM_INPUTS:
-        return []
+        return tuple()
 
-    size_factors = test_info.image_size_factors if test_info.image_size_factors else []
-    fixed_sizes = test_info.image_sizes if test_info.image_sizes else []
+    size_factors = test_info.image_size_factors \
+        if test_info.image_size_factors else []
+    fixed_sizes = test_info.image_sizes \
+        if test_info.image_sizes else []
 
     wrapped_factors = [
-        ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor) for factor in size_factors
+        ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor)
+        for factor in size_factors
     ]
 
     wrapped_sizes = [
-        ImageSizeWrapper(type=SizeType.FIXED_SIZE, data=size) for size in fixed_sizes
+        ImageSizeWrapper(type=SizeType.FIXED_SIZE, data=size)
+        for size in fixed_sizes
     ]
 
     return tuple(wrapped_factors + wrapped_sizes)
@@ -346,13 +353,21 @@ def multi_image_multi_aspect_ratio_inputs_llava():
 
 
 ### Utilities for local export
-def export_test(model, size_info, export_info, is_new, write_dir="/u/brooks/vllm/compare_tests", terminate_test=False):
-    import json, sys, os
+def export_test(model,
+                size_info,
+                export_info,
+                is_new,
+                write_dir="/u/brooks/vllm/compare_tests",
+                terminate_test=False):
+    import json
+    import os
+    import sys
     if size_info is None:
-        size_info = ("custom",)
+        size_info = ("custom", )
     default = lambda o: f"<<non-serializable: {type(o).__qualname__}>>"
     size_str = "_".join([str(x) for x in size_info])
-    filename = f"{model.split('/')[-1]}_sf_{size_str if size_str else 'NONE'}.json"
+    size_str = size_str if size_str else 'NONE'
+    filename = f"{model.split('/')[-1]}_sf_{size_str}.json"
     subdir_name = "common" if is_new else "legacy"
     subdir = os.path.join(write_dir, subdir_name)
     full_path = os.path.join(subdir, filename)

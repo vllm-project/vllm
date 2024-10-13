@@ -2,7 +2,8 @@
 We explicitly test this because Qwen is implemented as a multimodal and
 supports a visual encoder for models like Qwen-VL.
 """
-from typing import Type, List
+from typing import List, Type
+
 import pytest
 
 from ....conftest import VllmRunner
@@ -10,6 +11,7 @@ from ....conftest import VllmRunner
 models = [
     "Qwen/Qwen-7B-Chat"  # Has no visual encoder
 ]
+
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
