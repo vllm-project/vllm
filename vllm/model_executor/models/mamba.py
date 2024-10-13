@@ -261,6 +261,7 @@ class MambaDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
+        **kwargs,
     ):
         if residual is None:
             residual = hidden_states
@@ -268,11 +269,8 @@ class MambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(
-            hidden_states,
-            attn_metadata,
-            mamba_cache_params
-        )
+        hidden_states = self.mixer(hidden_states, attn_metadata,
+                                   mamba_cache_params)
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
             hidden_states, residual)
@@ -318,6 +316,7 @@ class MambaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
     ) -> torch.Tensor:
@@ -332,8 +331,7 @@ class MambaModel(nn.Module):
                 hidden_states=hidden_states,
                 attn_metadata=attn_metadata,
                 residual=residual,
-                mamba_cache_params=mamba_cache_params.at_layer_idx(i)
-            )
+                mamba_cache_params=mamba_cache_params.at_layer_idx(i))
         hidden_states, _ = self.norm_f(hidden_states, residual)
 
         return hidden_states
@@ -407,12 +405,16 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                 self.lm_head.weight.dtype, self.config.num_hidden_layers,
                 max_batch_size, *self._get_mamba_cache_shape())
 
-        mamba_cache_tensors = self.mamba_cache.current_run_tensors(
+
+        mamba_cache_tensors, state_indices_tensor = self.mamba_cache.current_run_tensors(
             input_ids, attn_metadata, **kwargs)
 
+        mamba_cache_params = MambaCacheParams(mamba_cache_tensors[0],
+                                              mamba_cache_tensors[1],
+                                              state_indices_tensor)
+
         hidden_states = self.backbone(input_ids, positions, kv_caches,
-                                      attn_metadata, mamba_cache_tensors[0],
-                                      mamba_cache_tensors[1])
+                                   attn_metadata, mamba_cache_params)
 
         return hidden_states
 

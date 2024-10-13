@@ -6,6 +6,7 @@ import torch
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.utils import PAD_SLOT_ID
 
+
 @dataclass
 class MambaCacheParams:
     conv_state: torch.Tensor = torch.Tensor()
@@ -80,16 +81,13 @@ class MambaCacheManager:
 
         self._release_finished_requests(finished_requests_ids)
         state_indices = self._prepare_current_run_mamba_cache(
-            request_ids_to_seq_ids,
-            finished_requests_ids
-        )
+            request_ids_to_seq_ids, finished_requests_ids)
         cuda_graph_pad_len = input_state_indices_buffer.shape[0] - len(
             state_indices)
         state_indices.extend([PAD_SLOT_ID] * cuda_graph_pad_len)
 
         input_state_indices_buffer.copy_(
             torch.as_tensor(state_indices, dtype=torch.int32, device="cuda"))
-
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """
@@ -98,8 +96,8 @@ class MambaCacheManager:
         replay runs.
         """
         state_indices_tensor = torch.as_tensor([PAD_SLOT_ID] * batch_size,
-                                                       dtype=torch.int32,
-                                                       device="cuda")
+                                               dtype=torch.int32,
+                                               device="cuda")
         return (self.mamba_cache, state_indices_tensor)
 
     def _copy_mamba_cache(self, from_index: int, to_index: int):
@@ -119,7 +117,9 @@ class MambaCacheManager:
             return PAD_SLOT_ID
         elif cur_rid not in self.mamba_cache_indices_mapping:
             destination_index = self.free_cache_indices.pop()
-            self.mamba_cache_indices_mapping[cur_rid] = {seq_id: destination_index}
+            self.mamba_cache_indices_mapping[cur_rid] = {
+                seq_id: destination_index
+            }
             return destination_index
         elif seq_id not in (seq_ids2indices :=
                             self.mamba_cache_indices_mapping[cur_rid]):
@@ -131,7 +131,8 @@ class MambaCacheManager:
             destination_index = self.free_cache_indices.pop()
             self._copy_mamba_cache(from_index=index_exists,
                                    to_index=destination_index)
-            self.mamba_cache_indices_mapping[cur_rid][seq_id] = destination_index
+            self.mamba_cache_indices_mapping[cur_rid][
+                seq_id] = destination_index
             return destination_index
         else:
             # already exists
@@ -154,8 +155,8 @@ class MambaCacheManager:
             for cache_idx in seq_ids2indices.values()
         ]
 
-
-    def _release_finished_requests(self, finished_seq_groups_req_ids: List[str]):
+    def _release_finished_requests(self,
+                                   finished_seq_groups_req_ids: List[str]):
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.mamba_cache_indices_mapping:
                 for seq_id in self.mamba_cache_indices_mapping[req_id]:
