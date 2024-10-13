@@ -1727,6 +1727,7 @@ def _get_and_verify_max_len(
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None:
+        # No need to consider "type" key because of patch_rope_scaling()
         rope_type = rope_scaling["rope_type"]
 
         if rope_type not in ("su", "longrope", "llama3"):
