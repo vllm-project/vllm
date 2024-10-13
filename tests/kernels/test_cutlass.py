@@ -116,6 +116,20 @@ def cutlass_int8_gemm_helper(m: int,
             (out, a, b, scale_a, scale_b, bias))
 
 
+@pytest.mark.parametrize("m", [2048, 8192, 16384, 32768])
+@pytest.mark.parametrize("n", [8192, 28672])
+@pytest.mark.parametrize("k", [8192, 57344])
+@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.skipif(capability < 89,
+                    reason="FP8 is not supported on this GPU type.")
+def test_cutlass_fp8_llama70b_workloads(
+    m: int, n: int, k: int, per_act_token: bool, per_out_ch: bool, 
+    use_bias: bool):
+    cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, use_bias)
+
+
 @pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 100, 33])
 @pytest.mark.parametrize("n", [2048, 4096, 8192, 16384, 24576, 256, 1024])
 @pytest.mark.parametrize("k", [128, 496, 1024])

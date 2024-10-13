@@ -480,6 +480,35 @@ struct sm90_fp8_config_default {
                       KernelSchedule, EpilogueSchedule>;
 };
 
+// LLAMA70 configs
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm90_fp8_config_P0 {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _128, _128>;
+  using ClusterShape = Shape<_1, _2, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
+                      KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm90_fp8_config_P1 {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_128, _128, _128>;
+  using ClusterShape = Shape<_1, _2, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
+                      KernelSchedule, EpilogueSchedule>;
+};
+
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm90_fp8_config_M128 {
@@ -602,6 +631,166 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
       typename sm90_fp8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
       typename sm90_fp8_config_M128<InType, OutType, Epilogue>::Cutlass3xGemm;
+
+  // optimization for llama-70b
+  using Cutlass3xGemmP0 =
+      typename sm90_fp8_config_P0<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemmP1 =
+      typename sm90_fp8_config_P1<InType, OutType, Epilogue>::Cutlass3xGemm;
+
+  uint32_t const M = a.size(0);
+  uint32_t const N = b.size(1);
+  uint32_t const K = a.size(1);
+  // N = 57344, K = 8192
+  if (N == 57344 && K == 8192) {
+    if (M > 0 && M <= 64) {
+      // Gemm_1
+      return cutlass_gemm_caller<Cutlass3xGemmP0>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if (M > 64 && M <= 128) {
+      // Gemm_2
+      return cutlass_gemm_caller<Cutlass3xGemmM128>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 128 && M <= 256) || (M > 448 && M <= 512) ||
+               (M > 704 && M <= 768) || (M > 896 && M <= 1024) ||
+               (M > 1152 && M <= 1280) || (M > 1408 && M <= 1472) ||
+               (M > 1664 && M <= 1792) || (M > 2752 && M <= 2816) ||
+               (M > 3520 && M <= 3584) || (M > 5312 && M <= 5376) ||
+               (M > 5568 && M <= 5632) || (M > 5824 && M <= 5888) ||
+               (M > 11200 && M <= 11264) || (M > 13184 && M <= 13312) ||
+               (M > 15040 && M <= 15104) || (M > 31744 && M <= 31808)) {
+      // Gemm_3
+      return cutlass_gemm_caller<Cutlass3xGemmDefault>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 256 && M <= 320) || (M > 384 && M <= 448) ||
+               (M > 640 && M <= 704)) {
+      // Gemm_4
+      return cutlass_gemm_caller<Cutlass3xGemmP1>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 320 && M <= 384) || (M > 512 && M <= 640) ||
+               (M > 768 && M <= 896) || (M > 1024 && M <= 1152) ||
+               (M > 1280 && M <= 1408) || (M > 1472 && M <= 1664) ||
+               (M > 1792 && M <= 2752) || (M > 2816 && M <= 3520) ||
+               (M > 3584 && M <= 5312) || (M > 5376 && M <= 5568) ||
+               (M > 5632 && M <= 5824) || (M > 5888 && M <= 11200) ||
+               (M > 11264 && M <= 13184) || (M > 13312 && M <= 15040) ||
+               (M > 15104 && M <= 31744) || (M > 31808 && M <= 32768)) {
+      // Gemm_5
+      return cutlass_gemm_caller<Cutlass3xGemmP1>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
+  }
+
+  // N = 10240, K = 8192
+  else if (N == 10240 && K == 8192) {
+    if ((M > 0 && M <= 64) || (M > 128 && M <= 192)) {
+      // Gemm_1
+      return cutlass_gemm_caller<Cutlass3xGemmP0>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 64 && M <= 128) || (M > 256 && M <= 384) ||
+               (M > 512 && M <= 640) || (M > 768 && M <= 896) ||
+               (M > 1024 && M <= 1216) || (M > 1280 && M <= 1472) ||
+               (M > 1536 && M <= 1664) || (M > 1792 && M <= 5312) ||
+               (M > 5376 && M <= 5504) || (M > 5632 && M <= 5824) ||
+               (M > 5888 && M <= 6080) || (M > 6144 && M <= 7360) ||
+               (M > 7424 && M <= 7616) || (M > 7680 && M <= 9408) ||
+               (M > 9472 && M <= 10112) || (M > 28416 && M <= 28480)) {
+      // Gemm_2
+      return cutlass_gemm_caller<Cutlass3xGemmP1>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if (M > 192 && M <= 256) {
+      // Gemm_3
+      return cutlass_gemm_caller<Cutlass3xGemmM128>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 384 && M <= 512) || (M > 640 && M <= 768) ||
+               (M > 896 && M <= 1024) || (M > 1216 && M <= 1280) ||
+               (M > 1472 && M <= 1536) || (M > 1664 && M <= 1792) ||
+               (M > 5312 && M <= 5376) || (M > 5504 && M <= 5632) ||
+               (M > 5824 && M <= 5888) || (M > 6080 && M <= 6144) ||
+               (M > 7360 && M <= 7424) || (M > 7616 && M <= 7680) ||
+               (M > 9408 && M <= 9472) || (M > 10112 && M <= 28416) ||
+               (M > 28480 && M <= 32768)) {
+      // Gemm_4
+      return cutlass_gemm_caller<Cutlass3xGemmDefault>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
+  }  // end of N = 10240, K = 8192
+
+  // N = 8192, K = 28672
+  else if (N == 8192 && K == 28672) {
+    if (M > 0 && M <= 64) {
+      // Gemm_1
+      return cutlass_gemm_caller<Cutlass3xGemmP0>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+
+    } else if ((M > 64 && M <= 128) || (M > 320 && M <= 384)) {
+      // Gemm_2
+      return cutlass_gemm_caller<Cutlass3xGemmM128>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 128 && M <= 256) || (M > 384 && M <= 512) ||
+               (M > 640 && M <= 768) || (M > 896 && M <= 1024) ||
+               (M > 1152 && M <= 1280) || (M > 1472 && M <= 1536) ||
+               (M > 1728 && M <= 1792) || (M > 1984 && M <= 2048) ||
+               (M > 2240 && M <= 2304) || (M > 2752 && M <= 2816) ||
+               (M > 3520 && M <= 3584) || (M > 3776 && M <= 3840) ||
+               (M > 4032 && M <= 4096) || (M > 5312 && M <= 5376) ||
+               (M > 5504 && M <= 5632) || (M > 5824 && M <= 5888) ||
+               (M > 7616 && M <= 7680) || (M > 8064 && M <= 32768)) {
+      // Gemm_3
+      return cutlass_gemm_caller<Cutlass3xGemmDefault>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 256 && M <= 320) || (M > 512 && M <= 576) ||
+               (M > 768 && M <= 896) || (M > 1024 && M <= 1152) ||
+               (M > 1280 && M <= 1344) || (M > 1408 && M <= 1472) ||
+               (M > 1536 && M <= 1600) || (M > 1792 && M <= 1856) ||
+               (M > 2560 && M <= 2624) || (M > 3328 && M <= 3392)) {
+      // Gemm_4
+      return cutlass_gemm_caller<Cutlass3xGemmP1>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 576 && M <= 640) || (M > 1344 && M <= 1408) ||
+               (M > 1600 && M <= 1728) || (M > 1856 && M <= 1984) ||
+               (M > 2048 && M <= 2240) || (M > 2304 && M <= 2560) ||
+               (M > 2624 && M <= 2752) || (M > 2816 && M <= 3328) ||
+               (M > 3392 && M <= 3520) || (M > 3584 && M <= 3776) ||
+               (M > 3840 && M <= 4032) || (M > 4096 && M <= 5312) ||
+               (M > 5376 && M <= 5504) || (M > 5632 && M <= 5824) ||
+               (M > 5888 && M <= 7616) || (M > 7680 && M <= 8064)) {
+      // Gemm_5
+      return cutlass_gemm_caller<Cutlass3xGemmP1>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
+
+  }  // end of N = 8192, K = 28672
+
+  // N = 8192, K = 8192
+  else if (N == 8192 && K == 8192) {
+    if ((M > 0 && M <= 64) || (M > 256 && M <= 320)) {
+      // Gemm_1
+      return cutlass_gemm_caller<Cutlass3xGemmP0>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 64 && M <= 128) || (M > 320 && M <= 384)) {
+      // Gemm_2
+      return cutlass_gemm_caller<Cutlass3xGemmM128>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 128 && M <= 256) || (M > 384 && M <= 512) ||
+               (M > 640 && M <= 768) || (M > 896 && M <= 1024) ||
+               (M > 1152 && M <= 1280) || (M > 1472 && M <= 1536) ||
+               (M > 1664 && M <= 1792) || (M > 5568 && M <= 5632) ||
+               (M > 5824 && M <= 5888) || (M > 7552 && M <= 7680) ||
+               (M > 7872 && M <= 32768)) {
+      // Gemm_3
+      return cutlass_gemm_caller<Cutlass3xGemmDefault>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else if ((M > 512 && M <= 640) || (M > 768 && M <= 896) ||
+               (M > 1024 && M <= 1152) || (M > 1280 && M <= 1472) ||
+               (M > 1536 && M <= 1664) || (M > 1792 && M <= 5568) ||
+               (M > 5632 && M <= 5824) || (M > 5888 && M <= 7552) ||
+               (M > 7680 && M <= 7872)) {
+      // Gemm_4
+      return cutlass_gemm_caller<Cutlass3xGemmP1>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
+  }  // end of N = 8192, K = 8192
 
   uint32_t const m = a.size(0);
   uint32_t const mp2 =
