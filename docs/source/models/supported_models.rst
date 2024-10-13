@@ -11,7 +11,7 @@ Text-only Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Text Generation
----------------
+--------------- 
 
 .. list-table::
   :widths: 25 25 50 5 5
@@ -87,6 +87,11 @@ Text Generation
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
     -
     - ✅︎
+  * - :code:`FalconMambaForCausalLM`
+    - FalconMamba
+    - :code:`tiiuae/falcon-mamba-7b`, :code:`tiiuae/falcon-mamba-7b-instruct`, etc.
+    - ✅︎
+    -  
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
@@ -156,7 +161,7 @@ Text Generation
     - Mamba
     - :code:`state-spaces/mamba-130m-hf`, :code:`state-spaces/mamba-790m-hf`, :code:`state-spaces/mamba-2.8b-hf`, etc.
     - ✅︎
-    -
+    -  
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
