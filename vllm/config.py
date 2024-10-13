@@ -15,8 +15,7 @@ from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
-                                            get_hf_text_config,
-                                            patch_rope_scaling)
+                                            get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         is_hip, is_neuron, is_openvino, is_xpu,
                         print_warning_once)
@@ -1722,12 +1721,10 @@ def _get_and_verify_max_len(
             default_max_len)
         derived_max_model_len = default_max_len
 
-    # Backwards compatibility
-    patch_rope_scaling(hf_config)
-
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None:
-        # No need to consider "type" key because of patch_rope_scaling()
+        # No need to consider "type" key because of patch_rope_scaling when
+        # loading HF config
         rope_type = rope_scaling["rope_type"]
 
         if rope_type not in ("su", "longrope", "llama3"):
