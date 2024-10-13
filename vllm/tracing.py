@@ -96,7 +96,6 @@ class SpanAttributes(BaseSpanAttributes):
     # The following span attribute names are added here because they are missing
     # from the Semantic Conventions for LLM.
     LLM_REQUEST_ID = "gen_ai.request.id"
-    LLM_REQUEST_BEST_OF = "gen_ai.request.best_of"
     LLM_REQUEST_N = "gen_ai.request.n"
     LLM_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
     LLM_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
