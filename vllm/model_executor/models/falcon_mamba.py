@@ -44,6 +44,7 @@ class FalconMambaCacheParams:
     conv_state: torch.Tensor = torch.Tensor()
     ssm_state: torch.Tensor = torch.Tensor()
 
+
 # Adapted from transformers.models.falcon_mamba.modeling_falcon_mamba.FalconMambaMixer
 class FalconMambaMixer(nn.Module):
     """
@@ -118,14 +119,14 @@ class FalconMambaMixer(nn.Module):
         self.activation = config.hidden_act
 
         self.dt_layernorm = RMSNorm(self.time_step_rank,
-                                eps=self.rms_eps,
-                                is_learnable=False)
+                                    eps=self.rms_eps,
+                                    is_learnable=False)
         self.b_layernorm = RMSNorm(self.ssm_state_size,
-                                eps=self.rms_eps,
-                                is_learnable=False)
+                                   eps=self.rms_eps,
+                                   is_learnable=False)
         self.c_layernorm = RMSNorm(self.ssm_state_size,
-                                eps=self.rms_eps,
-                                is_learnable=False)
+                                   eps=self.rms_eps,
+                                   is_learnable=False)
 
     def forward(self, hidden_states: torch.Tensor,
                 attn_metadata: AttentionMetadata, conv_state: torch.Tensor,
@@ -178,7 +179,7 @@ class FalconMambaMixer(nn.Module):
         time_step = self.dt_layernorm(time_step.contiguous())
         B = self.b_layernorm(B.contiguous())
         C = self.c_layernorm(C.contiguous())
-        
+
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
         time_proj_bias = (self.dt_proj.bias.float() if hasattr(
@@ -281,9 +282,9 @@ class FalconMambaModel(nn.Module):
         for i in range(config.num_hidden_layers):
             decoder_layers.append(
                 FalconMambaDecoderLayer(config,
-                                  layer_idx=i,
-                                  cache_config=cache_config,
-                                  quant_config=quant_config))
+                                        layer_idx=i,
+                                        cache_config=cache_config,
+                                        quant_config=quant_config))
         self.layers = nn.ModuleList(decoder_layers)
         self.norm_f = RMSNorm(config.hidden_size,
                               eps=config.layer_norm_epsilon)
@@ -355,9 +356,9 @@ class FalconMambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         self.config = config
         self.scheduler_config = scheduler_config
         self.backbone = FalconMambaModel(config,
-                                   cache_config=cache_config,
-                                   quant_config=quant_config,
-                                   lora_config=lora_config)
+                                         cache_config=cache_config,
+                                         quant_config=quant_config,
+                                         lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
