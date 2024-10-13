@@ -1,14 +1,25 @@
 #include <cusparse.h>
 #include <torch/all.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include <cusparseLt.h>
-#include <cuda_fp8.h>
 
-// namespace vllm {
+#if defined(CUSPARSELT_VERSION) && CUSPARSELT_VERSION >= 600
+
+#define CUDASPARSE_CHECK(EXPR)                                  \
+  do {                                                          \
+    cusparseStatus_t __err = EXPR;                              \
+    TORCH_CHECK(__err == CUSPARSE_STATUS_SUCCESS,               \
+                "CUDA error: ",                                 \
+                cusparseGetErrorString(__err),                  \
+                " when calling `" #EXPR "`");                   \
+  } while (0)
+
 
 cusparseLtHandle_t handle;
 bool handle_initialized = false;
-#if defined(CUSPARSELT_VERSION) && CUSPARSELT_VERSION >= 602
+
 
 torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
     
@@ -41,7 +52,7 @@ torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
         &compressed_size,
         &compressed_buffer_size));
 
-    auto& allocator = ::c10::cuda::CUDACachingAllocator::get();
+    auto& allocator = *c10::cuda::CUDACachingAllocator::get();
     auto compressedBufferPtr = allocator.allocate(compressed_buffer_size);
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -82,7 +93,7 @@ torch::Tensor cslt_mm_fp8_semi_structured(
     cudaDataType C_type;
     cusparseComputeType compute_type = CUSPARSE_COMPUTE_32F;
     auto compression_factor = 9;
-    ScalarType out_dtype = dense_B.scalar_type();
+    auto out_dtype = dense_B.scalar_type();
 
     switch (out_dtype)
     {
@@ -191,7 +202,7 @@ torch::Tensor cslt_mm_fp8_semi_structured(
         cusparseLtMatmulGetWorkspace(&handle, &plan, &workspace_size));
 
 
-    auto& allocator = *::c10::cuda::CUDACachingAllocator::get();
+    auto& allocator = *c10::cuda::CUDACachingAllocator::get();
     auto workspacePtr = allocator.allocate(workspace_size);
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -205,7 +216,6 @@ torch::Tensor cslt_mm_fp8_semi_structured(
         res.data_ptr(),
         res.data_ptr(),
         workspacePtr.get(),
-        // jank because of the way we want this to be an array of streams
         &stream,
         1));
 
@@ -219,6 +229,7 @@ torch::Tensor cslt_mm_fp8_semi_structured(
     TORCH_CUDASPARSE_CHECK(cusparseLtMatmulPlanDestroy(&plan));
     return res;
 }
+
 #else
 
 torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
@@ -226,18 +237,12 @@ torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
 }
 
 torch::Tensor cslt_mm_fp8_semi_structured(
-    const Tensor& compressed_A,
-    const Tensor& dense_B,
-    const c10::optional<Tensor>& bias_opt,
+    const torch::Tensor& compressed_A,
+    const torch::Tensor& dense_B,
+    const c10::optional<torch::Tensor>& bias_opt,
     bool transpose_result,
-)
-{
-#if not (defined(CUSPARSELT_VERSION) && CUSPARSELT_VERSION >= 602)
+) {
     TORCH_CHECK(false, "Unsupported dtype for compressed matrix multiplication in current version of cuSPARSELt.");
-#endif
 }
 
 #endif
-
-
-// } // namespace vllm
