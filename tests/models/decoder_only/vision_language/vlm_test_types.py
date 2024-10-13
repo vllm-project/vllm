@@ -2,12 +2,14 @@ from vllm.sequence import SampleLogprobs
 
 from enum import Enum
 from pathlib import PosixPath
-from typing import Union, Tuple, Callable, Optional, Dict, Any, NamedTuple, Type, List
+from typing import Union, Tuple, Callable, Optional, Dict, Any, NamedTuple, Type, List, Iterable
+from PIL.Image import Image
 import torch
 from transformers import AutoModelForCausalLM, BatchEncoding
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from ...utils import check_logprobs_close, identity
+from ...utils import check_logprobs_close
+from vllm.utils import identity
 from ....conftest import _ImageAssets, IMAGE_ASSETS
 
 # meta image tag; will be replaced by the appropriate tag for the model
@@ -29,13 +31,17 @@ class VlmTestType(Enum):
     MULTI_IMAGE = 2
     EMBEDDING = 3
     VIDEO = 4 # TODO
-    QUANTIZED_IMAGE = 5 # TODO
+    CUSTOM_INPUTS = 5
 
-class SizeType: # TODO - integate this
+class SizeType(Enum):
     SIZE_FACTOR = 1
     FIXED_SIZE = 2
 
-class ImageSizeWrapper:
+class CustomTestOptions(NamedTuple):
+    inputs: List[Tuple[List[str], List[Union[List[Image], Image]]]]
+    limit_mm_per_prompt: Dict[str, int]
+
+class ImageSizeWrapper(NamedTuple):
     type: SizeType
     # A size factor is a wrapper of 0+ floats,
     # while a fixed size contains 2 integers
@@ -45,17 +51,15 @@ class ImageSizeWrapper:
 class VLMTestInfo(NamedTuple):
     models: Union[Tuple[str], str]
     prompt_formatter: Callable
+    test_type: Union[VlmTestType, Iterable[VlmTestType]]
+
     img_idx_to_prompt: Callable = lambda idx: "<image>\n"
 
-    # TODO - Overrides for single / multi-image prompts, respectively
-    single_image_prompt: Tuple[str] = None
-    multi_image_prompt: str = None
+    # TODO - Overrides for just the prompts to fix paligemma
 
-    # Function for converting ImageAssets to image embeddings; if a VLMTestInfo
-    # object defines this, we run a separate test for embedding with
-    # size_factors 
+    # Function for converting ImageAssets to image embeddings;
+    # We need to define this explicitly for embedding tests
     convert_assets_to_embeddings: Callable[[_ImageAssets], torch.Tensor] = None
-    supports_multi_image: bool = False
 
     # Exposed options for vLLM runner; we change these in a several tests,
     # but the defaults are derived from VllmRunner & the engine defaults
@@ -91,13 +95,36 @@ class VLMTestInfo(NamedTuple):
     # such that each model will consider each image size factor / image size
     # once per tests (much like concatenating and wrapping in one parametrize
     # call)
-    image_size_factors: Tuple[float] = IMAGE_SIZE_FACTORS
-    image_sizes: Tuple[float] = None
+    image_size_factors: Tuple[Tuple[float]] = IMAGE_SIZE_FACTORS
+    image_sizes: Tuple[Tuple[int, int]] = None
 
     # Hack for updating a prompt to take into a local path; currently only used
     # for Qwen-VL, which requires encoding the image path / url into the prompt
     # for HF runner
     prompt_path_encoder: Optional[Callable[[PosixPath, str, List[_ImageAssets]], str]] = None  # noqa: E501
 
+    # Allows configuring a test to run with custom types
+    custom_test_opts: Optional[CustomTestOptions] = None
+
     # Toggle for disabling instances of this class
-    skip: bool = True
+    skip: bool = True # TODO - flip me after done testing...
+
+    def get_non_parametrized_runner_kwargs(self):
+        """Returns a dictionary of expandable kwargs for items that are used
+        in all test types, which are NOT used when creating the parametrized
+        test cases.
+        """
+        return {
+            "tensor_parallel_size": self.tensor_parallel_size,
+            "enforce_eager": self.enforce_eager,
+            "max_model_len": self.max_model_len,
+            "max_num_seqs": self.max_num_seqs,
+            "hf_output_post_proc": self.hf_output_post_proc,
+            "vllm_output_post_proc": self.vllm_output_post_proc,
+            "auto_cls": self.auto_cls,
+            "use_tokenizer_eos": self.use_tokenizer_eos,
+            "postprocess_inputs": self.postprocess_inputs,
+            "comparator": self.comparator,
+            "get_stop_token_ids": self.get_stop_token_ids,
+            "model_kwargs": self.model_kwargs,
+        }
