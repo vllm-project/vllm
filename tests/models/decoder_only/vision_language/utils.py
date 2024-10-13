@@ -5,14 +5,16 @@ comparable to vLLM, etc.
 import re
 import itertools
 from pathlib import PosixPath
-from typing import Tuple, List, Callable, Union, Dict, Optional
+from typing import Tuple, List, Callable, Union, Dict, Optional, Iterable
 from transformers import AutoTokenizer, AutoConfig, BatchEncoding
 
-from ....conftest import _ImageAssets
+from ....conftest import _ImageAssets, IMAGE_ASSETS
+from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.sequence import SampleLogprobs
-from vlm_test_types import (VllmOutput, VLMTestInfo, VlmTestType,
-                            EMBEDDING_SIZE_FACTORS, TEST_IMG_PLACEHOLDER)
+from .vlm_test_types import (VllmOutput, VLMTestInfo, VlmTestType,
+                            EMBEDDING_SIZE_FACTORS, TEST_IMG_PLACEHOLDER,
+                            SizeType, ImageSizeWrapper)
 
 ####### vLLM output processors functions
 def blip2_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
@@ -224,23 +226,25 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
 
 def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
                                test_type: VlmTestType):
-    # Filter based on type of test; assume single image is supported everywhere
-    filter_func = lambda _: True
+    filtered_test_settings = {}
+    for test_name, test_info in test_settings.items():
+        # Skip if it's explicitly disabled
+        if test_info.skip:
+            continue
+        # Otherwise check if the test has the right type & keep if it does
+        if test_type == test_info.test_type or (
+            isinstance(test_info.test_type, Iterable)
+            and test_type in test_info.test_type
+        ):
+            # Embedding tests need to have a conversion func in their test info
+            if test_type ==  VlmTestType.EMBEDDING:
+                assert test_info.convert_assets_to_embeddings is not None
+            # Custom test inputs need to explicitly define the mm limit/inputs
+            if test_type == VlmTestType.CUSTOM_INPUTS:
+                assert test_info.custom_test_opts is not None
 
-    if test_type == VlmTestType.MULTI_IMAGE:
-        # Multi-image requires explicit enablement
-        filter_func = lambda info: info.supports_multi_image
-    elif test_type == VlmTestType.EMBEDDING:
-        # Embedding requires an explicit func to get embeddings to pass to vLLM
-        filter_func = lambda info: info.convert_assets_to_embeddings is not None
-
-    # Drop anything that is either unimplemented for the test config/disabled
-    test_settings = {
-        model_type: test_info
-        for model_type, test_info in test_settings.items()
-        if filter_func(test_info) and not test_info.skip
-    }
-    return test_settings
+            filtered_test_settings[test_name] = test_info
+    return filtered_test_settings
 
 
 def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
@@ -252,26 +256,23 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e, )
 
     def get_model_type_cases(model_type: str, test_info: VLMTestInfo):
-        size_factors = test_info.image_size_factors
-        # All embedding tests use the same size factors; we currently
-        # don't configure this per test since embeddings can't be
-        # heterogeneous, etc
-        if test_type == VlmTestType.EMBEDDING:
-            size_factors = EMBEDDING_SIZE_FACTORS
-
         # This is essentially the same as nesting a bunch of mark.parametrize
         # decorators, but we do it programmatically to allow overrides for on
         # a per-model basis, while still being able to execute each of these
         # as individual test cases in pytest.
+        iterables = [
+            ensure_wrapped(model_type),
+            ensure_wrapped(test_info.models),
+            ensure_wrapped(test_info.max_tokens),
+            ensure_wrapped(test_info.num_logprobs),
+            ensure_wrapped(test_info.dtype),
+        ]
+        # No sizes passed for custom inputs, since inputs are directly provided
+        if test_type != VlmTestType.CUSTOM_INPUTS:
+            iterables.append(get_wrapped_test_sizes(test_info, test_type))
         return list(
-            itertools.product(
-                ensure_wrapped(model_type),
-                ensure_wrapped(test_info.models),
-                ensure_wrapped(test_info.max_tokens),
-                ensure_wrapped(test_info.num_logprobs),
-                ensure_wrapped(test_info.dtype),
-                ensure_wrapped(size_factors),
-            ))
+            itertools.product(*iterables)
+        )
 
     # Get a list per model type, where each entry contains a tuple of all of
     # that model type's cases, then flatten them into the top level so that
@@ -281,3 +282,88 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
         for model_type, test_info in test_settings.items()
     ]
     return list(itertools.chain(*cases_by_model_type))
+
+
+def get_wrapped_test_sizes(test_info: VLMTestInfo, test_type: VlmTestType) -> Tuple[ImageSizeWrapper]:
+    """Given a test info which may have size factors or fixed sizes, wrap them
+    and combine them into an iterable, each of which will be used in parameter
+    expansion.
+
+    Args:
+        test_info: Test configuration to be expanded.
+        test_type: The type of test being filtered for.
+    """
+    # If it is an embedding test, we always use the EMBEDDING_SIZE_FACTORS
+    if test_type == VlmTestType.EMBEDDING:
+        return [
+            ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor) for factor in EMBEDDING_SIZE_FACTORS
+        ]
+    # Custom inputs have preprocessed inputs
+    elif test_type == VlmTestType.CUSTOM_INPUTS:
+        return []
+
+    size_factors = test_info.image_size_factors if test_info.image_size_factors else []
+    fixed_sizes = test_info.image_sizes if test_info.image_sizes else []
+
+    wrapped_factors = [
+        ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor) for factor in size_factors
+    ]
+
+    wrapped_sizes = [
+        ImageSizeWrapper(type=SizeType.FIXED_SIZE, data=size) for size in fixed_sizes
+    ]
+
+    return tuple(wrapped_factors + wrapped_sizes)
+
+
+def multi_image_multi_aspect_ratio_inputs_llava():
+    """Builds inputs for multi-image (varied sizes/aspect ratio) testing."""
+    stop_sign = IMAGE_ASSETS[0].pil_image
+    cherry_blossom = IMAGE_ASSETS[1].pil_image
+
+    return [(
+        [
+            "USER: <image><image>\nDescribe 2 images.\nASSISTANT:",
+            "USER: <image><image>\nDescribe 2 images.\nASSISTANT:",
+            "USER: <image><image><image><image>\nDescribe 4 images.\nASSISTANT:",  # noqa: E501
+            "USER: <image>\nWhat is the season?\nASSISTANT:",
+        ],
+        [
+            [stop_sign, cherry_blossom],
+            # Images with different sizes and aspect-ratios
+            [
+                rescale_image_size(stop_sign, 0.1),
+                stop_sign,
+            ],
+            [
+                stop_sign,
+                rescale_image_size(stop_sign, 0.25),
+                cherry_blossom.resize((183, 488)),
+                cherry_blossom.resize((488, 183))
+            ],
+            cherry_blossom,
+        ])]
+
+
+### Utilities for local export
+def export_test(model, size_info, export_info, is_new, write_dir="/u/brooks/vllm/compare_tests", terminate_test=False):
+    import json, sys, os
+    if size_info is None:
+        size_info = ("custom",)
+    default = lambda o: f"<<non-serializable: {type(o).__qualname__}>>"
+    size_str = "_".join([str(x) for x in size_info])
+    filename = f"{model.split('/')[-1]}_sf_{size_str if size_str else 'NONE'}.json"
+    subdir_name = "common" if is_new else "legacy"
+    subdir = os.path.join(write_dir, subdir_name)
+    full_path = os.path.join(subdir, filename)
+
+    if not os.path.isdir(subdir):
+        os.mkdir(subdir)
+    if os.path.exists(full_path):
+        # Delete it if already exists
+        os.remove(full_path)
+
+    with open(full_path, "w") as f:
+        json.dump(export_info, f, sort_keys=True, indent=4, default=default)
+    if terminate_test:
+        sys.exit(0)
