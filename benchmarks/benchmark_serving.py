@@ -176,9 +176,9 @@ def sample_sonnet_requests(
     # Sample the rest of lines per request.
     sampled_requests: List[Tuple[str, int, int]] = []
     for _ in range(num_requests):
-        sampled_lines = "".join(
-            prefix_lines +
-            random.sample(poem_lines, num_input_lines - num_prefix_lines))
+        num_lines_needed = num_input_lines - num_prefix_lines
+        sampled_lines = "".join(prefix_lines +
+                                random.choices(poem_lines, k=num_lines_needed))
 
         prompt = f"{base_prompt}{sampled_lines}"
         message = [
@@ -391,12 +391,12 @@ async def benchmark(
     input_requests: List[Tuple[str, int, int]],
     logprobs: Optional[int],
     best_of: int,
-    use_beam_search: bool,
     request_rate: float,
     disable_tqdm: bool,
     profile: bool,
     selected_percentile_metrics: List[str],
     selected_percentiles: List[str],
+    ignore_eos: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -418,8 +418,8 @@ async def benchmark(
         output_len=test_output_len,
         logprobs=logprobs,
         best_of=best_of,
-        use_beam_search=use_beam_search,
         multi_modal_content=test_mm_content,
+        ignore_eos=ignore_eos,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -439,7 +439,6 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
             best_of=best_of,
-            use_beam_search=use_beam_search,
             multi_modal_content=test_mm_content,
         )
         profile_output = await request_func(request_func_input=profile_input)
@@ -462,7 +461,6 @@ async def benchmark(
             output_len=output_len,
             logprobs=logprobs,
             best_of=best_of,
-            use_beam_search=use_beam_search,
             multi_modal_content=mm_content,
         )
         tasks.append(
@@ -481,7 +479,6 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
             best_of=best_of,
-            use_beam_search=use_beam_search,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -539,7 +536,7 @@ async def benchmark(
         # E.g., "Time to First Token"
         metric_header: str,
     ):
-        # This function print and add statistics of the specified
+        # This function prints and adds statistics of the specified
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
@@ -677,7 +674,6 @@ def main(args: argparse.Namespace):
             input_requests=input_requests,
             logprobs=args.logprobs,
             best_of=args.best_of,
-            use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
@@ -685,6 +681,7 @@ def main(args: argparse.Namespace):
             selected_percentiles=[
                 float(p) for p in args.metric_percentiles.split(",")
             ],
+            ignore_eos=args.ignore_eos,
         ))
 
     # Save config and results to json
@@ -698,7 +695,6 @@ def main(args: argparse.Namespace):
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
-        result_json["use_beam_search"] = args.use_beam_search
         result_json["num_prompts"] = args.num_prompts
 
         # Metadata
@@ -863,6 +859,11 @@ if __name__ == "__main__":
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         " format.",
     )
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Set ignore_eos flag when sending the benchmark request."
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
     parser.add_argument(
         "--percentile-metrics",
         type=str,
