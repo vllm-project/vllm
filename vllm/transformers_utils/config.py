@@ -120,7 +120,10 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
 
 def uses_mrope(config: PretrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
-    rope_scaling = getattr(config, "rope_scaling", {})
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return False
+
     return "mrope_section" in rope_scaling
 
 
