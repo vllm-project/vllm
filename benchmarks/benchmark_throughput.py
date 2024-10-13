@@ -473,6 +473,7 @@ if __name__ == "__main__":
         help="Maximum number of forward steps per scheduler call.")
     parser.add_argument("--use-v2-block-manager",
                         action='store_true',
+                        default=EngineArgs.use_v2_block_manager,
                         help="Enable block manager v2.")
     parser.add_argument(
         "--enable-prefix-caching",

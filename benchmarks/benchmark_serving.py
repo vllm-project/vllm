@@ -176,9 +176,9 @@ def sample_sonnet_requests(
     # Sample the rest of lines per request.
     sampled_requests: List[Tuple[str, int, int]] = []
     for _ in range(num_requests):
-        sampled_lines = "".join(
-            prefix_lines +
-            random.sample(poem_lines, num_input_lines - num_prefix_lines))
+        num_lines_needed = num_input_lines - num_prefix_lines
+        sampled_lines = "".join(prefix_lines +
+                                random.choices(poem_lines, k=num_lines_needed))
 
         prompt = f"{base_prompt}{sampled_lines}"
         message = [
