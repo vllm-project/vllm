@@ -1,6 +1,6 @@
 import pytest
-from ....conftest import IMAGE_ASSETS
 
+from ....conftest import IMAGE_ASSETS
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
@@ -9,9 +9,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "USER: <image>\nWhat is the season?\nASSISTANT:",
 })
 
-models = [
-    "llava-hf/llava-1.5-7b-hf"
-]
+models = ["llava-hf/llava-1.5-7b-hf"]
+
 
 @pytest.mark.parametrize("model", models)
 def test_context_length_too_short(vllm_runner, image_assets, model):

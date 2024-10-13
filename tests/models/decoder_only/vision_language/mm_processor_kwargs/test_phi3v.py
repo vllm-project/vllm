@@ -14,6 +14,7 @@ from ....utils import build_model_context
 
 models = ["microsoft/Phi-3.5-vision-instruct"]
 
+
 # Wrap lazy imports to avoid initializing CUDA during test collection
 @pytest.fixture()
 def input_processor_for_phi3v():

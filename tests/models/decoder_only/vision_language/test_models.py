@@ -3,12 +3,12 @@ image support for different VLMs in vLLM.
 """
 import os
 from pathlib import PosixPath
-from typing import (Any, Callable, Dict, List, Optional, Tuple, Type, Union)
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import pytest
-from PIL.Image import Image
 import torch
-from transformers import (AutoModelForVision2Seq, AutoTokenizer, BatchEncoding)
+from PIL.Image import Image
+from transformers import AutoModelForVision2Seq, AutoTokenizer, BatchEncoding
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.multimodal.utils import rescale_image_size
@@ -17,15 +17,10 @@ from vllm.utils import identity, is_cpu, is_hip
 from ....conftest import HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_outputs_equal
 from . import utils as vlm_utils
-from .vlm_test_types import (
-    VLMTestInfo,
-    VlmTestType,
-    SINGLE_IMAGE_BASE_PROMPTS,
-    MULTI_IMAGE_BASE_PROMPT,
-    SizeType,
-    ImageSizeWrapper,
-    CustomTestOptions,
-)
+from .vlm_test_types import (MULTI_IMAGE_BASE_PROMPT,
+                             SINGLE_IMAGE_BASE_PROMPTS, CustomTestOptions,
+                             ImageSizeWrapper, SizeType, VLMTestInfo,
+                             VlmTestType)
 
 # This hack is needed for phi3v & paligemma models
 # ROCm Triton FA can run into shared memory issues with these models,
@@ -83,7 +78,11 @@ VLM_TEST_SETTINGS = {
     "llava": VLMTestInfo(
         models="llava-hf/llava-1.5-7b-hf",
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        test_type=(VlmTestType.EMBEDDING, VlmTestType.IMAGE, VlmTestType.CUSTOM_INPUTS),
+        test_type=(
+            VlmTestType.EMBEDDING,
+            VlmTestType.IMAGE,
+            VlmTestType.CUSTOM_INPUTS
+        ),
         convert_assets_to_embeddings=vlm_utils.get_llava_embeddings,
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
@@ -138,12 +137,12 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt = lambda idx: "",
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=vlm_utils.paligemma_vllm_to_hf_output,
-        dtype="half" if is_hip() else ["half", "float"],
+        dtype="half" if is_hip() else ("half", "float"),
     ),
 
     # Tests above this point have been validated to align with current tests
     "intern_vl": VLMTestInfo(
-        models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
+        models=("OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         test_type=(VlmTestType.IMAGE, VlmTestType.MULTI_IMAGE),
         max_model_len=4096,
@@ -208,7 +207,6 @@ def test_single_image_generation(tmp_path: PosixPath, model_type: str,
 # def test_video_generation():
 #     raise NotImplementedError("Video model test wrapper not implemented")
 
-
 # def test_quantized_models():
 #     raise NotImplementedError("Quantized model test wrapper not implemented")
 
@@ -223,11 +221,10 @@ def test_embedding_generation(model_type: str, model: str, max_tokens: int,
                               vllm_runner, image_assets: _ImageAssets):
     # Grab the model type's global model config to leverage callables
     test_info = VLM_TEST_SETTINGS[model_type]
-    # This will always be true due to the conditions in the parametrization
-    # but we check it anyway, because the test will break if it isn't
-    if size_wrapper.type != SizeType.SIZE_FACTOR or not \
-            all(factor == 1.0 for factor in size_wrapper.data):
-        raise AssertionError("Embed tests can only use size_factors (1.0)")
+    # These checks will always be true due to the way the test is invoked
+    assert size_wrapper.type != SizeType.SIZE_FACTOR or not \
+            all(factor == 1.0 for factor in size_wrapper.data)
+    assert test_info.convert_assets_to_embeddings is not None
 
     model_prompts = vlm_utils.get_model_prompts(
         SINGLE_IMAGE_BASE_PROMPTS,
@@ -272,9 +269,10 @@ def test_multi_image_generation(tmp_path: PosixPath, model_type: str,
                                                 test_info.prompt_formatter)
 
     if test_info.prompt_path_encoder is not None:
-        model_prompts = [test_info.prompt_path_encoder(
-            tmp_path, model_prompt, image_assets
-        ) for model_prompt in model_prompts]
+        model_prompts = [
+            test_info.prompt_path_encoder(tmp_path, model_prompt, image_assets)
+            for model_prompt in model_prompts
+        ]
 
     images = [asset.pil_image for asset in image_assets]
 
@@ -496,21 +494,26 @@ def build_single_image_inputs(images, model_prompts,
     # NOTE: rescaling preserves the image aspect ratio.
     return [(
         [prompt for _ in size_wrapper.data],
-        [apply_size_scaling(image, size, size_wrapper.type) for size in size_wrapper.data],
+        [
+            apply_size_scaling(image, size, size_wrapper.type)
+            for size in size_wrapper.data
+        ],
     ) for image, prompt in zip(images, model_prompts)]
 
 
 def build_multi_image_inputs(image_lists, model_prompts,
                              size_wrapper: ImageSizeWrapper):
-    return [
-        (
-            [prompt for _ in size_wrapper.data],
-            [[apply_size_scaling(image, size, size_wrapper.type) for image in images] for size in size_wrapper.data],
-        ) for images, prompt in zip(image_lists, model_prompts)
-    ]
+    return [(
+        [prompt for _ in size_wrapper.data],
+        [[
+            apply_size_scaling(image, size, size_wrapper.type)
+            for image in images
+        ] for size in size_wrapper.data],
+    ) for images, prompt in zip(image_lists, model_prompts)]
 
 
-def apply_size_scaling(image, size: Union[Tuple[float], Tuple[int, int]], size_type: SizeType):
+def apply_size_scaling(image, size: Union[float, Tuple[int, int]],
+                       size_type: SizeType):
     """Applies a size scaler to one image; this can be a an image size factor,
     which scales the image while maintaining the aspect ratio"""
     # Special case for embeddings; if it's a tensor, it's only valid if we

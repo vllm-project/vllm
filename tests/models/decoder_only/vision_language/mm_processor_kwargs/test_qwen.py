@@ -12,7 +12,6 @@ from vllm.multimodal.utils import cached_get_tokenizer
 from .....conftest import IMAGE_ASSETS
 from ....utils import build_model_context
 
-
 ### Multimodal preprocessing tests
 SAMPLE_IMAGE = IMAGE_ASSETS[0].pil_image
 # These values are specific to Qwen-VL/Chat; we can get these from the model
