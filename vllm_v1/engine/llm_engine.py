@@ -322,8 +322,8 @@ class LLMEngine:
             num_gpu_blocks = num_gpu_blocks_override
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        self.cache_config.num_cpu_blocks = 0
+        self.model_executor.initialize_cache(num_gpu_blocks)
 
     @classmethod
     def from_engine_args(

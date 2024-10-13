@@ -147,18 +147,14 @@ class Worker:
         num_gpu_blocks = int(
             (total_gpu_memory * self.cache_config.gpu_memory_utilization -
              peak_memory) // cache_block_size)
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                             cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
-        num_cpu_blocks = max(num_cpu_blocks, 0)
         # if self.model_runner.lora_manager:
         #     self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
-        return num_gpu_blocks, num_cpu_blocks
+        return num_gpu_blocks, 0
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks."""
         if num_gpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
@@ -175,13 +171,11 @@ class Worker:
                 "`gpu_memory_utilization` or decreasing `max_model_len` when "
                 "initializing the engine.")
 
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
         self.model_runner.initialize_kv_cache(num_gpu_blocks)
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model(self.gpu_cache)
+            self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)

@@ -81,18 +81,20 @@ class GPUExecutor:
         """
         return self.worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+    def initialize_cache(self, num_gpu_blocks: int) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# GPU blocks: %d", num_gpu_blocks)
-        self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        self.worker.initialize_cache(num_gpu_blocks)
+        self.worker.compile_or_warm_up_model()
 
     def execute_model(
-        self, scheduler_output,
-    ) -> Optional[List[Union[ModelRunnerOutput]]]:
+        self,
+        scheduler_output,
+    ) -> ModelRunnerOutput:
         output = self.worker.execute_model(scheduler_output)
         return output
 
@@ -113,7 +115,7 @@ class GPUExecutorAsync(GPUExecutor):
     async def execute_model_async(
         self,
         scheduler_output,
-    ) -> List[Union[ModelRunnerOutput]]:
+    ) -> ModelRunnerOutput:
         output = await make_async(self.worker.execute_model
                                   )(scheduler_output=scheduler_output)
         return output
