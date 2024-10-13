@@ -337,7 +337,11 @@ class LoRAModelManager(AdapterModelManager):
             self.packed_modules_mapping = copy.deepcopy(
                 self.model.packed_modules_mapping)
         # Used to indicate whether the model is a multimodal model
-        self.supports_mm: bool = supports_multimodal(self.model)
+        self.supports_mm: bool = (
+            supports_multimodal(self.model)
+            # In case the model only supports LoRA for
+            # text modules (e.g. ChatGLM)
+            and hasattr(self.model, "get_mm_mapping"))
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
         # Dict instead of a Set for compatibility with LRUCache.
