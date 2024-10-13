@@ -14,7 +14,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import identity, is_cpu, is_hip
 
-from ....conftest import HfRunner, VllmRunner, _ImageAssets
+from ....conftest import HfRunner, VllmRunner, _ImageAssets, IMAGE_ASSETS
 from ...utils import check_outputs_equal
 from . import utils as vlm_utils
 from .vlm_test_types import (MULTI_IMAGE_BASE_PROMPT,
@@ -102,7 +102,6 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         postprocess_inputs=vlm_utils.wrap_inputs_post_processor,
         hf_output_post_proc=vlm_utils.minicmpv_trunc_hf_output,
-        skip=False,
     ),
     "phi3v": VLMTestInfo(
         models="microsoft/Phi-3.5-vision-instruct",
@@ -127,19 +126,21 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=vlm_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=vlm_utils.qwen_prompt_path_encoder,
     ),
-    # paligemma works, but needs its own prompt, or else it fails
     "paligemma": VLMTestInfo(
         models="google/paligemma-3b-mix-224",
         prompt_formatter=identity,
         test_type=VlmTestType.IMAGE,
-        # <image> is the paligemma placeholder, which is contained in the
-        # default; careful not to pass it in the prompt, or it'll be a mismatch
         img_idx_to_prompt = lambda idx: "",
+        # Paligemma uses its own sample prompts because the default one fails
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "caption es",
+            "cherry_blossom": "What is in the picture?",
+        }),
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=vlm_utils.paligemma_vllm_to_hf_output,
         dtype="half" if is_hip() else ("half", "float"),
+        skip=False,
     ),
-
     # Tests above this point have been validated to align with current tests
     "intern_vl": VLMTestInfo(
         models=("OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"),
@@ -174,7 +175,7 @@ def test_single_image_generation(tmp_path: PosixPath, model_type: str,
                                  vllm_runner, image_assets: _ImageAssets):
     # Grab the model type's global model config to leverage callables
     test_info = VLM_TEST_SETTINGS[model_type]
-    model_prompts = vlm_utils.get_model_prompts(SINGLE_IMAGE_BASE_PROMPTS,
+    model_prompts = vlm_utils.get_model_prompts(test_info.single_image_prompts,
                                                 test_info.img_idx_to_prompt,
                                                 test_info.prompt_formatter)
 
