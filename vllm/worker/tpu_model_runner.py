@@ -123,6 +123,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         )
         self.cached_step_outputs: List[torch.Tensor] = []
 
+        smem_size = 512 * 1024
+        block_table_size = 4 * self.block_tables.size
+        if block_table_size >= smem_size:
+            logger.warning(
+                "The max_model_len (%d) is too large. This may degrade the "
+                "performance due to the insufficient smem size. Consider "
+                "setting --max-model-len to a smaller value.",
+                self.model_config.max_model_len)
+
     def load_model(self) -> None:
         self.device = self.device_config.device
 
