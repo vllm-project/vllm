@@ -262,7 +262,7 @@ def llama_2_7b_engine_extra_embeddings():
                              **kwargs)
 
     if current_platform.is_hpu():
-        with patch("vllm.worker.habana_model_runner.get_model",
+        with patch("vllm.worker.hpu_model_runner.get_model",
                    get_model_patched):
             engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
     else:
