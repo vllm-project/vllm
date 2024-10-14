@@ -1261,14 +1261,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal):
                     continue
                 param = params_dict[name]
             except KeyError:
-                print(params_dict.keys())
-                raise
+                raise ValueError(f"Unexpected weight: {name}") from None
+
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            try:
-                weight_loader(param, loaded_weight)
-            except:
-                raise
+            weight_loader(param, loaded_weight)
 
         gate_up_proj_weight = torch.cat(
             [projector_weight["gate_proj"], projector_weight["up_proj"]],
