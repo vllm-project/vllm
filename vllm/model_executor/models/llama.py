@@ -287,7 +287,7 @@ class LlamaDecoderLayer(nn.Module):
             print(f"SLICES {[r.shape for r in residual_slices]}")
             return residual_slices
 
-        orig_residual = residual
+        orig_residual_shape = residual.shape
 
         # Partition residual
         residual_slices = slices(residual) if self.first_layer else []
@@ -308,7 +308,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         print(f"LAST_LAYER = {self.last_layer}, #slices = {len(residual_slices)}")
-        if self.last_layer and len(slices(orig_residual)) > 0:
+        if self.last_layer and should_slice(orig_residual_shape) > 0:
             print(f"FINAL REDUCE {my_residual.shape}")
             if True:
                 residual = tensor_model_parallel_all_gather(my_residual, 0)
