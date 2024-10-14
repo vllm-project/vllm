@@ -239,7 +239,7 @@ async def test_multi_step_pp_smoke(
     (2, 3),
 ])
 @pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
-@pytest.mark.parametrize("is_async", [True])
+@pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize("num_logprobs", [None, 5])
 @pytest.mark.asyncio
 async def test_multi_step_llm_best_of_fallback_async(
@@ -273,7 +273,6 @@ async def test_multi_step_llm_best_of_fallback_async(
       tp_size: degree of tensor-parallelism
       pp_size: degree of pipeline-parallelism
       enforce_eager
-      max_tokens: the maximum number of tokens to generate
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
       num_prompts: number of example prompts under test
