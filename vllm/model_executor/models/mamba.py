@@ -220,16 +220,20 @@ class MambaDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        residual: Optional[torch.Tensor],
         conv_state: torch.Tensor,
         ssm_state: torch.Tensor,
         **kwargs,
     ):
-        residual = hidden_states
-        hidden_states = self.norm(hidden_states)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.norm(hidden_states)
+        else:
+            hidden_states, residual = self.norm(hidden_states, residual)
+
         hidden_states = self.mixer(hidden_states, attn_metadata, conv_state,
                                    ssm_state)
-        hidden_states = hidden_states + residual
-        return hidden_states
+        return hidden_states, residual
 
 
 class MambaModel(nn.Module):
@@ -282,7 +286,7 @@ class MambaModel(nn.Module):
             current_ssm_state = ssm_state[i]
             current_conv_state = conv_state[i]
 
-            hidden_states = layer(
+            hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 attn_metadata=attn_metadata,
@@ -290,7 +294,7 @@ class MambaModel(nn.Module):
                 conv_state=current_conv_state,
                 ssm_state=current_ssm_state,
             )
-        hidden_states = self.norm_f(hidden_states)
+        hidden_states, _ = self.norm_f(hidden_states, residual)
 
         return hidden_states
 
