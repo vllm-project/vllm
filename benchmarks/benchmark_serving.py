@@ -340,7 +340,8 @@ def calculate_metrics(
             total_input += input_requests[i][1]
             tpot = 0
             if output_len > 1:
-                tpot = (outputs[i].latency - outputs[i].ttft) / (output_len - 1)
+                tpot = (outputs[i].latency - outputs[i].ttft) / (output_len -
+                                                                 1)
                 tpots.append(tpot)
             # Note: if output_len <= 1, we regard tpot as 0 for goodput
             all_tpots.append(tpot)
@@ -379,7 +380,7 @@ def calculate_metrics(
         warnings.warn(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
-            stacklevel=2)    
+            stacklevel=2)
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -608,6 +609,7 @@ async def benchmark(
 
     return result
 
+
 def check_goodput_args(args):
     # Check and parse goodput arguments
     slos_dict = {}
@@ -619,14 +621,14 @@ def check_goodput_args(args):
                 raise ValueError(
                     f"Invalid metric name found, {slo_name}: {slo_val}. "
                     f"The service level objective name should be one of "
-                    f"\"ttft\", \"tpot\", \"e2el\". ",
-                )
+                    f"\"ttft\", \"tpot\", \"e2el\". ")
             if slo_val < 0:
                 raise ValueError(
                     f"Invalid value found, {slo_name}: {slo_val}. "
-                    f"The service level objective value should be non-negative. "
-                )
+                    f"The service level objective value should be "
+                    f"non-negative.")
     return slos_dict
+
 
 def parse_goodput(slo_pairs):
     slos_dict = {}
@@ -634,14 +636,14 @@ def parse_goodput(slo_pairs):
         for slo_pair in slo_pairs:
             slo_name, slo_val = slo_pair.split(":")
             slos_dict[slo_name] = float(slo_val)
-    except ValueError:
+    except ValueError as err:
         raise argparse.ArgumentTypeError(
             "Invalid format found for service level objectives. "
             "Specify service level objectives for goodput as \"KEY:VALUE\" "
             "pairs, where the key is a metric name, and the value is a "
-            "number in milliseconds."
-        )
+            "number in milliseconds.") from err
     return slos_dict
+
 
 def main(args: argparse.Namespace):
     print(args)
