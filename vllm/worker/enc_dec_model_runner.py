@@ -300,32 +300,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         if max_mm_tokens > 0:
             logger.info("Starting profile run for multi-modal models.")
 
-        # # Find the maximum number of multimodal inputs (e.g. images) that will
-        # # fit into the `max_num_batched_tokens` budget.
-        # max_multimodal_inputs = max_num_batched_tokens // max_mm_tokens
-        # # Use the leftover tokens for text for each sequence
-        # leftover_tokens = max_num_batched_tokens % max_mm_tokens
-        # if leftover_tokens < max_num_seqs:
-        #     # If we don't have at least one token left over for each sequence,
-        #     # then remove one multi-modal input
-        #     max_multimodal_inputs -= 1
-        #     leftover_tokens += max_mm_tokens
-        # assert max_multimodal_inputs > 0, "No room to fit a single " \
-        #     "multi-modal input within the scheduling budget"
-
-        # original logic:
-        leftover_tokens = max_num_batched_tokens
-        max_multimodal_inputs = max_num_seqs
-        
-        print(f"\n\n\nMAX IMAGES: {max_multimodal_inputs}, LEFTOVER_TOKENS: {leftover_tokens}")
-
-        # start profile
-        torch.cuda.memory._record_memory_history(max_entries=100000)
-
         batch_size = 0
         for group_id in range(max_num_seqs):
-            seq_len = (leftover_tokens // max_num_seqs +
-                       (group_id < leftover_tokens % max_num_seqs))
+            seq_len = (max_num_batched_tokens // max_num_seqs +
+                       (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
             decoder_seq_data, decoder_dummy_multi_modal_data \
@@ -351,11 +329,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 "Multi-modal data can't be provided in both encoder and decoder"
             )
 
-            if group_id < max_multimodal_inputs:
-                multi_modal_data = decoder_dummy_multi_modal_data or encoder_dummy_multi_modal_data
-            else:
-                multi_modal_data = None
-
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -364,7 +337,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 block_tables=None,
                 encoder_seq_data=encoder_seq_data,
                 cross_block_table=None,
-                multi_modal_data=multi_modal_data,
+                multi_modal_data=decoder_dummy_multi_modal_data
+                or encoder_dummy_multi_modal_data,
             )
             seqs.append(seq)
 
@@ -384,16 +358,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         intermediate_tensors = None
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
-
-        # Record memory usage
-        try:
-            torch.cuda.memory._dump_snapshot(f"/tmp/forward_profile.pickle")
-        except Exception as e:
-            logger.error(f"Failed to capture memory snapshot {e}")
-
-        # Stop profiling
-        torch.cuda.memory._record_memory_history(enabled=None)
-
         return
 
     def _prepare_encoder_model_input_tensors(

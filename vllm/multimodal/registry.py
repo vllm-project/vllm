@@ -189,8 +189,6 @@ class MultiModalRegistry:
         """
         limits_per_plugin = self._limits_by_model[model_config]
 
-        print(f"\n\n\n limits_per_plugin: {limits_per_plugin}\n\n]n")
-
         return sum((limits_per_plugin[key] *
                     plugin.get_max_multimodal_tokens(model_config))
                    for key, plugin in self._plugins.items())
