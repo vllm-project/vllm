@@ -478,7 +478,7 @@ class LLMEngine:
             # Multi-step only: construct a fallback single-step output
             # processor for scenarios where a request utilizes a feature
             # unsupported by multi-step
-            self.single_step_output_processor = (
+            self.fallback_single_step_output_processor = (
                 SequenceGroupOutputProcessor.create_output_processor(
                     self.scheduler_config,
                     self.detokenizer,
@@ -1136,10 +1136,10 @@ class LLMEngine:
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
             else:
-                selected_output_processor = (self.single_step_output_processor
-                                             if
-                                             self._should_force_single_step()
-                                             else self.output_processor)
+                selected_output_processor = (
+                    self.fallback_single_step_output_processor
+                    if self._should_force_single_step() else
+                    self.output_processor)
                 selected_output_processor.process_prompt_logprob(
                     seq_group, output)
                 if seq_group_meta.do_sample:
