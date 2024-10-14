@@ -152,6 +152,11 @@ Text Generation
     - :code:`meta-llama/Meta-Llama-3.1-405B-Instruct`, :code:`meta-llama/Meta-Llama-3.1-70B`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-70b-hf`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`MambaForCausalLM`
+    - Mamba
+    - :code:`state-spaces/mamba-130m-hf`, :code:`state-spaces/mamba-790m-hf`, :code:`state-spaces/mamba-2.8b-hf`, etc.
+    - ✅︎
+    -
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
     - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
@@ -346,6 +351,12 @@ Text Generation
     - :code:`adept/fuyu-8b` etc.
     - 
     - ✅︎
+  * - :code:`ChatGLMModel`
+    - GLM-4V
+    - Image
+    - :code:`THUDM/glm-4v-9b` etc.
+    - 
+    - ✅︎
   * - :code:`InternVLChatModel`
     - InternVL2
     - Image\ :sup:`E+`
@@ -378,7 +389,7 @@ Text Generation
     - ✅︎
   * - :code:`MiniCPMV`
     - MiniCPM-V
-    - Image\ :sup:`+`
+    - Image\ :sup:`E+`
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     - ✅︎
     - ✅︎
@@ -388,6 +399,12 @@ Text Generation
     - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
     -
     -
+  * - :code:`MolmoForCausalLM`
+    - Molmo
+    - Image
+    - :code:`allenai/Molmo-7B-D-0924`, :code:`allenai/Molmo-72B-0924`, etc.
+    -
+    - ✅︎
   * - :code:`NVLM_D_Model`
     - NVLM-D 1.0
     - Image\ :sup:`E+`
