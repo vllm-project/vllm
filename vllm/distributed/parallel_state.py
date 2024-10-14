@@ -46,7 +46,7 @@ from vllm.platforms import current_platform
 from vllm.utils import supports_custom_op
 
 
-torch._inductor.config._micro_pipeline_tp = True
+#torch._inductor.config._micro_pipeline_tp = True
 
 
 @dataclass
@@ -952,12 +952,12 @@ def graph_capture():
 
 logger = init_logger(__name__)
 
-_ENABLE_CUSTOM_ALL_REDUCE = False # True
+_ENABLE_CUSTOM_ALL_REDUCE = True
 
 
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
-    _ENABLE_CUSTOM_ALL_REDUCE = False #enable
+    _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
 def init_distributed_environment(
