@@ -1009,7 +1009,7 @@ class SchedulerConfig:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.use_v2_block_manager = use_v2_block_manager
-        self.num_lookahead_slots = num_lookahead_slots
+        self._num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
@@ -1026,6 +1026,21 @@ class SchedulerConfig:
         self.current_step_is_multi_step = (
             self.engine_permits_multi_step_scheduling)
         self._verify_args()
+
+    @property
+    def num_lookahead_slots(self) -> int:
+        """Getter method that gets num_lookahead_slots
+
+        Force to zero if multi-step is disabled in the current step.
+        """
+        return (self._num_lookahead_slots 
+                if self.current_step_is_multi_step 
+                else 0)
+
+    @num_lookahead_slots.setter
+    def num_lookahead_slots(self,value:int) -> None:
+        """Setter method for num_lookahead_slots"""
+        self._num_lookahead_slots=value
 
     def _verify_args(self) -> None:
         if (self.max_num_batched_tokens < self.max_model_len
