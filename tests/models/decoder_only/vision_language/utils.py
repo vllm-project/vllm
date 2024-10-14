@@ -13,16 +13,19 @@ import torch
 from transformers import AutoConfig, AutoTokenizer, BatchEncoding
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from vllm.multimodal.utils import rescale_image_size
+from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
+                                   resize_video, sample_frames_from_video)
+
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.transformers_utils.tokenizer import patch_padding_side
 
-from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets, HfRunner, VllmRunner
+from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets, HfRunner, VllmRunner, _VideoAssets
 from .vlm_test_types import (EMBEDDING_SIZE_FACTORS, TEST_IMG_PLACEHOLDER,
-                             ImageSizeWrapper, SizeType, VllmOutput,
-                             VLMTestInfo, VlmTestType, MULTI_IMAGE_BASE_PROMPT,
-                             SINGLE_IMAGE_BASE_PROMPTS)
+                             TEST_VIDEO_PLACEHOLDER, ImageSizeWrapper,
+                             SizeType, VllmOutput, VLMTestInfo, VlmTestType,
+                             SINGLE_IMAGE_BASE_PROMPTS, CustomTestOptions,
+                             MULTI_IMAGE_BASE_PROMPT, VIDEO_BASE_PROMPT)
 
 ####### vLLM output processors functions
 def blip2_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
@@ -305,12 +308,13 @@ def _internvl_generate(
 # Most of these help us handle image tags and configure things
 # that would normally be handled by parametrize(), since we want
 # to be able to adapt settings like num_logprobs on a per-model basis
-def replace_test_img_placeholders(prompt: str,
-                                  img_idx_to_prompt: Callable) -> str:
+def replace_test_placeholder(prompt: str,
+                             img_idx_to_prompt: Callable,
+                             test_placeholder: str) -> str:
     """Given a prompt, replaces each TEST_IMG_PLACEHOLDER with the
     model-specific image prompt.
     """
-    prompt_segments = prompt.split(TEST_IMG_PLACEHOLDER)
+    prompt_segments = prompt.split(test_placeholder)
     img_prompt = prompt_segments[0]
     for placeholder_idx, next_seg in enumerate(prompt_segments[1:], start=1):
         img_prompt += img_idx_to_prompt(placeholder_idx)
@@ -319,10 +323,11 @@ def replace_test_img_placeholders(prompt: str,
 
 
 def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
-                      img_idx_to_prompt: Callable,
+                      img_idx_to_prompt: Optional[Callable],
+                      video_idx_to_prompt: Optional[Callable],
                       prompt_formatter: Callable) -> List[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
-    to be tested, update the image placeholders and apply the prompt formatting
+    to be tested, update the media placeholders and apply the prompt formatting
     to get the test prompt string for this model.
 
     Example for phi3v, given the base_prompt: "<image>What is the season?"
@@ -334,13 +339,21 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
     assert isinstance(base_prompts, (list, tuple))
     model_prompts = []
     for base_prompt in base_prompts:
-        # Replace the image placeholders in the base prompt with
+        # Replace the image /video placeholders in the base prompt with
         # the correct ones for the model that we are testing
-        base_prompt_with_imgs = replace_test_img_placeholders(
-            base_prompt, img_idx_to_prompt)
+        if img_idx_to_prompt:
+            base_prompt = replace_test_placeholder(
+                base_prompt, img_idx_to_prompt, TEST_IMG_PLACEHOLDER
+            )
+
+        if video_idx_to_prompt:
+            base_prompt = replace_test_placeholder(
+                base_prompt, video_idx_to_prompt, TEST_VIDEO_PLACEHOLDER
+            )
+
         # Apply the prompt formatter to wrap the base prompt with
-        # the correct img placeholders to get the model test prompt
-        model_prompt = prompt_formatter(base_prompt_with_imgs)
+        # the correct media placeholders to get the model test prompt
+        model_prompt = prompt_formatter(base_prompt)
         model_prompts.append(model_prompt)
     return model_prompts
 
@@ -362,7 +375,8 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
                 assert test_info.convert_assets_to_embeddings is not None
             # Custom test inputs need to explicitly define the mm limit/inputs
             if test_type == VlmTestType.CUSTOM_INPUTS:
-                assert test_info.custom_test_opts is not None
+                assert (test_info.custom_test_opts is not None
+                        and isinstance(test_info.custom_test_opts, Iterable))
 
             # Everything looks okay; keep if this is has correct proc handling
             if test_info.fork_new_process_for_each_test == fork_per_test:
@@ -397,10 +411,16 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
             ensure_wrapped(test_info.dtype),
             ensure_wrapped(test_info.distributed_executor_backend),
         ]
+        # num_frames is video only
+        if test_type == VlmTestType.VIDEO:
+            iterables.append(ensure_wrapped(test_info.num_video_frames))
 
         # No sizes passed for custom inputs, since inputs are directly provided
         if test_type != VlmTestType.CUSTOM_INPUTS:
             iterables.append(get_wrapped_test_sizes(test_info, test_type))
+        #Otherwise expand the custom test options instead
+        else:
+            iterables.append(test_info.custom_test_opts)
         return list(itertools.product(*iterables))
 
     # Get a list per model type, where each entry contains a tuple of all of
@@ -486,32 +506,27 @@ def multi_image_multi_aspect_ratio_inputs_llava(is_llava):
             cherry_blossom,
         ])]
 
+
+def different_patch_input_cases_internvl():
+    images = [asset.pil_image.resize((896, 896)) for asset in IMAGE_ASSETS]
+    formatter = lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"
+    single_img_prompts = [
+        "<image>\nWhat's the content in the center of the image?",
+        "<image>\nWhat is the season?",
+    ]
+    multi_img_prompts = [
+        "Image-1: <image>\nImage-2: <image>\nDescribe the two images in detail.\n",
+    ]
+    formatted_sprompts = [formatter(prompt) for prompt in single_img_prompts]
+    formatted_mprompts = [formatter(prompt) for prompt in multi_img_prompts]
+
+    wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5, 1.0])
+    return [
+        build_single_image_inputs(images, formatted_sprompts, wrapped_sf),
+        build_multi_image_inputs([images], formatted_mprompts, wrapped_sf),
+    ]
+
 ####### Useful builders for setting up different types of tests
-
-def build_embedding_inputs_from_test_info(
-    test_info: VLMTestInfo,
-    image_assets:_ImageAssets,
-    size_wrapper: ImageSizeWrapper,
-):
-    # These checks will always be true due to the way the test is invoked
-    assert size_wrapper.type != SizeType.SIZE_FACTOR or not \
-            all(factor == 1.0 for factor in size_wrapper.data)
-    assert test_info.convert_assets_to_embeddings is not None
-
-    model_prompts = get_model_prompts(
-        SINGLE_IMAGE_BASE_PROMPTS,
-        test_info.img_idx_to_prompt,
-        test_info.prompt_formatter,
-    )
-
-    images = [asset.pil_image for asset in image_assets]
-    embeds = test_info.convert_assets_to_embeddings(image_assets)
-    assert len(images) == len(model_prompts)
-
-    inputs = build_single_image_inputs(images, model_prompts, size_wrapper)
-    vllm_embeddings = build_single_image_inputs(embeds, model_prompts,
-                                                size_wrapper)
-    return inputs, vllm_embeddings
 
 def build_single_image_inputs_from_test_info(
         test_info: VLMTestInfo,
@@ -521,6 +536,7 @@ def build_single_image_inputs_from_test_info(
     ):
     model_prompts = get_model_prompts(test_info.single_image_prompts,
                                       test_info.img_idx_to_prompt,
+                                      test_info.video_idx_to_prompt,
                                       test_info.prompt_formatter)
 
     # For models that require a local path / URL encoded in the image; export
@@ -548,7 +564,7 @@ def build_single_image_inputs(images, model_prompts,
     return [(
         [prompt for _ in size_wrapper.data],
         [
-            apply_size_scaling(image, size, size_wrapper.type)
+            apply_image_size_scaling(image, size, size_wrapper.type)
             for size in size_wrapper.data
         ],
     ) for image, prompt in zip(images, model_prompts)]
@@ -563,6 +579,7 @@ def build_multi_image_inputs_from_test_info(
 
     model_prompts = get_model_prompts([MULTI_IMAGE_BASE_PROMPT],
                                       test_info.img_idx_to_prompt,
+                                      test_info.video_idx_to_prompt,
                                       test_info.prompt_formatter)
 
     if test_info.prompt_path_encoder is not None:
@@ -586,14 +603,71 @@ def build_multi_image_inputs(image_lists, model_prompts,
     return [(
         [prompt for _ in size_wrapper.data],
         [[
-            apply_size_scaling(image, size, size_wrapper.type)
+            apply_image_size_scaling(image, size, size_wrapper.type)
             for image in images
         ] for size in size_wrapper.data],
     ) for images, prompt in zip(image_lists, model_prompts)]
 
 
-def apply_size_scaling(image, size: Union[float, Tuple[int, int]],
-                       size_type: SizeType):
+def build_embedding_inputs_from_test_info(
+    test_info: VLMTestInfo,
+    image_assets:_ImageAssets,
+    size_wrapper: ImageSizeWrapper,
+):
+    # These checks will always be true due to the way the test is invoked
+    assert size_wrapper.type != SizeType.SIZE_FACTOR or not \
+            all(factor == 1.0 for factor in size_wrapper.data)
+    assert test_info.convert_assets_to_embeddings is not None
+
+    model_prompts = get_model_prompts(
+        SINGLE_IMAGE_BASE_PROMPTS,
+        test_info.img_idx_to_prompt,
+        test_info.video_idx_to_prompt,
+        test_info.prompt_formatter,
+    )
+
+    images = [asset.pil_image for asset in image_assets]
+    embeds = test_info.convert_assets_to_embeddings(image_assets)
+    assert len(images) == len(model_prompts)
+
+    inputs = build_single_image_inputs(images, model_prompts, size_wrapper)
+    vllm_embeddings = build_single_image_inputs(embeds, model_prompts,
+                                                size_wrapper)
+    return inputs, vllm_embeddings
+
+
+def build_video_inputs_from_test_info(
+    test_info: VLMTestInfo,
+    video_assets: _VideoAssets,
+    size_wrapper: ImageSizeWrapper,
+    num_frames: int,
+):
+    model_prompts = get_model_prompts(
+        [VIDEO_BASE_PROMPT],
+        test_info.img_idx_to_prompt,
+        test_info.video_idx_to_prompt,
+        test_info.prompt_formatter,
+    )
+
+    sampled_vids = [
+        sample_frames_from_video(asset.np_ndarrays, num_frames)
+        for asset in video_assets
+    ]
+
+    video_scaler = (resize_video if test_info.test_type == SizeType.FIXED_SIZE
+                    else rescale_video_size)
+
+    return [(
+        [prompt for _ in size_wrapper.data],
+        [video_scaler(video, size) for size in size_wrapper.data],
+    ) for video, prompt in zip(sampled_vids, model_prompts)]
+
+
+def apply_image_size_scaling(
+    image,
+    size: Union[float, Tuple[int, int]],
+    size_type: SizeType
+):
     """Applies a size scaler to one image; this can be a an image size factor,
     which scales the image while maintaining the aspect ratio"""
     # Special case for embeddings; if it's a tensor, it's only valid if we
@@ -697,12 +771,37 @@ def run_embedding_test(
     )
 
 
+def run_video_test(
+    *, test_info: VLMTestInfo, model: str, num_frames: int, max_tokens: int,
+    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    vllm_runner: VllmRunner, video_assets: _VideoAssets,
+):
+    inputs = build_video_inputs_from_test_info(
+        test_info, video_assets, size_wrapper, num_frames
+    )
+
+    run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        limit_mm_per_prompt={"video": len(video_assets)},
+        size_factors=size_wrapper,
+        distributed_executor_backend=distributed_executor_backend,
+        **test_info.get_non_parametrized_runner_kwargs()
+    )
+
+
 def run_custom_inputs_test(
     *, test_info: VLMTestInfo, model: str, max_tokens: int, num_logprobs: int, 
     distributed_executor_backend: Optional[str], dtype: str,
-    hf_runner: HfRunner, vllm_runner: VllmRunner
+    custom_test_opts: CustomTestOptions, hf_runner: HfRunner,
+    vllm_runner: VllmRunner
 ):
-    custom_test_opts = test_info.custom_test_opts
     # Custom test cases can provide inputs directly, but they need to
     # explicitly provided a CustomTestConfig, which wraps the inputs and
     # the limit_mm_per_prompt
