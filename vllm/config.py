@@ -1033,14 +1033,13 @@ class SchedulerConfig:
 
         Force to zero if multi-step is disabled in the current step.
         """
-        return (self._num_lookahead_slots 
-                if self.current_step_is_multi_step 
-                else 0)
+        return (self._num_lookahead_slots
+                if self.current_step_is_multi_step else 0)
 
     @num_lookahead_slots.setter
-    def num_lookahead_slots(self,value:int) -> None:
+    def num_lookahead_slots(self, value: int) -> None:
         """Setter method for num_lookahead_slots"""
-        self._num_lookahead_slots=value
+        self._num_lookahead_slots = value
 
     def _verify_args(self) -> None:
         if (self.max_num_batched_tokens < self.max_model_len
