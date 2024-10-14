@@ -317,7 +317,7 @@ def run_molmo(question, modality):
     return llm, prompt, stop_token_ids
 
 
-# GLM4V
+# GLM-4v
 def run_glm4v(question: str, modality: str):
     assert modality == "image"
     model_name = "THUDM/glm-4v-9b"
