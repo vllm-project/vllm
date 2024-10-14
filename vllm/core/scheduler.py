@@ -396,6 +396,12 @@ class Scheduler:
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
 
+        # Multi-step scheduling is not supported with best_of > 1,
+        # so if multi-step is enabled, count the number of unfinished
+        # requests incompatible with multi-step & only allow a given
+        # step to use multi-step if the count is zero.
+        self._multi_step_incompat_req_count = 0
+
     @property
     def next_cache_id(self):
         return (self.cache_id + 1) % self.num_cache_iters
@@ -409,9 +415,32 @@ class Scheduler:
         """The number of new tokens."""
         return 1
 
+    def _maybe_record_new_multi_step_incompat_seq_group(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
+        """If a newly added seq group has best_of>1, increment counter"""
+        if (seq_group.sampling_params is not None
+                and seq_group.sampling_params.best_of is not None
+                and seq_group.sampling_params.best_of > 1):
+            self._multi_step_incompat_req_count += 1
+
+    def _maybe_record_finished_multi_step_incompat_seq_group(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
+        """If a finished seq group has best_of>1, decrement counter"""
+        if (seq_group.sampling_params is not None
+                and seq_group.sampling_params.best_of is not None
+                and seq_group.sampling_params.best_of > 1):
+            assert self._multi_step_incompat_req_count > 0
+            self._multi_step_incompat_req_count -= 1
+
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
+        # Detect & count seq groups incompatible with multi-step
+        self._maybe_record_new_multi_step_incompat_seq_group(seq_group)
 
     def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the running queue.
@@ -842,32 +871,6 @@ class Scheduler:
         self.running = running_queue
         return force_preemption_count
 
-    def _maybe_disable_multi_step_by_sampling_params(self) -> None:
-        """Disable multi-step scheduling for unsupported sampling parameters.
-
-        This method must be called each step in order to update scheduler config
-        `current_step_is_multi_step` member.
-
-        Default behavior: 
-        `current_step_is_multi_step = engine_permits_multi_step_scheduling`
-        (i.e. match user-requested behavior.)
-        
-        But `current_step_is_multi_step = False` if any state queues contain
-        :class:`SequenceGroup`'s with `best_of>1` which is not
-        supported by multi-step.
-        """
-        if self.scheduler_config.engine_permits_multi_step_scheduling:
-            self.scheduler_config.current_step_is_multi_step = all([
-                (sg.sampling_params is None
-                 or sg.sampling_params.best_of is None
-                 or sg.sampling_params.best_of < 2)
-                for state_queue in [self.waiting, self.running, self.swapped]
-                for sg in state_queue
-            ])
-            return
-        self.scheduler_config.current_step_is_multi_step = (
-            self.scheduler_config.engine_permits_multi_step_scheduling)
-
     def _schedule_prefills(
         self,
         budget: SchedulingBudget,
@@ -1205,7 +1208,6 @@ class Scheduler:
         """Schedule queued requests."""
         # Configure the (non-)use of multi-step scheduling
         # in this step
-        self._maybe_disable_multi_step_by_sampling_params()
         if self.scheduler_config.chunked_prefill_enabled:
             return self._schedule_chunked_prefill()
         else:
@@ -1429,6 +1431,9 @@ class Scheduler:
             self._free_finished_seq_group(seq_group)
             if not seq_group.is_finished():
                 remaining.append(seq_group)
+            else:
+                self._maybe_record_finished_multi_step_incompat_seq_group(
+                    seq_group)
 
         self.running = remaining
 
@@ -1441,6 +1446,9 @@ class Scheduler:
 
                 # Free finished seqs
                 self._free_finished_seqs(seq_group)
+
+                self._maybe_record_finished_multi_step_incompat_seq_group(
+                    seq_group)
 
             self._async_stopped.clear()
 
