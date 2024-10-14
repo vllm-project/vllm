@@ -447,9 +447,6 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-
             if "A_log" in name:
                 name = name.replace("A_log", "A")
 
