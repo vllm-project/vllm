@@ -131,6 +131,11 @@ class ScalarType:
 
     @functools.cached_property
     def id(self) -> int:
+        """
+        Convert the ScalarType to an int which can be passed to pytorch custom
+        ops. This layout of the int must be kept in sync with the C++
+        ScalarType's from_id method.
+        """
         val = 0
         offset = 0
 
