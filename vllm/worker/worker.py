@@ -217,9 +217,11 @@ class Worker(LocalOrDistributedWorkerBase):
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
+        print("\n\n\n CALLING PROFILE_RUN \n\n\n")
         self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
@@ -228,14 +230,23 @@ class Worker(LocalOrDistributedWorkerBase):
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
-        assert peak_memory > 0, (
+        assert self.init_gpu_memory - free_gpu_memory > 0, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_gpu_memory}, current free memory"
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
+        
+        # Get the peak memory allocation recorded by torch
+        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+
+        print(f"\n\n\n TOTAL VRAM: {total_gpu_memory} | INITIAL VRAM: {self.init_gpu_memory} | FREE VRAM: {free_gpu_memory} | PEAK VRAM: {peak_memory}\n\n\n")
 
         cache_block_size = self.get_cache_block_size_bytes()
+        print(f"\n\n\n CACHE BLOCK SIZE BYTES: {cache_block_size}\n\n\n")
+
+        stats = torch.cuda.memory_stats()
+        print(f"\n\n\n STATS: {stats}\n\n\n")
+
         if cache_block_size == 0:
             num_gpu_blocks = 0
             num_cpu_blocks = 0

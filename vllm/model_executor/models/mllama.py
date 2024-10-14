@@ -1120,6 +1120,9 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             cross_attention_states.shape[-1],
             device=cross_attention_states.device,
             dtype=cross_attention_states.dtype)
+        
+        print(f"\n\n\n CROSS ATTN STATES SHAPE: {cross_attention_states_flat.shape} \n\n\n")
+
         start_pos = 0
         for seq_len, vision_token_in_batch in zip(actual_encoder_seq_lens,
                                                   cross_attention_states):
@@ -1217,6 +1220,9 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         **kwargs: object,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        
+        print("\n\n\n MLLAMA FORWARD \n\n\n")
+
         if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
             raise ValueError("Chunk prefill not supported")
