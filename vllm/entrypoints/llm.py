@@ -371,7 +371,8 @@ class LLM:
         penalty, and stopping criteria, etc.?
         """
 
-        if self.llm_engine.scheduler_config.user_is_multi_step:
+        if (self.llm_engine.scheduler_config.
+                engine_permits_multi_step_scheduling):
             raise ValueError(STR_MULTI_STEP_BEAM_SEARCH_NOT_SUPPORTED)
 
         beam_width = params.beam_width

@@ -323,7 +323,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # multi-step logic
         self._base_model_runner: GPUModelRunnerBase = base_model_runner
 
-        self.is_multi_step = self.scheduler_config.is_multi_step
+        self.is_multi_step = (
+            self.scheduler_config.engine_permits_multi_step_scheduling)
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
         # Using the PythonizationCache in Pipeline-Parallel clobbers the

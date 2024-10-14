@@ -1019,10 +1019,12 @@ class SchedulerConfig:
         self.send_delta_data = send_delta_data
         self.policy = policy
 
-        # `user_is_multi_step` reflects the user-specified multi-step
-        # config. `is_multi_step` may be modified to override
-        # `user_is_multi_step` in any given call to `schedule()`
-        self.is_multi_step = self.user_is_multi_step
+        # `engine_permits_multi_step_scheduling` reflects the user-specified
+        # multi-step config. `current_step_is_multi_step` may be modified to
+        # override `engine_permits_multi_step_scheduling` in any given call to
+        # `schedule()`
+        self.current_step_is_multi_step = (
+            self.engine_permits_multi_step_scheduling)
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1067,7 +1069,7 @@ class SchedulerConfig:
                 "file an issue with detailed information.")
 
     @property
-    def user_is_multi_step(self) -> bool:
+    def engine_permits_multi_step_scheduling(self) -> bool:
         """Base multi-step setting, configured by user.
 
         Can be overridden by scheduler.
