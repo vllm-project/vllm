@@ -415,40 +415,51 @@ class Scheduler:
         """The number of new tokens."""
         return 1
 
-    def _maybe_record_new_multi_step_incompat_seq_group(
+    @property
+    def _engine_permits_multi_step_scheduling(self) -> bool:
+        return self.scheduler_config.engine_permits_multi_step_scheduling
+
+    def _seq_group_has_multi_step_incompat_sample_params(
+        self,
+        seq_group: SequenceGroup,
+    ) -> bool:
+        return (seq_group.sampling_params is not None
+                and seq_group.sampling_params.best_of is not None
+                and seq_group.sampling_params.best_of > 1)
+
+    def _maybe_record_new_sg_w_multi_step_incompat_sample_params(
         self,
         seq_group: SequenceGroup,
     ) -> None:
         """If new req has best_of>1 & engine supports multistep, ++count"""
-        if (self.scheduler_config.engine_permits_multi_step_scheduling
-                and seq_group.sampling_params is not None
-                and seq_group.sampling_params.best_of is not None
-                and seq_group.sampling_params.best_of > 1):
+        if (self._engine_permits_multi_step_scheduling
+                and self._seq_group_has_multi_step_incompat_sample_params(
+                    seq_group)):
             self._multi_step_incompat_req_count += 1
 
-    def _maybe_record_finished_multi_step_incompat_seq_group(
+    def _maybe_record_finished_sg_w_multi_step_incompat_sample_params(
         self,
         seq_group: SequenceGroup,
     ) -> None:
         """If finished req has best_of>1 & engine supports multistep, --count"""
-        if (self.scheduler_config.engine_permits_multi_step_scheduling
-                and seq_group.sampling_params is not None
-                and seq_group.sampling_params.best_of is not None
-                and seq_group.sampling_params.best_of > 1):
+        if (self._engine_permits_multi_step_scheduling
+                and self._seq_group_has_multi_step_incompat_sample_params(
+                    seq_group)):
             assert self._multi_step_incompat_req_count > 0
             self._multi_step_incompat_req_count -= 1
 
     def _maybe_disable_multi_step_by_sampling_params(self) -> None:
         """Disable multi-step unless engine & all unfinished reqs support it"""
         self.scheduler_config.current_step_is_multi_step = (
-            self.scheduler_config.engine_permits_multi_step_scheduling
+            self._engine_permits_multi_step_scheduling
             and self._multi_step_incompat_req_count == 0)
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
         # Detect & count seq groups incompatible with multi-step
-        self._maybe_record_new_multi_step_incompat_seq_group(seq_group)
+        self._maybe_record_new_sg_w_multi_step_incompat_sample_params(
+            seq_group)
 
     def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the running queue.
@@ -1442,7 +1453,7 @@ class Scheduler:
             if not seq_group.is_finished():
                 remaining.append(seq_group)
             else:
-                self._maybe_record_finished_multi_step_incompat_seq_group(
+                self._maybe_record_finished_sg_w_multi_step_incompat_sample_params(
                     seq_group)
 
         self.running = remaining
@@ -1457,7 +1468,7 @@ class Scheduler:
                 # Free finished seqs
                 self._free_finished_seqs(seq_group)
 
-                self._maybe_record_finished_multi_step_incompat_seq_group(
+                self._maybe_record_finished_sg_w_multi_step_incompat_sample_params(
                     seq_group)
 
             self._async_stopped.clear()
