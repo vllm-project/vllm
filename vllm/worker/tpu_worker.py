@@ -114,8 +114,6 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
-        m = xm.get_memory_info(self.device)
-        weight_size = m["bytes_used"]
 
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value ``None``.
@@ -134,26 +132,19 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         )
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
-        # NOTE(woosuk): Here, `bytes_used` does not seem to include the memory
-        # used by the model weights.
-        m = xm.get_memory_info(self.device)
-        max_activation_size = m["bytes_used"]
-        # NOTE(woosuk): We have to double the activation size because the
-        # activation tensor does not seem to be reused between different XLA
-        # graphs.
-        profiled = weight_size + 2 * max_activation_size
-
-        # Calculate the TPU KV cache size based on profiling.
-        total_memory_size = m["bytes_limit"]
-        usable_memory_size = int(total_memory_size *
-                                 self.cache_config.gpu_memory_utilization)
-        tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
 
         dtype_btyes = get_dtype_size(self.cache_dtype)
         block_size = self.cache_config.block_size
         block_size_bytes = (dtype_btyes * block_size * num_layers * 2 *
                             head_size * num_kv_heads)
 
+        # Calculate the TPU KV cache size based on profiling.
+        m = xm.get_memory_info(self.device)
+        total_memory_size = m["bytes_limit"]
+        usable_memory_size = int(total_memory_size *
+                                 self.cache_config.gpu_memory_utilization)
+        profiled = m["bytes_used"]  # Weights + intermediate activations.
+        tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
         num_tpu_blocks = tpu_kv_cache_bytes // block_size_bytes
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 
