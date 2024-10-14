@@ -102,21 +102,19 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
 
 
 def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
-    # Although HF prefers "rope_type", we have code that accesses "type",
-    # so we populate both keys
-    if "type" in rope_scaling:
-        rope_type = rope_scaling["rope_type"] = rope_scaling["type"]
-    elif "rope_type" in rope_scaling:
-        rope_type = rope_scaling["type"] = rope_scaling["rope_type"]
-    else:
-        raise ValueError("rope_scaling must have a 'type' or 'rope_type' key")
+    if "rope_type" not in rope_scaling and "type" in rope_scaling:
+        rope_scaling["rope_type"] = rope_scaling["type"]
+        logger.info("Replacing legacy 'type' key with 'rope_type'")
 
-    if rope_type == "su":
-        rope_scaling["type"] = rope_scaling["rope_type"] = "longrope"
+    if "rope_type" not in rope_scaling:
+        raise ValueError("rope_scaling should have a 'rope_type' key")
+
+    if rope_scaling["rope_type"] == "su":
+        rope_scaling["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
-    elif rope_type == "mrope":
+    elif rope_scaling["rope_type"] == "mrope":
         assert "mrope_section" in rope_scaling
-        rope_scaling["type"] = rope_scaling["rope_type"] = "default"
+        rope_scaling["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
