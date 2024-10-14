@@ -86,11 +86,27 @@ VLM_TEST_SETTINGS = {
         convert_assets_to_embeddings=vlm_utils.get_llava_embeddings,
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
-        vllm_output_post_proc=vlm_utils.llava_vllm_to_hf_output,
+        vllm_output_post_proc=vlm_utils.llava_image_vllm_to_hf_output,
         custom_test_opts=CustomTestOptions(
-            inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs_llava(),
+            inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs_llava(is_llava=True),
             limit_mm_per_prompt={"image": 4},
         ),
+    ),
+    # TODO - test me
+    "llava-next": VLMTestInfo(
+        models="llava-hf/llava-v1.6-mistral-7b-hf",
+        prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
+        test_type=(VlmTestType.IMAGE, VlmTestType.CUSTOM_INPUTS),
+        max_model_len=10240,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=vlm_utils.llava_image_vllm_to_hf_output,
+        custom_test_opts=CustomTestOptions(
+            inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs_llava(is_llava=False),
+            limit_mm_per_prompt={"image": 4},
+        ),
+        # Llava-next tests fixed sizes & the default size factors
+        image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
+        skip=False,
     ),
     "minicpmv": VLMTestInfo(
         models="openbmb/MiniCPM-Llama3-V-2_5",
@@ -139,7 +155,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=vlm_utils.paligemma_vllm_to_hf_output,
         dtype="half" if is_hip() else ("half", "float"),
-        skip=False,
     ),
     # Tests above this point have been validated to align with current tests
     "intern_vl": VLMTestInfo(
@@ -302,7 +317,6 @@ def test_multi_image_generation(tmp_path: PosixPath, model_type: str,
                              test_type=VlmTestType.CUSTOM_INPUTS))
 def test_custom_inputs(model_type: str, model: str, max_tokens: int,
                        num_logprobs: int, dtype: str, hf_runner, vllm_runner):
-
     test_info = VLM_TEST_SETTINGS[model_type]
     custom_test_opts = test_info.custom_test_opts
     # Custom test cases can provide inputs directly, but they need to
@@ -418,25 +432,10 @@ def run_test(
         size_factors.data if size_factors is not None else None,
         is_new=True,
         export_info=[
-            {
-                "config": {
-                    "inputs": inputs,
-                    "max_tokens": max_tokens,
-                    "num_logprobs": num_logprobs
-                }
-            },
-            {
-                "hf_runner": {
-                    "dtype": dtype,
-                    "model": model
-                }
-            },
-            {
-                "hf_out": hf_outputs_per_image
-            },
-            {
-                "vllm_out": vllm_outputs_per_image
-            },
+            {"config": {"inputs": inputs, "max_tokens": max_tokens, "num_logprobs": num_logprobs}},
+            {"hf_runner": {"dtype": dtype, "model": model}},
+            {"hf_out": hf_outputs_per_image},
+            {"vllm_out": vllm_outputs_per_image},
         ],
     )
 

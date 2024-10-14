@@ -52,19 +52,28 @@ def qwen_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     return output_ids, hf_output_str, out_logprobs
 
 
-def llava_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def llava_image_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+    config = AutoConfig.from_pretrained(model)
+    mm_token_id = config.image_token_index
+    return _llava_vllm_to_hf_output(vllm_output, model, mm_token_id)
+
+
+def llava_video_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+    config = AutoConfig.from_pretrained(model)
+    mm_token_id = config.video_token_index
+    return _llava_vllm_to_hf_output(vllm_output, model, mm_token_id)
+
+
+def _llava_vllm_to_hf_output(vllm_output: VllmOutput, model: str, mm_token_id: int):
     """Sanitize vllm output [Llava models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
-
-    config = AutoConfig.from_pretrained(model)
-    image_token_id = config.image_token_index
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     eos_token_id = tokenizer.eos_token_id
 
     hf_output_ids = [
         token_id for idx, token_id in enumerate(output_ids)
-        if token_id != image_token_id or output_ids[idx - 1] != image_token_id
+        if token_id != mm_token_id or output_ids[idx - 1] != mm_token_id
     ]
 
     assert output_str[0] == " "
@@ -323,18 +332,24 @@ def get_wrapped_test_sizes(
     return tuple(wrapped_factors + wrapped_sizes)
 
 
-def multi_image_multi_aspect_ratio_inputs_llava():
+def multi_image_multi_aspect_ratio_inputs_llava(is_llava):
     """Builds inputs for multi-image (varied sizes/aspect ratio) testing."""
     stop_sign = IMAGE_ASSETS[0].pil_image
     cherry_blossom = IMAGE_ASSETS[1].pil_image
+    llava_formatter = lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:"
+    llava_next_formatter = lambda img_prompt: f"[INST] {img_prompt} [/INST]"
+    # Apply the selected formatter to the base prompts
+    img_prompts = [
+        "<image><image>\nDescribe 2 images.",
+        "<image><image>\nDescribe 2 images.",
+        "<image><image><image><image>\nDescribe 4 images.",  # noqa: E501
+        "<image>\nWhat is the season?",
+    ]
+    formatter = llava_formatter if is_llava else llava_next_formatter 
+    formatted_prompts = [formatter(prompt) for prompt in img_prompts]
 
     return [(
-        [
-            "USER: <image><image>\nDescribe 2 images.\nASSISTANT:",
-            "USER: <image><image>\nDescribe 2 images.\nASSISTANT:",
-            "USER: <image><image><image><image>\nDescribe 4 images.\nASSISTANT:",  # noqa: E501
-            "USER: <image>\nWhat is the season?\nASSISTANT:",
-        ],
+        formatted_prompts,
         [
             [stop_sign, cherry_blossom],
             # Images with different sizes and aspect-ratios
