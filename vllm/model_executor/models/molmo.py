@@ -1,58 +1,51 @@
-from array import array
-from functools import lru_cache, partial
-import re
 import logging
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple, Union, Any, Mapping, TypedDict
-from PIL import Image
 import math
+import re
+from array import array
+from dataclasses import dataclass
+from functools import lru_cache, partial
+from typing import (Any, Iterable, List, Mapping, Optional, Tuple, TypedDict,
+                    Union)
 
 import torch
+from einops import rearrange
+from PIL import Image
 from torch import nn
 from torch.nn import functional as F
-from einops import rearrange
 from transformers import PretrainedConfig
+
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.selector import (_Backend, backend_name_to_enum,
                                      get_global_forced_attn_backend)
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_rank,
-    split_tensor_along_last_dim,
-    tensor_model_parallel_all_gather,
-)
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather)
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               ColumnParallelLinear,
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
-from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.multimodal import (
-    MULTIMODAL_REGISTRY,
-    MultiModalInputs,
-)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.utils import make_layers
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sequence import (
-    VLLM_TOKEN_ID_ARRAY_TYPE,
-    SequenceData,
-)
-from vllm.model_executor import SamplingMetadata
-from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import get_processor
+from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.utils import make_layers
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
 from vllm.platforms import current_platform
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
+                           SequenceData)
+from vllm.transformers_utils.processor import get_processor
 
 log = logging.getLogger(__name__)
 
@@ -407,7 +400,8 @@ class MolmoAttention(nn.Module):
         assert self.total_num_heads % self.tp_size == 0
 
         self.num_heads = self.total_num_heads // self.tp_size
-        self.total_num_kv_heads = config.num_key_value_heads or self.total_num_heads
+        self.total_num_kv_heads = config.num_key_value_heads \
+            or self.total_num_heads
         if self.total_num_kv_heads >= self.tp_size:
             assert self.total_num_kv_heads % self.tp_size == 0
         else:
@@ -690,7 +684,7 @@ class MolmoVisionBackbone(nn.Module):
         self, images: torch.Tensor, image_masks: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
-        # image_features: (batch_size, num_crops(=num_image), num_patch, nximage_emb_dim)
+        # image_features: (batch_size, num_crops(=num_image), num_patch, nximage_emb_dim) # noqa: E501
         batch_size, num_image = images.shape[:2]
         images = images.to(device=self.device, dtype=self.dtype)
         image_features = self.encode_image(images)
@@ -760,7 +754,8 @@ class MolmoModel(nn.Module):
             quant_config=quant_config,
         )
 
-        decoder_layer = MolmoDecoderNormAfterLayer if config.norm_after else MolmoDecoderLayer
+        decoder_layer = MolmoDecoderNormAfterLayer if config.norm_after \
+            else MolmoDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer(config, cache_config, quant_config),
@@ -897,14 +892,14 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     left_margin, right_margin = image_processor.overlap_margins
     max_crops = image_processor.max_crops
 
-    # Assume: prompt_token_ids always starts with bos_token_id followed image tokens
+    # Assume: prompt_token_ids always starts with bos_token_id followed image tokens # noqa: E501
     max_llm_image_tokens = get_max_molmo_image_tokens(ctx)
     if seq_len - max_llm_image_tokens - 1 < 0:
         raise RuntimeError(
             f"Molmo cannot process {max_crops} crops in a prompt, "
             "please increase max_model_len or reduce number of crops")
 
-    # The vertical image has the maximum number of image tokens due to column tokens.
+    # The vertical image has the maximum number of image tokens due to column tokens. # noqa: E501
     tiling = (max_crops, 1)
     total_margin_pixels = base_image_input_d * (right_margin + left_margin)
     crop_patches = image_processor.base_image_input_size[
@@ -984,7 +979,10 @@ def input_processor_for_molmo(ctx: InputContext, llm_inputs: LLMInputs):
         )
         n_pixels = image_patch_size * image_patch_size * 3
         n_patches = image_num_patch[0] * image_num_patch[1]
-        tokens_per_image = image_processor.image_token_length_w * image_processor.image_token_length_h
+
+        image_length_w = image_processor.image_token_length_w
+        image_length_h = image_processor.image_token_length_h
+        tokens_per_image = image_length_w * image_length_h
         images = torch.full(
             (max_total_crops, n_patches, n_pixels),
             -1,
@@ -1202,7 +1200,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal):
         projector_weight = dict()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
-                log.info(f"Skipping {name}")
                 continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
