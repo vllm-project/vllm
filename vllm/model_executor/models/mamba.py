@@ -1,6 +1,5 @@
 # coding=utf-8
 """PyTorch MAMBA model."""
-from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -37,13 +36,6 @@ from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-
-@dataclass
-class MambaCacheParams:
-    is_prompt: bool = False
-    conv_state: torch.Tensor = torch.Tensor()
-    ssm_state: torch.Tensor = torch.Tensor()
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -346,18 +338,8 @@ class MambaModel(nn.Module):
 
 
 class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
-
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
         "embed_tokens",
         "lm_head",
     ]
@@ -459,9 +441,6 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
@@ -473,9 +452,6 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
             if "A_log" in name:
                 name = name.replace("A_log", "A")
-
-            if ".self_attn." in name:
-                name = name.replace(".self_attn", "")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
