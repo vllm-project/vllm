@@ -160,10 +160,10 @@ endmacro()
 # Example:
 #   `export VLLM_CUDA_EXTRA_ARCH="89;90"`
 #   CUDA_ARCH_FLAGS="-gencode arch=compute_86,code=sm_86" # input
-#   add_extra_cuda_args("${CUDA_ARCH_FLAGS}")
+#   add_extra_cuda_archs("${CUDA_ARCH_FLAGS}")
 #   CUDA_ARCH_FLAGS="-gencode arch=compute_86,code=sm_86;-gencode arch=compute_89,code=sm_89;-gencode arch=compute_90,code=sm_90"
 #
-function(add_extra_cuda_args CUDA_ARCH_FLAGS)
+function(add_extra_cuda_archs CUDA_ARCH_FLAGS)
     set(_CUDA_ARCHES ${CUDA_ARCH_FLAGS})
     if (DEFINED ENV{VLLM_CUDA_EXTRA_ARCH})
       foreach(EXTRA_ARCH $ENV{VLLM_CUDA_EXTRA_ARCH})
