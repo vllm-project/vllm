@@ -343,7 +343,7 @@ class InternVLInputPipeline:
             # we can't stack here because images may have different num_patches
             data = [image_pixel_values_mapper(img) for img in data]
         else:
-            return MultiModalInputs({ "image_embeds": data })
+            return MultiModalInputs({"image_embeds": data})
         model_config = ctx.model_config
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,
