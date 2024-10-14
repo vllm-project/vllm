@@ -68,7 +68,8 @@ class NGramWorker(NonLLMProposerWorkerBase):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
 
             input_ids = torch.as_tensor(seq_data.get_token_ids(),
-                                        dtype=torch.long, device='cpu')
+                                        dtype=torch.long,
+                                        device='cpu')
             input_length = seq_data.get_len()
 
             for ngram_size in range(
@@ -93,11 +94,11 @@ class NGramWorker(NonLLMProposerWorkerBase):
                 first_match = matches.max(dim=-1)
                 if first_match.values.item():
                     proposal_start_idx = first_match.indices.add_(ngram_size)
-                    spec_indices = (
-                        proposal_start_idx).repeat(sample_len) + torch.arange(
-                            sample_len)
+                    spec_indices = (proposal_start_idx).repeat(
+                        sample_len) + torch.arange(sample_len)
                     spec_indices.clamp_(max=input_ids.shape[-1] - 1)
-                    res = input_ids.gather(dim=-1, index=spec_indices).to(self.device)
+                    res = input_ids.gather(dim=-1,
+                                           index=spec_indices).to(self.device)
                     token_id_list.append(res)
                     token_prob_list.append(
                         torch.nn.functional.one_hot(
