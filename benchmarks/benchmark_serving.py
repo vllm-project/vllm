@@ -60,6 +60,7 @@ class BenchmarkMetrics:
     total_input: int
     total_output: int
     request_throughput: float
+    request_goodput: float
     output_throughput: float
     total_token_throughput: float
     mean_ttft_ms: float
@@ -315,12 +316,15 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: List[str],
     selected_percentiles: List[float],
+    slos_dict: Dict[str, float],
 ) -> Tuple[BenchmarkMetrics, List[int]]:
     actual_output_lens: List[int] = []
     total_input = 0
     completed = 0
+    good_completed = 0
     itls: List[float] = []
     tpots: List[float] = []
+    all_tpots: List[float] = []
     ttfts: List[float] = []
     e2els: List[float] = []
     for i in range(len(outputs)):
@@ -334,9 +338,12 @@ def calculate_metrics(
                           add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
             total_input += input_requests[i][1]
+            tpot = 0
             if output_len > 1:
-                tpots.append(
-                    (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
+                tpot = (outputs[i].latency - outputs[i].ttft) / (output_len - 1)
+                tpots.append(tpot)
+            # Note: if output_len <= 1, we regard tpot as 0 for goodput
+            all_tpots.append(tpot)
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
@@ -344,16 +351,41 @@ def calculate_metrics(
         else:
             actual_output_lens.append(0)
 
+    if slos_dict:
+        valid_metrics = []
+        slo_values = []
+        MS_TO_S = 1000
+        if "ttft" in slos_dict:
+            valid_metrics.append(ttfts)
+            slo_values.append(slos_dict["ttft"] / MS_TO_S)
+        if "tpot" in slos_dict:
+            valid_metrics.append(all_tpots)
+            slo_values.append(slos_dict["tpot"] / MS_TO_S)
+        if "e2el" in slos_dict:
+            valid_metrics.append(e2els)
+            slo_values.append(slos_dict["e2el"] / MS_TO_S)
+
+        req_metric_list = list(zip(*valid_metrics))
+        for req_metric in req_metric_list:
+            is_good_req = True
+            for i in range(len(slo_values)):
+                if slo_values[i] < req_metric[i]:
+                    is_good_req = False
+                    break
+            if is_good_req:
+                good_completed += 1
+
     if completed == 0:
         warnings.warn(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
-            stacklevel=2)
+            stacklevel=2)    
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
+        request_goodput=good_completed / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0) *
@@ -397,6 +429,7 @@ async def benchmark(
     selected_percentile_metrics: List[str],
     selected_percentiles: List[str],
     ignore_eos: bool,
+    slos_dict: Dict[str, float],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -496,6 +529,7 @@ async def benchmark(
         tokenizer=tokenizer,
         selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
+        slos_dict=slos_dict,
     )
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
@@ -507,6 +541,9 @@ async def benchmark(
                                  metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
+    if slos_dict:
+        print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
+                                        metrics.request_goodput))
     print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
                                     metrics.output_throughput))
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
@@ -518,6 +555,7 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
+        "request_goodput:": metrics.request_goodput if slos_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
         "input_lens": [output.prompt_len for output in outputs],
@@ -570,6 +608,40 @@ async def benchmark(
 
     return result
 
+def check_goodput_args(args):
+    # Check and parse goodput arguments
+    slos_dict = {}
+    VALID_NAMES = ["ttft", "tpot", "e2el"]
+    if args.goodput:
+        slos_dict = parse_goodput(args.goodput)
+        for slo_name, slo_val in slos_dict.items():
+            if slo_name not in VALID_NAMES:
+                raise ValueError(
+                    f"Invalid metric name found, {slo_name}: {slo_val}. "
+                    f"The service level objective name should be one of "
+                    f"\"ttft\", \"tpot\", \"e2el\". ",
+                )
+            if slo_val < 0:
+                raise ValueError(
+                    f"Invalid value found, {slo_name}: {slo_val}. "
+                    f"The service level objective value should be non-negative. "
+                )
+    return slos_dict
+
+def parse_goodput(slo_pairs):
+    slos_dict = {}
+    try:
+        for slo_pair in slo_pairs:
+            slo_name, slo_val = slo_pair.split(":")
+            slos_dict[slo_name] = float(slo_val)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "Invalid format found for service level objectives. "
+            "Specify service level objectives for goodput as \"KEY:VALUE\" "
+            "pairs, where the key is a metric name, and the value is a "
+            "number in milliseconds."
+        )
+    return slos_dict
 
 def main(args: argparse.Namespace):
     print(args)
@@ -664,6 +736,8 @@ def main(args: argparse.Namespace):
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
 
+    slos_dict = check_goodput_args(args)
+
     benchmark_result = asyncio.run(
         benchmark(
             backend=backend,
@@ -682,6 +756,7 @@ def main(args: argparse.Namespace):
                 float(p) for p in args.metric_percentiles.split(",")
             ],
             ignore_eos=args.ignore_eos,
+            slos_dict=slos_dict,
         ))
 
     # Save config and results to json
@@ -880,6 +955,16 @@ if __name__ == "__main__":
         "To report 25-th, 50-th, and 75-th percentiles, use \"25,50,75\". "
         "Default value is \"99\". "
         "Use \"--percentile-metrics\" to select metrics.",
+    )
+    parser.add_argument(
+        "--goodput",
+        nargs="+",
+        required=False,
+        help="Specify service level objectives for goodput as \"KEY:VALUE\" "
+        "pairs, where the key is a metric name, and the value is in "
+        "milliseconds. Multiple \"KEY:VALUE\" pairs can be provided, "
+        "separated by spaces. Allowed request level metric names are "
+        "\"ttft\", \"tpot\", \"e2el\". ",
     )
 
     # group for dataset specific arguments
