@@ -18,7 +18,7 @@ Requirements
 -  OS: Ubuntu 22.04 LTS
 -  Python: 3.10
 -  Intel Gaudi accelerator
--  Intel Gaudi software version 1.17.0
+-  Intel Gaudi software version 1.18.0
 
 To verify that the Intel Gaudi software was correctly installed, run:
 
@@ -45,8 +45,8 @@ Use the following commands to run a Docker image:
 
 .. code:: console
 
-   $ docker pull vault.habana.ai/gaudi-docker/1.17.0/ubuntu22.04/habanalabs/pytorch-installer-2.3.1:latest
-   $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.17.0/ubuntu22.04/habanalabs/pytorch-installer-2.3.1:latest
+   $ docker pull vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
+   $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 
 Build and Install vLLM
 ---------------------------
@@ -157,7 +157,7 @@ Currently in vLLM for HPU we support four execution modes, depending on selected
      - PyTorch lazy mode
 
 .. warning::
-   In 1.17.0, all modes utilizing ``PT_HPU_LAZY_MODE=0`` are highly experimental and should be only used for validating functional correctness. Their performance will be improved in the next releases. For obtaining the best performance in 1.17.0, please use HPU Graphs, or PyTorch lazy mode.
+   In 1.18.0, all modes utilizing ``PT_HPU_LAZY_MODE=0`` are highly experimental and should be only used for validating functional correctness. Their performance will be improved in the next releases. For obtaining the best performance in 1.18.0, please use HPU Graphs, or PyTorch lazy mode.
 
 
 Bucketing mechanism
