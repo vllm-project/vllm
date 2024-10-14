@@ -399,6 +399,12 @@ Text Generation
     - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
     -
     -
+  * - :code:`MolmoForCausalLM`
+    - Molmo
+    - Image
+    - :code:`allenai/Molmo-7B-D-0924`, :code:`allenai/Molmo-72B-0924`, etc.
+    -
+    - ✅︎
   * - :code:`NVLM_D_Model`
     - NVLM-D 1.0
     - Image\ :sup:`E+`
