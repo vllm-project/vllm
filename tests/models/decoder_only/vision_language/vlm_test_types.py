@@ -104,6 +104,7 @@ class VLMTestInfo(NamedTuple):
     max_tokens: Union[int, Tuple[int]] = 128
     num_logprobs: Union[int, Tuple[int]] = 5
     dtype: Union[str, Iterable[str]] = "half"
+    distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
     # The values provided for these two fields will be stacked and expanded
