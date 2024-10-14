@@ -133,6 +133,7 @@ class EngineArgs:
     tokenizer_pool_extra_config: Optional[dict] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     enable_lora: bool = False
+    enable_lora_bias: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
     enable_prompt_adapter: bool = False
@@ -535,6 +536,9 @@ class EngineArgs:
         parser.add_argument('--enable-lora',
                             action='store_true',
                             help='If True, enable handling of LoRA adapters.')
+        parser.add_argument('--enable-lora-bias',
+                            action='store_true',
+                            help='If True, enable bias for LoRA adapters.')
         parser.add_argument('--max-loras',
                             type=int,
                             default=EngineArgs.max_loras,
@@ -1036,6 +1040,7 @@ class EngineArgs:
             policy=self.scheduling_policy,
         )
         lora_config = LoRAConfig(
+            bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
             fully_sharded_loras=self.fully_sharded_loras,
