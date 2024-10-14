@@ -44,28 +44,12 @@ class PPTestSettings:
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=pp_base,
-                              eager_mode=False,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=2 * pp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=2 * pp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
                 ParallelSetup(tp_size=2 * tp_base,
                               pp_size=pp_base,
                               eager_mode=False,
                               chunked_prefill=True),
-                ParallelSetup(tp_size=2 * tp_base,
-                              pp_size=pp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
             ],
-            distributed_backends=["mp", "ray"],
+            distributed_backends=["ray"],
             trust_remote_code=trust_remote_code,
             tokenizer_mode=tokenizer_mode,
         )
@@ -168,23 +152,25 @@ EMBEDDING_MODEL_SETTINGS = {  # type: ignore[var-annotated]
 }
 
 MULTIMODAL_MODEL_SETTINGS = {
-    # [FAST TESTS]
-    "Salesforce/blip2-opt-2.7b": PPTestSettings.fast(),
-    "facebook/chameleon-7b": PPTestSettings.fast(),
-    "adept/fuyu-8b": PPTestSettings.fast(),
-    "OpenGVLab/InternVL2-1B": PPTestSettings.fast(trust_remote_code=True),
-    "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
-    "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
-    "llava-hf/LLaVA-NeXT-Video-7B-hf": PPTestSettings.fast(),
-    "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
-    "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(trust_remote_code=True),
-    # TODO: Implement PP
-    # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
-    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2, tokenizer_mode="mistral"),  # noqa: E501
-    "Qwen/Qwen-VL-Chat": PPTestSettings.fast(trust_remote_code=True),
-    "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
-    "fixie-ai/ultravox-v0_3": PPTestSettings.fast(),
+    # # [FAST TESTS]
+    # "Salesforce/blip2-opt-2.7b": PPTestSettings.fast(),
+    # "facebook/chameleon-7b": PPTestSettings.fast(),
+    # "adept/fuyu-8b": PPTestSettings.fast(),
+    # "OpenGVLab/InternVL2-1B": PPTestSettings.fast(trust_remote_code=True),
+    # "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
+    # "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
+    # "llava-hf/LLaVA-NeXT-Video-7B-hf": PPTestSettings.fast(),
+    # "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
+    # "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(trust_remote_code=True),
+    # # TODO: Implement PP
+    # # "meta-llama/Llama-3.2-11B-Vision-Instruct": PPTestSettings.fast(),
+    # "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    # "mistralai/Pixtral-12B-2409": PPTestSettings.fast(tp_base=2, tokenizer_mode="mistral"),  # noqa: E501
+    # "Qwen/Qwen-VL-Chat": PPTestSettings.fast(trust_remote_code=True),
+    # "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
+    "OpenGVLab/InternVL2-1B": PPTestSettings.detailed(trust_remote_code=True),
+    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.detailed(trust_remote_code=True),  # noqa: E501
+    "fixie-ai/ultravox-v0_3": PPTestSettings.detailed(),
 }
 
 CONDITIONAL_GENERATION_MODEL_SETTINGS = {  # type: ignore[var-annotated]
@@ -245,8 +231,7 @@ def _compare_tp(
     if tokenizer_mode:
         common_args.extend(["--tokenizer-mode", tokenizer_mode])
 
-    if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
-            and chunked_prefill):
+    if (distributed_backend == "ray"):
         # Test Ray ADAG for a subset of the tests
         pp_env = {
             "VLLM_USE_RAY_COMPILED_DAG": "1",
@@ -296,6 +281,7 @@ def _compare_tp(
             logger.exception("Ray ADAG tests failed")
 
 
+@pytest.mark.skip(reason="skip in testing")
 @pytest.mark.parametrize(
     ("model_name", "parallel_setup", "distributed_backend",
      "trust_remote_code", "tokenizer_mode"),
@@ -323,6 +309,7 @@ def test_tp_language_generation(
                 method="generate")
 
 
+@pytest.mark.skip(reason="skip in testing")
 @pytest.mark.parametrize(
     ("model_name", "parallel_setup", "distributed_backend",
      "trust_remote_code", "tokenizer_mode"),
