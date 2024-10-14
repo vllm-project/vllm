@@ -155,6 +155,25 @@ macro(clear_cuda_arches CUDA_ARCH_FLAGS)
 endmacro()
 
 #
+# Add extra CUDA archs(according to env variable) to generate more cuda code for more CUDA devices.
+#
+# Example:
+#   `export VLLM_CUDA_EXTRA_ARCH="89;90"`
+#   CUDA_ARCH_FLAGS="-gencode arch=compute_86,code=sm_86" # input
+#   add_extra_cuda_args("${CUDA_ARCH_FLAGS}")
+#   CUDA_ARCH_FLAGS="-gencode arch=compute_86,code=sm_86;-gencode arch=compute_89,code=sm_89;-gencode arch=compute_90,code=sm_90"
+#
+function(add_extra_cuda_args CUDA_ARCH_FLAGS)
+    set(_CUDA_ARCHES ${CUDA_ARCH_FLAGS})
+    if (DEFINED ENV{VLLM_CUDA_EXTRA_ARCH})
+      foreach(EXTRA_ARCH $ENV{VLLM_CUDA_EXTRA_ARCH})
+        list(APPEND _CUDA_ARCHES "-gencode arch=compute_${EXTRA_ARCH},code=sm_${EXTRA_ARCH}")
+      endforeach()
+      set(CUDA_ARCH_FLAGS ${_CUDA_ARCHES} PARENT_SCOPE)
+    endif()
+endfunction()
+
+#
 # Extract unique CUDA architectures from a list of compute capabilities codes in 
 # the form `<major><minor>[<letter>]`, convert them to the form sort 
 # `<major>.<minor>`, dedupes them and then sorts them in ascending order and 
