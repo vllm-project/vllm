@@ -874,6 +874,8 @@ def get_max_molmo_image_tokens(ctx: InputContext) -> int:
     return max_llm_image_tokens
 
 
+# NOTE: preprocessing for the image data has been included in the
+# 'input_processor_for_molmo' function
 def image_input_mapper_for_molmo(
     ctx: InputContext,
     data: object,
@@ -951,6 +953,9 @@ def input_processor_for_molmo(ctx: InputContext, llm_inputs: LLMInputs):
                                      trust_remote_code=True,
                                      revision=ctx.model_config.code_revision)
 
+    # NOTE: message formatting for raw text prompt is only applied for
+    # offline inference; for online inference, the prompt is always in
+    # instruction format and tokenized.
     if prompt is not None and re.match(r"^User:[\s\S]*?(Assistant:)*$",
                                        prompt):
         out = processor.process(prompt, image, message_format="none")
