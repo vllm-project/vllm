@@ -6,22 +6,23 @@ import itertools
 import re
 from pathlib import PosixPath
 import types
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union, Any, Type
 
 from PIL.Image import Image
 import torch
 from transformers import AutoConfig, AutoTokenizer, BatchEncoding
+from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.transformers_utils.tokenizer import patch_padding_side
 
-from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets, HfRunner
+from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets, HfRunner, VllmRunner
 from .vlm_test_types import (EMBEDDING_SIZE_FACTORS, TEST_IMG_PLACEHOLDER,
                              ImageSizeWrapper, SizeType, VllmOutput,
-                             VLMTestInfo, VlmTestType)
-
+                             VLMTestInfo, VlmTestType, MULTI_IMAGE_BASE_PROMPT,
+                             SINGLE_IMAGE_BASE_PROMPTS)
 
 ####### vLLM output processors functions
 def blip2_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
@@ -385,6 +386,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
             ensure_wrapped(test_info.max_tokens),
             ensure_wrapped(test_info.num_logprobs),
             ensure_wrapped(test_info.dtype),
+            ensure_wrapped(test_info.distributed_executor_backend),
         ]
         # No sizes passed for custom inputs, since inputs are directly provided
         if test_type != VlmTestType.CUSTOM_INPUTS:
@@ -473,6 +475,271 @@ def multi_image_multi_aspect_ratio_inputs_llava(is_llava):
             ],
             cherry_blossom,
         ])]
+
+### Useful builders for setting up different types of tests
+
+def build_embedding_inputs_from_test_info(
+    test_info: VLMTestInfo,
+    image_assets:_ImageAssets,
+    size_wrapper: ImageSizeWrapper,
+):
+    # These checks will always be true due to the way the test is invoked
+    assert size_wrapper.type != SizeType.SIZE_FACTOR or not \
+            all(factor == 1.0 for factor in size_wrapper.data)
+    assert test_info.convert_assets_to_embeddings is not None
+
+    model_prompts = get_model_prompts(
+        SINGLE_IMAGE_BASE_PROMPTS,
+        test_info.img_idx_to_prompt,
+        test_info.prompt_formatter,
+    )
+
+    images = [asset.pil_image for asset in image_assets]
+    embeds = test_info.convert_assets_to_embeddings(image_assets)
+    assert len(images) == len(model_prompts)
+
+    inputs = build_single_image_inputs(images, model_prompts, size_wrapper)
+    vllm_embeddings = build_single_image_inputs(embeds, model_prompts,
+                                                size_wrapper)
+    return inputs, vllm_embeddings
+
+def build_single_image_inputs_from_test_info(
+        test_info: VLMTestInfo,
+        image_assets:_ImageAssets,
+        size_wrapper: ImageSizeWrapper,
+        tmp_path: Optional[PosixPath]=None
+    ):
+    model_prompts = get_model_prompts(test_info.single_image_prompts,
+                                      test_info.img_idx_to_prompt,
+                                      test_info.prompt_formatter)
+
+    # For models that require a local path / URL encoded in the image; export
+    # assets and encode into tmp_path for this test. This should be avoided
+    # where possible (currently needed for Qwen-VL).
+    if test_info.prompt_path_encoder is not None:
+        model_prompts = [
+            test_info.prompt_path_encoder(tmp_path, prompt, [asset])
+            for prompt, asset in zip(model_prompts, image_assets)
+        ]
+
+    images = [asset.pil_image for asset in image_assets]
+    assert len(images) == len(model_prompts)
+    return build_single_image_inputs(images, model_prompts, size_wrapper)
+
+
+def build_single_image_inputs(images, model_prompts,
+                              size_wrapper: ImageSizeWrapper):
+    # For every image / prompt pair, get a pair containing two lists of
+    # length size_factors, where the first contains duplicates of the model
+    # prompt [str], and the second contains copies of the image after being
+    # scaled by one of the size factors.
+    #
+    # NOTE: rescaling preserves the image aspect ratio.
+    return [(
+        [prompt for _ in size_wrapper.data],
+        [
+            apply_size_scaling(image, size, size_wrapper.type)
+            for size in size_wrapper.data
+        ],
+    ) for image, prompt in zip(images, model_prompts)]
+
+
+def build_multi_image_inputs_from_test_info(
+        test_info: VLMTestInfo,
+        image_assets:_ImageAssets,
+        size_wrapper: ImageSizeWrapper,
+        tmp_path: Optional[PosixPath]=None
+    ):
+
+    model_prompts = get_model_prompts([MULTI_IMAGE_BASE_PROMPT],
+                                      test_info.img_idx_to_prompt,
+                                      test_info.prompt_formatter)
+
+    if test_info.prompt_path_encoder is not None:
+        model_prompts = [
+            test_info.prompt_path_encoder(tmp_path, model_prompt, image_assets)
+            for model_prompt in model_prompts
+        ]
+
+    images = [asset.pil_image for asset in image_assets]
+
+    # Currently, we only have one multi-image list & one multi-image prompt
+    return build_multi_image_inputs(
+        image_lists=[images],
+        model_prompts=model_prompts,
+        size_wrapper=size_wrapper,
+    )
+
+
+def build_multi_image_inputs(image_lists, model_prompts,
+                             size_wrapper: ImageSizeWrapper):
+    return [(
+        [prompt for _ in size_wrapper.data],
+        [[
+            apply_size_scaling(image, size, size_wrapper.type)
+            for image in images
+        ] for size in size_wrapper.data],
+    ) for images, prompt in zip(image_lists, model_prompts)]
+
+
+def apply_size_scaling(image, size: Union[float, Tuple[int, int]],
+                       size_type: SizeType):
+    """Applies a size scaler to one image; this can be a an image size factor,
+    which scales the image while maintaining the aspect ratio"""
+    # Special case for embeddings; if it's a tensor, it's only valid if we
+    # are considering size factors at constant scale, i.e., we just clone
+    # the tensor
+    if isinstance(image, torch.Tensor):
+        assert size_type == SizeType.SIZE_FACTOR and size == 1
+        return image
+    if size_type == SizeType.SIZE_FACTOR:
+        # We have a list of image size factors
+        return rescale_image_size(image, size)
+    elif size_type == SizeType.FIXED_SIZE:
+        # We have a list of fixed sizes
+        return image.resize(size)
+    raise ValueError("ImageSizeWrapper type must be FIXED_SIZE or SIZE_FACTOR")
+
+
+### Core test implementation & details
+# run_test() is does the heavy lifting for all test types
+def run_test(
+    *,
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    inputs: List[Tuple[List[str], List[Union[List[Image], Image]]]],
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    enforce_eager: bool,
+    max_model_len: int,
+    max_num_seqs: int,
+    hf_output_post_proc: Optional[Callable],
+    vllm_output_post_proc: Optional[Callable],
+    auto_cls: Type[_BaseAutoModelClass],
+    use_tokenizer_eos: bool,
+    postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
+    comparator: Callable,
+    get_stop_token_ids: Optional[Callable],
+    limit_mm_per_prompt: Dict[str, int],
+    distributed_executor_backend: Optional[str],
+    size_factors,
+    model_kwargs: Optional[Dict[str, Any]],
+    patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
+    vllm_embeddings: Optional[torch.Tensor]=None,
+):
+    # In the case of embeddings, vLLM takes separate input tensors
+    vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
+    opt_vllm_kwargs = {}
+    if get_stop_token_ids is not None:
+        opt_vllm_kwargs["stop_token_ids"] = get_stop_token_ids(tokenizer)
+
+    with vllm_runner(model,
+                     max_model_len=max_model_len,
+                     max_num_seqs=max_num_seqs,
+                     dtype=dtype,
+                     limit_mm_per_prompt=limit_mm_per_prompt,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=enforce_eager) as vllm_model:
+        vllm_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images,
+                                                **opt_vllm_kwargs)
+            for prompts, images in vllm_inputs
+        ]
+
+    hf_model = hf_runner(model,
+                         dtype=dtype,
+                         auto_cls=auto_cls,
+                         postprocess_inputs=postprocess_inputs,
+                         model_kwargs=model_kwargs)
+
+    # Some models need to patch things like the model processor, e.g., internvl
+    if patch_hf_runner is not None:
+        hf_model = patch_hf_runner(hf_model)
+
+    # Some models need to explicitly pass the eos_token_id off the tokenizer or
+    # processor for a good comparison; currently assume processor/tokenizer
+    # agree on the EOS, and pull it off the tokenizer if requested.
+    opt_hf_kwargs = {}
+    if use_tokenizer_eos:
+        opt_hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
+
+    with hf_model, torch.no_grad():
+        hf_outputs_per_image = [
+            hf_model.generate_greedy_logprobs_limit(prompts,
+                                                    max_tokens,
+                                                    num_logprobs=num_logprobs,
+                                                    images=images,
+                                                    tokenizer=tokenizer,
+                                                    **opt_hf_kwargs)
+            for prompts, images in inputs
+        ]
+
+    # Apply output processing / sanitation to the vLLM and HF runner results
+    hf_outputs_per_image, vllm_outputs_per_image = process_runner_outputs(
+        model,
+        first_runner_outputs=hf_outputs_per_image,
+        second_runner_outputs=vllm_outputs_per_image,
+        first_runner_processor=hf_output_post_proc,
+        second_runner_processor=vllm_output_post_proc,
+    )
+
+    export_test(
+        model,
+        size_factors.data if size_factors is not None else None,
+        is_new=True,
+        export_info=[
+            {"config": {"inputs": inputs, "max_tokens": max_tokens, "num_logprobs": num_logprobs}},
+            {"hf_runner": {"dtype": dtype, "model": model}},
+            {"hf_out": hf_outputs_per_image},
+            {"vllm_out": vllm_outputs_per_image},
+        ],
+    )
+
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
+                                        vllm_outputs_per_image):
+        # This is usually check_logprobs_close, but it's passed through to
+        # allow things like check_outputs_equal where needed
+        comparator(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )
+
+
+def process_runner_outputs(
+    model,
+    first_runner_outputs,
+    second_runner_outputs,
+    first_runner_processor=None,
+    second_runner_processor=None,
+):
+    if first_runner_processor is not None:
+        first_runner_outputs = process_outputs(first_runner_processor, model,
+                                                first_runner_outputs)
+    if second_runner_processor is not None:
+        second_runner_outputs = process_outputs(second_runner_processor,
+                                                 model, second_runner_outputs)
+    return first_runner_outputs, second_runner_outputs
+
+
+def process_outputs(output_processor, model, outputs_per_image):
+    """Applies a model specific post-processor function to a runner's output"""
+    return [[output_processor(res, model) for res in outputs]
+            for outputs in outputs_per_image]
 
 
 ### Utilities for local export
