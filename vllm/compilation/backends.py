@@ -160,6 +160,7 @@ def wrap_inductor(graph: fx.GraphModule,
     compilation_counter.num_inductor_compilations += 1
 
     from torch._inductor import config
+    torch._inductor.config._micro_pipeline_tp = True
     current_config = config.get_config_copy()
     from torch._inductor.compile_fx import compile_fx
 

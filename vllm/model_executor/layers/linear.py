@@ -44,6 +44,11 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 ]
 
 
+def pprint(x):
+    #print(x)
+    pass
+
+
 def adjust_marlin_shard(param, shard_size, shard_offset):
     marlin_tile_size = getattr(param, "marlin_tile_size", None)
     if marlin_tile_size is None:
@@ -270,7 +275,7 @@ class MatmulRS(LinearMethodBase):
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
-        print(f"inpp={input_size_per_partition}, output_part_siz={output_partition_sizes}, input_size={input_size}, output_size={output_size}")
+        pprint(f"inpp={input_size_per_partition}, output_part_siz={output_partition_sizes}, input_size={input_size}, output_size={output_size}")
 
     def apply(self,
               layer: torch.nn.Module,
@@ -278,10 +283,10 @@ class MatmulRS(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert bias is None
 
-        print(f"MATMUL_RS {get_tp_group().rank} {x.shape}, {layer.weight.transpose(1,0).shape}")
+        pprint(f"MATMUL_RS {get_tp_group().rank} {x.shape}, {layer.weight.transpose(1,0).shape}")
 
         if not should_slice(x.shape):
-            print("MATMUL_RS naive")
+            pprint("MATMUL_RS naive")
             output = torch.matmul(x, layer.weight.transpose(1, 0))
             # total hack
             output = tensor_model_parallel_all_reduce(output)
@@ -295,7 +300,7 @@ class MatmulRS(LinearMethodBase):
                 group_name=group_name
             )
 
-        print(f"MATMUL_RS DONE {get_tp_group().rank} {output.shape}")
+        pprint(f"MATMUL_RS DONE {get_tp_group().rank} {output.shape}")
 
         return output
 
@@ -325,7 +330,7 @@ class AGMatmul(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert bias is None
 
-        print(f"AG_MATMUL {get_tp_group().rank}, {x.shape}, {layer.weight.transpose(1,0).shape}")
+        pprint(f"AG_MATMUL {get_tp_group().rank}, {x.shape}, {layer.weight.transpose(1,0).shape}")
 
         if not should_slice(x.shape):
             output = torch.matmul(x, layer.weight.transpose(1,0))
@@ -339,7 +344,7 @@ class AGMatmul(LinearMethodBase):
             )
             output = mm_outputs[0]
 
-        print(f"AG_MATMUL DONE {get_tp_group().rank}, {output.shape}")
+        pprint(f"AG_MATMUL DONE {get_tp_group().rank}, {output.shape}")
 
         return output
 
