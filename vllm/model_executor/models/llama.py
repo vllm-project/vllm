@@ -61,6 +61,11 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     maybe_prefix)
 
 
+def pprint(x):
+    #print(x)
+    pass
+
+
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -275,16 +280,16 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        print(f"RESIDUAL SHAPE = {residual.shape}")
+        pprint(f"RESIDUAL SHAPE = {residual.shape}")
 
         def slices(residual) -> bool:
             if not should_slice(residual.shape):
-                print(f"SLICES TOO SMALL {[residual.shape]}")
+                pprint(f"SLICES TOO SMALL {[residual.shape]}")
                 return []
 
             n_slices = get_tensor_model_parallel_world_size()
             residual_slices = torch.chunk(residual, n_slices, dim=0)
-            print(f"SLICES {[r.shape for r in residual_slices]}")
+            pprint(f"SLICES {[r.shape for r in residual_slices]}")
             return residual_slices
 
         orig_residual_shape = residual.shape
@@ -307,10 +312,10 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states, my_residual)
         hidden_states = self.mlp(hidden_states)
 
-        print(f"LAST_LAYER = {self.last_layer}, #slices = {len(residual_slices)}")
-        if self.last_layer and should_slice(orig_residual_shape) > 0:
-            print(f"FINAL REDUCE {my_residual.shape}")
-            if True:
+        pprint(f"LAST_LAYER = {self.last_layer}, #slices = {len(residual_slices)}")
+        if self.last_layer and should_slice(orig_residual_shape):
+            pprint(f"FINAL REDUCE {my_residual.shape}")
+            if False:
                 residual = tensor_model_parallel_all_gather(my_residual, 0)
             else:
                 residual = torch.ops._c10d_functional.all_gather_into_tensor(
@@ -318,8 +323,9 @@ class LlamaDecoderLayer(nn.Module):
                     get_tp_group().world_size,
                     torch.distributed.group.WORLD.group_name
                 )
+                residual = torch.ops._c10d_functional.wait_tensor(residual)
 
-            print(f"GOT HERE2 {my_residual.shape}, {residual.shape}")
+            pprint(f"GOT HERE2 {my_residual.shape}, {residual.shape}")
         else:
             residual = my_residual
 

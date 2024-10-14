@@ -159,6 +159,7 @@ def fix_functionalization(graph: fx.Graph):
 
 def wrap_inductor(graph, example_inputs, additional_inductor_config):
     from torch._inductor import config
+    torch._inductor.config._micro_pipeline_tp = True
     current_config = config.shallow_copy_dict()
     from torch._inductor.compile_fx import compile_fx
 
