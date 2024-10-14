@@ -1,0 +1,16 @@
+# test_config_t_compile.yaml
+stages:
+  - name: test_gsm8k_small_models_tcompile
+    steps:
+      - name: gsm8k_small_g3_tp1_tc
+        flavor: g3
+        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 1
+      - name: gsm8k_small_g3_tp2_tc
+        flavor: g3.s
+        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 2
+      - name: gsm8k_small_g2_tp1_tc
+        flavor: g2
+        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 1
+      - name: gsm8k_small_g2_tp2_tc
+        flavor: g2.s
+        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 2

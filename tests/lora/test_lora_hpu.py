@@ -1,8 +1,7 @@
 import pytest
 import torch
 from vllm_hpu_extension.ops import LoraMask
-
-from vllm.hpu.punica_hpu import GaudiPunicaWrapper
+from vllm_hpu_extension.punica_hpu import GaudiPunicaWrapper
 
 from .utils import DummyLoRAManager
 

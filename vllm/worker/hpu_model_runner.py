@@ -521,7 +521,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.prompt_adapter_config = prompt_adapter_config
         self.return_hidden_states = return_hidden_states
         self.observability_config = observability_config
-        self.profiler = HabanaHighLevelProfiler()
 
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
@@ -557,6 +556,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.inc_initialized_successfully = False
 
         # Profiler stats
+        self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
         self.seen_configs: set = set()
         self._mem_margin: Optional[int] = None
@@ -672,9 +672,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def _setup_buckets(self) -> None:
         align_bs = lambda x: min(self.max_num_seqs, x)
         max_bucket_cfg = 64
-        if self.lora_config and \
-            max_bucket_cfg > self.max_num_batched_tokens // self.block_size:
-            max_bucket_cfg = self.max_num_batched_tokens // self.block_size
         #FIXME: The default values should be max_model_len
         max_prompt_seq = 1024
         max_decode_seq = 2048
@@ -1480,11 +1477,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.prompt_buckets, prompt_omitted_buckets = generate_prompt_buckets(
             self.prompt_bs_bucket_cfg, self.prompt_seq_bucket_cfg,
             self.max_num_batched_tokens)
-        if self.lora_config:
-            self.prompt_buckets[:] = [
-                bucket for bucket in self.prompt_buckets
-                if self._is_valid_bucket(bucket)
-            ]
 
         msg = (
             f"Generated {len(self.prompt_buckets)} "
@@ -1502,11 +1494,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.decode_buckets = generate_decode_buckets(
             self.decode_bs_bucket_cfg, self.decode_block_bucket_cfg,
             max_blocks)
-        if self.lora_config:
-            self.decode_buckets[:] = [
-                bucket for bucket in self.decode_buckets
-                if self._is_valid_bucket(bucket)
-            ]
         logger.info("Generated %d decode buckets [bs, total_blocks]: %s",
                     len(self.decode_buckets),
                     list(sorted(self.decode_buckets)))
@@ -1767,8 +1754,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         """
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             assert seq_group_metadata_list is not None
-            self.profiler_counter_helper.capture_seq_group_metadata_stats(
-                seq_group_metadata_list=seq_group_metadata_list)
+            if self.profiler.enabled:
+                self.profiler_counter_helper.capture_seq_group_metadata_stats(
+                    seq_group_metadata_list=seq_group_metadata_list)
             model_input, sampling_metadata = self.prepare_input_tensors(
                 seq_group_metadata_list)
             assert model_input.attn_metadata is not None
