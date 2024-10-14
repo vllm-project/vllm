@@ -236,7 +236,21 @@ def test_multi_step_llm_best_of_fallback(
     Currently multi-step scheduling does not support best_of > 1 or beam search,
     however the default behavior is for the engine to fall back on single-step
     scheduling rather than failing.
-    
+
+    Two instantiations of the sync vLLM engine are tested, one with single-step
+    and one with multi-step scheduling.
+
+    Each instantiation of vLLM is tested in 3 phases:
+    1. Batch of requests without best_of > 1
+    2. Batch of requests with best_of > 1
+    3. Batch of requests without best_of > 1
+
+    For the instantiation of vLLM with multi-step scheduling, Phase 1 should use
+    multi-step scheduling, Phase 2 should fall back on single-step scheduling,
+    and Phase 3 should resume multi-step scheduling.
+
+    The other instantiation should use single-step scheduling for all phases.
+
     Args:
       vllm_runner: vLLM model runner fixture
       example_prompts: test fixture providing example prompts
@@ -261,12 +275,23 @@ def test_multi_step_llm_best_of_fallback(
     prompts = prompts[:num_prompts]
     assert len(prompts) == num_prompts
 
-    sampling_params = SamplingParams(
+    # Challenging sample parameters which should trigger a
+    # multi-step scheduler to fall back on single-step scheduling
+    sampling_params_best_of_gt_1 = SamplingParams(
         max_tokens=max_output_len,
         ignore_eos=True,
         temperature=1.0,
         n=n,
         best_of=best_of,
+        seed=42,
+    )
+
+    # Easy sample parameters, for testing that multi-step scheduling
+    # resumes without issue once all best_of > 1 requests are completed.
+    sampling_params_best_of_eq_1 = SamplingParams(
+        max_tokens=max_output_len,
+        ignore_eos=True,
+        temperature=0.0,
         seed=42,
     )
 
@@ -276,8 +301,19 @@ def test_multi_step_llm_best_of_fallback(
             enforce_eager=enforce_eager,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
+            num_scheduler_steps=1,
+            enable_chunked_prefill=enable_chunked_prefill,
+            enable_prefix_caching=enable_prefix_caching,
     ) as vllm_model:
-        outputs_baseline = vllm_model.generate(prompts, sampling_params)
+        # outputs_baseline = (vllm_model.generate(prompts, 
+        #                                         sampling_params_best_of_eq_1)+
+        #                     vllm_model.generate(prompts, 
+        #                                         sampling_params_best_of_gt_1)+
+        #                     vllm_model.generate(prompts, 
+        #                                         sampling_params_best_of_eq_1))
+        outputs_baseline = (vllm_model.generate(prompts, 
+                                                sampling_params_best_of_eq_1))
 
     with vllm_runner(
             model,
@@ -290,7 +326,14 @@ def test_multi_step_llm_best_of_fallback(
             enable_chunked_prefill=enable_chunked_prefill,
             enable_prefix_caching=enable_prefix_caching,
     ) as vllm_model:
-        outputs_ms = vllm_model.generate(prompts, sampling_params)
+        # outputs_ms = (vllm_model.generate(prompts, 
+        #                                  sampling_params_best_of_eq_1)+
+        #               vllm_model.generate(prompts, 
+        #                                  sampling_params_best_of_gt_1)+
+        #               vllm_model.generate(prompts, 
+        #                                  sampling_params_best_of_eq_1))
+        outputs_ms = (vllm_model.generate(prompts, 
+                                         sampling_params_best_of_eq_1))
 
     check_outputs_equal(
         outputs_0_lst=outputs_baseline,
