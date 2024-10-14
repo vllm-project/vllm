@@ -74,6 +74,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
     seq_lens: Optional[List[int]]
     seqlen_q: Optional[torch.Tensor]
     max_seqlen: Optional[int]
+    max_decode_seq_len: int
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -103,7 +104,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     def advance_step(self, num_seqs, num_queries):
         assert num_seqs == num_queries
-        
+
         assert self.num_prefills == 0
         assert self.num_prefill_tokens == 0
         assert self.num_decode_tokens == num_seqs
@@ -113,17 +114,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
         assert len(self.seq_lens) == num_seqs
         assert self.seq_lens_tensor is not None
         assert self.seq_lens_tensor.shape == (num_seqs, )
-        # assert self.max_query_len == 1
-        # assert self.max_prefill_seq_len == 0
         assert self.max_decode_seq_len == max(self.seq_lens)
-
-        # assert self.query_start_loc is not None
-        # assert self.query_start_loc.shape == (num_queries + 1, )
-        # assert self.seq_start_loc is not None
-        # assert self.seq_start_loc.shape == (num_seqs + 1, )
-
-        # assert self.context_lens_tensor is not None
-        # assert self.context_lens_tensor.shape == (num_queries, )
 
         assert self.block_tables is not None
         assert self.block_tables.shape[0] == num_seqs
@@ -133,6 +124,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
         for i in range(num_queries):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
+
 
 class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
 
