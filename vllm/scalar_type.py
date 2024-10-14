@@ -1,3 +1,4 @@
+import functools
 import struct
 from dataclasses import dataclass
 from enum import Enum
@@ -128,7 +129,7 @@ class ScalarType:
             else:
                 return 0
 
-    @property
+    @functools.cached_property
     def id(self) -> int:
         val = 0
         offset = 0
@@ -250,12 +251,16 @@ class ScalarType:
     @classmethod
     def int_(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
         "Create a signed integer scalar type (size_bits includes sign-bit)."
-        return cls(0, size_bits - 1, True, bias if bias else 0)
+        ret = cls(0, size_bits - 1, True, bias if bias else 0)
+        ret.id  # noqa B018
+        return ret
 
     @classmethod
     def uint(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
         """Create a unsigned integer scalar type."""
-        return cls(0, size_bits, False, bias if bias else 0)
+        ret = cls(0, size_bits, False, bias if bias else 0)
+        ret.id  # noqa B018
+        return ret
 
     @classmethod
     def float_IEEE754(cls, exponent: int, mantissa: int) -> 'ScalarType':
@@ -264,7 +269,9 @@ class ScalarType:
         (i.e. follows IEEE 754 conventions).
         """
         assert (mantissa > 0 and exponent > 0)
-        return cls(exponent, mantissa, True, 0)
+        ret = cls(exponent, mantissa, True, 0)
+        ret.id  # noqa B018
+        return ret
 
     @classmethod
     def float_(cls, exponent: int, mantissa: int, finite_values_only: bool,
@@ -277,7 +284,9 @@ class ScalarType:
         assert (nan_repr != NanRepr.IEEE_754), (
             "use `float_IEEE754` constructor for floating point types that "
             "follow IEEE 754 conventions")
-        return cls(exponent, mantissa, True, 0, finite_values_only, nan_repr)
+        ret = cls(exponent, mantissa, True, 0, finite_values_only, nan_repr)
+        ret.id  # noqa B018
+        return ret
 
 
 # naming generally follows: https://github.com/jax-ml/ml_dtypes
