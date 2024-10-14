@@ -461,9 +461,20 @@ class LLMEngine:
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
+
         self.output_processor = (
-            SequenceGroupOutputProcessor.create_output_processor(
+            SequenceGroupOutputProcessor.create_single_step_output_processor(
                 self.scheduler_config,
+                self.detokenizer,
+                self.scheduler,
+                self.seq_counter,
+                stop_checker=StopChecker(
+                    self.scheduler_config.max_model_len,
+                    get_tokenizer_for_seq,
+                ),
+            )
+        ) if self.scheduler_config.num_lookahead_slots == 0 else (
+            SequenceGroupOutputProcessor.create_multi_step_output_processor(
                 self.detokenizer,
                 self.scheduler,
                 self.seq_counter,
@@ -479,17 +490,16 @@ class LLMEngine:
             # processor for scenarios where a request utilizes a feature
             # unsupported by multi-step
             self.fallback_single_step_output_processor = (
-                SequenceGroupOutputProcessor.create_output_processor(
+                SequenceGroupOutputProcessor.
+                create_single_step_output_processor(
                     self.scheduler_config,
                     self.detokenizer,
                     self.scheduler,
                     self.seq_counter,
-                    get_tokenizer_for_seq,
                     stop_checker=StopChecker(
                         self.scheduler_config.max_model_len,
                         get_tokenizer_for_seq,
                     ),
-                    force_single_step=True,
                 ))
 
     def _initialize_kv_caches(self) -> None:
