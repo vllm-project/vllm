@@ -152,6 +152,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # CMAKE_CUDA_FLAGS so that they are not applied globally.
   #
   clear_cuda_arches(CUDA_ARCH_FLAGS)
+  # Check whether there are extra cuda arch for the build.
+  add_extra_cuda_args("${CUDA_ARCH_FLAGS}")
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
   # Filter the target architectures by the supported supported archs
