@@ -6,11 +6,11 @@ from pathlib import PosixPath
 from typing import Optional
 
 import pytest
-from transformers import AutoModelForVision2Seq, AutoTokenizer, BatchEncoding
+from transformers import AutoModelForVision2Seq
 
 from vllm.utils import identity, is_cpu, is_hip, cuda_device_count_stateless
 
-from ....conftest import _ImageAssets, IMAGE_ASSETS
+from ....conftest import _ImageAssets, IMAGE_ASSETS, HfRunner, VllmRunner
 from ...utils import check_outputs_equal
 from ....utils import get_memory_gb, fork_new_process_for_each_test
 from . import utils as vlm_utils
@@ -26,19 +26,17 @@ if is_hip():
 
 
 COMMON_BROADCAST_SETTINGS = {
-    "test_type": VlmTestType.NEW_PROC_IMAGE,
+    "test_type": VlmTestType.IMAGE,
+    "fork_new_process_for_each_test": True,
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
     "image_size_factors": ((.25, 0.5, 1.0),),
-    "distributed_executor_backend": ("ray", "mp"),
+    "distributed_executor_backend": ("ray", "mp",),
     "skip": cuda_device_count_stateless() < 2,
 }
 
-### Test configuration for specific models;
-# NOTE: the key in the dict below is not mostly used as an identifier;
-# it will be first in all of the expanded parametrizations, so it will
-# tell you which test configuration failed.
+### Test configuration for specific models
 
 # yapf: disable
 VLM_TEST_SETTINGS = {
@@ -83,13 +81,14 @@ VLM_TEST_SETTINGS = {
     "glm4": VLMTestInfo(
         models="THUDM/glm-4v-9b",
         prompt_formatter=identity,
-        test_type=VlmTestType.NEW_PROC_IMAGE,
+        test_type=VlmTestType.IMAGE,
+        fork_new_process_for_each_test=True,
         img_idx_to_prompt=lambda idx: "",
         max_model_len=2048,
         max_num_seqs=2,
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
-        skip=(get_memory_gb() < 48), # large GPU test; run in separate proc
+        skip=(get_memory_gb() < 48), # Large GPU test
         patch_hf_runner=vlm_utils.glm_patch_hf_runner,
     ),
     "llava": VLMTestInfo(
@@ -176,11 +175,15 @@ VLM_TEST_SETTINGS = {
         models=("OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         test_type=(VlmTestType.IMAGE, VlmTestType.MULTI_IMAGE),
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>\nWhat's the content in the center of the image?",
+            "cherry_blossom": "<image>\nWhat is the season?",
+        }),
         max_model_len=4096,
-        num_logprobs=10,
         dtype="bfloat16" if is_cpu() else "half",
         use_tokenizer_eos=True,
         patch_hf_runner=vlm_utils.internvl_patch_hf_runner,
+        skip=False,
     ),
     # Tensor parallel / multi-gpu broadcast tests
     "broadcast-chameleon": VLMTestInfo(
@@ -226,156 +229,191 @@ VLM_TEST_SETTINGS = {
 # relevant VLMTestInfo object into a combination that can be
 # consumed by parametrize()
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
-    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
-                                       test_type=VlmTestType.IMAGE))
-def test_single_image_generation(tmp_path: PosixPath, model_type: str,
-                                 model: str, max_tokens: int,
-                                 num_logprobs: int, dtype: str,
-                                 size_wrapper: ImageSizeWrapper, 
-                                 hf_runner,
-                                 vllm_runner, image_assets: _ImageAssets):
-    # Grab the model type's global model config to leverage callables
-    test_info = VLM_TEST_SETTINGS[model_type]
-    inputs = vlm_utils.build_single_image_inputs_from_test_info(
-        test_info, image_assets, size_wrapper, tmp_path
+    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    vlm_utils.get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VlmTestType.IMAGE,
+        fork_new_process_for_each_test=False,
     )
+)
+def test_single_image_models(
+    tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
+    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    vllm_runner: VllmRunner, image_assets: _ImageAssets
+):
+    test_info = VLM_TEST_SETTINGS[model_type]
+    vlm_utils.run_single_image_test(
+        tmp_path=tmp_path, test_info=test_info, model=model,
+        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        distributed_executor_backend=distributed_executor_backend,
+        size_wrapper=size_wrapper, hf_runner=hf_runner,
+        vllm_runner=vllm_runner, image_assets=image_assets)
 
-    vlm_utils.run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": 1},
-        size_factors=size_wrapper,
-        **test_info.get_non_parametrized_runner_kwargs()
+
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    vlm_utils.get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VlmTestType.MULTI_IMAGE,
+        fork_new_process_for_each_test=False,
+    )
+)
+def test_multi_image_models(
+    tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
+    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    vllm_runner: VllmRunner, image_assets: _ImageAssets
+):
+    test_info = VLM_TEST_SETTINGS[model_type]
+    vlm_utils.run_multi_image_test(
+        tmp_path=tmp_path, test_info=test_info, model=model,
+        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        distributed_executor_backend=distributed_executor_backend,
+        size_wrapper=size_wrapper, hf_runner=hf_runner,
+        vllm_runner=vllm_runner, image_assets=image_assets
     )
 
 
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
-    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
-                                       test_type=VlmTestType.NEW_PROC_IMAGE))
-@fork_new_process_for_each_test
-def test_resource_heavy_image_generation(
-                                 tmp_path: PosixPath, model_type: str,
-                                 model: str, max_tokens: int,
-                                 num_logprobs: int, dtype: str,
-                                 distributed_executor_backend: Optional[str],
-                                 size_wrapper: ImageSizeWrapper, 
-                                 hf_runner,
-                                 vllm_runner, image_assets: _ImageAssets):
-    # Grab the model type's global model config to leverage callables
-    test_info = VLM_TEST_SETTINGS[model_type]
-    inputs = vlm_utils.build_single_image_inputs_from_test_info(
-        test_info, image_assets, size_wrapper, tmp_path
+    vlm_utils.get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VlmTestType.EMBEDDING,
+        fork_new_process_for_each_test=False,
     )
-
-    vlm_utils.run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": 1},
-        size_factors=size_wrapper,
+)
+def test_image_embedding_models(
+    model_type: str, model: str, max_tokens: int, num_logprobs: int,
+    dtype: str, distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    vllm_runner: VllmRunner, image_assets: _ImageAssets
+):
+    test_info = VLM_TEST_SETTINGS[model_type]
+    vlm_utils.run_embedding_test(
+        test_info=test_info, model=model, max_tokens=max_tokens,
+        num_logprobs=num_logprobs, dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        tensor_parallel_size=test_info.tensor_parallel_size,
-        **test_info.get_non_parametrized_runner_kwargs()
+        size_wrapper=size_wrapper, hf_runner=hf_runner,
+        vllm_runner=vllm_runner, image_assets=image_assets
     )
 
 
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
-    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
-                                       test_type=VlmTestType.EMBEDDING))
-def test_embedding_generation(model_type: str, model: str, max_tokens: int,
-                              num_logprobs: int, dtype: str,
-                              size_wrapper: ImageSizeWrapper, hf_runner,
-                              vllm_runner, image_assets: _ImageAssets):
-    # Grab the model type's global model config to leverage callables
+    "model_type,model,max_tokens,num_logprobs,distributed_executor_backend,dtype",
+    vlm_utils.get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VlmTestType.CUSTOM_INPUTS,
+        fork_new_process_for_each_test=False,
+    )
+)
+def test_custom_inputs_models(
+    model_type: str, model: str, max_tokens: int, num_logprobs: int,
+    distributed_executor_backend: Optional[str], dtype: str,
+    hf_runner: HfRunner, vllm_runner: VllmRunner
+):
     test_info = VLM_TEST_SETTINGS[model_type]
-    inputs, vllm_embeddings = vlm_utils.build_embedding_inputs_from_test_info(
-        test_info, image_assets, size_wrapper
+    vlm_utils.run_custom_inputs_test(
+        test_info=test_info, model=model, max_tokens=max_tokens,
+        num_logprobs=num_logprobs, dtype=dtype,
+        distributed_executor_backend=distributed_executor_backend,
+        hf_runner=hf_runner, vllm_runner=vllm_runner
     )
 
-    vlm_utils.run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": 1},
-        size_factors=size_wrapper,
-        vllm_embeddings=vllm_embeddings,
-        **test_info.get_non_parametrized_runner_kwargs()
+
+#### Tests filtering for things running each test as a new process
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    vlm_utils.get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VlmTestType.IMAGE,
+        fork_new_process_for_each_test=True,
+    )
+)
+@fork_new_process_for_each_test
+def test_single_image_models_heavy(
+    tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
+    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    vllm_runner: VllmRunner, image_assets: _ImageAssets
+):
+    test_info = VLM_TEST_SETTINGS[model_type]
+    vlm_utils.run_single_image_test(
+        tmp_path=tmp_path, test_info=test_info, model=model,
+        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        distributed_executor_backend=distributed_executor_backend,
+        size_wrapper=size_wrapper, hf_runner=hf_runner,
+        vllm_runner=vllm_runner, image_assets=image_assets)
+
+
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    vlm_utils.get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VlmTestType.MULTI_IMAGE,
+        fork_new_process_for_each_test=True,
+    )
+)
+@fork_new_process_for_each_test
+def test_multi_image_models_heavy(
+    tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
+    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    vllm_runner: VllmRunner, image_assets: _ImageAssets
+):
+    test_info = VLM_TEST_SETTINGS[model_type]
+    vlm_utils.run_multi_image_test(
+        tmp_path=tmp_path, test_info=test_info, model=model,
+        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        distributed_executor_backend=distributed_executor_backend,
+        size_wrapper=size_wrapper, hf_runner=hf_runner,
+        vllm_runner=vllm_runner, image_assets=image_assets
     )
 
 
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
-    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
-                                       test_type=VlmTestType.MULTI_IMAGE))
-def test_multi_image_generation(tmp_path: PosixPath, model_type: str,
-                                model: str, max_tokens: int, num_logprobs: int,
-                                dtype: str,
-                                size_wrapper: ImageSizeWrapper,
-                                hf_runner, vllm_runner,
-                                image_assets: _ImageAssets):
-    # Grab the model type's global model config to leverage callables
-    test_info = VLM_TEST_SETTINGS[model_type]
-    inputs = vlm_utils.build_multi_image_inputs_from_test_info(
-        test_info, image_assets, size_wrapper, tmp_path
+    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    vlm_utils.get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VlmTestType.EMBEDDING,
+        fork_new_process_for_each_test=True,
     )
-
-    vlm_utils.run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": len(image_assets)},
-        size_factors=size_wrapper,
-        **test_info.get_non_parametrized_runner_kwargs()
+)
+@fork_new_process_for_each_test
+def test_image_embedding_models_heavy(
+    model_type: str, model: str, max_tokens: int, num_logprobs: int,
+    dtype: str, distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    vllm_runner: VllmRunner, image_assets: _ImageAssets
+):
+    test_info = VLM_TEST_SETTINGS[model_type]
+    vlm_utils.run_embedding_test(
+        test_info=test_info, model=model, max_tokens=max_tokens,
+        num_logprobs=num_logprobs, dtype=dtype,
+        distributed_executor_backend=distributed_executor_backend,
+        size_wrapper=size_wrapper, hf_runner=hf_runner,
+        vllm_runner=vllm_runner, image_assets=image_assets
     )
 
 
-@pytest.mark.parametrize("model_type,model,max_tokens,num_logprobs,dtype",
-                         vlm_utils.get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VlmTestType.CUSTOM_INPUTS))
-def test_custom_inputs(model_type: str, model: str, max_tokens: int,
-                       num_logprobs: int, dtype: str,
-                       hf_runner, vllm_runner):
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,distributed_executor_backend,dtype",
+    vlm_utils.get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VlmTestType.CUSTOM_INPUTS,
+        fork_new_process_for_each_test=True,
+    )
+)
+@fork_new_process_for_each_test
+def test_custom_inputs_models_heavy(
+    model_type: str, model: str, max_tokens: int, num_logprobs: int, 
+    distributed_executor_backend: Optional[str], dtype: str,
+    hf_runner: HfRunner, vllm_runner: VllmRunner
+):
     test_info = VLM_TEST_SETTINGS[model_type]
-    custom_test_opts = test_info.custom_test_opts
-    # Custom test cases can provide inputs directly, but they need to
-    # explicitly provided a CustomTestConfig, which wraps the inputs and
-    # the limit_mm_per_prompt
-    assert custom_test_opts is not None
-
-    inputs = custom_test_opts.inputs
-    limit_mm_per_prompt = custom_test_opts.limit_mm_per_prompt
-
-    assert inputs is not None and limit_mm_per_prompt is not None
-    vlm_utils.run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-        size_factors=None,
-        **test_info.get_non_parametrized_runner_kwargs()
+    vlm_utils.run_custom_inputs_test(
+        test_info=test_info, model=model, max_tokens=max_tokens,
+        num_logprobs=num_logprobs, dtype=dtype,
+        distributed_executor_backend=distributed_executor_backend,
+        hf_runner=hf_runner, vllm_runner=vllm_runner
     )
