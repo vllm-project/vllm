@@ -161,7 +161,6 @@ class GroupCoordinator:
     rank_in_group: int  # rank inside the group
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
-    #device_mesh: DeviceMesh
     use_pynccl: bool  # a hint of whether to use PyNccl
     use_custom_allreduce: bool  # a hint of whether to use CustomAllreduce
     # communicators are only created for world size > 1
@@ -953,7 +952,7 @@ def graph_capture():
 
 logger = init_logger(__name__)
 
-_ENABLE_CUSTOM_ALL_REDUCE = False #True
+_ENABLE_CUSTOM_ALL_REDUCE = False # True
 
 
 def set_custom_all_reduce(enable: bool):
@@ -1065,8 +1064,8 @@ def initialize_model_parallel(
                                     use_message_queue_broadcaster=True,
                                     group_name="tp")
 
-    print(f"ENABLE! {_TP.device_group.group_name}, {backend}")
-    _symmetric_memory.enable_symm_mem_for_group(_TP.device_group.group_name)
+    #print(f"ENABLE! {_TP.device_group.group_name}, {backend}")
+    #_symmetric_memory.enable_symm_mem_for_group(_TP.device_group.group_name)
 
 
     # Build the pipeline model-parallel groups.

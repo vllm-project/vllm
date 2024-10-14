@@ -37,7 +37,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               should_slice)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -274,28 +275,22 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
+        print(f"RESIDUAL SHAPE = {residual.shape}")
+
         def slices(residual) -> bool:
-            return [residual]
-            if residual.shape[0] < 128:
+            if not should_slice(residual.shape):
                 print(f"SLICES TOO SMALL {[residual.shape]}")
-                return [residual]
+                return []
 
             n_slices = get_tensor_model_parallel_world_size()
             residual_slices = torch.chunk(residual, n_slices, dim=0)
-            if all(r.shape == residual_slices[0].shape for r in residual_slices):
-                print(f"SLICES SAME {[r.shape for r in residual_slices]}")
-                return residual_slices
-            else:
-                print(f"SLICES TAIL {[residual.shape]}")
-                return [residual]
+            print(f"SLICES {[r.shape for r in residual_slices]}")
+            return residual_slices
 
         # Partition residual
-        if self.first_layer:
-            residual_slices = slices(residual)
-            if len(residual_slices) > 1:
-                my_residual = residual_slices[get_tensor_model_parallel_rank()]
-            else:
-                my_residual = residual
+        residual_slices = slices(residual) if self.first_layer else []
+        if len(residual_slices) > 0:
+            my_residual = residual_slices[get_tensor_model_parallel_rank()]
         else:
             my_residual = residual
 
@@ -310,8 +305,8 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states, my_residual)
         hidden_states = self.mlp(hidden_states)
 
-        if self.last_layer and len(slices(residual)) > 1:
-            print(f"GOT HERE {my_residual.shape}")
+        if self.last_layer and len(residual_slices) > 0:
+            print(f"FINAL REDUCE {my_residual.shape}")
             if True:
                 residual = tensor_model_parallel_all_gather(my_residual, 0)
             else:
