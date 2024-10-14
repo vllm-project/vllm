@@ -12,7 +12,7 @@ from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
-_LIMIT_IMAGE_PER_PROMPT = 1
+_LIMIT_IMAGE_PER_PROMPT = 3
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
@@ -244,14 +244,93 @@ def _run_test(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets, model, sizes, dtype,
-                max_tokens, num_logprobs) -> None:
+def test_models_single_leading_image(hf_runner, vllm_runner, image_assets,
+                                     model, sizes, dtype, max_tokens,
+                                     num_logprobs) -> None:
     run_test(
         hf_runner,
         vllm_runner,
         image_assets,
         model,
         sizes=sizes,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets,
+                                     model, dtype, max_tokens,
+                                     num_logprobs) -> None:
+
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
+
+    inputs = [(
+        [
+            "<|image|><|image|><|begin_of_text|>Describe 2 images.",  # noqa: E501
+            "<|image|><|image|><|begin_of_text|>Describe 2 images.",  # noqa: E501
+            "<|image|><|image|><|image|><|begin_of_text|>Describe 3 images.",  # noqa: E501
+        ],
+        [
+            [stop_sign, cherry_blossom],
+            # Images with different sizes.
+            [
+                stop_sign.resize((512, 512)),
+                stop_sign,
+            ],
+            [
+                stop_sign,
+                stop_sign.resize((512, 1536)),
+                cherry_blossom.resize((512, 1024)),
+            ],
+        ])]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        inputs,
+        model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
+                                   dtype, max_tokens, num_logprobs) -> None:
+
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
+
+    inputs = [(
+        [
+            "<|begin_of_text|>The content of the image <|image|> is",  # noqa: E501
+            "<|begin_of_text|>Between the first image <|image|> and the second image<|image|>, "  # noqa: E501
+            "which is a stop sign and which is a cherry blossom?",  # noqa: E501
+        ],
+        [
+            [stop_sign],
+            [stop_sign, cherry_blossom],
+        ])]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        inputs,
+        model,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
