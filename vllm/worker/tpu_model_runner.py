@@ -129,7 +129,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             logger.warning(
                 "The max_model_len (%d) is too large. This may degrade the "
                 "performance due to the insufficient smem size. Consider "
-                "setting --max-model-len to a smaller value.".
+                "setting --max-model-len to a smaller value.",
                 self.model_config.max_model_len)
 
     def load_model(self) -> None:
