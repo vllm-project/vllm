@@ -1,7 +1,6 @@
-
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -9,12 +8,11 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.model_runner_base import BroadcastableModelInput
-from vllm.worker.xpu_multi_step_model_runner import XPUMultiStepModelRunner,XPUStatefulModelInput
-from vllm.worker.worker import Worker, WorkerInput
-
-from vllm.worker.multi_step_worker import MultiStepWorker
+from vllm.worker.worker import WorkerInput
+from vllm.worker.xpu_multi_step_model_runner import (XPUMultiStepModelRunner,
+                                                     XPUStatefulModelInput)
 from vllm.worker.xpu_worker import XPUWorker
-from vllm.worker.xpu_model_runner import XPUModelRunnerBase
+
 
 @dataclass
 class XPUMultiStepState:
@@ -27,8 +25,8 @@ class XPUMultiStepWorker(XPUWorker):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         base_model_runner = self.model_runner
-        self.model_runner = XPUMultiStepModelRunner( # type: ignore
-            base_model_runner, # type: ignore
+        self.model_runner = XPUMultiStepModelRunner(  # type: ignore
+            base_model_runner,  # type: ignore
             base_model_runner.model_config,
             base_model_runner.parallel_config,
             base_model_runner.scheduler_config,
@@ -45,6 +43,7 @@ class XPUMultiStepWorker(XPUWorker):
         self.multi_step_states: List[
             Optional[XPUMultiStepState]] = [None] * pipeline_parallel_size
         self.temp_output = None
+
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
     ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
@@ -143,8 +142,8 @@ class XPUMultiStepWorker(XPUWorker):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[Tuple[XPUStatefulModelInput, WorkerInput, Dict[str,
-                                                              torch.Tensor]]]:
+    ) -> Optional[Tuple[XPUStatefulModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
         """
         Depending on the current state of the request and multi step worker,
         this method may skip the normal _prepare_model_input and

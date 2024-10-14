@@ -1,32 +1,29 @@
 import dataclasses
 import functools
 from dataclasses import dataclass, field
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
-import time
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
+
 import torch
 
-from vllm import _custom_ops as ops
+from vllm.attention.backends.ipex_attn import IpexAttnMetadata
 from vllm.distributed import get_pp_group
-from vllm.logger import init_logger
-from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
-                                                SamplerOutput,
-                                                SamplingMetadata, get_logprobs,
-                                                get_pythonized_sample_results)
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
-from vllm.worker.xpu_model_runner import (XPUModelRunnerBase,
-                                        ModelInputForXPUWithSamplingMetadata)
-from vllm.worker.multi_step_model_runner import PythonizationCache, deferred_pythonize_logprobs
 from vllm.worker.model_runner_base import (
     BroadcastableModelInput, _init_attn_metadata_from_tensor_dict,
     _init_frozen_model_input_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-from vllm.attention.backends.ipex_attn import IpexAttnMetadata
+from vllm.worker.multi_step_model_runner import (PythonizationCache,
+                                                 deferred_pythonize_logprobs)
+from vllm.worker.xpu_model_runner import (ModelInputForXPUWithSamplingMetadata,
+                                          XPUModelRunnerBase)
+
 from ..model_executor.model_loader.tensorizer import TensorizerConfig
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
+
 
 @dataclass
 class XPUModelOutput:
@@ -70,7 +67,8 @@ class XPUModelOutput:
                 input_metadata, copy_stream, pinned_sampled_token_buffer,
                 False)
 
-    def _pythonize_sampler_output(self, input_metadata: "XPUStatefulModelInput",
+    def _pythonize_sampler_output(self,
+                                  input_metadata: "XPUStatefulModelInput",
                                   copy_stream: torch.xpu.Stream,
                                   pinned_sampled_token_buffer: torch.Tensor,
                                   blocking: bool) -> bool:
@@ -102,7 +100,6 @@ class XPUModelOutput:
         return True
 
 
-
 @dataclass(frozen=False)
 class XPUStatefulModelInput(BroadcastableModelInput):
     # actual frozen model input dataclass passed to _base_model_runner
@@ -121,8 +118,8 @@ class XPUStatefulModelInput(BroadcastableModelInput):
     # ping-pong data structures for multi-step to wait on the previous step
     step_xpu_events: List[torch.xpu.Event] = field(
         default_factory=lambda: [torch.xpu.Event()] * 2)
-        # FIXME: use blocking
-        # default_factory=lambda: [torch.xpu.Event(blocking=True)] * 2)
+    # FIXME: use blocking
+    # default_factory=lambda: [torch.xpu.Event(blocking=True)] * 2)
     num_seqs: int = -1
     num_queries: int = -1
 
@@ -161,10 +158,10 @@ class XPUStatefulModelInput(BroadcastableModelInput):
         # on it. We modulo by 2 to keep the events in a circular buffer and
         # support any attn backends that may be supported in the future. ie
         # Flashinfer would want two DecodeWrappers to overlap the CPU and GPU.
-        
+
         self.step_xpu_events[self.current_step & 1] = \
             torch.xpu.Event()
-            # torch.xpu.Event(blocking=True)
+        # torch.xpu.Event(blocking=True)
         self.step_xpu_events[self.current_step & 1].record(current_stream)
 
     def wait_previous_step(self):
@@ -183,9 +180,9 @@ class XPUStatefulModelInput(BroadcastableModelInput):
                            sampled_token_ids: Optional[torch.Tensor] = None):
         self.cached_outputs.append(
             XPUModelOutput(sampler_output=sampler_output,
-                            sampler_output_ready_event=None,
-                            sampled_token_ids=sampled_token_ids,
-                            pythonized=False))
+                           sampler_output_ready_event=None,
+                           sampled_token_ids=sampled_token_ids,
+                           pythonized=False))
 
 
 # mypy: disable-error-code=type-var
@@ -193,11 +190,11 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
     # mypy: enable-error-code=type-var
     def __init__(self, base_model_runner: XPUModelRunnerBase, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        
+
         # uses the base model runner to execute the model and wraps it with
         # multi-step logic
         self._base_model_runner: XPUModelRunnerBase = base_model_runner
-    
+
         self.is_multi_step = self.scheduler_config.is_multi_step
         # used to copy tensors from GPU to CPU asynchronously
         self._copy_stream = torch.xpu.Stream()
@@ -243,7 +240,7 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
                 if model_output.pythonized:
                     ctx = output_proc_callback.keywords["ctx"]
                     ctx.append_output(
-                        outputs=[model_output.sampler_output], 
+                        outputs=[model_output.sampler_output],
                         seq_group_metadata_list=ctx.seq_group_metadata_list,
                         scheduler_outputs=ctx.scheduler_outputs,
                         is_async=False,
@@ -302,7 +299,7 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
                 outputs.append(output.sampler_output)
 
         return outputs
-    
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -396,8 +393,8 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
                     0].sampled_token_ids.cpu()
             model_input.cached_outputs.append(
                 XPUModelOutput(output[0], output_ready_event,
-                            output[0].sampled_token_ids, False,
-                            output[0].logprobs, self.pythonization_cache))
+                               output[0].sampled_token_ids, False,
+                               output[0].logprobs, self.pythonization_cache))
 
             # These GPU tensors are not required by multi-step;
             # erase them to ensure they are not pythonized or
@@ -470,21 +467,26 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
 
         # refer ops.advance_step()
         next_seq_len = attn_metadata.seq_lens_tensor + 1
-        next_input_pos = next_seq_len - 1
+        next_input_pos: torch.Tensor = next_seq_len - 1
         attn_metadata.seq_lens_tensor = next_seq_len
 
         block_index = next_input_pos // self.block_size
         block_offset = next_input_pos % self.block_size
         slot = attn_metadata.block_tables
-        slot_num = slot[torch.arange(num_queries), block_index] * self.block_size + block_offset
+        slot_num = slot[torch.arange(num_queries),
+                        block_index] * self.block_size + block_offset
         attn_metadata.slot_mapping = slot_num.to(dtype=torch.long)
 
-        tmp_input_tokens = frozen_model_input.input_tokens
-        sampled_token_ids = model_input.cached_outputs[-1].sampled_token_ids
+        tmp_input_tokens: Optional[
+            torch.Tensor] = frozen_model_input.input_tokens
+        sampled_token_ids: Optional[
+            torch.Tensor] = model_input.cached_outputs[-1].sampled_token_ids
+        assert tmp_input_tokens is not None
+        assert sampled_token_ids is not None
         if sampled_token_ids.dim() > 1 and sampled_token_ids.size(-1) == 1:
             sampled_token_ids = sampled_token_ids.squeeze(-1)
         tmp_input_tokens[:num_queries] = sampled_token_ids[:num_queries]
-        tmp_input_positions = frozen_model_input.input_positions
+        tmp_input_positions: torch.Tensor = frozen_model_input.input_positions
         tmp_input_positions[:num_queries] = next_input_pos[:num_queries]
         frozen_model_input = dataclasses.replace(
             frozen_model_input,
@@ -504,7 +506,7 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
 
     def load_model(self) -> None:
         return self._base_model_runner.load_model()
-    
+
     def save_sharded_state(
         self,
         path: str,
@@ -522,7 +524,6 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
         return self._base_model_runner.profile_run()
 
 
-    
 def _pythonize_sampler_output(
     model_input: XPUStatefulModelInput,
     output: SamplerOutput,
