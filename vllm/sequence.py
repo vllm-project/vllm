@@ -482,6 +482,10 @@ class Sequence:
             inputs).get("encoder_multi_modal_data")) or {}
 
     @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        return self.inputs.get("mm_processor_kwargs") or {}
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -711,6 +715,14 @@ class SequenceGroup:
         return self.seqs[0].multi_modal_data
 
     @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        # As with multi-modal data, all sequences in the group should have the
+        # same processor kwargs (i.e., mm_processor_kwargs are optionally
+        # provided per request; note that are independent of whether the model
+        # decoder-only or an encoder-decoder).
+        return self.seqs[0].mm_processor_kwargs
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -791,14 +803,14 @@ class SequenceGroup:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
         if self.sampling_params:
-            best_of = self.sampling_params.best_of
-            assert isinstance(best_of, int)
-            if best_of > self.num_seqs():
+            n = self.sampling_params.n
+            assert isinstance(n, int)
+            if n > self.num_seqs():
                 # At prompt stage, the sequence group is not yet filled up
                 # and only have one sequence running. However, in the
-                # generation stage, we will have `best_of` sequences
+                # generation stage, we will have `n` sequences
                 # running.
-                return best_of
+                return n
         # At sampling stages, return the number of actual sequences
         # that are not finished yet.
         return self.num_unfinished_seqs()
@@ -949,6 +961,7 @@ class SequenceGroupMetadata(
             used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
+        mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None 
                           unless you are working with an encoder/decoder
@@ -975,6 +988,7 @@ class SequenceGroupMetadata(
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
@@ -1123,10 +1137,9 @@ class EmbeddingSequenceGroupOutput(
         return self.embeddings == other.embeddings
 
 
-class IntermediateTensors(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
+# cannot use msgspec.Struct here because Dynamo does not support it
+@dataclass
+class IntermediateTensors:
     """For all pipeline stages except the last, we need to return the hidden
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.

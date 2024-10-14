@@ -77,8 +77,8 @@ steps:
   - vllm/
   - tests/basic_correctness/test_chunked_prefill
   commands:
-  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
-  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_ATTENTION_BACKEND=XFORMERS VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_ATTENTION_BACKEND=FLASH_ATTN VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test # 10min
   mirror_hardwares: [amd]
@@ -88,7 +88,11 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
-  - pytest -v -s core
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core/test_scheduler.py
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/test_chunked_prefill_scheduler.py
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/block/e2e/test_correctness.py
+  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/block/e2e/test_correctness_sliding_window.py
+  - pytest -v -s core --ignore=core/block/e2e/test_correctness.py --ignore=core/test_scheduler.py --ignore=core/test_chunked_prefill_scheduler.py --ignore=core/block/e2e/test_correctness.py --ignore=core/block/e2e/test_correctness_sliding_window.py
 
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
@@ -98,7 +102,6 @@ steps:
   - vllm/
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
-  - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
@@ -118,7 +121,9 @@ steps:
   - vllm/core/
   - tests/distributed
   - tests/spec_decode/e2e/test_integration_dist_tp4
+  - tests/compile
   commands:
+  - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
@@ -186,7 +191,8 @@ steps:
   - vllm/
   - tests/prefix_caching
   commands:
-    - pytest -v -s prefix_caching
+    - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s prefix_caching/test_prefix_caching.py
+    - pytest -v -s prefix_caching --ignore=prefix_caching/test_prefix_caching.py
 
 - label: Samplers Test # 36min
   source_file_dependencies:
@@ -210,7 +216,8 @@ steps:
   - tests/spec_decode
   commands:
     - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
-    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
+    - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s spec_decode/e2e/test_compatibility.py
+    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py --ignore=spec_decode/e2e/test_compatibility.py
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amd]
@@ -226,14 +233,16 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_full_graph_smoke.py
+  - pytest -v -s compile/test_basic_correctness.py
 
-- label: "PyTorch Fullgraph Test" # 18min
-  source_file_dependencies:
-  - vllm/
-  - tests/compile
-  commands:
-  - pytest -v -s compile/test_full_graph.py
+# TODO: re-write in comparison tests, and fix symbolic shape
+# for quantization ops.
+# - label: "PyTorch Fullgraph Test" # 18min
+#   source_file_dependencies:
+#   - vllm/
+#   - tests/compile
+#   commands:
+#   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
   mirror_hardwares: [amd]
@@ -270,7 +279,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   - tests/quantization
-  command: pytest -v -s quantization
+  command: VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -278,7 +287,6 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
@@ -339,10 +347,11 @@ steps:
     - pytest -v -s models/encoder_decoder/language
     - pytest -v -s models/encoder_decoder/vision_language
 
+# This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
-  #mirror_hardwares: [amd]
   optional: true
   commands:
+    - echo 'Testing custom models...'
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
     # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
@@ -390,10 +399,10 @@ steps:
   - tests/distributed/
   - vllm/compilation
   commands:
-  - pytest -v -s ./compile/test_full_graph_multi_gpu.py
+  - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
-  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
+  - TARGET_TEST_SUITE=L4 VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest basic_correctness/ -v -s -m distributed_2_gpus
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m distributed_2_gpus
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
@@ -492,6 +501,5 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-large.txt -t 4
