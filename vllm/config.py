@@ -1086,7 +1086,8 @@ class SchedulerConfig:
     def engine_permits_multi_step_scheduling(self) -> bool:
         """Base multi-step setting, configured by user.
 
-        Can be overridden by scheduler if multi-step scheduling is not supported in the given request.
+        Can be overridden by scheduler if multi-step scheduling is not supported
+        in the given request.
         """
         return self.num_scheduler_steps > 1
 
