@@ -5,7 +5,8 @@ from typing import Dict, List, Tuple
 import torch
 import os
 
-from infinity import InfinityConnection
+import infinistore
+
 from vllm.attention import AttentionMetadata
 from vllm.distributed.kv_transfer.base import KVCacheTransporterBase
 
@@ -20,13 +21,23 @@ class InfiniStoreKVCacheTransporter(KVCacheTransporterBase):
             raise ValueError("model cannot be empty.")
         if tokens_per_page <= 0:
             raise ValueError("tokens_per_page must be greater than 0.")
-
+        
         self.model = model
         self.tokens_per_page = tokens_per_page
-        self.conn: InfinityConnection = InfinityConnection()
-       
+
         infinite_server = os.environ.get("INFINITE_STORE_SERVER", Default_Infinite_Server)
-        print("~~~~~~~~~~~~~connecting to infinite store server: ", infinite_server)
+        infinite_server = infinite_server.strip('"')
+        infinte_config = infinistore.ClientConfig(
+            host_addr=infinite_server,
+            service_port=22345,
+            log_level="warning",
+            connection_type=infinistore.TYPE_RDMA,
+        )
+
+        self.conn = infinistore.InfinityConnection(infinte_config)
+       
+        logger.info("connecting to infinite store server: ", infinite_server)
+        
         self.conn.connect(infinite_server)
 
     def _compute_kv_cache_block_offsets(
