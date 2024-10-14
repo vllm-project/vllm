@@ -203,6 +203,11 @@ def baichuan_zero_lora_files():
 
 
 @pytest.fixture(scope="session")
+def baichuan_regex_lora_files():
+    return snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex")
+
+
+@pytest.fixture(scope="session")
 def minicpmv_lora_files():
     return snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
 

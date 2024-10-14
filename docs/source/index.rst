@@ -88,6 +88,7 @@ Documentation
    serving/usage_stats
    serving/integrations
    serving/tensorizer
+   serving/compatibility_matrix
    serving/faq
 
 .. toctree::
