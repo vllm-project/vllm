@@ -431,6 +431,7 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
     ) -> bool:
+        """:class:`SequenceGroup`s with best_of>1 are incompat. w/ multi-step"""
         return (seq_group.sampling_params is not None
                 and seq_group.sampling_params.best_of is not None
                 and seq_group.sampling_params.best_of > 1)
@@ -747,8 +748,8 @@ class Scheduler:
             is_prefill = seq_group.is_prefill()
             alloc_status = self.block_manager.can_swap_in(
                 seq_group,
-                self._get_current_step_num_lookahead_slots(is_prefill, 
-                                                           enable_chunking))
+                self._get_current_step_num_lookahead_slots(
+                    is_prefill, enable_chunking))
             if alloc_status == AllocStatus.LATER:
                 break
             elif alloc_status == AllocStatus.NEVER:
@@ -968,7 +969,7 @@ class Scheduler:
             if (self._current_step_is_multi_step and enable_chunking):
                 num_lookahead_slots = (
                     self._get_current_step_num_lookahead_slots(
-                    True, enable_chunking))
+                        True, enable_chunking))
 
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(
@@ -1637,7 +1638,7 @@ class Scheduler:
         return passed_delay
 
     def _get_current_step_num_lookahead_slots(self, is_prefill: bool,
-                                 enable_chunking: bool) -> int:
+                                              enable_chunking: bool) -> int:
         """The number of slots to allocate per sequence per step, beyond known
         token ids. Speculative decoding uses these slots to store KV activations
         of tokens which may or may not be accepted.
