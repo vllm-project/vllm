@@ -5,15 +5,19 @@ comparable to vLLM, etc.
 import itertools
 import re
 from pathlib import PosixPath
+import types
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
+from PIL.Image import Image
+import torch
 from transformers import AutoConfig, AutoTokenizer, BatchEncoding
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.transformers_utils.tokenizer import patch_padding_side
 
-from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets
+from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets, HfRunner
 from .vlm_test_types import (EMBEDDING_SIZE_FACTORS, TEST_IMG_PLACEHOLDER,
                              ImageSizeWrapper, SizeType, VllmOutput,
                              VLMTestInfo, VlmTestType)
@@ -189,13 +193,117 @@ def qwen_prompt_path_encoder(
         )
     return prompt
 
+####### Model-specific HuggingFace runner patchers
+def glm_patch_hf_runner(hf_model: HfRunner):
+    """Patches and returns an instance of the HfRunner to use for GLM4."""
+    hf_processor = hf_model.processor
+    patch_padding_side(hf_processor)
+
+    def processor(*args, text="", images=None, **kwargs):
+        if images is None:
+            return hf_processor(*args, **kwargs)
+
+        return hf_processor.apply_chat_template(
+            [{
+                "role": "user",
+                "image": images,
+                "content": text
+            }],
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            **kwargs,
+        )
+
+    hf_model.processor = processor
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.transformer.output_layer
+    return hf_model
+
+
+def internvl_patch_hf_runner(hf_model: HfRunner):
+    class InternVLProcessor:
+        """A simple processor for InternVL2 which misses a processor."""
+
+        def __init__(self, hf_runner: HfRunner):
+            self.num_image_token = hf_runner.model.num_image_token
+            self.tokenizer = hf_runner.tokenizer
+            self.dtype = hf_runner.model.dtype
+
+            self.config = AutoConfig.from_pretrained(hf_runner.model_name,
+                                                     trust_remote_code=True)
+            self.vision_config = self.config.vision_config
+            self.use_thumbnail = self.config.use_thumbnail
+            self.min_num = self.config.min_dynamic_patch
+            self.max_num = self.config.max_dynamic_patch
+            self.image_size = self.vision_config.image_size
+
+        def __call__(self, text: str, images: Union[Image, List[Image]],
+                     **kwargs):
+            from vllm.model_executor.models.internvl import (
+                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
+            images = [images] if isinstance(images, Image) else images
+            pixel_values = [
+                image_to_pixel_values(image, self.image_size, self.min_num,
+                                      self.max_num,
+                                      self.use_thumbnail).to(self.dtype)
+                for image in images
+            ]
+            num_patches_list = [
+                pixel_value.shape[0] for pixel_value in pixel_values
+            ]
+            pixel_values = torch.cat(pixel_values, dim=0)
+            for num_patches in num_patches_list:
+                context_tokens = IMG_CONTEXT * self.num_image_token \
+                    * num_patches
+                image_tokens = IMG_START + context_tokens + IMG_END
+                text = text.replace('<image>', image_tokens, 1)
+            prompt = self.tokenizer(text, return_tensors="pt")
+            prompt.update({"pixel_values": pixel_values})
+            return prompt
+
+    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids(
+        "<IMG_CONTEXT>")
+    hf_model.model.img_context_token_id = img_context_token_id
+    hf_model.processor = InternVLProcessor(hf_model)
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.generate = types.MethodType(_internvl_generate,
+                                               hf_model.model)
+    return hf_model
+
+
+def _internvl_generate(
+    self,
+    pixel_values: torch.FloatTensor,
+    input_ids: torch.FloatTensor,
+    attention_mask: Optional[torch.LongTensor] = None,
+    **generate_kwargs,
+) -> torch.LongTensor:
+    """Generate method for InternVL2 model without fixed use_cache."""
+    assert self.img_context_token_id is not None
+    vit_embeds = self.extract_feature(pixel_values)
+    input_embeds = self.language_model.get_input_embeddings()(input_ids)
+    B, N, C = input_embeds.shape
+    input_embeds = input_embeds.reshape(B * N, C)
+
+    input_ids = input_ids.reshape(B * N)
+    selected = (input_ids == self.img_context_token_id)
+    assert selected.sum() != 0
+    input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
+
+    input_embeds = input_embeds.reshape(B, N, C)
+
+    return self.language_model.generate(
+        inputs_embeds=input_embeds,
+        attention_mask=attention_mask,
+        **generate_kwargs,
+    )
 
 ####### Utils for model-agnostic prompt manipulation / case filtering
 # Most of these help us handle image tags and configure things
 # that would normally be handled by parametrize(), since we want
 # to be able to adapt settings like num_logprobs on a per-model basis
-
-
 def replace_test_img_placeholders(prompt: str,
                                   img_idx_to_prompt: Callable) -> str:
     """Given a prompt, replaces each TEST_IMG_PLACEHOLDER with the
