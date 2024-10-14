@@ -21,7 +21,7 @@ ref_answers = [
     "Wales"
 ]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0, n=1, use_beam_search=False)
+sampling_params = SamplingParams(temperature=0, n=1)
 
 # Create an LLM.
 llm = LLM(model="facebook/opt-125m", max_model_len=32, max_num_seqs=4)
