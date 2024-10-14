@@ -244,7 +244,7 @@ class FluxAGCook(LinearMethodBase):
 # This check is a hack
 def should_slice(shape) -> bool:
     n_slices = get_tensor_model_parallel_world_size()
-    return False and (shape[0] % n_slices == 0 and shape[0] >= 128)
+    return (shape[0] % n_slices == 0 and shape[0] >= 128)
 
 
 class MatmulRS(LinearMethodBase):
