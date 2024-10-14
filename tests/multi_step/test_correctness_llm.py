@@ -257,12 +257,11 @@ def test_multi_step_llm_best_of_fallback(
       model: model under test (same for single- and multi-step engines)
       dtype: tensor datatype for engine to utilize
       tp_size: degree of tensor-parallelism
-      max_output_len: the maximum number of tokens to generate
       enforce_eager
       num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
       num_prompts: number of example prompts under test
-      max_output_len
+      max_output_len: the maximum number of tokens to generate
       n: num seqs to output per :class:`SequenceGroup`
       best_of: num seqs per :class:`SequenceGroup` from which to choose
       enable_chunked_prefill
@@ -275,7 +274,7 @@ def test_multi_step_llm_best_of_fallback(
     prompts = prompts[:num_prompts]
     assert len(prompts) == num_prompts
 
-    # Challenging sample parameters which should trigger a
+    # Sampling parameters with best_of > 1 which should trigger a
     # multi-step scheduler to fall back on single-step scheduling
     sampling_params_best_of_gt_1 = SamplingParams(
         max_tokens=max_output_len,
@@ -285,15 +284,6 @@ def test_multi_step_llm_best_of_fallback(
         best_of=best_of,
         seed=42,
     )
-
-    # Easy sample parameters, for testing that multi-step scheduling
-    # resumes without issue once all best_of > 1 requests are completed.
-    # sampling_params_best_of_eq_1 = SamplingParams(
-    #     max_tokens=max_output_len,
-    #     ignore_eos=True,
-    #     temperature=0.0,
-    #     seed=42,
-    # )
 
     with vllm_runner(
             model,
@@ -306,9 +296,6 @@ def test_multi_step_llm_best_of_fallback(
             enable_chunked_prefill=enable_chunked_prefill,
             enable_prefix_caching=enable_prefix_caching,
     ) as vllm_model:
-        # _ = vllm_model.generate(prompts,
-        #                                  sampling_params_best_of_eq_1)
-
         outputs_ss_best_of_gt_1 = vllm_model.generate(
             prompts, sampling_params_best_of_gt_1)
 
@@ -323,14 +310,8 @@ def test_multi_step_llm_best_of_fallback(
             enable_chunked_prefill=enable_chunked_prefill,
             enable_prefix_caching=enable_prefix_caching,
     ) as vllm_model:
-        # outputs_ms_best_of_eq_1_baseline = (vllm_model.generate(prompts,
-        #                                     sampling_params_best_of_eq_1))
-
         outputs_ms_best_of_gt_1 = (vllm_model.generate(
             prompts, sampling_params_best_of_gt_1))
-
-        # outputs_ms_best_of_eq_1_finally = (vllm_model.generate(prompts,
-        #                                     sampling_params_best_of_eq_1))
 
     check_outputs_equal(
         outputs_0_lst=outputs_ss_best_of_gt_1,
@@ -338,13 +319,6 @@ def test_multi_step_llm_best_of_fallback(
         name_0="outputs_ss_best_of_gt_1",
         name_1="outputs_ms_best_of_gt_1",
     )
-
-    # check_outputs_equal(
-    #     outputs_0_lst=outputs_ms_best_of_eq_1_baseline,
-    #     outputs_1_lst=outputs_ms_best_of_eq_1_finally,
-    #     name_0="outputs_ms_best_of_eq_1_baseline",
-    #     name_1="outputs_ms_best_of_eq_1_finally",
-    # )
 
 
 @pytest.mark.parametrize("model", ["JackFram/llama-160m"])
