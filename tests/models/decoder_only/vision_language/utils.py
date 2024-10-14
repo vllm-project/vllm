@@ -386,8 +386,11 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
             ensure_wrapped(test_info.max_tokens),
             ensure_wrapped(test_info.num_logprobs),
             ensure_wrapped(test_info.dtype),
-            ensure_wrapped(test_info.distributed_executor_backend),
         ]
+        # Only pass distributed executor backend / tp info to heavy tests
+        if test_type == VlmTestType.NEW_PROC_IMAGE:
+            iterables.append(ensure_wrapped(test_info.distributed_executor_backend))
+
         # No sizes passed for custom inputs, since inputs are directly provided
         if test_type != VlmTestType.CUSTOM_INPUTS:
             iterables.append(get_wrapped_test_sizes(test_info, test_type))
@@ -612,7 +615,6 @@ def run_test(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-    tensor_parallel_size: int,
     enforce_eager: bool,
     max_model_len: int,
     max_num_seqs: int,
@@ -624,10 +626,11 @@ def run_test(
     comparator: Callable,
     get_stop_token_ids: Optional[Callable],
     limit_mm_per_prompt: Dict[str, int],
-    distributed_executor_backend: Optional[str],
     size_factors,
     model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
+    distributed_executor_backend: Optional[str]=None,
+    tensor_parallel_size: int=1,
     vllm_embeddings: Optional[torch.Tensor]=None,
 ):
     # In the case of embeddings, vLLM takes separate input tensors

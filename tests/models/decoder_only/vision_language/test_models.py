@@ -8,11 +8,11 @@ from typing import Optional
 import pytest
 from transformers import AutoModelForVision2Seq, AutoTokenizer, BatchEncoding
 
-from vllm.utils import identity, is_cpu, is_hip
+from vllm.utils import identity, is_cpu, is_hip, cuda_device_count_stateless
 
 from ....conftest import _ImageAssets, IMAGE_ASSETS
 from ...utils import check_outputs_equal
-from ....utils import get_memory_gb
+from ....utils import get_memory_gb, fork_new_process_for_each_test
 from . import utils as vlm_utils
 from .vlm_test_types import (CustomTestOptions, ImageSizeWrapper,
                              VLMTestInfo, VlmTestType)
@@ -23,6 +23,17 @@ from .vlm_test_types import (CustomTestOptions, ImageSizeWrapper,
 # FIXME (mattwong, gshtrasb, hongxiayan)
 if is_hip():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
+
+
+COMMON_BROADCAST_SETTINGS = {
+    "test_type": VlmTestType.NEW_PROC_IMAGE,
+    "dtype": "half",
+    "max_tokens": 5,
+    "tensor_parallel_size": 2,
+    "image_size_factors": ((.25, 0.5, 1.0),),
+    "distributed_executor_backend": ("ray", "mp"),
+    "skip": cuda_device_count_stateless() < 2,
+}
 
 ### Test configuration for specific models;
 # NOTE: the key in the dict below is not mostly used as an identifier;
@@ -72,13 +83,13 @@ VLM_TEST_SETTINGS = {
     "glm4": VLMTestInfo(
         models="THUDM/glm-4v-9b",
         prompt_formatter=identity,
-        test_type=VlmTestType.IMAGE,
+        test_type=VlmTestType.NEW_PROC_IMAGE,
         img_idx_to_prompt=lambda idx: "",
         max_model_len=2048,
         max_num_seqs=2,
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
-        skip=(get_memory_gb() < 48), # large GPU test; TODO fix new process forking
+        skip=(get_memory_gb() < 48), # large GPU test; run in separate proc
         patch_hf_runner=vlm_utils.glm_patch_hf_runner,
     ),
     "llava": VLMTestInfo(
@@ -170,6 +181,36 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16" if is_cpu() else "half",
         use_tokenizer_eos=True,
         patch_hf_runner=vlm_utils.internvl_patch_hf_runner,
+    ),
+    # Tensor parallel / multi-gpu broadcast tests
+    "broadcast-chameleon": VLMTestInfo(
+        models="facebook/chameleon-7b",
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        max_model_len=4096,
+        auto_cls=AutoModelForVision2Seq,
+        postprocess_inputs=vlm_utils.get_key_type_post_processor(
+            "pixel_values", "half"
+        ),
+        vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
+        hf_output_post_proc = lambda hf_output, model: hf_output[:2],
+        comparator=check_outputs_equal,
+        **COMMON_BROADCAST_SETTINGS,
+    ),
+    "broadcast-llava": VLMTestInfo(
+        models="llava-hf/llava-1.5-7b-hf",
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        max_model_len=4096,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=vlm_utils.llava_image_vllm_to_hf_output,
+        **COMMON_BROADCAST_SETTINGS,
+    ),
+    "broadcast-llava-next": VLMTestInfo(
+        models="llava-hf/llava-v1.6-mistral-7b-hf",
+        prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
+        max_model_len=10240,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=vlm_utils.llava_image_vllm_to_hf_output,
+        **COMMON_BROADCAST_SETTINGS,
     )
 }
 # yapf: enable
@@ -185,10 +226,42 @@ VLM_TEST_SETTINGS = {
 # relevant VLMTestInfo object into a combination that can be
 # consumed by parametrize()
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
     vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
                                        test_type=VlmTestType.IMAGE))
 def test_single_image_generation(tmp_path: PosixPath, model_type: str,
+                                 model: str, max_tokens: int,
+                                 num_logprobs: int, dtype: str,
+                                 size_wrapper: ImageSizeWrapper, 
+                                 hf_runner,
+                                 vllm_runner, image_assets: _ImageAssets):
+    # Grab the model type's global model config to leverage callables
+    test_info = VLM_TEST_SETTINGS[model_type]
+    inputs = vlm_utils.build_single_image_inputs_from_test_info(
+        test_info, image_assets, size_wrapper, tmp_path
+    )
+
+    vlm_utils.run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        limit_mm_per_prompt={"image": 1},
+        size_factors=size_wrapper,
+        **test_info.get_non_parametrized_runner_kwargs()
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
+                                       test_type=VlmTestType.NEW_PROC_IMAGE))
+@fork_new_process_for_each_test
+def test_resource_heavy_image_generation(
+                                 tmp_path: PosixPath, model_type: str,
                                  model: str, max_tokens: int,
                                  num_logprobs: int, dtype: str,
                                  distributed_executor_backend: Optional[str],
@@ -210,18 +283,19 @@ def test_single_image_generation(tmp_path: PosixPath, model_type: str,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         limit_mm_per_prompt={"image": 1},
-        distributed_executor_backend=distributed_executor_backend,
         size_factors=size_wrapper,
+        distributed_executor_backend=distributed_executor_backend,
+        tensor_parallel_size=test_info.tensor_parallel_size,
         **test_info.get_non_parametrized_runner_kwargs()
     )
 
+
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
     vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
                                        test_type=VlmTestType.EMBEDDING))
 def test_embedding_generation(model_type: str, model: str, max_tokens: int,
                               num_logprobs: int, dtype: str,
-                              distributed_executor_backend: Optional[str],
                               size_wrapper: ImageSizeWrapper, hf_runner,
                               vllm_runner, image_assets: _ImageAssets):
     # Grab the model type's global model config to leverage callables
@@ -239,7 +313,6 @@ def test_embedding_generation(model_type: str, model: str, max_tokens: int,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         limit_mm_per_prompt={"image": 1},
-        distributed_executor_backend=distributed_executor_backend,
         size_factors=size_wrapper,
         vllm_embeddings=vllm_embeddings,
         **test_info.get_non_parametrized_runner_kwargs()
@@ -247,13 +320,12 @@ def test_embedding_generation(model_type: str, model: str, max_tokens: int,
 
 
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    "model_type,model,max_tokens,num_logprobs,dtype,size_wrapper",
     vlm_utils.get_parametrized_options(VLM_TEST_SETTINGS,
                                        test_type=VlmTestType.MULTI_IMAGE))
 def test_multi_image_generation(tmp_path: PosixPath, model_type: str,
                                 model: str, max_tokens: int, num_logprobs: int,
                                 dtype: str,
-                                distributed_executor_backend: Optional[str],
                                 size_wrapper: ImageSizeWrapper,
                                 hf_runner, vllm_runner,
                                 image_assets: _ImageAssets):
@@ -272,19 +344,17 @@ def test_multi_image_generation(tmp_path: PosixPath, model_type: str,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         limit_mm_per_prompt={"image": len(image_assets)},
-        distributed_executor_backend=distributed_executor_backend,
         size_factors=size_wrapper,
         **test_info.get_non_parametrized_runner_kwargs()
     )
 
 
-@pytest.mark.parametrize("model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend",
+@pytest.mark.parametrize("model_type,model,max_tokens,num_logprobs,dtype",
                          vlm_utils.get_parametrized_options(
                              VLM_TEST_SETTINGS,
                              test_type=VlmTestType.CUSTOM_INPUTS))
 def test_custom_inputs(model_type: str, model: str, max_tokens: int,
                        num_logprobs: int, dtype: str,
-                       distributed_executor_backend: Optional[str],
                        hf_runner, vllm_runner):
     test_info = VLM_TEST_SETTINGS[model_type]
     custom_test_opts = test_info.custom_test_opts
@@ -306,7 +376,6 @@ def test_custom_inputs(model_type: str, model: str, max_tokens: int,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         limit_mm_per_prompt=limit_mm_per_prompt,
-        distributed_executor_backend=distributed_executor_backend,
         size_factors=None,
         **test_info.get_non_parametrized_runner_kwargs()
     )

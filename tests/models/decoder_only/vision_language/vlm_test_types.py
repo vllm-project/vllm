@@ -37,6 +37,9 @@ class VlmTestType(Enum):
     EMBEDDING = 3
     VIDEO = 4  # TODO
     CUSTOM_INPUTS = 5
+    # Same as IMAGE, but every test runs in a new process; the only difference
+    # is these tests pass the tensor parallelism / distributed backend info
+    NEW_PROC_IMAGE = 6
 
 
 class SizeType(Enum):
@@ -77,10 +80,14 @@ class VLMTestInfo(NamedTuple):
 
     # Exposed options for vLLM runner; we change these in a several tests,
     # but the defaults are derived from VllmRunner & the engine defaults
-    tensor_parallel_size: int = 1
     enforce_eager: bool = True
     max_model_len: int = 1024
     max_num_seqs: int = 256
+    # NOTE: distributed executor / tensor parallel settings are only passed
+    # for tp tests; this is configured separately since we run each test in a
+    # separate process
+    tensor_parallel_size: int = 1
+    distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
     # Optional callable which gets a list of token IDs from the model tokenizer
     get_stop_token_ids: Optional[Callable] = None
 
@@ -104,7 +111,6 @@ class VLMTestInfo(NamedTuple):
     max_tokens: Union[int, Tuple[int]] = 128
     num_logprobs: Union[int, Tuple[int]] = 5
     dtype: Union[str, Iterable[str]] = "half"
-    distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
     # The values provided for these two fields will be stacked and expanded
@@ -133,7 +139,6 @@ class VLMTestInfo(NamedTuple):
         test cases.
         """
         return {
-            "tensor_parallel_size": self.tensor_parallel_size,
             "enforce_eager": self.enforce_eager,
             "max_model_len": self.max_model_len,
             "max_num_seqs": self.max_num_seqs,
