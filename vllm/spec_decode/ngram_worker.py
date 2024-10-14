@@ -90,9 +90,6 @@ class NGramWorker(NonLLMProposerWorkerBase):
                 # first_match includes "values" (bool), indicating whether
                 # the match is found, and "indices", indicating the index
                 # of the first match.
-                # Note that "first_match.values.item()" triggers GPU-CPU
-                # sync so it is a bit inefficient, but we have not found
-                # a better way to do this.
                 first_match = matches.max(dim=-1)
                 if first_match.values.item():
                     proposal_start_idx = first_match.indices.add_(ngram_size)
