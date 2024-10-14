@@ -469,23 +469,36 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
         attn_metadata.advance_step(num_seqs, num_queries)
 
         # refer ops.advance_step()
-        for i in range(num_queries) :
-            frozen_model_input.input_tokens[i] = model_input.cached_outputs[-1].sampled_token_ids[i]
-            seq_len = attn_metadata.seq_lens_tensor[i]
-            next_seq_len = seq_len + 1
-            next_input_pos = next_seq_len - 1
-            attn_metadata.seq_lens_tensor[i] = next_seq_len
-            frozen_model_input.input_positions[i] = next_input_pos
-            block_index = next_input_pos // self.block_size
-            block_offset = next_input_pos % self.block_size
-            slot = attn_metadata.block_tables[i]
-            slot_num = slot[block_index] * self.block_size + block_offset
-            attn_metadata.slot_mapping[i] = slot_num
+        next_seq_len = attn_metadata.seq_lens_tensor + 1
+        next_input_pos = next_seq_len - 1
+        attn_metadata.seq_lens_tensor = next_seq_len
 
+        block_index = next_input_pos // self.block_size
+        block_offset = next_input_pos % self.block_size
+        slot = attn_metadata.block_tables
+        slot_num = slot[torch.arange(num_queries), block_index] * self.block_size + block_offset
+        attn_metadata.slot_mapping = slot_num.to(dtype=torch.long)
+
+        tmp_input_tokens = frozen_model_input.input_tokens
+        sampled_token_ids = model_input.cached_outputs[-1].sampled_token_ids
+        if sampled_token_ids.dim() > 1 and sampled_token_ids.size(-1) == 1:
+            sampled_token_ids = sampled_token_ids.squeeze(-1)
+        tmp_input_tokens[:num_queries] = sampled_token_ids[:num_queries]
+        tmp_input_positions = frozen_model_input.input_positions
+        tmp_input_positions[:num_queries] = next_input_pos[:num_queries]
+        frozen_model_input = dataclasses.replace(
+            frozen_model_input,
+            input_tokens=tmp_input_tokens,
+            input_positions=tmp_input_positions,
+        )
 
         if frozen_model_input.seq_lens is not None:
-            for i in range(num_queries):
-                frozen_model_input.seq_lens[i] = attn_metadata.seq_lens[i]
+            tmp_seq_lens = frozen_model_input.seq_lens
+            tmp_seq_lens[:num_queries] = attn_metadata.seq_lens[:num_queries]
+            frozen_model_input = dataclasses.replace(
+                frozen_model_input,
+                seq_lens=tmp_seq_lens,
+            )
 
         return model_input
 
@@ -657,4 +670,3 @@ def _pythonize_sampler_output(
                                   if logprobs_are_requested else None)))
 
     assert len(output.outputs) > 0
-
