@@ -11,7 +11,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm.sequence import SampleLogprobs
 from vllm.utils import identity
 
-from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets
+from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets, HfRunner
 from ...utils import check_logprobs_close
 
 # meta image tag; will be replaced by the appropriate tag for the model
@@ -91,6 +91,7 @@ class VLMTestInfo(NamedTuple):
     auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM
     # Callable to pass to the HF runner to run on inputs
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding] = identity
+    patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]] = None
 
     # Post processors that if defined, will run oun the outputs of the
     # vLLM and HF runner, respectively (useful for sanitization, etc).
@@ -143,4 +144,5 @@ class VLMTestInfo(NamedTuple):
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
             "model_kwargs": self.model_kwargs,
+            "patch_hf_runner": self.patch_hf_runner,
         }

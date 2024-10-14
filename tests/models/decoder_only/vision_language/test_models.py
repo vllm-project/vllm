@@ -16,6 +16,7 @@ from vllm.utils import identity, is_cpu, is_hip
 
 from ....conftest import HfRunner, VllmRunner, _ImageAssets, IMAGE_ASSETS
 from ...utils import check_outputs_equal
+from ....utils import get_memory_gb
 from . import utils as vlm_utils
 from .vlm_test_types import (MULTI_IMAGE_BASE_PROMPT,
                              SINGLE_IMAGE_BASE_PROMPTS, CustomTestOptions,
@@ -74,7 +75,18 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16" if is_cpu() else "half",
         image_size_factors=((), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)),
     ),
-    # Only embedding test has been verified for llava so far
+    "glm4": VLMTestInfo(
+        models="THUDM/glm-4v-9b",
+        prompt_formatter=identity,
+        test_type=VlmTestType.IMAGE,
+        img_idx_to_prompt=lambda idx: "",
+        max_model_len=2048,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        get_stop_token_ids=lambda tok: [151329, 151336, 151338],
+        skip=(get_memory_gb() < 48), # large GPU test
+        patch_hf_runner=vlm_utils.glm_patch_hf_runner,
+    ),
     "llava": VLMTestInfo(
         models="llava-hf/llava-1.5-7b-hf",
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
@@ -92,7 +104,6 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"image": 4},
         ),
     ),
-    # TODO - test me
     "llava-next": VLMTestInfo(
         models="llava-hf/llava-v1.6-mistral-7b-hf",
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
@@ -106,7 +117,6 @@ VLM_TEST_SETTINGS = {
         ),
         # Llava-next tests fixed sizes & the default size factors
         image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
-        skip=False,
     ),
     "minicpmv": VLMTestInfo(
         models="openbmb/MiniCPM-Llama3-V-2_5",
@@ -118,6 +128,20 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         postprocess_inputs=vlm_utils.wrap_inputs_post_processor,
         hf_output_post_proc=vlm_utils.minicmpv_trunc_hf_output,
+    ),
+    "paligemma": VLMTestInfo(
+        models="google/paligemma-3b-mix-224",
+        prompt_formatter=identity,
+        test_type=VlmTestType.IMAGE,
+        img_idx_to_prompt = lambda idx: "",
+        # Paligemma uses its own sample prompts because the default one fails
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "caption es",
+            "cherry_blossom": "What is in the picture?",
+        }),
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=vlm_utils.paligemma_vllm_to_hf_output,
+        dtype="half" if is_hip() else ("half", "float"),
     ),
     "phi3v": VLMTestInfo(
         models="microsoft/Phi-3.5-vision-instruct",
@@ -142,20 +166,6 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=vlm_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=vlm_utils.qwen_prompt_path_encoder,
     ),
-    "paligemma": VLMTestInfo(
-        models="google/paligemma-3b-mix-224",
-        prompt_formatter=identity,
-        test_type=VlmTestType.IMAGE,
-        img_idx_to_prompt = lambda idx: "",
-        # Paligemma uses its own sample prompts because the default one fails
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "caption es",
-            "cherry_blossom": "What is in the picture?",
-        }),
-        auto_cls=AutoModelForVision2Seq,
-        vllm_output_post_proc=vlm_utils.paligemma_vllm_to_hf_output,
-        dtype="half" if is_hip() else ("half", "float"),
-    ),
     # Tests above this point have been validated to align with current tests
     "intern_vl": VLMTestInfo(
         models=("OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"),
@@ -164,10 +174,11 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         num_logprobs=10,
         dtype="bfloat16" if is_cpu() else "half",
+        use_tokenizer_eos=True,
+        patch_hf_runner=vlm_utils.internvl_patch_hf_runner,
     ),
 }
 # yapf: enable
-
 
 ### Test wrappers
 # Wrappers around the core test running func for:
@@ -263,9 +274,9 @@ def test_embedding_generation(model_type: str, model: str, max_tokens: int,
              dtype=dtype,
              max_tokens=max_tokens,
              num_logprobs=num_logprobs,
-             vllm_embeddings=vllm_embeddings,
              limit_mm_per_prompt={"image": 1},
              size_factors=size_wrapper,
+             vllm_embeddings=vllm_embeddings,
              **test_info.get_non_parametrized_runner_kwargs())
 
 
@@ -363,9 +374,10 @@ def run_test(
     comparator: Callable,
     get_stop_token_ids: Optional[Callable],
     limit_mm_per_prompt: Dict[str, int],
-    size_factors=None,
-    vllm_embeddings: Optional[torch.Tensor] = None,
-    model_kwargs: Optional[Dict[str, Any]] = None,
+    size_factors,
+    model_kwargs: Optional[Dict[str, Any]],
+    patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
+    vllm_embeddings: Optional[torch.Tensor]=None,
 ):
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
@@ -395,6 +407,16 @@ def run_test(
             for prompts, images in vllm_inputs
         ]
 
+    hf_model = hf_runner(model,
+                         dtype=dtype,
+                         auto_cls=auto_cls,
+                         postprocess_inputs=postprocess_inputs,
+                         model_kwargs=model_kwargs)
+
+    # Some models need to patch things like the model processor, e.g., internvl
+    if patch_hf_runner is not None:
+        hf_model = patch_hf_runner(hf_model)
+
     # Some models need to explicitly pass the eos_token_id off the tokenizer or
     # processor for a good comparison; currently assume processor/tokenizer
     # agree on the EOS, and pull it off the tokenizer if requested.
@@ -402,11 +424,6 @@ def run_test(
     if use_tokenizer_eos:
         opt_hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
 
-    hf_model = hf_runner(model,
-                         dtype=dtype,
-                         auto_cls=auto_cls,
-                         postprocess_inputs=postprocess_inputs,
-                         model_kwargs=model_kwargs)
     with hf_model, torch.no_grad():
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
