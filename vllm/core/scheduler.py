@@ -419,8 +419,9 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
     ) -> None:
-        """If a newly added seq group has best_of>1, increment counter"""
-        if (seq_group.sampling_params is not None
+        """If new req has best_of>1 & engine supports multistep, ++count"""
+        if (self.scheduler_config.engine_permits_multi_step_scheduling
+                and seq_group.sampling_params is not None
                 and seq_group.sampling_params.best_of is not None
                 and seq_group.sampling_params.best_of > 1):
             self._multi_step_incompat_req_count += 1
@@ -429,12 +430,19 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
     ) -> None:
-        """If a finished seq group has best_of>1, decrement counter"""
-        if (seq_group.sampling_params is not None
+        """If finished req has best_of>1 & engine supports multistep, --count"""
+        if (self.scheduler_config.engine_permits_multi_step_scheduling
+                and seq_group.sampling_params is not None
                 and seq_group.sampling_params.best_of is not None
                 and seq_group.sampling_params.best_of > 1):
             assert self._multi_step_incompat_req_count > 0
             self._multi_step_incompat_req_count -= 1
+
+    def _maybe_disable_multi_step_by_sampling_params(self) -> None:
+        """Disable multi-step unless engine & all unfinished reqs support it"""
+        self.scheduler_config.current_step_is_multi_step = (
+            self.scheduler_config.engine_permits_multi_step_scheduling
+            and self._multi_step_incompat_req_count == 0)
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
@@ -1208,6 +1216,8 @@ class Scheduler:
         """Schedule queued requests."""
         # Configure the (non-)use of multi-step scheduling
         # in this step
+        self._maybe_disable_multi_step_by_sampling_params()
+        # Choose appropriate scheduler
         if self.scheduler_config.chunked_prefill_enabled:
             return self._schedule_chunked_prefill()
         else:
