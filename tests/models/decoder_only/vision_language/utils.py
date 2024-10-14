@@ -346,7 +346,8 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
 
 
 def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
-                               test_type: VlmTestType):
+                               test_type: VlmTestType,
+                               fork_per_test: bool):
     filtered_test_settings = {}
     for test_name, test_info in test_settings.items():
         # Skip if it's explicitly disabled
@@ -363,14 +364,22 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
             if test_type == VlmTestType.CUSTOM_INPUTS:
                 assert test_info.custom_test_opts is not None
 
-            filtered_test_settings[test_name] = test_info
+            # Everything looks okay; keep if this is has correct proc handling
+            if test_info.fork_new_process_for_each_test == fork_per_test:
+                filtered_test_settings[test_name] = test_info
+
     return filtered_test_settings
 
 
 def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
-                             test_type: VlmTestType):
+                             test_type: VlmTestType,
+                             fork_new_process_for_each_test: bool):
     """Converts all of our VLMTestInfo into an expanded list of parameters."""
-    test_settings = get_filtered_test_settings(test_settings, test_type)
+    test_settings = get_filtered_test_settings(
+        test_settings,
+        test_type,
+        fork_new_process_for_each_test
+    )
 
     # Ensure that something is wrapped as an iterable it's not already
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e, )
@@ -386,10 +395,8 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
             ensure_wrapped(test_info.max_tokens),
             ensure_wrapped(test_info.num_logprobs),
             ensure_wrapped(test_info.dtype),
+            ensure_wrapped(test_info.distributed_executor_backend),
         ]
-        # Only pass distributed executor backend / tp info to heavy tests
-        if test_type == VlmTestType.NEW_PROC_IMAGE:
-            iterables.append(ensure_wrapped(test_info.distributed_executor_backend))
 
         # No sizes passed for custom inputs, since inputs are directly provided
         if test_type != VlmTestType.CUSTOM_INPUTS:
@@ -479,7 +486,7 @@ def multi_image_multi_aspect_ratio_inputs_llava(is_llava):
             cherry_blossom,
         ])]
 
-### Useful builders for setting up different types of tests
+####### Useful builders for setting up different types of tests
 
 def build_embedding_inputs_from_test_info(
     test_info: VLMTestInfo,
@@ -604,8 +611,122 @@ def apply_size_scaling(image, size: Union[float, Tuple[int, int]],
     raise ValueError("ImageSizeWrapper type must be FIXED_SIZE or SIZE_FACTOR")
 
 
-### Core test implementation & details
-# run_test() is does the heavy lifting for all test types
+####### Entrypoints for running different test types
+# Wrappers for all the above, where the only difference
+# is that each test runs in a separate process
+def run_single_image_test(
+        *, tmp_path: PosixPath, test_info: VLMTestInfo,
+        model: str, max_tokens: int,
+        num_logprobs: int, dtype: str,
+        distributed_executor_backend: Optional[str],
+        size_wrapper: ImageSizeWrapper, 
+        hf_runner: HfRunner, vllm_runner: VllmRunner,
+        image_assets: _ImageAssets):
+    # Grab the model type's global model config to leverage callables
+    inputs = build_single_image_inputs_from_test_info(
+        test_info, image_assets, size_wrapper, tmp_path
+    )
+
+    run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        limit_mm_per_prompt={"image": 1},
+        size_factors=size_wrapper,
+        distributed_executor_backend=distributed_executor_backend,
+        **test_info.get_non_parametrized_runner_kwargs()
+    )
+
+
+def run_multi_image_test(
+        *, tmp_path: PosixPath, test_info: VLMTestInfo,
+        model: str, max_tokens: int,
+        num_logprobs: int, dtype: str,
+        distributed_executor_backend: Optional[str],
+        size_wrapper: ImageSizeWrapper, 
+        hf_runner: HfRunner, vllm_runner: VllmRunner,
+        image_assets: _ImageAssets
+    ):
+    # Grab the model type's global model config to leverage callables
+    inputs = build_multi_image_inputs_from_test_info(
+        test_info, image_assets, size_wrapper, tmp_path
+    )
+
+    run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        limit_mm_per_prompt={"image": len(image_assets)},
+        size_factors=size_wrapper,
+        distributed_executor_backend=distributed_executor_backend,
+        **test_info.get_non_parametrized_runner_kwargs()
+    )
+
+
+def run_embedding_test(
+    *, test_info: VLMTestInfo, model: str, max_tokens: int, num_logprobs: int,
+    dtype: str, distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    vllm_runner: VllmRunner, image_assets: _ImageAssets
+):
+    inputs, vllm_embeddings = build_embedding_inputs_from_test_info(
+        test_info, image_assets, size_wrapper
+    )
+
+    run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        limit_mm_per_prompt={"image": 1},
+        size_factors=size_wrapper,
+        vllm_embeddings=vllm_embeddings,
+        distributed_executor_backend=distributed_executor_backend,
+        **test_info.get_non_parametrized_runner_kwargs()
+    )
+
+
+def run_custom_inputs_test(
+    *, test_info: VLMTestInfo, model: str, max_tokens: int, num_logprobs: int, 
+    distributed_executor_backend: Optional[str], dtype: str,
+    hf_runner: HfRunner, vllm_runner: VllmRunner
+):
+    custom_test_opts = test_info.custom_test_opts
+    # Custom test cases can provide inputs directly, but they need to
+    # explicitly provided a CustomTestConfig, which wraps the inputs and
+    # the limit_mm_per_prompt
+    assert custom_test_opts is not None
+
+    inputs = custom_test_opts.inputs
+    limit_mm_per_prompt = custom_test_opts.limit_mm_per_prompt
+
+    assert inputs is not None and limit_mm_per_prompt is not None
+    run_test(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        inputs=inputs,
+        model=model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+        size_factors=None,
+        distributed_executor_backend=distributed_executor_backend,
+        **test_info.get_non_parametrized_runner_kwargs()
+    )
+
+####### Core test implementation & details
 def run_test(
     *,
     hf_runner: Type[HfRunner],
