@@ -288,12 +288,7 @@ def test_multi_step_llm_best_of_fallback(
 
     # Easy sample parameters, for testing that multi-step scheduling
     # resumes without issue once all best_of > 1 requests are completed.
-    sampling_params_best_of_eq_1 = SamplingParams(
-        max_tokens=max_output_len,
-        ignore_eos=True,
-        temperature=0.0,
-        seed=42,
-    )
+    sampling_params_best_of_eq_1 = SamplingParams()
 
     with vllm_runner(
             model,
