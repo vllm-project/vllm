@@ -28,7 +28,7 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "8192",
+        "None" if MODEL_NAME == "meta-llama/Llama-3.2-1B-Instruct" else "8192",
         "--enforce-eager",
         # lora config below
         "--enable-lora",
@@ -450,7 +450,7 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
+    ["meta-llama/Llama-3.2-1B-Instruct"],
 )
 async def test_chat_completion_stream_options_and_logprobs_with_long_prompts(
         client: openai.AsyncOpenAI, model_name: str):
