@@ -288,7 +288,12 @@ def test_multi_step_llm_best_of_fallback(
 
     # Easy sample parameters, for testing that multi-step scheduling
     # resumes without issue once all best_of > 1 requests are completed.
-    sampling_params_best_of_eq_1 = SamplingParams()
+    sampling_params_best_of_eq_1 = SamplingParams(
+        max_tokens=max_output_len,
+        ignore_eos=True,
+        temperature=0.0,
+        seed=42,
+    )
 
     with vllm_runner(
             model,
@@ -301,14 +306,11 @@ def test_multi_step_llm_best_of_fallback(
             enable_chunked_prefill=enable_chunked_prefill,
             enable_prefix_caching=enable_prefix_caching,
     ) as vllm_model:
-        # outputs_baseline = (vllm_model.generate(prompts, 
-        #                                         sampling_params_best_of_eq_1)+
-        #                     vllm_model.generate(prompts, 
-        #                                         sampling_params_best_of_gt_1)+
-        #                     vllm_model.generate(prompts, 
-        #                                         sampling_params_best_of_eq_1))
-        outputs_baseline = (vllm_model.generate(prompts, 
-                                                sampling_params_best_of_eq_1))
+        # _ = vllm_model.generate(prompts, 
+        #                                  sampling_params_best_of_eq_1)
+
+        outputs_ss_best_of_gt_1 = vllm_model.generate(prompts, 
+                                         sampling_params_best_of_gt_1)
 
     with vllm_runner(
             model,
@@ -321,22 +323,28 @@ def test_multi_step_llm_best_of_fallback(
             enable_chunked_prefill=enable_chunked_prefill,
             enable_prefix_caching=enable_prefix_caching,
     ) as vllm_model:
-        # outputs_ms = (vllm_model.generate(prompts, 
-        #                                  sampling_params_best_of_eq_1)+
-        #               vllm_model.generate(prompts, 
-        #                                  sampling_params_best_of_gt_1)+
-        #               vllm_model.generate(prompts, 
-        #                                  sampling_params_best_of_eq_1))
-        outputs_ms = (vllm_model.generate(prompts, 
-                                         sampling_params_best_of_eq_1))
+        # outputs_ms_best_of_eq_1_baseline = (vllm_model.generate(prompts, 
+        #                                     sampling_params_best_of_eq_1))
+        
+        outputs_ms_best_of_gt_1 = (vllm_model.generate(prompts, 
+                                         sampling_params_best_of_gt_1))
+
+        # outputs_ms_best_of_eq_1_finally = (vllm_model.generate(prompts, 
+        #                                     sampling_params_best_of_eq_1))
 
     check_outputs_equal(
-        outputs_0_lst=outputs_baseline,
-        outputs_1_lst=outputs_ms,
-        name_0="single_step_vllm",
-        name_1="multi_step_vllm",
+        outputs_0_lst=outputs_ss_best_of_gt_1,
+        outputs_1_lst=outputs_ms_best_of_gt_1,
+        name_0="outputs_ss_best_of_gt_1",
+        name_1="outputs_ms_best_of_gt_1",
     )
 
+    # check_outputs_equal(
+    #     outputs_0_lst=outputs_ms_best_of_eq_1_baseline,
+    #     outputs_1_lst=outputs_ms_best_of_eq_1_finally,
+    #     name_0="outputs_ms_best_of_eq_1_baseline",
+    #     name_1="outputs_ms_best_of_eq_1_finally",
+    # )
 
 @pytest.mark.parametrize("model", ["JackFram/llama-160m"])
 @pytest.mark.parametrize("dtype", ["half"])
