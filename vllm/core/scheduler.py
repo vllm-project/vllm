@@ -1453,6 +1453,8 @@ class Scheduler:
             if not seq_group.is_finished():
                 remaining.append(seq_group)
             else:
+                # If seq group had best_of>1 & is finished, decrement counter of
+                # seq groups incompatible with multi-step
                 self._maybe_record_finished_sg_w_multi_step_incompat_sample_params(
                     seq_group)
 
@@ -1467,7 +1469,8 @@ class Scheduler:
 
                 # Free finished seqs
                 self._free_finished_seqs(seq_group)
-
+                # If seq group had best_of>1 & is finished, decrement counter of
+                # seq groups incompatible with multi-step
                 self._maybe_record_finished_sg_w_multi_step_incompat_sample_params(
                     seq_group)
 
