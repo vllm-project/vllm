@@ -114,6 +114,8 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    global_print_ctr = 0
+
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
@@ -132,6 +134,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
+        # if UnquantizedLinearMethod.global_print_ctr < 3:
+        #     torch.set_printoptions(edgeitems=128)
+        #     torch.set_printoptions(sci_mode=False)
+
+        #     print("apply to weight:", layer.weight, layer.weight.shape)
+        #     # # print("and to bias:", bias)
+        #     UnquantizedLinearMethod.global_print_ctr += 1
         return F.linear(x, layer.weight, bias)
 
 
@@ -371,12 +380,16 @@ class ColumnParallelLinear(LinearBase):
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
+        # print("=== ColumnParallelLinear ===") 
+        # print("forward's io:", input_.shape, output.shape)
+        # print("for input:", input_)
+        # print("got output:", output)
         return output, output_bias
 
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={hasattr(self, 'bias') and self.bias is not None}"
         s += f", tp_size={get_tensor_model_parallel_world_size()}"
         s += f", gather_output={self.gather_output}"
         return s
@@ -430,6 +443,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
+
+        # print("weight loader", param.shape, loaded_weight.shape, loaded_shard_id)
 
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
@@ -506,14 +521,19 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # Special case for quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
+            # print("shard_size1:", shard_size)
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
-                shard_size = shard_size // param.pack_factor
-                shard_offset = shard_offset // param.pack_factor
+                # print(vars(param))
+                pack_factor = getattr(param, "packed_factor", None)
+                if pack_factor is None:
+                    pack_factor = param.pack_factor
+                shard_size = shard_size // pack_factor
+                shard_offset = shard_offset // pack_factor
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
-
+            # print("shard_size2:", shard_size)
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
                                             False)
             if use_bitsandbytes_4bit:
@@ -521,8 +541,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
 
+            # print("shard_size3:", shard_size)
+            # print("param data pre:", param_data.shape)
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
+            # print("param data post:", param_data.shape)
             start_idx = tp_rank * shard_size
             # bitsandbytes loads the weights of the specific portion
             # no need to narrow here
@@ -549,6 +572,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
 
+        # if param_data.shape != loaded_weight.shape:
+        #     print("FAIL", param_data.shape, loaded_weight.shape)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -767,6 +792,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
 
+        # print("LOAD", param.shape, loaded_weight.shape, loaded_shard_id)
+
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
@@ -859,8 +886,11 @@ class QKVParallelLinear(ColumnParallelLinear):
             # for the packing.
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
-                shard_size = shard_size // param.pack_factor
-                shard_offset = shard_offset // param.pack_factor
+                pack_factor = getattr(param, "packed_factor", None)
+                if pack_factor is None:
+                    pack_factor = param.pack_factor
+                shard_size = shard_size // pack_factor
+                shard_offset = shard_offset // pack_factor
 
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
@@ -916,6 +946,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "QKVParallelLinear, assume the weight is the same "
                     "for all partitions.")
 
+        # print(param_data.shape, loaded_weight.shape)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -959,6 +990,8 @@ class RowParallelLinear(LinearBase):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
 
+        # print("RPL", input_size, output_size)
+
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
@@ -967,8 +1000,6 @@ class RowParallelLinear(LinearBase):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = divide(input_size, self.tp_size)
         assert self.quant_method is not None
-
-        print("rowpar", self.quant_method)
 
         self.quant_method.create_weights(
             layer=self,
@@ -1014,11 +1045,15 @@ class RowParallelLinear(LinearBase):
             param.materialize(tuple(weight_shape), dtype=loaded_weight.dtype)
 
         param_data = param.data
+        # print("PRE", param_data.shape, loaded_weight.shape, input_dim)
+
         # bitsandbytes loads the weights of the specific portion
         # no need to narrow here
         if input_dim is not None and not use_bitsandbytes_4bit:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
+            # print("input_dim:", input_dim, "start_idx:", start_idx,
+            #       "shard_size:", shard_size)
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
 
@@ -1026,6 +1061,8 @@ class RowParallelLinear(LinearBase):
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
+
+        # print("POST", param_data.shape, loaded_weight.shape)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -1065,12 +1102,17 @@ class RowParallelLinear(LinearBase):
 
         output_bias = self.bias if self.skip_bias_add else None
 
+        # print("=== RowParallelLinear ===") 
+        # print("forward's io:", input_.shape, output.shape)
+        # print("for input:", input_)
+        # print("got output:", output)
+
         return output, output_bias
 
     def extra_repr(self) -> str:
         s = f"input_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={hasattr(self, 'bias') and self.bias is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s

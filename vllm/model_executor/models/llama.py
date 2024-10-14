@@ -38,6 +38,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.hqq_marlin import HQQMarlinConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -68,7 +69,9 @@ class LlamaMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        print("Quant config:", quant_config)
+        # print("gate_proj:", hidden_size, intermediate_size * 2)
+        # print("up_proj:", hidden_size, intermediate_size * 2)
+        # print("down_proj:", intermediate_size, hidden_size)
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
@@ -89,13 +92,17 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        # print("start forward mlp:", x)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
+        # print("end forward mlp:", x)
         return x
 
 
 class LlamaAttention(nn.Module):
+
+    global_print_ctr = 0
 
     def __init__(
         self,
@@ -183,9 +190,23 @@ class LlamaAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        if LlamaAttention.global_print_ctr < 1:
+            torch.set_printoptions(edgeitems=2048)
+            torch.set_printoptions(sci_mode=False)
+            print("qkv:", qkv[0])
+            LlamaAttention.global_print_ctr += 1
+        # print("split params:", self.q_size, self.kv_size, self.kv_size,
+        #       qkv.dtype)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # if LlamaAttention.global_print_ctr < 1:
+        #     torch.set_printoptions(edgeitems=100)
+        #     torch.set_printoptions(sci_mode=False)
+        #     print("q k v 1:", q, k, v)
+        #     LlamaAttention.global_print_ctr += 1
         q, k = self.rotary_emb(positions, q, k)
+        # print("q k v 2:", q, k, v)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        # print("attn out:", attn_output)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -269,6 +290,8 @@ class LlamaDecoderLayer(nn.Module):
 
 class LlamaModel(nn.Module):
 
+    global_print_ctr = 0
+
     def __init__(
         self,
         config: LlamaConfig,
@@ -286,6 +309,7 @@ class LlamaModel(nn.Module):
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
+            # print("et VocabParallelEmbedding")
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
@@ -293,6 +317,7 @@ class LlamaModel(nn.Module):
                 quant_config=quant_config,
             )
         else:
+            # print("et PPMissingLayer")
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -306,6 +331,9 @@ class LlamaModel(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+
+        self.is_hqq = (quant_config is not None and
+            isinstance(quant_config, HQQMarlinConfig))
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -358,8 +386,92 @@ class LlamaModel(nn.Module):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
+
+        # print("load weights LlamaModel")
         params_dict = dict(self.named_parameters())
+        # print(*[(k, v.shape) for k, v in params_dict.items()], sep="\n")
+
+        hqq_map = [
+            (".qweight", "W_q", False),
+            (".zeros", "zero", True),
+            (".scales", "scale", True),
+        ]
+
+        ### this is unpack function copied from hqq repo
+        def unpack_4bit_u8(W_q: torch.Tensor, dtype=torch.uint8) ->torch.Tensor:  # uint8/2 > uint8
+            step = W_q.shape[0]
+            tmp = torch.empty([2 * step, W_q.shape[1]], dtype=dtype, device=W_q.device)
+
+            tmp[:step] = (W_q & 0b11110000) >> 4
+            tmp[step:] = W_q & 0b00001111
+
+            return tmp
+        ###
+
         for name, loaded_weight in weights:
+
+            if self.is_hqq:
+                # print("START WITH NAME", name)
+                pick_shard_id = None
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                # print("is", weight_name, "in", name, "?")
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    pick_shard_id = shard_id
+                    break
+                if name.endswith("_proj"):
+                    to_shape = loaded_weight["shape"]
+                    group_size = loaded_weight["group_size"]
+                    for c, k, should_scale in hqq_map:
+                        new_name = name + c
+                        if new_name not in params_dict:
+                            continue
+                        param = params_dict[new_name]
+                        weight_loader = param.weight_loader
+                        if k == "W_q" and LlamaModel.global_print_ctr < 3:
+                            torch.set_printoptions(edgeitems=128)
+                            print("load:", new_name, param.shape, param.dtype,
+                                loaded_weight[k].shape, loaded_weight[k].dtype,
+                                to_shape)
+                            print(loaded_weight[k])
+                            LlamaModel.global_print_ctr += 1
+                        # if should_scale:
+                        #     loaded = loaded_weight[k].reshape(-1, to_shape[1] // group_size)
+                        # else:
+                        #     loaded = loaded_weight[k].reshape(to_shape[0] // 2, to_shape[1])
+
+                        #TODO try this
+                        loaded = loaded_weight[k]
+
+                        if pick_shard_id is not None:
+                            weight_loader(param, loaded, pick_shard_id)
+                        else:
+                            weight_loader(param, loaded)
+
+                    # unpack: unpack_4bit_u8
+                    param_wq = loaded_weight["W_q"]
+                    param_zp = loaded_weight["zero"]
+                    param_s = loaded_weight["scale"]
+                    param_w = ((unpack_4bit_u8(param_wq, dtype=torch.bfloat16) - param_zp) * param_s
+                               ).reshape(to_shape)
+                    torch.set_printoptions(sci_mode=False)
+                    # print("load wq orig shape:", param_wq)
+                    # print("load wq:", param_wq.reshape(to_shape[0] // 2, to_shape[1]))
+                    # print("deq:", unpack_4bit_u8(param_wq))
+                    # print("zps:", param_zp, param_zp.shape)
+                    # print("s:", param_s, param_s.shape)
+                    # print("w:", param_w)
+                else:
+                    name = name + ".weight"
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                    # print("load:", name, param.shape, param.dtype,
+                    #       loaded_weight["weight"].shape, loaded_weight["weight"].dtype)
+                    weight_loader(param, loaded_weight["weight"])
+                continue
+
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -390,6 +502,11 @@ class LlamaModel(nn.Module):
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
 
+                # if "proj" in name:
+                #     print("load:", name, weight_loader)
+                #     torch.set_printoptions(sci_mode=False)
+                #     print("unq:", loaded_weight)
+
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
@@ -407,6 +524,11 @@ class LlamaModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+                # if "proj" in name:
+                #     print("load:", name, weight_loader)
+                #     torch.set_printoptions(sci_mode=False)
+                #     print("unq:", loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
@@ -488,7 +610,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> None:
         super().__init__()
 
-        print("===== LLAMA FOR CAUSAL LM =====")
+        # print("===== LLAMA FOR CAUSAL LM =====")
 
         self.config = config
         self.lora_config = lora_config
@@ -554,12 +676,16 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        # print("load weights LlamaForCausalLM")
+        # print(*[(n, w['W_q'] if 'W_q' in w else "") for n, w in weights], sep="\n")
+        # print(*[(n, w) for n, w in weights], sep="\n")
+        # weights = self.maybe_remap_hqq(weights)
         weights = [
             self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights
         ]
-        # print(*[(n, w['meta'] if 'meta' in w else "") for n, w in weights], sep="\n")
         # print(*[(n, w) for n, w in weights], sep="\n")
+        # raise ValueError(".")
 
         weights_group = group_weights_with_prefix(weights)
 
@@ -568,13 +694,26 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if not self.config.tie_word_embeddings:
             lm_head_dict = dict(self.lm_head.named_parameters())
             for name, loaded_weight in weights_group["lm_head"]:
-                if is_pp_missing_parameter(name, self.lm_head):
-                    continue
 
-                param = lm_head_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+                if name == '':
+                    lw = loaded_weight
+                    for name, loaded_weight in lw.items():
+                        if is_pp_missing_parameter(name, self.lm_head):
+                            continue
+
+                        param = lm_head_dict[name]
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+                        weight_loader(param, loaded_weight)
+            
+                else:
+                    if is_pp_missing_parameter(name, self.lm_head):
+                        continue
+
+                    param = lm_head_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         self.model.load_kv_cache_scales(quantization_param_path)

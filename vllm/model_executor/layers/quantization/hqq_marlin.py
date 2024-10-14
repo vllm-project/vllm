@@ -2,6 +2,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
 
+import torch.nn.functional as F
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -25,6 +26,8 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
+
+big_printing_counter = 0
 
 class HQQMarlinConfig(QuantizationConfig):
     """Config class for HQQ Marlin"""
@@ -79,7 +82,9 @@ class HQQMarlinConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "HQQMarlinMethod":
-        return HQQMarlinMethod(self)
+        if isinstance(layer, LinearBase):
+            return HQQMarlinMethod(self)
+        return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
@@ -88,6 +93,8 @@ class HQQMarlinConfig(QuantizationConfig):
 class HQQMarlinMethod(LinearMethodBase):
     """Linear method for HQQ Marlin.
     """
+
+    global_print_ctr = 0
     
     def __init__(
         self,
@@ -105,59 +112,68 @@ class HQQMarlinMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        output_size_per_partition = sum(output_partition_sizes)
+        self.output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
+
+        self.input_size_per_partition = input_size_per_partition
+        
         weight_loader = extra_weight_attrs.get("weight_loader")
+
+        # print("WEIGHT LOADER:", weight_loader)
 
         scales_and_zp_size = input_size_per_partition // self.quant_config.group_size
 
+        group_in_tensor_size = (self.output_size_per_partition * self.input_size_per_partition) // self.quant_config.group_size
+
         # Quantized weights
         qweight = PackedvLLMParameter(
+            # data=torch.empty(
+            #     self.output_size_per_partition // 2,
+            #     input_size_per_partition,
+            #     dtype=torch.uint8,
+            # ),
             data=torch.empty(
-                input_size_per_partition // self.quant_config.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
+                group_in_tensor_size // 2,
+                self.quant_config.group_size,
+                dtype=torch.uint8,
             ),
-            input_dim=0,
-            output_dim=1,
+            input_dim=1,
+            output_dim=0,
             packed_dim=0,
-            packed_factor=self.quant_config.pack_factor,
+            packed_factor=2,#self.quant_config.pack_factor,
             weight_loader=weight_loader)
         
-        zeros_args = {
-            "data":
-            torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            "weight_loader":
-            weight_loader
-        }
-        scales_args = {
-            "data":
-            torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition,
+        zeros = GroupQuantScaleParameter(
+            # data=torch.empty(
+            #     self.output_size_per_partition,
+            #     scales_and_zp_size,
+            #     dtype=params_dtype,
+            # ),
+            data=torch.empty(
+                group_in_tensor_size,
+                1,
                 dtype=params_dtype,
             ),
-            "weight_loader":
-            weight_loader
-        }
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
 
-        zeros = PackedvLLMParameter(
-                    input_dim=0,
-                    output_dim=1,
-                    packed_dim=1,
-                    packed_factor=self.quant_config.pack_factor,
-                    **zeros_args)
+        scales = GroupQuantScaleParameter(
+            # data=torch.empty(
+            #     self.output_size_per_partition,
+            #     scales_and_zp_size,
+            #     dtype=params_dtype,
+            # ),
+            data=torch.empty(
+                group_in_tensor_size,
+                1,
+                dtype=params_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
 
-        scales = PackedvLLMParameter(
-                    input_dim=0,
-                    output_dim=1,
-                    packed_dim=1,
-                    packed_factor=self.quant_config.pack_factor,
-                    **scales_args)
+        # print("qweight size:", qweight.shape)
         
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("zeros", zeros)
@@ -167,8 +183,12 @@ class HQQMarlinMethod(LinearMethodBase):
 
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        print("TODO")
+        torch.set_printoptions(edgeitems=128)
+        print("layer qweight:", layer.qweight.shape)
+        print(layer.qweight.data)
         # self.kernel.process_weights_after_loading(layer)
+        raise ValueError("stop")
+        return
 
     def apply(
         self,
@@ -176,5 +196,46 @@ class HQQMarlinMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return torch.empty((0), dtype=x.dtype, device=x.device)
-        # return self.kernel.apply_weights(layer, x, bias)
+        # print("input size:", x.shape)
+        # (layer.unpack() - meta['zero'])*meta['scale]).reshape(meta['shape'])
+
+        ## this is unpack function copied from hqq repo
+        def unpack_4bit_u8(W_q: torch.Tensor, dtype=torch.uint8) ->torch.Tensor:  # uint8/2 > uint8
+            step = W_q.shape[0]
+            tmp = torch.empty([2 * step, W_q.shape[1]], dtype=dtype, device=W_q.device)
+
+            tmp[:step] = (W_q & 0b11110000) >> 4
+            tmp[step:] = W_q & 0b00001111
+
+            return tmp
+        ##
+
+        # lowbits = torch.full((layer.qweight.shape), 15, device=x.device)
+        # shifts = torch.full((layer.qweight.shape), 4, device=x.device)
+        # unpacked = torch.concat([layer.qweight.bitwise_and(lowbits).to(torch.int8),
+        #     layer.qweight.bitwise_right_shift(shifts).to(torch.int8)], dim=0)
+        unpacked = unpack_4bit_u8(layer.qweight, dtype=x.dtype)
+        scales = layer.scales.repeat_interleave(64, dim=1)
+        zeros = layer.zeros.repeat_interleave(64, dim=1)
+        # torch.set_printoptions(sci_mode=False)
+        # print("scales:", scales, scales.shape)
+        # print("zeros:", zeros, zeros.shape)
+        # # print(unpacked.shape, zeros.shape, scales.shape)
+        # print("mydeq:", unpacked)
+        b = (unpacked - zeros) * scales
+        # b = b.reshape(self.output_size_per_partition, self.input_size_per_partition)
+        # b = b.transpose(1, 0)
+        # print("unpacked:", unpacked, unpacked.shape)
+        # if HQQMarlinMethod.global_print_ctr < 3:
+        #     torch.set_printoptions(edgeitems=128)
+        #     torch.set_printoptions(sci_mode=False)
+        #     print("mydeq:", b, b.shape)
+        #     HQQMarlinMethod.global_print_ctr += 1
+        # # print(x.shape, b.shape)
+        # print("act wq:", layer.qweight)
+        # return torch.matmul(x, b)
+        # print(x.dtype, b.dtype)
+        return F.linear(x, b, bias)
+        # return torch.empty((x.shape[0], self.output_size_per_partition),
+        #                    dtype=x.dtype,
+        #                    device=x.device)
