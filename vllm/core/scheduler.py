@@ -416,6 +416,14 @@ class Scheduler:
         return 1
 
     @property
+    def _current_step_is_multi_step(self) -> bool:
+        return self.scheduler_config.current_step_is_multi_step
+
+    @_current_step_is_multi_step.setter
+    def _current_step_is_multi_step(self, value) -> None:
+        self.scheduler_config.current_step_is_multi_step = value
+
+    @property
     def _engine_permits_multi_step_scheduling(self) -> bool:
         return self.scheduler_config.engine_permits_multi_step_scheduling
 
@@ -423,6 +431,7 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
     ) -> bool:
+        """:class:`SequenceGroup`s with best_of>1 are incompat. w/ multi-step"""
         return (seq_group.sampling_params is not None
                 and seq_group.sampling_params.best_of is not None
                 and seq_group.sampling_params.best_of > 1)
@@ -450,9 +459,14 @@ class Scheduler:
 
     def _maybe_disable_multi_step_by_sampling_params(self) -> None:
         """Disable multi-step unless engine & all unfinished reqs support it"""
-        self.scheduler_config.current_step_is_multi_step = (
+        self._current_step_is_multi_step = (
             self._engine_permits_multi_step_scheduling
             and self._multi_step_incompat_req_count == 0)
+
+    def _is_multi_step_temporarily_disabled(self) -> bool:
+        """The engine supports multi-step; the current step disabled it."""
+        return (self._engine_permits_multi_step_scheduling
+                and not self._current_step_is_multi_step)
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
@@ -570,7 +584,7 @@ class Scheduler:
         ret.preempted.clear()
         ret.swapped_out.clear()
 
-        ret.num_lookahead_slots = self._get_num_lookahead_slots(
+        ret.num_lookahead_slots = self._get_current_step_num_lookahead_slots(
             is_prefill=False, enable_chunking=enable_chunking)
 
         ret.decode_seq_groups_list.clear()
@@ -734,7 +748,8 @@ class Scheduler:
             is_prefill = seq_group.is_prefill()
             alloc_status = self.block_manager.can_swap_in(
                 seq_group,
-                self._get_num_lookahead_slots(is_prefill, enable_chunking))
+                self._get_current_step_num_lookahead_slots(
+                    is_prefill, enable_chunking))
             if alloc_status == AllocStatus.LATER:
                 break
             elif alloc_status == AllocStatus.NEVER:
@@ -796,14 +811,14 @@ class Scheduler:
             prefill_seq_groups=prefill_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_copy=blocks_to_copy,
-            num_lookahead_slots=self._get_num_lookahead_slots(
+            num_lookahead_slots=self._get_current_step_num_lookahead_slots(
                 is_prefill=False, enable_chunking=enable_chunking),
             infeasible_seq_groups=infeasible_seq_groups,
         )
 
     def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
         if self.scheduler_config.chunked_prefill_enabled and \
-                not self.scheduler_config.current_step_is_multi_step:
+                not self._current_step_is_multi_step:
             prompt_limit = self.scheduler_config.max_model_len
         else:
             prompt_limit = min(self.scheduler_config.max_model_len,
@@ -951,10 +966,10 @@ class Scheduler:
                 continue
 
             num_lookahead_slots: int = 0
-            if (self.scheduler_config.current_step_is_multi_step
-                    and enable_chunking):
-                num_lookahead_slots = self._get_num_lookahead_slots(
-                    True, enable_chunking)
+            if (self._current_step_is_multi_step and enable_chunking):
+                num_lookahead_slots = (
+                    self._get_current_step_num_lookahead_slots(
+                        True, enable_chunking))
 
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(
@@ -998,8 +1013,7 @@ class Scheduler:
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
 
-            if (enable_chunking
-                    and self.scheduler_config.current_step_is_multi_step):
+            if (enable_chunking and self._current_step_is_multi_step):
                 blocks_to_copy: List[Tuple[int, int]] = []
                 # init_multi_step_from_lookahead_slots happens in append_slots
                 self._append_slots(seq_group, blocks_to_copy, enable_chunking)
@@ -1031,7 +1045,7 @@ class Scheduler:
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
             ignored_seq_groups=ignored_seq_groups,
-            num_lookahead_slots=self._get_num_lookahead_slots(
+            num_lookahead_slots=self._get_current_step_num_lookahead_slots(
                 is_prefill=True, enable_chunking=enable_chunking))
 
     def _schedule_default(self) -> SchedulerOutputs:
@@ -1247,14 +1261,13 @@ class Scheduler:
             return False
 
         is_prefill = seq_group.is_prefill()
-        num_lookahead_slots = self._get_num_lookahead_slots(
+        num_lookahead_slots = self._get_current_step_num_lookahead_slots(
             is_prefill, enable_chunking)
 
         if is_prefill and num_lookahead_slots > 0:
             # Appending prefill slots only happens multi-step and
             # chunked-prefill are enabled together.
-            assert (self.scheduler_config.current_step_is_multi_step
-                    and enable_chunking)
+            assert (self._current_step_is_multi_step and enable_chunking)
 
         return self.block_manager.can_append_slots(
             seq_group=seq_group, num_lookahead_slots=num_lookahead_slots)
@@ -1498,17 +1511,17 @@ class Scheduler:
             enable_chunking (bool): True if chunked prefill is enabled.
         """
         is_prefill: bool = seq_group.is_prefill()
-        num_lookahead_slots: int = self._get_num_lookahead_slots(
+        num_lookahead_slots: int = self._get_current_step_num_lookahead_slots(
             is_prefill, enable_chunking)
 
         seq_group.init_multi_step_from_lookahead_slots(
             num_lookahead_slots,
             num_scheduler_steps=self.scheduler_config.num_scheduler_steps,
-            is_multi_step=self.scheduler_config.current_step_is_multi_step,
+            is_multi_step=self._current_step_is_multi_step,
             enable_chunking=enable_chunking)
 
         seq_status: Optional[SequenceStatus] = SequenceStatus.RUNNING
-        if self.scheduler_config.current_step_is_multi_step and enable_chunking:
+        if self._current_step_is_multi_step and enable_chunking:
             # In multi-step chunked-prefill any sequence type can have
             # slots appended.
             seq_status = None
@@ -1624,8 +1637,8 @@ class Scheduler:
             passed_delay = True
         return passed_delay
 
-    def _get_num_lookahead_slots(self, is_prefill: bool,
-                                 enable_chunking: bool) -> int:
+    def _get_current_step_num_lookahead_slots(self, is_prefill: bool,
+                                              enable_chunking: bool) -> int:
         """The number of slots to allocate per sequence per step, beyond known
         token ids. Speculative decoding uses these slots to store KV activations
         of tokens which may or may not be accepted.
@@ -1637,9 +1650,11 @@ class Scheduler:
         for the prefills for when the prefills turn into decodes in the first
         step.
         """
+        if self._is_multi_step_temporarily_disabled():
+            return 0
+
         if is_prefill:
-            if (self.scheduler_config.current_step_is_multi_step
-                    and enable_chunking):
+            if (self._current_step_is_multi_step and enable_chunking):
                 # num_lookahead_slots was introduced in the context of decodes,
                 # in Speculative Decoding.
                 # When the num_scheduler_steps is 8, say, then the
@@ -1677,7 +1692,7 @@ class Scheduler:
         # in a decode phase. Do not chunk.
         if enable_chunking and len(seqs) == 1:
             remaining_token_budget = budget.remaining_token_budget()
-            if self.scheduler_config.current_step_is_multi_step:
+            if self._current_step_is_multi_step:
                 # The current multi-step + chunked prefill capability does
                 # not actually support chunking prompts.
                 #

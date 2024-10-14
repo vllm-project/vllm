@@ -932,10 +932,10 @@ class SchedulerConfig:
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
-        num_lookahead_slots: The number of slots to allocate per sequence per
-            step, beyond the known token ids. This is used in speculative
-            decoding to store KV activations of tokens which may or may not be
-            accepted.
+        num_lookahead_slots: The number of slots to allocate per
+            sequence per step, beyond the known token ids. This is used in
+            speculative decoding to store KV activations of tokens which may or
+            may not be accepted. 
         delay_factor: Apply a delay (of delay factor multiplied by previous
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
@@ -1009,7 +1009,7 @@ class SchedulerConfig:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.use_v2_block_manager = use_v2_block_manager
-        self._num_lookahead_slots = num_lookahead_slots
+        self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
@@ -1026,20 +1026,6 @@ class SchedulerConfig:
         self.current_step_is_multi_step = (
             self.engine_permits_multi_step_scheduling)
         self._verify_args()
-
-    @property
-    def num_lookahead_slots(self) -> int:
-        """Getter method that gets num_lookahead_slots
-
-        Force to zero if multi-step is disabled in the current step.
-        """
-        return (self._num_lookahead_slots
-                if self.current_step_is_multi_step else 0)
-
-    @num_lookahead_slots.setter
-    def num_lookahead_slots(self, value: int) -> None:
-        """Setter method for num_lookahead_slots"""
-        self._num_lookahead_slots = value
 
     def _verify_args(self) -> None:
         if (self.max_num_batched_tokens < self.max_model_len
@@ -1086,7 +1072,8 @@ class SchedulerConfig:
     def engine_permits_multi_step_scheduling(self) -> bool:
         """Base multi-step setting, configured by user.
 
-        Can be overridden by scheduler.
+        Can be overridden by scheduler if multi-step scheduling is not supported
+        in the given request.
         """
         return self.num_scheduler_steps > 1
 
