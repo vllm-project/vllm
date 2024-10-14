@@ -375,6 +375,8 @@ class LLM:
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        stop = params.stop
+        stop_token_ids = params.stop_token_ids
 
         def sort_beams_key(x: BeamSearchSequence) -> float:
             return get_beam_search_score(x.tokens, x.cum_logprob,
@@ -387,7 +389,10 @@ class LLM:
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,
-                                            temperature=temperature)
+                                            temperature=temperature,
+                                            ignore_eos=ignore_eos,
+                                            stop=stop,
+                                            stop_token_ids=stop_token_ids)
         instances: List[BeamSearchInstance] = []
 
         for prompt in prompts:
@@ -436,8 +441,7 @@ class LLM:
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob)
 
-                            if token_id == tokenizer.eos_token_id and \
-                                not ignore_eos:
+                            if result.outputs[0].finish_reason == "stop":
                                 instance.completed.append(new_beam)
                             else:
                                 instance_new_beams.append(new_beam)

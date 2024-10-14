@@ -69,6 +69,8 @@ class EngineClient(ABC):
         ignore_eos = params.ignore_eos
         temperature = params.temperature
         length_penalty = params.length_penalty
+        stop = params.stop
+        stop_token_ids = params.stop_token_ids
 
         tokenizer = await self.get_tokenizer(lora_request=None)
         tokenizedPrompt = prompt if isinstance(
@@ -80,7 +82,10 @@ class EngineClient(ABC):
 
         beam_search_params = SamplingParams(logprobs=2 * beam_width,
                                             max_tokens=1,
-                                            temperature=temperature)
+                                            temperature=temperature,
+                                            ignore_eos=ignore_eos,
+                                            stop=stop,
+                                            stop_token_ids=stop_token_ids)
         all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
         completed = []
 
@@ -117,8 +122,7 @@ class EngineClient(ABC):
                             cum_logprob=current_beam.cum_logprob +
                             logprob_obj.logprob)
 
-                        if token_id == tokenizer.eos_token_id and \
-                            not ignore_eos:
+                        if result.outputs[0].finish_reason == "stop":
                             completed.append(new_beam)
                         else:
                             new_beams.append(new_beam)
