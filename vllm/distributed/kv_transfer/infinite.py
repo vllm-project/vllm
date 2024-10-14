@@ -38,7 +38,7 @@ class InfiniStoreKVCacheTransporter(KVCacheTransporterBase):
        
         logger.info("connecting to infinite store server: ", infinite_server)
         
-        self.conn.connect(infinite_server)
+        self.conn.connect()
 
     def _compute_kv_cache_block_offsets(
             self, input_ids: torch.Tensor, attn_metadata: AttentionMetadata,
