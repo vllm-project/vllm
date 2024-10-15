@@ -981,7 +981,7 @@ class SchedulerConfig:
                 else:
                     # It is the values that have the best balance between ITL
                     # and TTFT on A100. Note it is not optimized for throughput.
-                    max_num_batched_tokens = 512
+                    max_num_batched_tokens = 2048
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
