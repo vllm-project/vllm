@@ -25,6 +25,15 @@ pull_request_rules:
       add:
         - ci/build
 
+- name: label-frontend
+  description: Automatically apply frontend label
+  conditions:
+    - files~=^vllm/entrypoints/
+  actions:
+    label:
+      add:
+        - frontend
+
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:
       - conflict
