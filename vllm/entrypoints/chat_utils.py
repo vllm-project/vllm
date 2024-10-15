@@ -410,7 +410,6 @@ _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
-MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
@@ -486,11 +485,7 @@ def _parse_chat_message_content_parts(
     texts: List[str] = []
 
     mm_parser = mm_tracker.create_parser()
-    keep_multimodal_content = \
-        mm_tracker._model_config.hf_config.model_type in \
-            MODEL_KEEP_MULTI_MODAL_CONTENT
 
-    has_image = False
     for part in parts:
         if isinstance(part, str):  # Handle plain text parts
             text = _TextParser(part)
@@ -509,27 +504,20 @@ def _parse_chat_message_content_parts(
                 texts.append(content)
             elif part_type == "image_url":
                 mm_parser.parse_image(content)
-                has_image = True
+                # has_image = True
             elif part_type == "audio_url":
                 mm_parser.parse_audio(content)
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
-    if keep_multimodal_content:
-        text_prompt = "\n".join(texts)
-        role_content = [{'type': 'text', 'text': text_prompt}]
-
-        if has_image:
-            role_content = [{'type': 'image'}] + role_content
-        return [ConversationMessage(role=role,
-                                    content=role_content)]  # type: ignore
-    else:
-        mm_placeholder_counts = mm_parser.mm_placeholder_counts()
-        if mm_placeholder_counts:
-            text_prompt = _get_full_multimodal_text_prompt(
-                mm_placeholder_counts, text_prompt)
-        return [ConversationMessage(role=role, content=text_prompt)]
+    mm_placeholder_counts = mm_parser.mm_placeholder_counts()
+    if mm_placeholder_counts:
+        text_prompt = _get_full_multimodal_text_prompt(
+            mm_placeholder_counts,
+            text_prompt,
+        )
+    return [ConversationMessage(role=role, content=text_prompt)]
 
 
 # No need to validate using Pydantic again
