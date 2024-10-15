@@ -532,6 +532,9 @@ class Sequence:
             # (which is what we have most of the time)
             return self.data._cached_all_token_ids[-1]
 
+        if num_new_tokens == 0:
+            return []
+
         return self.data._cached_all_token_ids[-num_new_tokens:]
 
     def hash_of_block(self, logical_idx: int) -> int:
