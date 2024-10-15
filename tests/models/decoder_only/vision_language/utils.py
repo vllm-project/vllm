@@ -335,7 +335,7 @@ def _internvl_generate(
 # Most of these help us handle mm tags and configure things
 # that would normally be handled by parametrize(), since we want
 # to be able to adapt settings like num_logprobs on a per-model basis
-def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable,
+def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int], str],
                              test_placeholder: str) -> str:
     """Given a prompt, replaces each TEST_IMG_PLACEHOLDER with the
     model-specific image prompt.
@@ -349,8 +349,8 @@ def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable,
 
 
 def get_model_prompts(base_prompts: Iterable[str],
-                      img_idx_to_prompt: Optional[Callable],
-                      video_idx_to_prompt: Optional[Callable],
+                      img_idx_to_prompt: Optional[Callable[[int], str]],
+                      video_idx_to_prompt: Optional[Callable[[int], str]],
                       prompt_formatter: Callable) -> List[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
     to be tested, update the media placeholders and apply the prompt formatting
