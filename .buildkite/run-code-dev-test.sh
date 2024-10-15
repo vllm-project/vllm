@@ -34,11 +34,9 @@ docker exec vllm-dev-test bash -c '
     python3 -c "import vllm.fake_module; print(vllm.fake_module.test_var)"'
 
 # Test uninstall/updateing condition
-docker exec vllm-dev-test bash -c '
+docker exec vllm-dev-test bash -c "
     cd vllm && \
     python3 python_only_dev.py --quit-dev && \
     cd / && \
     pip uninstall -y vllm && \
-    pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${BUILDKITE_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl'
-
-docker rm -f vllm-dev-test
+    pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${BUILDKITE_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
