@@ -35,6 +35,8 @@ def support_torch_compile(dynamic_arg_dims: Dict[str, Union[int, List[int]]]):
     def cls_decorator_helper(cls: type):
         # helper to pass `dynamic_arg_dims`` to `_support_torch_compile``
         # to avoid too much indentation for `_support_torch_compile``
+        if not hasattr(cls, 'forward'):
+            raise TypeError("decorated class should have a forward method.")
         sig = inspect.signature(cls.forward)
         for k in dynamic_arg_dims:
             if k not in sig.parameters:
