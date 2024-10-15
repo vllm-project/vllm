@@ -302,6 +302,43 @@ def test_parse_chat_messages_multiple_images_across_messages(
     ]
     _assert_mm_data_is_image_input(mm_data, 2)
 
+def test_parse_chat_messages_context_text_format(
+    phi3v_model_config,
+    phi3v_tokenizer,
+):
+    conversation, mm_data = parse_chat_messages([{
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": "What's in this text?"
+        }]
+    }, {
+        "role": "assistant",
+        "content": "Some stuff."
+    }, {
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": "What about this one?"
+        }]
+    }], phi3v_model_config, phi3v_tokenizer)
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "What's in this text?"
+        },
+        {
+            "role": "assistant",
+            "content": "Some stuff."
+        },
+        {
+            "role": "user",
+            "content": "What about this one?"
+        },
+    ]
 
 def test_parse_chat_messages_rejects_too_many_images_in_one_message(
     phi3v_model_config,
