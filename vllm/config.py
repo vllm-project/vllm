@@ -200,6 +200,8 @@ class ModelConfig:
 
         if current_platform.is_neuron():
             self.override_neuron_config = override_neuron_config
+        else:
+            self.override_neuron_config = None
 
         self._verify_embedding_mode()
         self._verify_quantization()
