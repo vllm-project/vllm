@@ -34,11 +34,11 @@ VllmOutput = Tuple[List[int], str, Optional[SampleLogprobs]]
 # yapf: enable
 
 
-class VlmTestType(Enum):
+class VLMTestType(Enum):
     IMAGE = 1
     MULTI_IMAGE = 2
     EMBEDDING = 3
-    VIDEO = 4  # TODO
+    VIDEO = 4
     CUSTOM_INPUTS = 5
 
 
@@ -61,7 +61,7 @@ class ImageSizeWrapper(NamedTuple):
 
 class VLMTestInfo(NamedTuple):
     models: Union[Iterable[str], str]
-    test_type: Union[VlmTestType, Iterable[VlmTestType]]
+    test_type: Union[VLMTestType, Iterable[VLMTestType]]
 
     # Should be None only if this is a CUSTOM_INPUTS test
     prompt_formatter: Optional[Callable] = None

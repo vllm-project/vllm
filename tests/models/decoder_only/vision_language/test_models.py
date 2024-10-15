@@ -16,7 +16,7 @@ from ....utils import fork_new_process_for_each_test, get_memory_gb
 from ...utils import check_outputs_equal
 from . import utils as vlm_utils
 from .vlm_test_types import (CustomTestOptions, ImageSizeWrapper, VLMTestInfo,
-                             VlmTestType)
+                             VLMTestType)
 
 # This hack is needed for phi3v & paligemma models
 # ROCm Triton FA can run into shared memory issues with these models,
@@ -26,7 +26,7 @@ if is_hip():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 COMMON_BROADCAST_SETTINGS = {
-    "test_type": VlmTestType.IMAGE,
+    "test_type": VLMTestType.IMAGE,
     "fork_new_process_for_each_test": True,
     "dtype": "half",
     "max_tokens": 5,
@@ -45,7 +45,7 @@ COMMON_BROADCAST_SETTINGS = {
 VLM_TEST_SETTINGS = {
     "blip2": VLMTestInfo(
         models="Salesforce/blip2-opt-2.7b",
-        test_type=VlmTestType.IMAGE,
+        test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
         img_idx_to_prompt=lambda idx: "",
         auto_cls=AutoModelForVision2Seq,
@@ -53,7 +53,7 @@ VLM_TEST_SETTINGS = {
     ),
     "chameleon": VLMTestInfo(
         models="facebook/chameleon-7b",
-        test_type=VlmTestType.IMAGE,
+        test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
@@ -70,7 +70,7 @@ VLM_TEST_SETTINGS = {
     ),
     "fuyu": VLMTestInfo(
         models="adept/fuyu-8b",
-        test_type=VlmTestType.IMAGE,
+        test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"{img_prompt}\n",
         img_idx_to_prompt=lambda idx: "",
         max_model_len=2048,
@@ -83,7 +83,7 @@ VLM_TEST_SETTINGS = {
     ),
     "glm4": VLMTestInfo(
         models="THUDM/glm-4v-9b",
-        test_type=VlmTestType.IMAGE,
+        test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
         fork_new_process_for_each_test=True,
         img_idx_to_prompt=lambda idx: "",
@@ -96,7 +96,7 @@ VLM_TEST_SETTINGS = {
     ),
     "intern-vl": VLMTestInfo(
         models=("OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"),
-        test_type=(VlmTestType.IMAGE, VlmTestType.MULTI_IMAGE),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts({
             "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
@@ -110,9 +110,9 @@ VLM_TEST_SETTINGS = {
     "llava": VLMTestInfo(
         models="llava-hf/llava-1.5-7b-hf",
         test_type=(
-            VlmTestType.EMBEDDING,
-            VlmTestType.IMAGE,
-            VlmTestType.CUSTOM_INPUTS
+            VLMTestType.EMBEDDING,
+            VLMTestType.IMAGE,
+            VLMTestType.CUSTOM_INPUTS
         ),
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         convert_assets_to_embeddings=vlm_utils.get_llava_embeddings,
@@ -128,7 +128,7 @@ VLM_TEST_SETTINGS = {
     ),
     "llava-next": VLMTestInfo(
         models="llava-hf/llava-v1.6-mistral-7b-hf",
-        test_type=(VlmTestType.IMAGE, VlmTestType.CUSTOM_INPUTS),
+        test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
         max_model_len=10240,
         auto_cls=AutoModelForVision2Seq,
@@ -144,7 +144,7 @@ VLM_TEST_SETTINGS = {
     ),
     "llava-one-vision": VLMTestInfo(
         models="llava-hf/llava-onevision-qwen2-7b-ov-hf",
-        test_type=VlmTestType.VIDEO,
+        test_type=VLMTestType.VIDEO,
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
         fork_new_process_for_each_test=True,
         dtype="half",
@@ -163,7 +163,7 @@ VLM_TEST_SETTINGS = {
     ),
     "llava-next-video": VLMTestInfo(
         models="llava-hf/LLaVA-NeXT-Video-7B-hf",
-        test_type=VlmTestType.VIDEO,
+        test_type=VLMTestType.VIDEO,
         prompt_formatter=lambda vid_prompt: f"USER: {vid_prompt} ASSISTANT:",
         num_video_frames=16,
         max_model_len=4096,
@@ -175,7 +175,7 @@ VLM_TEST_SETTINGS = {
     ),
     "minicpmv": VLMTestInfo(
         models="openbmb/MiniCPM-Llama3-V-2_5",
-        test_type=(VlmTestType.MULTI_IMAGE),
+        test_type=(VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
@@ -186,7 +186,7 @@ VLM_TEST_SETTINGS = {
     ),
     "paligemma": VLMTestInfo(
         models="google/paligemma-3b-mix-224",
-        test_type=VlmTestType.IMAGE,
+        test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
         img_idx_to_prompt = lambda idx: "",
         # Paligemma uses its own sample prompts because the default one fails
@@ -200,7 +200,7 @@ VLM_TEST_SETTINGS = {
     ),
     "phi3v": VLMTestInfo(
         models="microsoft/Phi-3.5-vision-instruct",
-        test_type=(VlmTestType.IMAGE, VlmTestType.MULTI_IMAGE),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
         img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
         max_model_len=4096,
@@ -213,7 +213,7 @@ VLM_TEST_SETTINGS = {
     ),
     "qwen": VLMTestInfo(
         models="Qwen/Qwen-VL",
-        test_type=(VlmTestType.IMAGE, VlmTestType.MULTI_IMAGE),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=identity,
         img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
         max_model_len=1024,
@@ -255,7 +255,7 @@ VLM_TEST_SETTINGS = {
     "intern-vl_diff-patches": VLMTestInfo(
         models="OpenGVLab/InternVL2-2B",
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
-        test_type=VlmTestType.CUSTOM_INPUTS,
+        test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
         dtype="bfloat16" if is_cpu() else "half",
         use_tokenizer_eos=True,
@@ -269,7 +269,7 @@ VLM_TEST_SETTINGS = {
     ),
     "llava-one-vision_multiple-images": VLMTestInfo(
         models="llava-hf/llava-onevision-qwen2-7b-ov-hf",
-        test_type=VlmTestType.CUSTOM_INPUTS,
+        test_type=VLMTestType.CUSTOM_INPUTS,
         fork_new_process_for_each_test=True,
         max_model_len=16384,
         max_num_seqs=2,
@@ -306,7 +306,7 @@ VLM_TEST_SETTINGS = {
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.IMAGE,
+        test_type=VLMTestType.IMAGE,
         fork_new_process_for_each_test=False,
     ))
 def test_single_image_models(tmp_path: PosixPath, model_type: str, model: str,
@@ -335,7 +335,7 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str, model: str,
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.MULTI_IMAGE,
+        test_type=VLMTestType.MULTI_IMAGE,
         fork_new_process_for_each_test=False,
     ))
 def test_multi_image_models(tmp_path: PosixPath, model_type: str, model: str,
@@ -364,7 +364,7 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str, model: str,
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.EMBEDDING,
+        test_type=VLMTestType.EMBEDDING,
         fork_new_process_for_each_test=False,
     ))
 def test_image_embedding_models(
@@ -390,7 +390,7 @@ def test_image_embedding_models(
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,num_frames,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.VIDEO,
+        test_type=VLMTestType.VIDEO,
         fork_new_process_for_each_test=False,
     ))
 def test_video_models(model_type: str, model: str, max_tokens: int,
@@ -419,7 +419,7 @@ def test_video_models(model_type: str, model: str, max_tokens: int,
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,custom_test_opts",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.CUSTOM_INPUTS,
+        test_type=VLMTestType.CUSTOM_INPUTS,
         fork_new_process_for_each_test=False,
     ))
 def test_custom_inputs_models(
@@ -451,7 +451,7 @@ def test_custom_inputs_models(
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.IMAGE,
+        test_type=VLMTestType.IMAGE,
         fork_new_process_for_each_test=True,
     ))
 @fork_new_process_for_each_test
@@ -480,7 +480,7 @@ def test_single_image_models_heavy(
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.MULTI_IMAGE,
+        test_type=VLMTestType.MULTI_IMAGE,
         fork_new_process_for_each_test=True,
     ))
 @fork_new_process_for_each_test
@@ -509,7 +509,7 @@ def test_multi_image_models_heavy(
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.EMBEDDING,
+        test_type=VLMTestType.EMBEDDING,
         fork_new_process_for_each_test=True,
     ))
 @fork_new_process_for_each_test
@@ -536,7 +536,7 @@ def test_image_embedding_models_heavy(
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,num_frames,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.VIDEO,
+        test_type=VLMTestType.VIDEO,
         fork_new_process_for_each_test=True,
     ))
 def test_video_models_heavy(model_type: str, model: str, max_tokens: int,
@@ -566,7 +566,7 @@ def test_video_models_heavy(model_type: str, model: str, max_tokens: int,
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,custom_test_opts",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
-        test_type=VlmTestType.CUSTOM_INPUTS,
+        test_type=VLMTestType.CUSTOM_INPUTS,
         fork_new_process_for_each_test=True,
     ))
 @fork_new_process_for_each_test
