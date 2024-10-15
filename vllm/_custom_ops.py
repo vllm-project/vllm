@@ -830,11 +830,14 @@ def selective_scan_fwd(
 
 
 # moe
+def moe_sum(input: torch.Tensor, output: torch.Tensor):
+    torch.ops._moe_C.moe_sum(input, output)
+
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
                          experts_ids: torch.Tensor,
                          num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._C.moe_align_block_size(topk_ids, num_experts, block_size,
+    torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
                                       sorted_token_ids, experts_ids,
                                       num_tokens_post_pad)
 
