@@ -400,11 +400,13 @@ def _parse_chat_message_content_parts(
             MODEL_KEEP_MULTI_MODAL_CONTENT
 
     has_image = False
+    has_text = False
     for part in parts:
         part_type = part["type"]
         if part_type == "text":
             text = _TextParser(part)["text"]
             texts.append(text)
+            has_text = True
         elif part_type == "image_url":
             image_url = _ImageParser(part)["image_url"]
 
@@ -426,8 +428,7 @@ def _parse_chat_message_content_parts(
             raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
-    if keep_multimodal_content:
-        text_prompt = "\n".join(texts)
+    if has_text or keep_multimodal_content:
         role_content = [{'type': 'text', 'text': text_prompt}]
 
         if has_image:
