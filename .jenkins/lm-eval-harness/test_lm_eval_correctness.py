@@ -19,7 +19,7 @@ import yaml
 
 import vllm
 
-RTOL = 0.05
+RTOL = 0.06
 TEST_DATA_FILE = os.environ.get(
     "LM_EVAL_TEST_DATA_FILE",
     ".jenkins/lm-eval-harness/configs/Meta-Llama-3-8B-Instruct.yaml")

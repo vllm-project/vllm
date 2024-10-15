@@ -19,6 +19,6 @@ stages:
       - name: gsm8k_large_g3_tp2
         flavor: g3.s
         command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 2
-      - name: gsm8k_large_g2_tp2
-        flavor: g2.s
-        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 2
+      - name: gsm8k_large_g2_tp4
+        flavor: g2.m
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 4
