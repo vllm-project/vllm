@@ -12,5 +12,4 @@ For more information on CoreWeave's Tensorizer, please refer to
 the `vLLM example script <https://docs.vllm.ai/en/stable/getting_started/examples/tensorize_vllm_model.html>`_.
 
 .. note::
-
-Note that to use this feature you will need to install `tensorizer` by running `pip install vllm[tensorizer]`.
+  Note that to use this feature you will need to install `tensorizer` by running `pip install vllm[tensorizer]`.
