@@ -155,7 +155,7 @@ Text Generation
   * - :code:`MambaForCausalLM`
     - Mamba
     - :code:`state-spaces/mamba-130m-hf`, :code:`state-spaces/mamba-790m-hf`, :code:`state-spaces/mamba-2.8b-hf`, etc.
-    - ✅︎
+    -
     -
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
