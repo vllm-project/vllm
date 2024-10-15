@@ -56,8 +56,6 @@ class Scheduler:
         self.finished_req_ids: Set[str] = set()
         self.aborted_req_ids: Set[str] = set()
 
-        self.cum = 0
-
     def schedule(self) -> "SchedulerOutput":
         scheduled_new_reqs: List[Request] = []
         scheduled_resumed_reqs: List[Request] = []
@@ -80,11 +78,8 @@ class Scheduler:
             assert num_tokens > 0
 
             while True:
-                start = time.time()
                 new_block_ids = self.kv_cache_manager.append_slots(
                     request, num_tokens)
-                end = time.time()
-                self.cum += (end - start)
                 if new_block_ids is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -108,7 +103,6 @@ class Scheduler:
                     req_index += 1
                     break
 
-        start = time.time()
         # Next, schedule the WAITING requests.
         while self.waiting:
             if preempted_reqs:
