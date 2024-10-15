@@ -27,8 +27,9 @@ def test_semi_structured_compress(size, dtype):
     torch.testing.assert_close(input_pruned, output_pruned)
 
 
+# TODO modelopt config has to be replaced with corresponding fp8_24 config
 @pytest.mark.skipif(
-    not is_semi_structured_supported() or not is_quant_method_supported("fp8"),
+    not is_semi_structured_supported() or not is_quant_method_supported("modelopt"),
     reason="Semi structured fp8 matmul is not supported on this GPU type.")
 @pytest.mark.parametrize("size", SIZES_FP8)
 def test_semi_structured_fp8_compress(size):
@@ -75,8 +76,9 @@ def test_torch_semi_structured_sparse_dense_T_matmul(mnk, dtype):
     torch.testing.assert_close(C, C_sparse)
 
 
+# TODO modelopt config has to be replaced with corresponding fp8_24 config
 @pytest.mark.skipif(
-    not is_semi_structured_supported() or not is_quant_method_supported("fp8"),
+    not is_semi_structured_supported() or not is_quant_method_supported("modelopt"),
     reason="Semi structured fp8 matmul is not supported on this GPU type.")
 def test_torch_semi_structured_sparse_dense_T_fp8_matmul():
     M, N, K = (32, 64, 32)
@@ -106,8 +108,9 @@ def test_torch_semi_structured_dense_sparse_T_matmul(mnk, dtype):
     torch.testing.assert_close(C, C_sparse)
 
 
+# TODO modelopt config has to be replaced with corresponding fp8_24 config
 @pytest.mark.skipif(
-    not is_semi_structured_supported() or not is_quant_method_supported("fp8"),
+    not is_semi_structured_supported() or not is_quant_method_supported("modelopt"),
     reason="Semi structured fp8 matmul is not supported on this GPU type.")
 def test_torch_semi_structured_dense_sparse_T_fp8_matmul():
     M, N, K = (32, 64, 32)

@@ -399,6 +399,12 @@ define_gpu_extension_target(
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
+# If cuSparseLt is not installed we skip 2:4 optimizations
+CHECK_INCLUDE_FILE_CXX("cusparseLt.h" HAVE_CUSPARSELT)
+message(STATUS "Result of include cusparseLt ${HAVE_CUSPARSELT}")
+if(HAVE_CUSPARSELT)
+  target_compile_definitions(_C PRIVATE VLLM_CUSPARSELT_ENABLED=1)
+endif()
 #
 # _moe_C extension
 #
