@@ -24,6 +24,96 @@ from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
+aten = torch.ops.aten
+
+FILENO=0
+
+def match_gemm_rs_ag_gemm_orig():
+    permute_2 = torch.ops.aten.permute(arg7_1, [1, 0])
+    mm_1 = torch.ops.aten.mm(getitem_22, permute_2)
+    auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce, tensor=mm_1, group_name='tp:0')
+    getitem_25 = auto_functionalized_4[1]
+    auto_functionalized_5 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=getitem_25, residual=getitem_1, weight=arg8_1, epsilon=1e-05)
+    getitem_27 = auto_functionalized_5[1]
+    getitem_28 = auto_functionalized_5[2]
+    permute_3 = torch.ops.aten.permute(arg9_1, [1, 0])
+    mm_2 = torch.ops.aten.mm(getitem_27, permute_3)
+    return mm_2
+
+
+def match_gemm_rs_ag_gemm_small(arg7_1, getitem_22):
+    permute_2 = torch.ops.aten.permute.default(arg7_1, [1, 0])
+    mm_1 = torch.ops.aten.mm.default(getitem_22, permute_2)
+    auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = 'tp:0')  # how to deal with groupname?
+    getitem_25 = auto_functionalized_4[1]
+    return getitem_25
+
+
+def match_gemm_rs_ag_gemm_med(arg7_1, getitem_22, getitem_1, arg8_1):
+    permute_2 = torch.ops.aten.permute.default(arg7_1, [1, 0])
+    mm_1 = torch.ops.aten.mm.default(getitem_22, permute_2)
+    auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = 'tp:0')  # how to deal with groupname?
+    getitem_25 = auto_functionalized_4[1]
+    auto_functionalized_5 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = getitem_25, residual = getitem_1, weight = arg8_1, epsilon = 1e-05)
+    getitem_27 = auto_functionalized_5[1]
+    getitem_28 = auto_functionalized_5[2]
+    return getitem_27, getitem_28
+    #permute_3 = torch.ops.aten.permute.default(arg9_1, [1, 0])
+    #mm_2 = torch.ops.aten.mm.default(getitem_27, permute_3)
+    #return mm_2
+
+
+def match_gemm_rs_ag_gemm(arg7_1, getitem_22, arg8_1, getitem_1, arg9_1):
+    permute_2 = torch.ops.aten.permute.default(arg7_1, [1, 0])
+    mm_1 = torch.ops.aten.mm.default(getitem_22, permute_2)
+    auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = 'tp:0')  # how to deal with groupname?
+    getitem_25 = auto_functionalized_4[1]
+    auto_functionalized_5 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = getitem_25, residual = getitem_1, weight = arg8_1, epsilon = 1e-05)
+    getitem_27 = auto_functionalized_5[1]
+    getitem_28 = auto_functionalized_5[2]
+    permute_3 = torch.ops.aten.permute.default(arg9_1, [1, 0])
+    mm_2 = torch.ops.aten.mm.default(getitem_27, permute_3)
+    return mm_2, getitem_28
+
+
+def replace_gemm_rs_ag_gemm(arg7_1, getitem_24, arg8_1, getitem_26, arg9_1):
+    permute_3 = torch.ops.aten.permute.default(arg7_1, [1, 0])
+    clone = torch.ops.aten.clone.default(permute_3, memory_format = torch.contiguous_format)
+    fused_matmul_reduce_scatter = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(getitem_24, clone, 'avg', 0, '0')
+    auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = fused_matmul_reduce_scatter, residual = getitem_26, weight = arg8_1, epsilon = 1e-05)
+    getitem_29 = auto_functionalized_4[1]
+    getitem_30 = auto_functionalized_4[2]
+    slice_scatter_2 = torch.ops.aten.slice_scatter.default(getitem_1, getitem_30, 0, 0, 2048)
+    split_2 = torch.ops.aten.split.Tensor(slice_scatter_2, 2048)
+    getitem_31 = split_2[0]
+    permute_5 = torch.ops.aten.permute.default(arg9_1, [1, 0])
+    clone_1 = torch.ops.aten.clone.default(permute_5, memory_format = torch.contiguous_format)
+    fused_all_gather_matmul = torch.ops.symm_mem.fused_all_gather_matmul.default(getitem_29, [clone_1], 0, '0')
+    getitem_34 = fused_all_gather_matmul[1]
+    getitem_35 = getitem_34[0]
+    return getitem_34, getitem_35
+
+
+my_patterns = PatternMatcherPass()
+x = torch.empty([4,4], device='cuda')
+w = torch.empty([4,4], device='cuda')
+resid = torch.empty([4,4], device='cuda')
+resid_w = torch.empty([4,4], device='cuda')
+x2 = torch.empty([4,4], device='cuda')
+inputs = [x, w, resid, resid_w, x2]
+inputs_small = inputs[0:2]
+inputs_med = inputs[0:4]
+register_replacement(match_gemm_rs_ag_gemm,
+                     replace_gemm_rs_ag_gemm,
+                     inputs,
+                     fwd_only,
+                     [my_patterns])
+
+def async_rewrite(graph: fx.Graph):
+    count = my_patterns.apply(graph)
+    print(f"match count = {count}")
+    return graph
+
 
 class InductorHashCache:
     """
