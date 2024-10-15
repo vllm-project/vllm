@@ -129,7 +129,7 @@ def get_quant_config(model_config: ModelConfig,
     # GGUF doesn't have config file
     if model_config.quantization == "gguf":
         return quant_cls.from_config({})
-    
+
     if model_config.quantization == "hqq_marlin":
         # print("=======================================")
         # print(vars(model_config))

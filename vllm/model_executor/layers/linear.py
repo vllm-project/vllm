@@ -114,8 +114,6 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
-    global_print_ctr = 0
-
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
@@ -133,17 +131,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
-        # if UnquantizedLinearMethod.global_print_ctr < 1:
-        #     torch.set_printoptions(edgeitems=128)
-        #     torch.set_printoptions(sci_mode=False)
-
-        #     torch.set_printoptions(profile="full")
-        #     torch.set_printoptions(sci_mode=False)
-        #     print("weight:", layer.weight.transpose(1, 0)[0], layer.weight.shape)
-        #     # raise ValueError("stop")
-        #     # print("and to bias:", bias)
-        #     UnquantizedLinearMethod.global_print_ctr += 1
         return F.linear(x, layer.weight, bias)
 
 
@@ -383,10 +370,6 @@ class ColumnParallelLinear(LinearBase):
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
-        # print("=== ColumnParallelLinear ===") 
-        # print("forward's io:", input_.shape, output.shape)
-        # print("for input:", input_)
-        # print("got output:", output)
         return output, output_bias
 
     def extra_repr(self) -> str:
@@ -446,8 +429,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
-
-        # print("weight loader", param.shape, loaded_weight.shape, loaded_shard_id)
 
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
@@ -569,8 +550,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
 
-        # if param_data.shape != loaded_weight.shape:
-        #     print("FAIL", param_data.shape, loaded_weight.shape)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -1087,11 +1066,6 @@ class RowParallelLinear(LinearBase):
             output = output_parallel
 
         output_bias = self.bias if self.skip_bias_add else None
-
-        # print("=== RowParallelLinear ===") 
-        # print("forward's io:", input_.shape, output.shape)
-        # print("for input:", input_)
-        # print("got output:", output)
 
         return output, output_bias
 
