@@ -100,11 +100,12 @@ class CompressedTensorsConfig(QuantizationConfig):
                 target_scheme_map[target][
                     "weights"] = QuantizationArgs.parse_obj(
                         quant_config.get("weights"))
-                try:
+
+                if is_activation_quantization_format(quant_format):
                     target_scheme_map[target][
                         "input_activations"] = QuantizationArgs.parse_obj(
                             quant_config.get("input_activations"))
-                except Exception:
+                else:
                     target_scheme_map[target]["input_activations"] = None
 
         return cls(target_scheme_map=target_scheme_map,
@@ -244,9 +245,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size,
                     actorder=weight_quant.actorder)
 
-        # Detect If Activation Quantization.
-        # TODO @dsikka: clean-up conditions
-        if is_activation_quantization_format(self.quant_format):
+        # Will only be not None if is_activation_quantization_format is True
+        if input_quant:
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
                     CompressedTensorsW8A8Fp8.get_min_capability(), error=False)
