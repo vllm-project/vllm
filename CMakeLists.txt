@@ -305,7 +305,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
   cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS 
-    "7.5;8.0;8.6;8.9;9.0;9.0a" "${CUDA_ARCHS}")
+    "7.5;8.0;8.6;8.9;9.0" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
   if (SCALED_MM_2X_ARCHS)
