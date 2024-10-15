@@ -9,7 +9,8 @@ docker run -dit --entrypoint /bin/bash --privileged=true --network host --name v
 
 # Install vllm dev wheel (latest nightly wheel)
 docker exec vllm-dev-test bash -c "
-    pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${BUILDKITE_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+    pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${BUILDKITE_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl && \
+    pip install setuptools-scm"
 
 # Test python_only_dev.py
 docker exec vllm-dev-test bash -c '
