@@ -489,7 +489,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_model = BlipVisionModel(config.vision_config)
+        self.vision_model = BlipVisionModel(config.vision_config, quant_config)
 
         self.query_tokens = nn.Parameter(
             torch.zeros(1, config.num_query_tokens,

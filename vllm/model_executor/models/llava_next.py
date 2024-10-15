@@ -24,7 +24,7 @@ from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_clip_image_feature_size,
                    get_clip_patch_grid_length, input_processor_for_clip)
 from .interfaces import SupportsMultiModal, SupportsPP
-from .llava import LlavaMultiModalProjector
+from .llava import LlavaMultiModalProjector, init_vision_tower_for_llava
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
@@ -256,32 +256,6 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
     raise NotImplementedError(msg)
 
 
-def _init_vision_tower(hf_config: LlavaNextConfig):
-    vision_config = hf_config.vision_config
-
-    # Initialize the vision tower only up to the required feature layer
-    vision_feature_layer = hf_config.vision_feature_layer
-    if vision_feature_layer < 0:
-        num_hidden_layers = hf_config.vision_config.num_hidden_layers \
-            + vision_feature_layer + 1
-    else:
-        num_hidden_layers = vision_feature_layer + 1
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        return CLIPVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-    elif isinstance(vision_config, SiglipVisionConfig):
-        return SiglipVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_next_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
@@ -300,7 +274,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = _init_vision_tower(config)
+        self.vision_tower = init_vision_tower_for_llava(config, quant_config)
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
         self.multi_modal_projector = LlavaMultiModalProjector(

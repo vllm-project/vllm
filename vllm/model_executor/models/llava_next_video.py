@@ -25,6 +25,7 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
+from .llava import init_vision_tower_for_llava
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip)
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
@@ -178,32 +179,6 @@ def input_processor_for_llava_next_video(ctx: InputContext,
     raise NotImplementedError(msg)
 
 
-def _init_vision_tower(hf_config: LlavaNextVideoConfig):
-    vision_config = hf_config.vision_config
-
-    # Initialize the vision tower only up to the required feature layer
-    vision_feature_layer = hf_config.vision_feature_layer
-    if vision_feature_layer < 0:
-        num_hidden_layers = hf_config.vision_config.num_hidden_layers \
-            + vision_feature_layer + 1
-    else:
-        num_hidden_layers = vision_feature_layer + 1
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        return CLIPVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-    elif isinstance(vision_config, SiglipVisionConfig):
-        return SiglipVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
 # adopted from transformers modeling_llava_next_video.py
 class LlavaNextVideoPooler(nn.Module):
 
@@ -280,7 +255,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
 
         # Initialize the vision tower only up to the required feature layer
-        self.vision_tower = _init_vision_tower(config)
+        self.vision_tower = init_vision_tower_for_llava(config, quant_config)
         self.vision_resampler = LlavaNextVideoPooler(config)
         self.multi_modal_projector = LlavaNextMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
