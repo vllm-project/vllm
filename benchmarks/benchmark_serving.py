@@ -397,6 +397,7 @@ async def benchmark(
     selected_percentile_metrics: List[str],
     selected_percentiles: List[str],
     ignore_eos: bool,
+    max_concurrency: Optional[int],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -448,6 +449,16 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
+    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+
+    async def limited_request_func(request_func_input, pbar):
+        if semaphore:
+            async with semaphore:
+                return await request_func(
+                    request_func_input=request_func_input, pbar=pbar)
+        return await request_func(request_func_input=request_func_input,
+                                  pbar=pbar)
+
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
@@ -463,8 +474,8 @@ async def benchmark(
                                               ignore_eos=ignore_eos)
         tasks.append(
             asyncio.create_task(
-                request_func(request_func_input=request_func_input,
-                             pbar=pbar)))
+                limited_request_func(request_func_input=request_func_input,
+                                     pbar=pbar)))
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
@@ -680,6 +691,7 @@ def main(args: argparse.Namespace):
                 float(p) for p in args.metric_percentiles.split(",")
             ],
             ignore_eos=args.ignore_eos,
+            max_concurrency=args.max_concurrency,
         ))
 
     # Save config and results to json
@@ -766,6 +778,19 @@ if __name__ == "__main__":
                         default=None,
                         help="Path to the sharegpt/sonnet dataset. "
                         "Or the huggingface dataset ID if using HF dataset.")
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Maximum number of concurrent requests. This can be used "
+        "to help simulate an environment where a higher level component "
+        "is enforcing a maximum number of concurrent requests. While the "
+        "--request-rate argument controls the rate at which requests are "
+        "initiated, this argument will control how many are actually allowed "
+        "to execute at a time. This means that when used in combination, the "
+        "actual request rate may be lower than specified with --request-rate, "
+        "if the server is not processing requests fast enough to keep up.")
+
     parser.add_argument(
         "--model",
         type=str,
