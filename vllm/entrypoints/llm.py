@@ -441,7 +441,8 @@ class LLM:
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob)
 
-                            if result.outputs[0].finish_reason == "stop":
+                            if (result.outputs[0].finish_reason == "stop" or
+                                (token_id == tokenizer.eos_token_id and not ignore_eos)):
                                 instance.completed.append(new_beam)
                             else:
                                 instance_new_beams.append(new_beam)
