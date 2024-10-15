@@ -246,7 +246,6 @@ class GPUModelRunner:
         torch.add(block_numbers * self.block_size,
                   block_offsets,
                   out=slot_mapping)
-        slot_mapping = block_numbers * self.block_size + block_offsets
 
         # Prepare the attention metadata.
         query_start_loc = torch.empty((num_reqs + 1, ),
