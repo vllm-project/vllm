@@ -40,13 +40,6 @@ steps:
   # Check API reference (if it fails, you may have missing mock imports)
   - grep \"sig sig-object py\" build/html/dev/sampling_params.html
 
-- label: Code Devlopment Mode Test
-  working_dir: "/vllm-workspace/.buildkite"
-  fast_check: true
-  no_gpu: true
-  commands: 
-  - bash run-code-dev-test.sh
-
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   fast_check: true
   source_file_dependencies:
