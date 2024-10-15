@@ -1,4 +1,4 @@
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 import openvino as ov
 import openvino.properties.hint as hints
@@ -41,18 +41,25 @@ class OpenVINOExecutor(ExecutorBase):
             self.ov_core, self.cache_config)
 
         # Instantiate the worker and load the model to CPU.
-        self._init_worker()
+        self.driver_worker = self._create_worker()
+        self.driver_worker.init_device()
+        self.driver_worker.load_model()
 
-    def _init_worker(self):
+    def _create_worker(self,
+                       local_rank: int = 0,
+                       rank: int = 0,
+                       distributed_init_method: Optional[str] = None
+    ):
         from vllm.worker.openvino_worker import OpenVINOWorker
 
         assert (
             self.parallel_config.world_size == 1
         ), "OpenVINOExecutor only supports single CPU socket currently."
 
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
-        self.driver_worker = OpenVINOWorker(
+        if distributed_init_method is None:
+          distributed_init_method = get_distributed_init_method(
+              get_ip(), get_open_port())
+        return OpenVINOWorker(
             ov_core=self.ov_core,
             model_config=self.model_config,
             parallel_config=self.parallel_config,
@@ -60,15 +67,13 @@ class OpenVINOExecutor(ExecutorBase):
             device_config=self.device_config,
             cache_config=self.cache_config,
             load_config=self.load_config,
-            local_rank=0,
-            rank=0,
+            local_rank=local_rank,
+            rank=rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the

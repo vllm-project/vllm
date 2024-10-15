@@ -12,7 +12,6 @@ from vllm.worker.worker_base import WorkerBase, WorkerWrapperBase
 
 logger = init_logger(__name__)
 
-
 def create_worker(worker_module_name: str, worker_class_name: str,
                   worker_class_fn: Optional[Callable[[], Type[WorkerBase]]],
                   **kwargs):
@@ -23,7 +22,6 @@ def create_worker(worker_module_name: str, worker_class_name: str,
     )
     wrapper.init_worker(**kwargs)
     return wrapper.worker
-
 
 class GPUExecutor(ExecutorBase):
 
@@ -101,7 +99,8 @@ class GPUExecutor(ExecutorBase):
     def _create_worker(self,
                        local_rank: int = 0,
                        rank: int = 0,
-                       distributed_init_method: Optional[str] = None):
+                       distributed_init_method: Optional[str] = None
+    ):
         return create_worker(**self._get_create_worker_kwargs(
             local_rank=local_rank,
             rank=rank,
