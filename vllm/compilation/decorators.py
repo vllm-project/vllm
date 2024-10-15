@@ -65,13 +65,13 @@ def _support_torch_compile(cls: type,
     #  other than TorchCompileWrapperWithCustomDispatcher
     cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
-    old_init = cls.__init__
+    old_init = cls.__init__  # type: ignore
 
     def __init__(self, *args, **kwargs):
         old_init(self, *args, **kwargs)
         TorchCompileWrapperWithCustomDispatcher.__init__(self)
 
-    cls.__init__ = __init__
+    cls.__init__ = __init__  # type: ignore
 
     def __call__(self, *args, **kwargs):
         # torch.compiler.is_compiling() means we are inside the compilation
@@ -111,5 +111,5 @@ def _support_torch_compile(cls: type,
             model_output = self.forward(*args, **kwargs)
             return model_output
 
-    cls.__call__ = __call__
+    cls.__call__ = __call__  # type: ignore
     return cls
