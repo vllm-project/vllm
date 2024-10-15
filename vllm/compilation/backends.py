@@ -69,7 +69,10 @@ def match_gemm_rs_ag_gemm(arg7_1, getitem_22, arg8_1, getitem_1, arg9_1):
     return mm_2, getitem_28
 
 
-def replace_gemm_rs_ag_gemm(arg7_1, getitem_24, arg8_1, getitem_26, arg9_1):
+# getitem_1 full residual
+def replace_gemm_rs_ag_gemm(arg7_1, getitem_24, arg8_1, getitem_1, arg9_1):
+    split_1 = torch.ops.aten.split.Tensor(getitem_1, 2048)
+    getitem_26 = split_1[0];  split_1 = None
     permute_3 = torch.ops.aten.permute.default(arg7_1, [1, 0])
     clone = torch.ops.aten.clone.default(permute_3, memory_format = torch.contiguous_format)
     fused_matmul_reduce_scatter = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(getitem_24, clone, 'avg', 0, '0')
@@ -78,13 +81,13 @@ def replace_gemm_rs_ag_gemm(arg7_1, getitem_24, arg8_1, getitem_26, arg9_1):
     getitem_30 = auto_functionalized_4[2]
     slice_scatter_2 = torch.ops.aten.slice_scatter.default(getitem_1, getitem_30, 0, 0, 2048)
     split_2 = torch.ops.aten.split.Tensor(slice_scatter_2, 2048)
-    getitem_31 = split_2[0]
+    getitem_31 = split_2[0]  # local residual
     permute_5 = torch.ops.aten.permute.default(arg9_1, [1, 0])
     clone_1 = torch.ops.aten.clone.default(permute_5, memory_format = torch.contiguous_format)
     fused_all_gather_matmul = torch.ops.symm_mem.fused_all_gather_matmul.default(getitem_29, [clone_1], 0, '0')
     getitem_34 = fused_all_gather_matmul[1]
     getitem_35 = getitem_34[0]
-    return getitem_34, getitem_35
+    return getitem_35, getitem_31
 
 
 my_patterns = PatternMatcherPass()
