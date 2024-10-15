@@ -12,12 +12,18 @@ from contextlib import nullcontext
 import pytest
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
-from ..utils import multi_gpu_test
+from ..utils import check_deprecated_block_manager_usage, multi_gpu_test
 
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_deprecated_block_manager():
+    check_deprecated_block_manager_usage(
+        'tests/basic_correctness/test_chunked_prefill.py')
 
 
 @pytest.mark.parametrize("model", MODELS)

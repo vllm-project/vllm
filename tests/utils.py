@@ -678,3 +678,12 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def check_deprecated_block_manager_usage(test_name: str):
+    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
+        f"To allow the use of deprecated BlockSpaceManagerV1, set the "
+        f"environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
+        f"You can run the tests with: "
+        f"`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest {test_name}`"  #noqa
+    )
