@@ -9,6 +9,8 @@ from typing import Union
 from fastapi import Request
 
 from vllm.config import ModelConfig
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          apply_hf_chat_template,
@@ -29,12 +31,11 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     OpenAIServing,
                                                     PromptAdapterPath,
                                                     TextTokensPrompt)
-from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
-                                                  MistralToolParser,
-                                                  ToolParser)
+from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
@@ -81,13 +82,13 @@ class OpenAIServingChat(OpenAIServing):
 
         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
-            if tool_parser == "mistral":
-                self.tool_parser = MistralToolParser
-            elif tool_parser == "hermes":
-                self.tool_parser = Hermes2ProToolParser
-            else:
+            try:
+                self.tool_parser = ToolParserManager.get_tool_parser(
+                    tool_parser)
+            except Exception as e:
                 raise TypeError("Error: --enable-auto-tool-choice requires "
-                                "--tool-call-parser")
+                                f"tool_parser:'{tool_parser}' which has not "
+                                "been registered") from e
 
     async def create_chat_completion(
         self,
@@ -137,6 +138,7 @@ class OpenAIServingChat(OpenAIServing):
                     messages=request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                     tools=tool_dicts,
                     documents=request.documents,
                     **(request.chat_template_kwargs or {}),
@@ -147,18 +149,19 @@ class OpenAIServingChat(OpenAIServing):
                     conversation=conversation,
                     chat_template=request.chat_template or self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                     tools=tool_dicts,
                     documents=request.documents,
                     **(request.chat_template_kwargs or {}),
                 )
         except Exception as e:
-            logger.error("Error in applying chat template from request: %s", e)
+            logger.exception("Error in applying chat template from request")
             return self.create_error_response(str(e))
 
         try:
             mm_data = await mm_data_future
         except Exception as e:
-            logger.error("Error in loading multi-modal data: %s", e)
+            logger.exception("Error in loading multi-modal data")
             return self.create_error_response(str(e))
 
         # validation for OpenAI tools
@@ -182,8 +185,9 @@ class OpenAIServingChat(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         try:
-            guided_decode_logits_processor = (
-                await self._guided_decode_logits_processor(request, tokenizer))
+            if self.enable_auto_tools and self.tool_parser:
+                request = self.tool_parser(tokenizer).adjust_request(
+                    request=request)
 
             if isinstance(prompt, str):
                 prompt_inputs = self._tokenize_prompt_input(
@@ -202,11 +206,15 @@ class OpenAIServingChat(OpenAIServing):
 
             assert prompt_inputs is not None
 
-            sampling_params = request.to_sampling_params(
-                tokenizer,
-                guided_decode_logits_processor,
-                default_max_tokens=self.max_model_len -
-                len(prompt_inputs["prompt_token_ids"]))
+            sampling_params: Union[SamplingParams, BeamSearchParams]
+            default_max_tokens = self.max_model_len - len(
+                prompt_inputs["prompt_token_ids"])
+            if request.use_beam_search:
+                sampling_params = request.to_beam_search_params(
+                    default_max_tokens)
+            else:
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens)
 
             self._log_inputs(request_id,
                              prompt_inputs,
@@ -228,14 +236,27 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
 
-            result_generator = self.engine_client.generate(
-                engine_inputs,
-                sampling_params,
-                request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-            )
+            if isinstance(sampling_params, BeamSearchParams):
+                assert isinstance(self.engine_client,
+                                    (AsyncLLMEngine,
+                                    MQLLMEngineClient)), \
+                    "Beam search is only supported with" \
+                    "AsyncLLMEngine and MQLLMEngineClient."
+                result_generator = self.engine_client.beam_search(
+                    engine_inputs['prompt_token_ids'],
+                    request_id,
+                    sampling_params,
+                )
+            else:
+                result_generator = self.engine_client.generate(
+                    engine_inputs,
+                    sampling_params,
+                    request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=request.priority,
+                )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -281,11 +302,7 @@ class OpenAIServingChat(OpenAIServing):
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
-
         num_prompt_tokens = 0
-
-        tool_parser: Optional[ToolParser] = self.tool_parser(
-            tokenizer) if self.tool_parser else None
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -305,6 +322,21 @@ class OpenAIServingChat(OpenAIServing):
         else:
             previous_texts, all_previous_token_ids = None, None
 
+        # Prepare the tool parser if it's needed
+        try:
+            if tool_choice_auto and self.tool_parser:
+                tool_parsers: List[Optional[ToolParser]] = [
+                    self.tool_parser(tokenizer)
+                ] * num_choices
+            else:
+                tool_parsers = [None] * num_choices
+        except RuntimeError as e:
+            logger.error("Error in tool parser creation: %s", e)
+            data = self.create_streaming_error_response(str(e))
+            yield f"data: {data}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
         try:
             async for res in result_generator:
                 if res.prompt_token_ids is not None:
@@ -323,7 +355,7 @@ class OpenAIServingChat(OpenAIServing):
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
                     for i in range(num_choices):
-
+                        tool_parser = tool_parsers[i]
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=DeltaMessage(
@@ -358,7 +390,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # Send response to echo the input portion of the
                     # last message
-                    if request.echo:
+                    if request.echo or request.continue_final_message:
                         last_msg_content: str = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
@@ -398,6 +430,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index
+                    tool_parser = tool_parsers[i]
 
                     if finish_reason_sent[i]:
                         continue
@@ -445,7 +478,8 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_text=delta_text,
                                 previous_token_ids=previous_token_ids,
                                 current_token_ids=current_token_ids,
-                                delta_token_ids=output.token_ids))
+                                delta_token_ids=output.token_ids,
+                                request=request))
 
                         # update the previous values for the next iteration
                         previous_texts[i] = current_text
@@ -504,10 +538,12 @@ class OpenAIServingChat(OpenAIServing):
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
                         # only happens if we are NOT using guided decoding
+                        auto_tools_called = False
                         if tool_parser:
-                            index = len(
-                                tool_parser.prev_tool_call_arr) - 1 if len(
-                                    tool_parser.prev_tool_call_arr) > 0 else 0
+                            auto_tools_called = len(
+                                tool_parser.prev_tool_call_arr) > 0
+                            index = len(tool_parser.prev_tool_call_arr
+                                        ) - 1 if auto_tools_called else 0
                         else:
                             index = 0
 
@@ -542,9 +578,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=output.finish_reason
-                            if not (tool_parser
-                                    and len(tool_parser.prev_tool_call_arr))
-                            else "tool_calls",
+                            if not auto_tools_called else "tool_calls",
                             stop_reason=output.stop_reason)
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
@@ -646,8 +680,10 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            # by default, tools are not used.
-            tools_called = False
+            # In the OpenAI API the finish_reason is "tools_called"
+            # if the tool choice is auto and the model produced a tool
+            # call. The same is not true for named function calls
+            auto_tools_called = False
 
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
@@ -669,7 +705,6 @@ class OpenAIServingChat(OpenAIServing):
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
-                tools_called = True
 
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
@@ -683,9 +718,18 @@ class OpenAIServingChat(OpenAIServing):
                     or request.tool_choice is None) and self.enable_auto_tools \
                     and self.tool_parser:
 
-                tool_parser = self.tool_parser(tokenizer)
-                tool_call_info = tool_parser.extract_tool_calls(output.text)
-                tools_called = tool_call_info.tools_called
+                try:
+                    tool_parser = self.tool_parser(tokenizer)
+                except RuntimeError as e:
+                    logger.error("Error in tool parser creation: %s", e)
+                    return self.create_error_response(str(e))
+
+                tool_call_info = tool_parser.extract_tool_calls(
+                    output.text, request=request)
+                # In the OpenAI API the finish_reason is "tools_called"
+                # if the tool choice is auto and the model produced a tool
+                # call. The same is not true for named function calls
+                auto_tools_called = tool_call_info.tools_called
                 if tool_call_info.tools_called:
                     message = ChatMessage(role=role,
                                           content=tool_call_info.content,
@@ -708,12 +752,12 @@ class OpenAIServingChat(OpenAIServing):
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason="tool_calls" if tools_called else
+                finish_reason="tool_calls" if auto_tools_called else
                 output.finish_reason if output.finish_reason else "stop",
                 stop_reason=output.stop_reason)
             choices.append(choice_data)
 
-        if request.echo:
+        if request.echo or request.continue_final_message:
             last_msg_content = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
@@ -726,6 +770,8 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
+        if final_res.encoder_prompt_token_ids is not None:
+            num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
         usage = UsageInfo(

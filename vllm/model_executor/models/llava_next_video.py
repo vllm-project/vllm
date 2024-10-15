@@ -1,4 +1,5 @@
 import math
+from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -12,10 +13,8 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -25,10 +24,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip)
-from .utils import (group_weights_with_prefix, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 # For profile run
@@ -267,7 +266,8 @@ class LlavaNextMultiModalProjector(nn.Module):
     "video", get_max_llava_next_video_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next_video)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next_video)
-class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
+class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                             SupportsPP):
 
     def __init__(self,
                  config: LlavaNextVideoConfig,
@@ -281,13 +281,23 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         # Initialize the vision tower only up to the required feature layer
         self.vision_tower = _init_vision_tower(config)
+        self.vision_resampler = LlavaNextVideoPooler(config)
         self.multi_modal_projector = LlavaNextMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
-        self.vision_resampler = LlavaNextVideoPooler(config)
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.model.make_empty_intermediate_tensors)
+
+    @cached_property
+    def sampler(self):
+        if hasattr(self.language_model, "sampler"):
+            return self.language_model.sampler
+
+        return Sampler()
 
     def _validate_video_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
@@ -397,34 +407,36 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for LlaVA-NeXT-Video.
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values_videos: Pixels in each frames for each input videos.
         """
-        video_input = self._parse_and_validate_video_input(**kwargs)
-
-        # merge video embeddings into input embeddings
-        if video_input is not None:
-            video_embeddings = self._process_video_pixels(video_input)
-            inputs_embeds = self.language_model \
-                .model.get_input_embeddings(input_ids)
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, video_embeddings,
-                self.config.video_token_index)
-
+        if intermediate_tensors is not None:
             input_ids = None
-        else:
             inputs_embeds = None
+        else:
+            video_input = self._parse_and_validate_video_input(**kwargs)
+            if video_input is not None:
+                video_embeddings = self._process_video_pixels(video_input)
+                inputs_embeds = self.language_model \
+                    .model.get_input_embeddings(input_ids)
+
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, video_embeddings,
+                    self.config.video_token_index)
+
+                input_ids = None
+            else:
+                inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   kv_caches,
                                                   attn_metadata,
-                                                  None,
+                                                  intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
         return hidden_states
@@ -445,19 +457,9 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(weights)
-
-        # load vision encoder
-        self.vision_tower.load_weights(weights_group["vision_tower"])
-
-        # load mlp projector
-        mlp_params_dict = dict(self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in weights_group["multi_modal_projector"]:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load llm backbone
-        self.language_model.load_weights(weights_group["language_model"])
+        loader = AutoWeightsLoader(
+            self,
+            # This model doesn't support images for now
+            ignore_unexpected_prefixes=["image_newline"],
+        )
+        loader.load_weights(weights)

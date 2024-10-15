@@ -1,5 +1,6 @@
 import itertools
 import random
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock, patch
 
@@ -156,26 +157,6 @@ def test_sampler_all_random_seed_deterministic(seed: int, device: str):
                                        sampling_params, device)
 
     assert first_sampler_output == second_sampler_output
-
-
-@pytest.mark.parametrize("seed", RANDOM_SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_sampler_all_beam(seed: int, device: str):
-    set_random_seed(seed)
-    torch.set_default_device(device)
-    batch_size = random.randint(1, 256)
-    _, fake_logits, sampler = _prepare_test(batch_size)
-
-    sampling_params = SamplingParams(
-        temperature=0,
-        best_of=2,
-        use_beam_search=True,
-    )
-    _do_sample(batch_size, fake_logits, sampler, sampling_params, device)
-    # no assertion here as I am not sure how to determine whether
-    # the outputs are expected - in other words, this just tests
-    # whether there are no exceptions in the sampler
-    # when handling an all-beam search case.
 
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
@@ -433,7 +414,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens=seq_lens if seq_lens else None,
-            query_lens=seq_lens if seq_lens else None,
+            query_lens=seq_lens if seq_lens else [1] * batch_size,
             device=device,
             pin_memory=is_pin_memory_available())
         # the logits tensor is modified in-place by the sampler
@@ -478,7 +459,7 @@ def test_sampler_mixed(seed: int, device: str):
     seq_lens: List[int] = []
     for i in range(batch_size):
         expected: Optional[List[int]] = None
-        sampling_type = random.randint(0, 3)
+        sampling_type = random.randint(0, 2)
         if sampling_type == 0:
             sampling_params = SamplingParams(temperature=0)
             expected = [int(torch.argmax(fake_logits[i], dim=-1).item())]
@@ -497,10 +478,7 @@ def test_sampler_mixed(seed: int, device: str):
                 for idx in range(n):
                     fake_logits[i, i + idx] = 1e2
                 expected = list(range(i, i + n))
-        else:
-            sampling_params = SamplingParams(temperature=0,
-                                             use_beam_search=True,
-                                             best_of=2)
+
         expected_tokens.append(expected)
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -528,9 +506,6 @@ def test_sampler_mixed(seed: int, device: str):
         for i, (sequence_output, metadata) in enumerate(
                 zip(sampler_output, seq_group_metadata_list)):
             assert metadata.sampling_params is not None
-
-            if metadata.sampling_params.use_beam_search:
-                continue
 
             if (metadata.sampling_params.seed is not None
                     and expected_tokens[i] is None):
@@ -596,8 +571,19 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     generation_config = GenerationConfig(top_k=top_k,
                                          top_p=top_p,
                                          do_sample=True)
-    warpers = generation_model._get_logits_warper(generation_config, device)
-    assert len(warpers) == 2  # top_p and top_k
+
+    @dataclass
+    class MockConfig:
+        is_encoder_decoder: bool = False
+
+    generation_model.config = MockConfig()  # needed by the following method
+    generation_model._prepare_special_tokens(generation_config, device=device)
+    processors = generation_model._get_logits_processor(generation_config,
+                                                        None,
+                                                        None,
+                                                        None, [],
+                                                        device=device)
+    assert len(processors) == 2  # top_p and top_k
 
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
     seq_lens: List[int] = []
@@ -639,7 +625,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     assert sample_probs is not None
 
-    hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
+    hf_probs = processors(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     torch.testing.assert_close(hf_probs, sample_probs, rtol=0.0, atol=1e-5)
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
