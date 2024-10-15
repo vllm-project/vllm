@@ -127,48 +127,48 @@ class HQQMarlinMethod(LinearMethodBase):
 
         # Quantized weights
         qweight = PackedvLLMParameter(
-            # data=torch.empty(
-            #     self.output_size_per_partition // 2,
-            #     input_size_per_partition,
-            #     dtype=torch.uint8,
-            # ),
             data=torch.empty(
-                group_in_tensor_size // 2,
-                self.quant_config.group_size,
+                self.output_size_per_partition,
+                input_size_per_partition,
                 dtype=torch.uint8,
             ),
+            # data=torch.empty(
+            #     group_in_tensor_size // 2,
+            #     self.quant_config.group_size,
+            #     dtype=torch.uint8,
+            # ),
             input_dim=1,
             output_dim=0,
             packed_dim=0,
-            packed_factor=2,#self.quant_config.pack_factor,
+            packed_factor=1,#self.quant_config.pack_factor,
             weight_loader=weight_loader)
         
         zeros = GroupQuantScaleParameter(
-            # data=torch.empty(
-            #     self.output_size_per_partition,
-            #     scales_and_zp_size,
-            #     dtype=params_dtype,
-            # ),
             data=torch.empty(
-                group_in_tensor_size,
-                1,
+                self.output_size_per_partition,
+                scales_and_zp_size,
                 dtype=params_dtype,
             ),
+            # data=torch.empty(
+            #     group_in_tensor_size,
+            #     1,
+            #     dtype=params_dtype,
+            # ),
             input_dim=1,
             output_dim=0,
             weight_loader=weight_loader)
 
         scales = GroupQuantScaleParameter(
-            # data=torch.empty(
-            #     self.output_size_per_partition,
-            #     scales_and_zp_size,
-            #     dtype=params_dtype,
-            # ),
             data=torch.empty(
-                group_in_tensor_size,
-                1,
+                self.output_size_per_partition,
+                scales_and_zp_size,
                 dtype=params_dtype,
             ),
+            # data=torch.empty(
+            #     group_in_tensor_size,
+            #     1,
+            #     dtype=params_dtype,
+            # ),
             input_dim=1,
             output_dim=0,
             weight_loader=weight_loader)
@@ -183,11 +183,11 @@ class HQQMarlinMethod(LinearMethodBase):
 
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        torch.set_printoptions(edgeitems=128)
-        print("layer qweight:", layer.qweight.shape)
-        print(layer.qweight.data)
-        # self.kernel.process_weights_after_loading(layer)
-        raise ValueError("stop")
+        # torch.set_printoptions(profile="full")
+        # print("layer qweight:", layer.qweight.shape)
+        # print(layer.qweight.data.transpose(1, 0)[0])
+        # # self.kernel.process_weights_after_loading(layer)
+        # raise ValueError("stop")
         return
 
     def apply(
@@ -214,26 +214,31 @@ class HQQMarlinMethod(LinearMethodBase):
         # shifts = torch.full((layer.qweight.shape), 4, device=x.device)
         # unpacked = torch.concat([layer.qweight.bitwise_and(lowbits).to(torch.int8),
         #     layer.qweight.bitwise_right_shift(shifts).to(torch.int8)], dim=0)
-        unpacked = unpack_4bit_u8(layer.qweight, dtype=x.dtype)
-        scales = layer.scales.repeat_interleave(64, dim=1)
-        zeros = layer.zeros.repeat_interleave(64, dim=1)
+        unpacked = layer.qweight.reshape(-1, 64) #unpack_4bit_u8(layer.qweight.reshape(-1, 64), dtype=x.dtype)
+        scales = layer.scales.reshape(-1, 1)#.repeat_interleave(64, dim=1)
+        zeros = layer.zeros.reshape(-1, 1)#.repeat_interleave(64, dim=1)
         # torch.set_printoptions(sci_mode=False)
         # print("scales:", scales, scales.shape)
         # print("zeros:", zeros, zeros.shape)
         # # print(unpacked.shape, zeros.shape, scales.shape)
         # print("mydeq:", unpacked)
         b = (unpacked - zeros) * scales
-        # b = b.reshape(self.output_size_per_partition, self.input_size_per_partition)
-        # b = b.transpose(1, 0)
+        b = b.reshape(self.output_size_per_partition, self.input_size_per_partition)
         # print("unpacked:", unpacked, unpacked.shape)
-        # if HQQMarlinMethod.global_print_ctr < 3:
-        #     torch.set_printoptions(edgeitems=128)
-        #     torch.set_printoptions(sci_mode=False)
-        #     print("mydeq:", b, b.shape)
-        #     HQQMarlinMethod.global_print_ctr += 1
+        if HQQMarlinMethod.global_print_ctr < 1:
+            torch.set_printoptions(profile="full")
+            torch.set_printoptions(sci_mode=False)
+            # print("unpacked size:", layer.qweight.reshape(-1, 64).shape, "->", unpacked.shape)
+            # print(layer.qweight.reshape(-1, 64).transpose(1, 0)[0])
+            # print(unpacked.transpose(1, 0)[0])
+            # print("act wq:", layer.qweight[0])
+            # print("scales:", layer.scales.reshape(-1, 1).transpose(1, 0))
+            # print("zeros:", layer.zeros.reshape(-1, 1).transpose(1, 0))
+            # print("mydeq:", b.transpose(1, 0)[0], b.shape)
+            HQQMarlinMethod.global_print_ctr += 1
+            # raise ValueError("stop")
         # # print(x.shape, b.shape)
         # print("act wq:", layer.qweight)
-        # return torch.matmul(x, b)
         # print(x.dtype, b.dtype)
         return F.linear(x, b, bias)
         # return torch.empty((x.shape[0], self.output_size_per_partition),

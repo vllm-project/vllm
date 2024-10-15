@@ -190,19 +190,21 @@ class LlamaAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        if LlamaAttention.global_print_ctr < 1:
-            torch.set_printoptions(edgeitems=2048)
-            torch.set_printoptions(sci_mode=False)
-            print("qkv:", qkv[0])
-            LlamaAttention.global_print_ctr += 1
+        # if LlamaAttention.global_print_ctr < 1:
+        #     torch.set_printoptions(profile="full")
+        #     torch.set_printoptions(sci_mode=False)
+        #     print("qkv:", qkv[0])
+        #     LlamaAttention.global_print_ctr += 1
         # print("split params:", self.q_size, self.kv_size, self.kv_size,
         #       qkv.dtype)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # if LlamaAttention.global_print_ctr < 1:
-        #     torch.set_printoptions(edgeitems=100)
+        #     torch.set_printoptions(profile="full")
         #     torch.set_printoptions(sci_mode=False)
-        #     print("q k v 1:", q, k, v)
+        #     print("q k v 1:", q[0], k[0], v[0])
+        #     print("shapes of all:", qkv.shape, "->", q.shape, k.shape, v.shape)
         #     LlamaAttention.global_print_ctr += 1
+        # raise ValueError("stop")
         q, k = self.rotary_emb(positions, q, k)
         # print("q k v 2:", q, k, v)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -429,20 +431,28 @@ class LlamaModel(nn.Module):
                             continue
                         param = params_dict[new_name]
                         weight_loader = param.weight_loader
-                        if k == "W_q" and LlamaModel.global_print_ctr < 3:
-                            torch.set_printoptions(edgeitems=128)
-                            print("load:", new_name, param.shape, param.dtype,
-                                loaded_weight[k].shape, loaded_weight[k].dtype,
-                                to_shape)
-                            print(loaded_weight[k])
-                            LlamaModel.global_print_ctr += 1
-                        # if should_scale:
-                        #     loaded = loaded_weight[k].reshape(-1, to_shape[1] // group_size)
-                        # else:
-                        #     loaded = loaded_weight[k].reshape(to_shape[0] // 2, to_shape[1])
+                        if should_scale:
+                            loaded = loaded_weight[k].reshape(-1, to_shape[1] // group_size)
+                        else:
+                            loaded = unpack_4bit_u8(loaded_weight[k], dtype=torch.bfloat16).reshape(to_shape).to(torch.uint8)
+                            # loaded1 = loaded[:to_shape[0]]
+                            # loaded2 = loaded[to_shape[0]:]
+                            # if (pick_shard_id == "q" or pick_shard_id == "k" or
+                            #     pick_shard_id == "v"):
+                            #     pass
+
+                        # if k == "W_q" and LlamaModel.global_print_ctr < 3:
+                        #     torch.set_printoptions(profile="full")
+                        #     print("load:", new_name, param.shape, param.dtype,
+                        #         loaded_weight[k].shape, loaded_weight[k].dtype,
+                        #         to_shape)
+                        #     print(loaded.transpose(1, 0)[0])
+                        #     LlamaModel.global_print_ctr += 1
 
                         #TODO try this
-                        loaded = loaded_weight[k]
+                        # loaded = loaded_weight[k]
+
+                        # print(pick_shard_id)
 
                         if pick_shard_id is not None:
                             weight_loader(param, loaded, pick_shard_id)
@@ -455,13 +465,26 @@ class LlamaModel(nn.Module):
                     param_s = loaded_weight["scale"]
                     param_w = ((unpack_4bit_u8(param_wq, dtype=torch.bfloat16) - param_zp) * param_s
                                ).reshape(to_shape)
+                    torch.set_printoptions(profile="full")
                     torch.set_printoptions(sci_mode=False)
-                    # print("load wq orig shape:", param_wq)
-                    # print("load wq:", param_wq.reshape(to_shape[0] // 2, to_shape[1]))
+                    if LlamaModel.global_print_ctr < 3:
+                        # print("load wq orig shape:", param_wq.shape,
+                        #       param_wq.reshape(to_shape[0] // 2, to_shape[1]).shape)
+                        # # print("load wq:", param_wq.reshape(to_shape[0] // 2, to_shape[1])[0])
+                        # print("param s:", param_s.shape, param_s.reshape(-1, to_shape[1] // group_size).shape)
+                        # print("param zp:", param_zp.shape, param_zp.reshape(-1, to_shape[1] // group_size).shape)
+                        # print("s:", param_s.transpose(1, 0))
+                        # if LlamaModel.global_print_ctr > 0:
+                        #     print("zp:", param_zp.transpose(1, 0))
+                        # print(name)
+                        # print("w:", param_w.transpose(1, 0)[0])
+                        # print("wq shape:", param_wq.shape, "->", unpack_4bit_u8(param_wq, dtype=torch.bfloat16).shape)
+                        # print(param_wq.transpose(1, 0)[0])
+                        # print(unpack_4bit_u8(param_wq, dtype=torch.bfloat16).transpose(1, 0)[0])
+                        LlamaModel.global_print_ctr += 1
                     # print("deq:", unpack_4bit_u8(param_wq))
                     # print("zps:", param_zp, param_zp.shape)
                     # print("s:", param_s, param_s.shape)
-                    # print("w:", param_w)
                 else:
                     name = name + ".weight"
                     param = params_dict[name]
@@ -502,10 +525,13 @@ class LlamaModel(nn.Module):
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
 
-                # if "proj" in name:
-                #     print("load:", name, weight_loader)
-                #     torch.set_printoptions(sci_mode=False)
-                #     print("unq:", loaded_weight)
+                if LlamaModel.global_print_ctr < 3 and "layers.0.self_attn.qkv_proj" in name:
+                    torch.set_printoptions(profile="full")
+                    torch.set_printoptions(sci_mode=False)
+                    print("load:", name, weight_loader)
+                    torch.set_printoptions(sci_mode=False)
+                    print("unq:", loaded_weight.transpose(1, 0)[0])
+                    LlamaModel.global_print_ctr += 1
 
                 break
             else:
@@ -525,10 +551,13 @@ class LlamaModel(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
 
-                # if "proj" in name:
-                #     print("load:", name, weight_loader)
-                #     torch.set_printoptions(sci_mode=False)
-                #     print("unq:", loaded_weight)
+                if LlamaModel.global_print_ctr < 3 and "layers.0.self_attn.qkv_proj" in name:
+                    torch.set_printoptions(profile="full")
+                    torch.set_printoptions(sci_mode=False)
+                    print("load:", name, weight_loader)
+                    torch.set_printoptions(sci_mode=False)
+                    print("unq:", loaded_weight.transpose(1, 0)[0])
+                    LlamaModel.global_print_ctr += 1
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

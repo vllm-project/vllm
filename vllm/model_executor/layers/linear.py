@@ -134,12 +134,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        # if UnquantizedLinearMethod.global_print_ctr < 3:
+        # if UnquantizedLinearMethod.global_print_ctr < 1:
         #     torch.set_printoptions(edgeitems=128)
         #     torch.set_printoptions(sci_mode=False)
 
-        #     print("apply to weight:", layer.weight, layer.weight.shape)
-        #     # # print("and to bias:", bias)
+        #     torch.set_printoptions(profile="full")
+        #     torch.set_printoptions(sci_mode=False)
+        #     print("weight:", layer.weight.transpose(1, 0)[0], layer.weight.shape)
+        #     # raise ValueError("stop")
+        #     # print("and to bias:", bias)
         #     UnquantizedLinearMethod.global_print_ctr += 1
         return F.linear(x, layer.weight, bias)
 
@@ -521,10 +524,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # Special case for quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
-            # print("shard_size1:", shard_size)
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
-                # print(vars(param))
                 pack_factor = getattr(param, "packed_factor", None)
                 if pack_factor is None:
                     pack_factor = param.pack_factor
@@ -533,7 +534,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
-            # print("shard_size2:", shard_size)
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
                                             False)
             if use_bitsandbytes_4bit:
@@ -541,11 +541,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
 
-            # print("shard_size3:", shard_size)
-            # print("param data pre:", param_data.shape)
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
-            # print("param data post:", param_data.shape)
             start_idx = tp_rank * shard_size
             # bitsandbytes loads the weights of the specific portion
             # no need to narrow here
@@ -792,8 +789,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
 
-        # print("LOAD", param.shape, loaded_weight.shape, loaded_shard_id)
-
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
@@ -856,7 +851,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
-
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
@@ -946,7 +940,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "QKVParallelLinear, assume the weight is the same "
                     "for all partitions.")
 
-        # print(param_data.shape, loaded_weight.shape)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -989,8 +982,6 @@ class RowParallelLinear(LinearBase):
                  prefix: str = ""):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
-
-        # print("RPL", input_size, output_size)
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
@@ -1045,15 +1036,12 @@ class RowParallelLinear(LinearBase):
             param.materialize(tuple(weight_shape), dtype=loaded_weight.dtype)
 
         param_data = param.data
-        # print("PRE", param_data.shape, loaded_weight.shape, input_dim)
 
         # bitsandbytes loads the weights of the specific portion
         # no need to narrow here
         if input_dim is not None and not use_bitsandbytes_4bit:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
-            # print("input_dim:", input_dim, "start_idx:", start_idx,
-            #       "shard_size:", shard_size)
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
 
@@ -1061,8 +1049,6 @@ class RowParallelLinear(LinearBase):
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
-
-        # print("POST", param_data.shape, loaded_weight.shape)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
