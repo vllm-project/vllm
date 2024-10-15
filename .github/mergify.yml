@@ -10,6 +10,21 @@ pull_request_rules:
       add:
         - documentation
 
+- name: label-ci-build
+  description: Automatically apply ci/build label
+  conditions:
+    - files~=^\.github/
+    - files~=\.buildkite/
+    - files~=^cmake/
+    - files=CMakeLists.txt
+    - files~=^Dockerfile
+    - files~=^requirements.*\.txt
+    - files=setup.py
+  actions:
+    label:
+      add:
+        - ci/build
+
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:
       - conflict
