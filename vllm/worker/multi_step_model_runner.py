@@ -14,7 +14,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 get_pythonized_sample_results)
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
-from vllm.utils import PyObjectCache
+from vllm.utils import PyObjectCache, async_tensor_h2d
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -30,6 +30,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 MULTI_STEP_ATTENTION_BACKENDS = ["flash-attn", "rocm-flash-attn", "flashinfer"]
+MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["flash-attn"]
+
+def _get_supported_attention_backends(chunked_prefill_enabled: bool) \
+    -> List[str]:
+    if chunked_prefill_enabled:
+        return MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS
+    else:
+        return MULTI_STEP_ATTENTION_BACKENDS
 
 
 def seq_output_builder():
@@ -144,11 +152,13 @@ class StatefulModelInput(BroadcastableModelInput):
     is_multi_step: bool = True
     is_last_step: bool = False
     is_first_multi_step: bool = False
+    base_output_proc_callback: Optional[Callable] = None
     # ping-pong data structures for multi-step to wait on the previous step
     step_cuda_events: List[torch.cuda.Event] = field(
         default_factory=lambda: [torch.cuda.Event(blocking=True)] * 2)
     num_seqs: int = -1
     num_queries: int = -1
+    num_single_step_prefills: int = 0
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         assert self.frozen_model_input is not None
@@ -161,6 +171,7 @@ class StatefulModelInput(BroadcastableModelInput):
             'is_first_multi_step': self.is_first_multi_step,
             'num_seqs': self.num_seqs,
             'num_queries': self.num_queries,
+            'num_single_step_prefills': self.num_single_step_prefills,
         }
         tensor_dict.update(new_tensor_dict)
         return tensor_dict
@@ -209,6 +220,81 @@ class StatefulModelInput(BroadcastableModelInput):
                         sampled_token_ids=sampled_token_ids,
                         pythonized=False))
 
+    def maybe_advance_sampling_metadata(self, device: str, pin_memory: bool):
+        """
+        sampling_metadata.selected_token_indices is constructed for the
+        first-step in Multi-Step. However, when chunked-prefill is enabled with
+        multi-step, the scheduled prompts are fully processed in the
+        first-step and are processed as decodes in the rest of the steps.
+        This function updates the sampling_metadata.selected_token_indices
+        to account for this conversion.
+
+        Example:
+        Let 2 prompts and 2 decodes be scheduled together. Let the
+        num-tokens to process for the 2 prompts be 5 and 8 respectively.
+
+        In that case, sampling_metadata.sampled_token_indices will be,
+        [4, 12, 13, 14] as it is constructed for the first-step in
+        multi-step.
+        However, the prompts turns to decodes after the first-step
+        and the num-tokens for the previously-prompt sequences will
+        be 1 and 1 as they are decodes now. The self.sampled_token_indices
+        must be updated to [0,1,2,3].
+        """
+        assert self.current_step == 1 and self.num_single_step_prefills > 0
+        if not get_pp_group().is_last_rank:
+            return
+
+        assert self.frozen_model_input is not None
+        assert self.frozen_model_input.sampling_metadata is not None
+        self.frozen_model_input.sampling_metadata.selected_token_indices =  \
+            async_tensor_h2d(list(range(self.num_queries)),
+                             dtype=torch.long,
+                             target_device=device,
+                             pin_memory=pin_memory)
+
+    def maybe_advance_frozen_model_input(self, device: str, pin_memory: bool):
+        """
+        Advancing the datastructures of StatefulModelInput::frozen_model_input
+        is only required when prefills are scheduled with decodes to run in
+        multi-step. This advancement/correction is required to account for
+        the conversion of Prefills to Decodes after the first multi-step.
+        """
+        if self.current_step != 1 or self.num_single_step_prefills == 0:
+            return
+
+        assert self.frozen_model_input is not None
+        fmi = self.frozen_model_input
+
+        # Truncate input_tokens
+        assert fmi.input_tokens is not None
+        assert fmi.input_tokens.shape[0] >= self.num_seqs
+        fmi_new_input_tokens: torch.Tensor = fmi.input_tokens[:self.num_seqs]
+
+        # Update frozen_model_input::input_positons.
+        assert fmi.input_positions is not None
+        assert fmi.input_positions.shape[0] >= self.num_seqs
+        fmi_new_input_positions: torch.Tensor = fmi.input_positions[:self.
+                                                                    num_seqs]
+
+        # Assert unsupported
+        assert fmi.lora_mapping is None
+        assert fmi.lora_requests is not None
+        assert len(fmi.lora_requests) == 0
+        assert fmi.attn_metadata is not None
+        assert fmi.prompt_adapter_mapping is None
+        assert fmi.prompt_adapter_requests is not None
+        assert len(fmi.prompt_adapter_requests) == 0
+        assert fmi.multi_modal_kwargs is not None
+        assert len(fmi.multi_modal_kwargs) == 0
+
+        self.frozen_model_input = dataclasses.replace(
+            self.frozen_model_input,
+            input_tokens=fmi_new_input_tokens,
+            input_positions=fmi_new_input_positions)
+
+        self.maybe_advance_sampling_metadata(device, pin_memory)
+
 
 # MutableModelInputForGPUWithMultiStepMetadata is not subclass of
 # ModelInputForGPU but it wraps the actual input dataclass and adds multi-step
@@ -220,6 +306,19 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
     def __init__(self, base_model_runner: GPUModelRunnerBase, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # Check attention backend support.
+        supported_attention_backends: List[str] = \
+            _get_supported_attention_backends(
+                self.scheduler_config.chunked_prefill_enabled)
+        if self.attn_backend.get_name() not in supported_attention_backends:
+            ms_config_str: str = "Multi-Step + Chunked-Prefill" \
+                if self.scheduler_config.chunked_prefill_enabled \
+                      else "Multi-Step"
+            raise ValueError(
+                f"{ms_config_str} not supported for attention backend: "
+                f"{self.attn_backend.get_name()}. Set VLLM_ATTENTION_BACKEND "
+                f"to a value from {supported_attention_backends}.")
+
         # uses the base model runner to execute the model and wraps it with
         # multi-step logic
         self._base_model_runner: GPUModelRunnerBase = base_model_runner
@@ -227,7 +326,14 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         self.is_multi_step = self.scheduler_config.is_multi_step
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
-        self.pythonization_cache = PythonizationCache()
+        # Using the PythonizationCache in Pipeline-Parallel clobbers the
+        # SequenceOutput and CompletionSequenceGroupOutput object.
+        # When cache-reset happens at the last step of a multi-step
+        # execution, there may be other on-going single-step/multi-step
+        # executions. The current caching implementation does not check
+        # for this.
+        self.pythonization_cache = PythonizationCache() \
+            if self.parallel_config.pipeline_parallel_size == 1 else None
 
     @functools.cached_property
     def _copy_stream(self):
@@ -248,14 +354,25 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> StatefulModelInput:
-        frozen_model_input = self._base_model_runner.prepare_model_input(
-            seq_group_metadata_list, virtual_engine, finished_requests_ids)
+        frozen_model_input: ModelInputForGPUWithSamplingMetadata = \
+              self._base_model_runner.prepare_model_input(
+                    seq_group_metadata_list,
+                    virtual_engine,
+                    finished_requests_ids)
+
+        assert frozen_model_input.query_lens is not None
+        assert frozen_model_input.seq_lens is not None
+        assert frozen_model_input.attn_metadata is not None
+        num_queries = len(frozen_model_input.query_lens)
+        num_seqs = len(frozen_model_input.seq_lens)
+        num_single_step_prefills = frozen_model_input.attn_metadata.num_prefills
 
         model_input = StatefulModelInput(
             frozen_model_input=frozen_model_input,
-            num_seqs=len(frozen_model_input.seq_lens),
-            num_queries=len(frozen_model_input.query_lens),
-        )
+            num_seqs=num_seqs,
+            num_queries=num_queries,
+            num_single_step_prefills=num_single_step_prefills)
+
         return model_input
 
     def _async_process_outputs(self, model_input: StatefulModelInput,
@@ -265,7 +382,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         output_proc_callback()
 
         cont = True
-        for model_output in model_input.cached_outputs:
+        for step_num, model_output in enumerate(model_input.cached_outputs):
             if not model_output.pythonized:
                 model_output.maybe_pythonize(model_input, self._copy_stream,
                                              self.pinned_sampled_token_ids)
@@ -276,7 +393,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                         seq_group_metadata_list=ctx.seq_group_metadata_list,
                         scheduler_outputs=ctx.scheduler_outputs,
                         is_async=False,
-                        is_last_step=False)
+                        is_last_step=False,
+                        is_first_step_output=step_num == 0)
 
                     output_proc_callback()
                 else:
@@ -292,9 +410,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         has_async_callback = output_proc_callback is not None
 
         outputs = []
-        for output_id in range(len(model_input.cached_outputs)):
-            output = model_input.cached_outputs[output_id]
-            is_last_step = output_id == len(model_input.cached_outputs) - 1
+        for step_num, output in enumerate(model_input.cached_outputs):
+            is_last_step = step_num == len(model_input.cached_outputs) - 1
 
             # For non-async case:
             #   -- We simply add the outputs
@@ -323,7 +440,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                             seq_group_metadata_list,
                             scheduler_outputs=ctx.scheduler_outputs,
                             is_async=False,
-                            is_last_step=False)
+                            is_last_step=False,
+                            is_first_step_output=step_num == 0)
                     else:
                         outputs.append(output.sampler_output)
             else:
@@ -389,18 +507,27 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             model_input = self._advance_step(
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
-        output_proc_callback = None
+            # frozen_model_input may have been updated
+            frozen_model_input = model_input.frozen_model_input
+            assert frozen_model_input is not None
+
+        if model_input.base_output_proc_callback is None:
+            assert frozen_model_input is not None
+            model_input.base_output_proc_callback = \
+                        frozen_model_input.async_callback
+
         if frozen_model_input.async_callback is not None:
-            output_proc_callback = frozen_model_input.async_callback
-            assert output_proc_callback is not None
+            assert model_input.base_output_proc_callback is not None
             async_callback = functools.partial(
                 self._async_process_outputs,
                 model_input=model_input,
-                output_proc_callback=output_proc_callback)
+                output_proc_callback=model_input.base_output_proc_callback)
 
-            frozen_model_input = dataclasses.replace(  # type: ignore
+            model_input.frozen_model_input = dataclasses.replace(  # type: ignore
                 model_input.frozen_model_input,
                 async_callback=async_callback)
+            # Update the local instance
+            frozen_model_input = model_input.frozen_model_input
             assert frozen_model_input is not None
 
         # Execute the model
@@ -455,9 +582,10 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # Pythonize the output and block if needed since it is the last step
         if model_input.is_last_step:
-            outputs = self._final_process_outputs(model_input,
-                                                  output_proc_callback)
-            self.pythonization_cache.reset()
+            outputs = self._final_process_outputs(
+                model_input, model_input.base_output_proc_callback)
+            if self.pythonization_cache:
+                self.pythonization_cache.reset()
             return outputs
 
         # should be [SamplerOutput]
@@ -484,11 +612,14 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
     def _advance_step(self, model_input: StatefulModelInput,
                       out: SamplerOutput) -> StatefulModelInput:
-        if self.attn_backend.get_name() not in MULTI_STEP_ATTENTION_BACKENDS:
-            raise ValueError(
-                f"Multi-step not supported for attention backend: "
-                f"{self.attn_backend.get_name()}. Set VLLM_ATTENTION_BACKEND "
-                f"to a value from {MULTI_STEP_ATTENTION_BACKENDS}.")
+
+        model_input.maybe_advance_frozen_model_input(self.device,
+                                                     self.pin_memory)
+        frozen_model_input = model_input.frozen_model_input
+        assert frozen_model_input is not None
+        assert frozen_model_input.input_tokens is not None
+        assert frozen_model_input.input_tokens.shape[0] == model_input.num_seqs
+        assert frozen_model_input.attn_metadata is not None
 
         sampled_token_ids = model_input.cached_outputs[-1].sampled_token_ids
         num_seqs = model_input.num_seqs
@@ -498,13 +629,15 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         attn_metadata = frozen_model_input.attn_metadata
         assert attn_metadata is not None
 
+        turn_prefills_into_decodes: bool = model_input.current_step == 1 and \
+                                    model_input.num_single_step_prefills != 0
         attn_metadata.advance_step(
             frozen_model_input,
             sampled_token_ids,
             self.block_size,
             num_seqs,
             num_queries,
-        )
+            turn_prefills_into_decodes=turn_prefills_into_decodes)
 
         return model_input
 
@@ -683,6 +816,9 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
+        # (Check for Guided Decoding)
         if seq_group.sampling_params.logits_processors:
             assert len(seq_group.sampling_params.logits_processors) == 0, (
                 "Logits Processors are not supported in multi-step decoding")

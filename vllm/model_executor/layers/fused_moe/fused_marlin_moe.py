@@ -10,17 +10,27 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.scalar_type import scalar_types
 
 
+def get_scalar_type(num_bits: int, has_zp: bool):
+    if has_zp:
+        assert num_bits == 4
+        return scalar_types.uint4
+    else:
+        return scalar_types.uint4b8 if num_bits == 4 else scalar_types.uint8b128
+
+
 def single_marlin_moe(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
     scales: torch.Tensor,
     gating_output: torch.Tensor,
-    g_idx: torch.Tensor,
-    perm: torch.Tensor,
     topk: int,
     renormalize: bool,
+    g_idx: Optional[torch.Tensor] = None,
+    sort_indices: Optional[torch.Tensor] = None,
+    w_zeros: Optional[torch.Tensor] = None,
     override_config: Optional[Dict[str, Any]] = None,
     num_bits: int = 8,
+    is_k_full: bool = True,
 ) -> torch.Tensor:
     """
     This function computes the multiplication of hidden_states with expert
@@ -33,10 +43,12 @@ def single_marlin_moe(
     - scales (torch.Tensor): The quantization scales.
     - gating_output (torch.Tensor): The output of the gating operation
         (before softmax).
-    - g_idx (torch.Tensor): The act_order indices.
-    - perm (torch.Tensor): The act_order input permutation.
+    - g_idx (Optional[torch.Tensor]): Optional act_order indices.
+    - sort_indices (Optional[torch.Tensor]): Optional act_order input
+      permutation.
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
+    - w_zeros (Optional[torch.Tensor]): Optional zero points to be used for w.
     - override_config (Optional[Dict[str, Any]]): Optional override
         for the kernel configuration.
     - num_bits (bool): The number of bits in expert weights quantization.
@@ -78,16 +90,34 @@ def single_marlin_moe(
     max_workspace_size = (N // 64) * 16
     workspace = torch.zeros(max_workspace_size,
                             dtype=torch.int,
-                            device="cuda",
+                            device=hidden_states.device,
                             requires_grad=False)
 
-    scalar_type = (scalar_types.uint4b8
-                   if num_bits == 4 else scalar_types.uint8b128)
+    has_zero_point = w_zeros is not None
+    if w_zeros is None:
+        w_zeros = torch.empty((0, 0),
+                              dtype=hidden_states.dtype,
+                              device=hidden_states.device,
+                              requires_grad=False)
+
+    if g_idx is None:
+        g_idx = torch.empty((0, 0),
+                            dtype=torch.int32,
+                            device=hidden_states.device,
+                            requires_grad=False)
+
+    if sort_indices is None:
+        sort_indices = torch.empty((0),
+                                   dtype=torch.int32,
+                                   device=hidden_states.device,
+                                   requires_grad=False)
+
+    scalar_type = get_scalar_type(num_bits, has_zero_point)
 
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        g_idx, perm, workspace, scalar_type, M, N, K, True, E, topk,
-        block_size_m, True, False)
+        w_zeros, g_idx, sort_indices, workspace, scalar_type, M, N, K,
+        is_k_full, E, topk, block_size_m, True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -96,17 +126,20 @@ def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
     gating_output: torch.Tensor,
-    g_idx1: torch.Tensor,
-    g_idx2: torch.Tensor,
-    perm1: torch.Tensor,
-    perm2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    g_idx1: Optional[torch.Tensor] = None,
+    g_idx2: Optional[torch.Tensor] = None,
+    sort_indices1: Optional[torch.Tensor] = None,
+    sort_indices2: Optional[torch.Tensor] = None,
+    w1_zeros: Optional[torch.Tensor] = None,
+    w2_zeros: Optional[torch.Tensor] = None,
     override_config: Optional[Dict[str, Any]] = None,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
     num_bits: int = 8,
+    is_k_full: bool = True,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -116,21 +149,22 @@ def fused_marlin_moe(
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
     - w1 (torch.Tensor): The first set of expert weights.
     - w2 (torch.Tensor): The second set of expert weights.
+    - w1_scale (torch.Tensor): Scale to be used for w1.
+    - w2_scale (torch.Tensor): Scale to be used for w2.
     - gating_output (torch.Tensor): The output of the gating operation
         (before softmax).
-    - g_idx1 (torch.Tensor): The first set of act_order indices.
-    - g_idx2 (torch.Tensor): The second set of act_order indices.
-    - perm1 (torch.Tensor): The first act_order input permutation.
-    - perm2 (torch.Tensor): The second act_order input permutation.
+    - g_idx1 (Optional[torch.Tensor]): The first set of act_order indices.
+    - g_idx2 (Optional[torch.Tensor]): The second set of act_order indices.
+    - sort_indices1 (Optional[torch.Tensor]): The first act_order input
+        permutation.
+    - sort_indices2 (Optional[torch.Tensor]): The second act_order input
+        permutation.
     - topk_weights (torch.Tensor): Top-k weights.
     - topk_ids (torch.Tensor): Indices of topk-k elements.
-    - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - override_config (Optional[Dict[str, Any]]): Optional override
         for the kernel configuration.
-    - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
-        w1.
-    - w2_scale (Optional[torch.Tensor]): Optional scale to be used for
-        w2.
+    - w1_zeros (Optional[torch.Tensor]): Optional zero points to be used for w1.
+    - w2_zeros (Optional[torch.Tensor]): Optional zero points to be used for w2.
     - num_bits (bool): The number of bits in expert weights quantization.
 
     Returns:
@@ -149,6 +183,20 @@ def fused_marlin_moe(
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype == torch.float16
     assert num_bits in [4, 8]
+
+    has_no_act_order = (g_idx1 is None and g_idx2 is None
+                        and sort_indices1 is None and sort_indices2 is None)
+    has_all_act_order = (g_idx1 is not None and g_idx2 is not None
+                         and sort_indices1 is not None
+                         and sort_indices2 is not None)
+    assert has_no_act_order or has_all_act_order, (
+        "g_idx and sorted_indices "
+        "must be all not None or must be all None")
+
+    has_no_zp = w1_zeros is None and w2_zeros is None
+    has_all_zp = w1_zeros is not None and w2_zeros is not None
+    assert has_no_zp or has_all_zp, ("zero points must be both not None or "
+                                     "must be both None")
 
     M, K = hidden_states.shape
     E = w1.shape[0]
@@ -170,14 +218,42 @@ def fused_marlin_moe(
 
     sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
 
-    max_workspace_size = ((M + 255) // 256) * (max(2 * N, K) // 64) * 16
+    max_workspace_size = (max(2 * N, K) // 64) * 16
     workspace = torch.zeros(max_workspace_size,
                             dtype=torch.int,
                             device="cuda",
                             requires_grad=False)
 
-    scalar_type = (scalar_types.uint4b8
-                   if num_bits == 4 else scalar_types.uint8b128)
+    if has_no_zp:
+        w1_zeros = torch.empty((0, 0),
+                               dtype=hidden_states.dtype,
+                               device=hidden_states.device,
+                               requires_grad=False)
+        w2_zeros = torch.empty((0, 0),
+                               dtype=hidden_states.dtype,
+                               device=hidden_states.device,
+                               requires_grad=False)
+
+    if has_no_act_order:
+        g_idx1 = torch.empty((0, 0),
+                             dtype=torch.int32,
+                             device=hidden_states.device,
+                             requires_grad=False)
+        g_idx2 = torch.empty((0, 0),
+                             dtype=torch.int32,
+                             device=hidden_states.device,
+                             requires_grad=False)
+        sort_indices1 = torch.empty((0),
+                                    dtype=torch.int32,
+                                    device=hidden_states.device,
+                                    requires_grad=False)
+        sort_indices2 = torch.empty((0, 0),
+                                    dtype=torch.int32,
+                                    device=hidden_states.device,
+                                    requires_grad=False)
+
+    scalar_type1 = get_scalar_type(num_bits, has_all_zp)
+    scalar_type2 = get_scalar_type(num_bits, has_all_zp)
 
     intermediate_cache2 = torch.empty(
         (M * topk_ids.shape[1], N),
@@ -192,14 +268,15 @@ def fused_marlin_moe(
         topk_weights,
         topk_ids,
         w1_scale,
+        w1_zeros,
         g_idx1,
-        perm1,
+        sort_indices1,
         workspace,
-        scalar_type,
+        scalar_type1,
         M,
         2 * N,
         K,
-        True,
+        is_k_full,
         E,
         topk,
         block_size_m,
@@ -216,14 +293,15 @@ def fused_marlin_moe(
         topk_weights,
         topk_ids,
         w2_scale,
+        w2_zeros,
         g_idx2,
-        perm2,
+        sort_indices2,
         workspace,
-        scalar_type,
+        scalar_type2,
         M,
         K,
         N,
-        True,
+        is_k_full,
         E,
         topk,
         block_size_m,
