@@ -560,7 +560,8 @@ def _pythonize_sampler_output(
     pinned_buffer = pinned_sampled_token_buffer[:model_input.num_queries]
 
     # CPU GPU sync
-    pinned_buffer = pinned_buffer.copy_(sampled_token_ids, non_blocking=False)
+    pinned_buffer = pinned_buffer.copy_(
+        sampled_token_ids[:model_input.num_queries], non_blocking=False)
 
     # this will not block as the tensors are already on CPU
     samples_list = pinned_buffer.tolist()
