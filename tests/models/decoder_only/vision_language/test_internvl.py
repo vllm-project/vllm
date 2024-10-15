@@ -5,7 +5,7 @@ import torch
 
 from vllm.multimodal.utils import rescale_image_size
 
-from ....conftest import (IMAGE_ASSETS, VllmRunner, _ImageAssets)
+from ....conftest import IMAGE_ASSETS, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
@@ -82,6 +82,7 @@ def run_awq_test(
             name_0="source",
             name_1="awq",
         )
+
 
 @pytest.mark.parametrize(
     "models", [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")])

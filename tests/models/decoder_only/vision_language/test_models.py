@@ -3,19 +3,20 @@ image support for different VLMs in vLLM.
 """
 import os
 from pathlib import PosixPath
-from typing import Optional
+from typing import Optional, Type
 
 import pytest
 from transformers import AutoModelForVision2Seq
 
-from vllm.utils import identity, is_cpu, is_hip, cuda_device_count_stateless
+from vllm.utils import cuda_device_count_stateless, identity, is_cpu, is_hip
 
-from ....conftest import _ImageAssets, _VideoAssets, IMAGE_ASSETS, HfRunner, VllmRunner
+from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
+                          _VideoAssets)
+from ....utils import fork_new_process_for_each_test, get_memory_gb
 from ...utils import check_outputs_equal
-from ....utils import get_memory_gb, fork_new_process_for_each_test
 from . import utils as vlm_utils
-from .vlm_test_types import (CustomTestOptions, ImageSizeWrapper,
-                             VLMTestInfo, VlmTestType)
+from .vlm_test_types import (CustomTestOptions, ImageSizeWrapper, VLMTestInfo,
+                             VlmTestType)
 
 # This hack is needed for phi3v & paligemma models
 # ROCm Triton FA can run into shared memory issues with these models,
@@ -24,15 +25,17 @@ from .vlm_test_types import (CustomTestOptions, ImageSizeWrapper,
 if is_hip():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
-
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VlmTestType.IMAGE,
     "fork_new_process_for_each_test": True,
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
-    "image_size_factors": ((.25, 0.5, 1.0),),
-    "distributed_executor_backend": ("ray", "mp",),
+    "image_size_factors": ((.25, 0.5, 1.0), ),
+    "distributed_executor_backend": (
+        "ray",
+        "mp",
+    ),
     "skip": cuda_device_count_stateless() < 2,
 }
 
@@ -96,7 +99,7 @@ VLM_TEST_SETTINGS = {
         test_type=(VlmTestType.IMAGE, VlmTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>\nWhat's the content in the center of the image?",
+            "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
             "cherry_blossom": "<image>\nWhat is the season?",
         }),
         max_model_len=4096,
@@ -142,7 +145,7 @@ VLM_TEST_SETTINGS = {
     "llava-one-vision": VLMTestInfo(
         models="llava-hf/llava-onevision-qwen2-7b-ov-hf",
         test_type=VlmTestType.VIDEO,
-        prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",
+        prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
         fork_new_process_for_each_test=True,
         dtype="half",
         num_video_frames=16,
@@ -279,7 +282,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=vlm_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs(
-                formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",
+                formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
             ),
             limit_mm_per_prompt={"image": 4},
         )],
@@ -288,12 +291,13 @@ VLM_TEST_SETTINGS = {
 }
 # yapf: enable
 
+
 ### Test wrappers
 # Wrappers around the core test running func for:
 # - single image
 # - multi-image
 # - image embeddings
-# - video [TODO]
+# - video
 # All wrappers (except single image) have a filter for dropping
 # models that don't have applicable tests, and expanding the
 # relevant VLMTestInfo object into a combination that can be
@@ -304,21 +308,27 @@ VLM_TEST_SETTINGS = {
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.IMAGE,
         fork_new_process_for_each_test=False,
-    )
-)
-def test_single_image_models(
-    tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
-    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, image_assets: _ImageAssets
-):
+    ))
+def test_single_image_models(tmp_path: PosixPath, model_type: str, model: str,
+                             max_tokens: int, num_logprobs: int, dtype: str,
+                             distributed_executor_backend: Optional[str],
+                             size_wrapper: ImageSizeWrapper,
+                             hf_runner: Type[HfRunner],
+                             vllm_runner: Type[VllmRunner],
+                             image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_single_image_test(
-        tmp_path=tmp_path, test_info=test_info, model=model,
-        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        tmp_path=tmp_path,
+        test_info=test_info,
+        model=model,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        size_wrapper=size_wrapper, hf_runner=hf_runner,
-        vllm_runner=vllm_runner, image_assets=image_assets)
+        size_wrapper=size_wrapper,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        image_assets=image_assets)
 
 
 @pytest.mark.parametrize(
@@ -327,22 +337,27 @@ def test_single_image_models(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.MULTI_IMAGE,
         fork_new_process_for_each_test=False,
-    )
-)
-def test_multi_image_models(
-    tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
-    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, image_assets: _ImageAssets
-):
+    ))
+def test_multi_image_models(tmp_path: PosixPath, model_type: str, model: str,
+                            max_tokens: int, num_logprobs: int, dtype: str,
+                            distributed_executor_backend: Optional[str],
+                            size_wrapper: ImageSizeWrapper,
+                            hf_runner: Type[HfRunner],
+                            vllm_runner: Type[VllmRunner],
+                            image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_multi_image_test(
-        tmp_path=tmp_path, test_info=test_info, model=model,
-        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        tmp_path=tmp_path,
+        test_info=test_info,
+        model=model,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        size_wrapper=size_wrapper, hf_runner=hf_runner,
-        vllm_runner=vllm_runner, image_assets=image_assets
-    )
+        size_wrapper=size_wrapper,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        image_assets=image_assets)
 
 
 @pytest.mark.parametrize(
@@ -351,22 +366,24 @@ def test_multi_image_models(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.EMBEDDING,
         fork_new_process_for_each_test=False,
-    )
-)
+    ))
 def test_image_embedding_models(
-    model_type: str, model: str, max_tokens: int, num_logprobs: int,
-    dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, image_assets: _ImageAssets
-):
+        model_type: str, model: str, max_tokens: int, num_logprobs: int,
+        dtype: str, distributed_executor_backend: Optional[str],
+        size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
+        vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_embedding_test(
-        test_info=test_info, model=model, max_tokens=max_tokens,
-        num_logprobs=num_logprobs, dtype=dtype,
+        test_info=test_info,
+        model=model,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        size_wrapper=size_wrapper, hf_runner=hf_runner,
-        vllm_runner=vllm_runner, image_assets=image_assets
-    )
+        size_wrapper=size_wrapper,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        image_assets=image_assets)
 
 
 @pytest.mark.parametrize(
@@ -375,21 +392,26 @@ def test_image_embedding_models(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.VIDEO,
         fork_new_process_for_each_test=False,
-    )
-)
-def test_video_models(
-    model_type: str, model: str, max_tokens: int, num_logprobs: int,
-    dtype: str, distributed_executor_backend: Optional[str],
-    num_frames: int, size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, video_assets: _VideoAssets
-):
+    ))
+def test_video_models(model_type: str, model: str, max_tokens: int,
+                      num_logprobs: int, dtype: str,
+                      distributed_executor_backend: Optional[str],
+                      num_frames: int, size_wrapper: ImageSizeWrapper,
+                      hf_runner: Type[HfRunner], vllm_runner: Type[VllmRunner],
+                      video_assets: _VideoAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_video_test(
-        test_info=test_info, model=model, num_frames=num_frames,
-        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        test_info=test_info,
+        model=model,
+        num_frames=num_frames,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        size_wrapper=size_wrapper, hf_runner=hf_runner,
-        vllm_runner=vllm_runner, video_assets=video_assets,
+        size_wrapper=size_wrapper,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        video_assets=video_assets,
     )
 
 
@@ -399,22 +421,29 @@ def test_video_models(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.CUSTOM_INPUTS,
         fork_new_process_for_each_test=False,
-    )
-)
+    ))
 def test_custom_inputs_models(
-    model_type: str, model: str, max_tokens: int, num_logprobs: int,
-    distributed_executor_backend: Optional[str], dtype: str,
-    custom_test_opts: CustomTestOptions, hf_runner: HfRunner,
-    vllm_runner: VllmRunner,
+    model_type: str,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+    distributed_executor_backend: Optional[str],
+    dtype: str,
+    custom_test_opts: CustomTestOptions,
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
 ):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_custom_inputs_test(
-        test_info=test_info, model=model, max_tokens=max_tokens,
-        num_logprobs=num_logprobs, dtype=dtype,
+        test_info=test_info,
+        model=model,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         custom_test_opts=custom_test_opts,
         distributed_executor_backend=distributed_executor_backend,
-        hf_runner=hf_runner, vllm_runner=vllm_runner
-    )
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner)
 
 
 #### Tests filtering for things running each test as a new process
@@ -424,22 +453,27 @@ def test_custom_inputs_models(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.IMAGE,
         fork_new_process_for_each_test=True,
-    )
-)
+    ))
 @fork_new_process_for_each_test
 def test_single_image_models_heavy(
-    tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
-    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, image_assets: _ImageAssets
-):
+        tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
+        num_logprobs: int, dtype: str,
+        distributed_executor_backend: Optional[str],
+        size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
+        vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_single_image_test(
-        tmp_path=tmp_path, test_info=test_info, model=model,
-        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        tmp_path=tmp_path,
+        test_info=test_info,
+        model=model,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        size_wrapper=size_wrapper, hf_runner=hf_runner,
-        vllm_runner=vllm_runner, image_assets=image_assets)
+        size_wrapper=size_wrapper,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        image_assets=image_assets)
 
 
 @pytest.mark.parametrize(
@@ -448,23 +482,27 @@ def test_single_image_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.MULTI_IMAGE,
         fork_new_process_for_each_test=True,
-    )
-)
+    ))
 @fork_new_process_for_each_test
 def test_multi_image_models_heavy(
-    tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
-    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, image_assets: _ImageAssets
-):
+        tmp_path: PosixPath, model_type: str, model: str, max_tokens: int,
+        num_logprobs: int, dtype: str,
+        distributed_executor_backend: Optional[str],
+        size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
+        vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_multi_image_test(
-        tmp_path=tmp_path, test_info=test_info, model=model,
-        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        tmp_path=tmp_path,
+        test_info=test_info,
+        model=model,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        size_wrapper=size_wrapper, hf_runner=hf_runner,
-        vllm_runner=vllm_runner, image_assets=image_assets
-    )
+        size_wrapper=size_wrapper,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        image_assets=image_assets)
 
 
 @pytest.mark.parametrize(
@@ -473,23 +511,25 @@ def test_multi_image_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.EMBEDDING,
         fork_new_process_for_each_test=True,
-    )
-)
+    ))
 @fork_new_process_for_each_test
 def test_image_embedding_models_heavy(
-    model_type: str, model: str, max_tokens: int, num_logprobs: int,
-    dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, image_assets: _ImageAssets
-):
+        model_type: str, model: str, max_tokens: int, num_logprobs: int,
+        dtype: str, distributed_executor_backend: Optional[str],
+        size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
+        vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_embedding_test(
-        test_info=test_info, model=model, max_tokens=max_tokens,
-        num_logprobs=num_logprobs, dtype=dtype,
+        test_info=test_info,
+        model=model,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        size_wrapper=size_wrapper, hf_runner=hf_runner,
-        vllm_runner=vllm_runner, image_assets=image_assets
-    )
+        size_wrapper=size_wrapper,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        image_assets=image_assets)
 
 
 @pytest.mark.parametrize(
@@ -498,21 +538,27 @@ def test_image_embedding_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.VIDEO,
         fork_new_process_for_each_test=True,
-    )
-)
-def test_video_models_heavy(
-    model_type: str, model: str, max_tokens: int, num_logprobs: int,
-    dtype: str, distributed_executor_backend: Optional[str],
-    num_frames: int, size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, video_assets: _VideoAssets
-):
+    ))
+def test_video_models_heavy(model_type: str, model: str, max_tokens: int,
+                            num_logprobs: int, dtype: str,
+                            distributed_executor_backend: Optional[str],
+                            num_frames: int, size_wrapper: ImageSizeWrapper,
+                            hf_runner: Type[HfRunner],
+                            vllm_runner: Type[VllmRunner],
+                            video_assets: _VideoAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_video_test(
-        test_info=test_info, model=model, num_frames=num_frames,
-        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
+        test_info=test_info,
+        model=model,
+        num_frames=num_frames,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
-        size_wrapper=size_wrapper, hf_runner=hf_runner,
-        vllm_runner=vllm_runner, video_assets=video_assets,
+        size_wrapper=size_wrapper,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        video_assets=video_assets,
     )
 
 
@@ -522,20 +568,21 @@ def test_video_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.CUSTOM_INPUTS,
         fork_new_process_for_each_test=True,
-    )
-)
+    ))
 @fork_new_process_for_each_test
 def test_custom_inputs_models_heavy(
-    model_type: str, model: str, max_tokens: int, num_logprobs: int, 
-    distributed_executor_backend: Optional[str], dtype: str,
-    custom_test_opts: CustomTestOptions, hf_runner: HfRunner,
-    vllm_runner: VllmRunner
-):
+        model_type: str, model: str, max_tokens: int, num_logprobs: int,
+        distributed_executor_backend: Optional[str], dtype: str,
+        custom_test_opts: CustomTestOptions, hf_runner: Type[HfRunner],
+        vllm_runner: Type[VllmRunner]):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_custom_inputs_test(
-        test_info=test_info, model=model, max_tokens=max_tokens,
-        num_logprobs=num_logprobs, dtype=dtype,
+        test_info=test_info,
+        model=model,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        dtype=dtype,
         custom_test_opts=custom_test_opts,
         distributed_executor_backend=distributed_executor_backend,
-        hf_runner=hf_runner, vllm_runner=vllm_runner
-    )
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner)
