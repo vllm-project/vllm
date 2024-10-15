@@ -92,6 +92,27 @@ def _llava_vllm_to_hf_output(vllm_output: VllmOutput, model: str, mm_token_id: i
     return hf_output_ids, hf_output_str, out_logprobs
 
 
+def llava_onevision_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+    """Sanitize vllm output [llava-onevision] to compare with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    config = AutoConfig.from_pretrained(model)
+    video_token_id = config.video_token_index
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eos_token_id = tokenizer.eos_token_id
+
+    hf_output_ids = [
+        token_id for idx, token_id in enumerate(output_ids)
+        if token_id != video_token_id or output_ids[idx - 1] != video_token_id
+    ]
+
+    hf_output_str = output_str
+    if hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+
+    return hf_output_ids, hf_output_str, out_logprobs
+
 def phi3v_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     """Sanitize vllm output [phi3v] to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
@@ -486,7 +507,7 @@ def get_wrapped_test_sizes(
     return tuple(wrapped_factors + wrapped_sizes)
 
 
-def multi_image_multi_aspect_ratio_inputs_llava(is_llava: bool):
+def multi_image_multi_aspect_ratio_inputs(formatter):
     """Builds inputs for multi-image (varied sizes/aspect ratio) testing.
     
     Args:
@@ -494,8 +515,7 @@ def multi_image_multi_aspect_ratio_inputs_llava(is_llava: bool):
     """
     stop_sign = IMAGE_ASSETS[0].pil_image
     cherry_blossom = IMAGE_ASSETS[1].pil_image
-    llava_formatter = lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:"
-    llava_next_formatter = lambda img_prompt: f"[INST] {img_prompt} [/INST]"
+
     # Apply the selected formatter to the base prompts
     img_prompts = [
         "<image><image>\nDescribe 2 images.",
@@ -503,7 +523,6 @@ def multi_image_multi_aspect_ratio_inputs_llava(is_llava: bool):
         "<image><image><image><image>\nDescribe 4 images.",  # noqa: E501
         "<image>\nWhat is the season?",
     ]
-    formatter = llava_formatter if is_llava else llava_next_formatter 
     formatted_prompts = [formatter(prompt) for prompt in img_prompts]
 
     return [(
@@ -826,6 +845,7 @@ def run_custom_inputs_test(
     assert custom_test_opts is not None
 
     inputs = custom_test_opts.inputs
+
     limit_mm_per_prompt = custom_test_opts.limit_mm_per_prompt
 
     assert inputs is not None and limit_mm_per_prompt is not None
@@ -938,18 +958,6 @@ def run_test(
         second_runner_processor=vllm_output_post_proc,
     )
 
-    export_test(
-        model,
-        size_factors.data if size_factors is not None else None,
-        is_new=True,
-        export_info=[
-            {"config": {"inputs": inputs, "max_tokens": max_tokens, "num_logprobs": num_logprobs}},
-            {"hf_runner": {"dtype": dtype, "model": model}},
-            {"hf_out": hf_outputs_per_mm},
-            {"vllm_out": vllm_outputs_per_mm},
-        ],
-    )
-
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_mm,
                                         vllm_outputs_per_mm):
         # This is usually check_logprobs_close, but it's passed through to
@@ -982,35 +990,3 @@ def process_outputs(output_processor, model, outputs_per_image):
     """Applies a model specific post-processor function to a runner's output"""
     return [[output_processor(res, model) for res in outputs]
             for outputs in outputs_per_image]
-
-
-### Utilities for local export
-def export_test(model,
-                size_info,
-                export_info,
-                is_new,
-                write_dir="/u/brooks/vllm/compare_tests",
-                terminate_test=False):
-    import json
-    import os
-    import sys
-    if size_info is None:
-        size_info = ("custom", )
-    default = lambda o: f"<<non-serializable: {type(o).__qualname__}>>"
-    size_str = "_".join([str(x) for x in size_info])
-    size_str = size_str if size_str else 'NONE'
-    filename = f"{model.split('/')[-1]}_sf_{size_str}.json"
-    subdir_name = "common" if is_new else "legacy"
-    subdir = os.path.join(write_dir, subdir_name)
-    full_path = os.path.join(subdir, filename)
-
-    if not os.path.isdir(subdir):
-        os.mkdir(subdir)
-    if os.path.exists(full_path):
-        # Delete it if already exists
-        os.remove(full_path)
-
-    with open(full_path, "w") as f:
-        json.dump(export_info, f, sort_keys=True, indent=4, default=default)
-    if terminate_test:
-        sys.exit(0)
