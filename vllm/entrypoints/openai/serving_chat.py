@@ -9,8 +9,6 @@ from typing import Union
 from fastapi import Request
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          apply_hf_chat_template,
@@ -237,11 +235,6 @@ class OpenAIServingChat(OpenAIServing):
                 log_tracing_disabled_warning()
 
             if isinstance(sampling_params, BeamSearchParams):
-                assert isinstance(self.engine_client,
-                                    (AsyncLLMEngine,
-                                    MQLLMEngineClient)), \
-                    "Beam search is only supported with" \
-                    "AsyncLLMEngine and MQLLMEngineClient."
                 result_generator = self.engine_client.beam_search(
                     engine_inputs['prompt_token_ids'],
                     request_id,
@@ -337,6 +330,14 @@ class OpenAIServingChat(OpenAIServing):
             yield "data: [DONE]\n\n"
             return
 
+        stream_options = request.stream_options
+        if stream_options:
+            include_usage = stream_options.include_usage
+            include_continuous_usage = include_usage and \
+                                       stream_options.continuous_usage_stats
+        else:
+            include_usage, include_continuous_usage = False, False
+
         try:
             async for res in result_generator:
                 if res.prompt_token_ids is not None:
@@ -355,7 +356,6 @@ class OpenAIServingChat(OpenAIServing):
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
                     for i in range(num_choices):
-                        tool_parser = tool_parsers[i]
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=DeltaMessage(
@@ -371,19 +371,12 @@ class OpenAIServingChat(OpenAIServing):
                             choices=[choice_data],
                             model=model_name)
 
-                        # if usage should be included
-                        if (request.stream_options
-                                and request.stream_options.include_usage):
-                            # if continuous usage stats are requested, add it
-                            if request.stream_options.continuous_usage_stats:
-                                usage = UsageInfo(
-                                    prompt_tokens=num_prompt_tokens,
-                                    completion_tokens=0,
-                                    total_tokens=num_prompt_tokens)
-                                chunk.usage = usage
-                            # otherwise don't
-                            else:
-                                chunk.usage = None
+                        # if continuous usage stats are requested, add it
+                        if include_continuous_usage:
+                            chunk.usage = UsageInfo(
+                                prompt_tokens=num_prompt_tokens,
+                                completion_tokens=0,
+                                total_tokens=num_prompt_tokens)
 
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
@@ -411,17 +404,11 @@ class OpenAIServingChat(OpenAIServing):
                                     created=created_time,
                                     choices=[choice_data],
                                     model=model_name)
-                                if (request.stream_options and
-                                        request.stream_options.include_usage):
-                                    if (request.stream_options.
-                                            continuous_usage_stats):
-                                        usage = UsageInfo(
-                                            prompt_tokens=num_prompt_tokens,
-                                            completion_tokens=0,
-                                            total_tokens=num_prompt_tokens)
-                                        chunk.usage = usage
-                                    else:
-                                        chunk.usage = None
+                                if include_continuous_usage:
+                                    chunk.usage = UsageInfo(
+                                        prompt_tokens=num_prompt_tokens,
+                                        completion_tokens=0,
+                                        total_tokens=num_prompt_tokens)
 
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
@@ -501,36 +488,11 @@ class OpenAIServingChat(OpenAIServing):
 
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
-
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=None)
-                        chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            object=chunk_object_type,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=model_name)
-
-                        # handle usage stats if requested & if continuous
-                        if (request.stream_options
-                                and request.stream_options.include_usage):
-                            if request.stream_options.continuous_usage_stats:
-                                completion_tokens = len(output.token_ids)
-                                usage = UsageInfo(
-                                    prompt_tokens=num_prompt_tokens,
-                                    completion_tokens=completion_tokens,
-                                    total_tokens=num_prompt_tokens +
-                                    completion_tokens,
-                                )
-                                chunk.usage = usage
-                            else:
-                                chunk.usage = None
-
-                        data = chunk.model_dump_json(exclude_unset=True)
-                        yield f"data: {data}\n\n"
 
                     # if the model is finished generating
                     else:
@@ -580,34 +542,32 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason=output.finish_reason
                             if not auto_tools_called else "tool_calls",
                             stop_reason=output.stop_reason)
-                        chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            object=chunk_object_type,
-                            created=created_time,
-                            choices=[choice_data],
-                            model=model_name)
-                        if (request.stream_options
-                                and request.stream_options.include_usage):
-                            if request.stream_options.continuous_usage_stats:
-                                completion_tokens = len(output.token_ids)
-                                usage = UsageInfo(
-                                    prompt_tokens=num_prompt_tokens,
-                                    completion_tokens=completion_tokens,
-                                    total_tokens=num_prompt_tokens +
-                                    completion_tokens,
-                                )
-                                chunk.usage = usage
-                            else:
-                                chunk.usage = None
-                        data = chunk.model_dump_json(exclude_unset=True)
-                        yield f"data: {data}\n\n"
+
                         finish_reason_sent[i] = True
+
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=model_name)
+
+                    # handle usage stats if requested & if continuous
+                    if include_continuous_usage:
+                        completion_tokens = previous_num_tokens[i]
+                        chunk.usage = UsageInfo(
+                            prompt_tokens=num_prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            total_tokens=num_prompt_tokens + completion_tokens,
+                        )
+
+                    data = chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
-            if (request.stream_options
-                    and request.stream_options.include_usage):
-                completion_tokens = previous_num_tokens[i]
+            if include_usage:
+                completion_tokens = sum(previous_num_tokens)
                 final_usage = UsageInfo(
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
