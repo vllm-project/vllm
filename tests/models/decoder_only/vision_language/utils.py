@@ -26,7 +26,7 @@ from .vlm_test_types import (EMBEDDING_SIZE_FACTORS, MULTI_IMAGE_BASE_PROMPT,
                              SINGLE_IMAGE_BASE_PROMPTS, TEST_IMG_PLACEHOLDER,
                              TEST_VIDEO_PLACEHOLDER, VIDEO_BASE_PROMPT,
                              CustomTestOptions, ImageSizeWrapper, SizeType,
-                             VllmOutput, VLMTestInfo, VlmTestType)
+                             VllmOutput, VLMTestInfo, VLMTestType)
 
 
 ####### vLLM output processors functions
@@ -385,14 +385,14 @@ def get_model_prompts(base_prompts: Iterable[str],
 
 
 def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
-                               test_type: VlmTestType,
+                               test_type: VLMTestType,
                                fork_per_test: bool) -> Dict[str, VLMTestInfo]:
     """Given the dict of potential test settings to run, return a subdict
     of tests who have the current test type enabled, with the matching val for
     fork_per_test.
     """
 
-    def matches_test_type(test_info: VLMTestInfo, test_type: VlmTestType):
+    def matches_test_type(test_info: VLMTestInfo, test_type: VLMTestType):
         return test_info.test_type == test_type or (
             isinstance(test_info.test_type, Iterable)
             and test_type in test_info.test_type)
@@ -405,10 +405,10 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
         # Otherwise check if the test has the right type & keep if it does
         if matches_test_type(test_info, test_type):
             # Embedding tests need to have a conversion func in their test info
-            if matches_test_type(test_info, VlmTestType.EMBEDDING):
+            if matches_test_type(test_info, VLMTestType.EMBEDDING):
                 assert test_info.convert_assets_to_embeddings is not None
             # Custom test inputs need to explicitly define the mm limit/inputs
-            if matches_test_type(test_info, VlmTestType.CUSTOM_INPUTS):
+            if matches_test_type(test_info, VLMTestType.CUSTOM_INPUTS):
                 assert (test_info.custom_test_opts is not None
                         and isinstance(test_info.custom_test_opts, Iterable))
             # For all types besides custom inputs, we need a prompt formatter
@@ -423,7 +423,7 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
 
 
 def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
-                             test_type: VlmTestType,
+                             test_type: VLMTestType,
                              fork_new_process_for_each_test: bool):
     """Converts all of our VLMTestInfo into an expanded list of parameters.
     This is similar to nesting pytest parametrize calls, but done directly
@@ -450,11 +450,11 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
             ensure_wrapped(test_info.distributed_executor_backend),
         ]
         # num_frames is video only
-        if test_type == VlmTestType.VIDEO:
+        if test_type == VLMTestType.VIDEO:
             iterables.append(ensure_wrapped(test_info.num_video_frames))
 
         # No sizes passed for custom inputs, since inputs are directly provided
-        if test_type != VlmTestType.CUSTOM_INPUTS:
+        if test_type != VLMTestType.CUSTOM_INPUTS:
             iterables.append(get_wrapped_test_sizes(test_info, test_type))
         #Otherwise expand the custom test options instead
         else:
@@ -476,7 +476,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
 
 def get_wrapped_test_sizes(
         test_info: VLMTestInfo,
-        test_type: VlmTestType) -> Tuple[ImageSizeWrapper, ...]:
+        test_type: VLMTestType) -> Tuple[ImageSizeWrapper, ...]:
     """Given a test info which may have size factors or fixed sizes, wrap them
     and combine them into an iterable, each of which will be used in parameter
     expansion.
@@ -486,13 +486,13 @@ def get_wrapped_test_sizes(
         test_type: The type of test being filtered for.
     """
     # If it is an embedding test, we always use the EMBEDDING_SIZE_FACTORS
-    if test_type == VlmTestType.EMBEDDING:
+    if test_type == VLMTestType.EMBEDDING:
         return tuple([
             ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor)
             for factor in EMBEDDING_SIZE_FACTORS
         ])
     # Custom inputs have preprocessed inputs
-    elif test_type == VlmTestType.CUSTOM_INPUTS:
+    elif test_type == VLMTestType.CUSTOM_INPUTS:
         return tuple()
 
     size_factors = test_info.image_size_factors \
