@@ -241,6 +241,18 @@ class Worker(LocalOrDistributedWorkerBase):
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
 
+        # Edge case: Check for any memory left around that may have been
+        # allocated on the gpu outside of `torch`
+        torch.cuda.empty_cache()
+        leftover_allocations = torch.cuda.mem_get_info(
+        )[0] - self.init_gpu_memory
+        if leftover_allocations > 0:
+            logger.info(
+                "Found %.2f GB of allocated memory leftover after clearing "
+                "torch cache. Adding to peak memory usage.",
+                leftover_allocations / (1024**3))
+            peak_memory += leftover_allocations
+
         logger.info("Initial memory usage before profile: %.2f GB",
                     (total_gpu_memory - self.init_gpu_memory) / (1024**3))
         logger.info("Peak memory usage during profile: %.2f GB",
@@ -263,7 +275,6 @@ class Worker(LocalOrDistributedWorkerBase):
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
         gc.collect()
-        torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
