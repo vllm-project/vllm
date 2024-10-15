@@ -274,8 +274,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
-                    # TODO(simon): optimize the performance by avoiding full
-                    # text O(n^2) sending.
 
                     assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
@@ -306,6 +304,11 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_text = output.text
                         delta_token_ids = output.token_ids
                         out_logprobs = output.logprobs
+
+                        if not delta_text and not delta_token_ids \
+                            and not previous_num_tokens[i]:
+                            # Chunked prefill case, don't return empty chunks
+                            continue
 
                     if request.logprobs is not None:
                         assert out_logprobs is not None, (
