@@ -590,7 +590,7 @@ def fused_experts(hidden_states: torch.Tensor,
                                 use_int8_w8a16=use_int8_w8a16)
 
         ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                  out_hidden_states[begin_chunk_idx:end_chunk_idx])
+                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
     return out_hidden_states
 
 
