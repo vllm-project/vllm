@@ -46,7 +46,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    intermediate_size,
+                                                    2 * intermediate_size,
                                                     hidden_size,
                                                     dtype=params_dtype),
                                         requires_grad=False)

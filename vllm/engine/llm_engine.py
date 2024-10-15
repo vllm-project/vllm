@@ -314,8 +314,6 @@ class LLMEngine:
             self.detokenizer = None
             tokenizer_group = None
 
-        print(self.load_config)
-
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues
         def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
@@ -333,11 +331,6 @@ class LLMEngine:
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
-
-        # from pprint import pprint
-        # pprint(vars(model_config))
-        # pprint(vars(executor_class))
-        print("QUANT:", model_config.quantization)
 
         self.model_executor = executor_class(
             model_config=model_config,

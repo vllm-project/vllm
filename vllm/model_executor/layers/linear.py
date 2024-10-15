@@ -131,6 +131,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
         return F.linear(x, layer.weight, bias)
 
 
@@ -515,6 +516,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
+
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
                                             False)
             if use_bitsandbytes_4bit:
@@ -830,6 +832,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
+
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
@@ -1015,7 +1018,6 @@ class RowParallelLinear(LinearBase):
             param.materialize(tuple(weight_shape), dtype=loaded_weight.dtype)
 
         param_data = param.data
-
         # bitsandbytes loads the weights of the specific portion
         # no need to narrow here
         if input_dim is not None and not use_bitsandbytes_4bit:

@@ -123,19 +123,12 @@ def get_quant_config(model_config: ModelConfig,
 
     quant_cls = get_quantization_config(model_config.quantization)
 
-    # print(vars(model_config))
-    # print(vars(quant_cls))
-
     # GGUF doesn't have config file
     if model_config.quantization == "gguf":
         return quant_cls.from_config({})
 
     if model_config.quantization == "hqq_marlin":
-        # print("=======================================")
-        # print(vars(model_config))
-        # print(vars(load_config))
-        # print("=======================================")
-        # TODO shouldn't be done like this
+        # TODO don't hardcode params
         return quant_cls.from_config({"bits": 4, "group_size": 64})
 
     # Read the quantization config from the HF model config, if available.
