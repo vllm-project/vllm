@@ -435,6 +435,12 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = None
 
                     delta_text = output.text
+
+                    if not delta_text and not output.token_ids and \
+                        not previous_num_tokens[i]:
+                        # Chunked prefill case, don't return empty chunks
+                        continue
+
                     delta_message: Optional[DeltaMessage]
 
                     # handle streaming deltas for tools with named tool_choice
