@@ -35,12 +35,20 @@ class MultiStepNeuronModelRunner(NeuronModelRunner):
 
     def load_model(self) -> None:
         if find_spec("transformers_neuronx") is not None:
-            from vllm.model_executor.model_loader.neuron import get_neuron_speculation_model
-            self.model = get_neuron_speculation_model(
-                self.model_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-                speculation_config=self.speculation_config)
+            from vllm.model_executor.model_loader.neuron import get_neuron_speculation_model, get_neuron_eagle_speculation_model
+            if self.speculation_config.speculative_token_tree is not None:
+                self.model = get_neuron_eagle_speculation_model(
+                    self.model_config,
+                    parallel_config=self.parallel_config,
+                    scheduler_config=self.scheduler_config,
+                    speculation_config=self.speculation_config
+                )
+            else:
+                self.model = get_neuron_speculation_model(
+                    self.model_config,
+                    parallel_config=self.parallel_config,
+                    scheduler_config=self.scheduler_config,
+                    speculation_config=self.speculation_config)
         else:
             raise NotImplementedError(
                 "Supports only Transformer-NeuronX based models.")
