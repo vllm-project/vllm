@@ -78,6 +78,9 @@ class RayHPUExecutor(DistributedGPUExecutor):
                 ray.kill(worker)
             self.forward_dag = None
 
+    def finish_measurements(self):
+        self._run_workers("finish_measurements")
+
     def _get_worker_module_and_class(
         self
     ) -> Tuple[str, str, Optional[Callable[[],
