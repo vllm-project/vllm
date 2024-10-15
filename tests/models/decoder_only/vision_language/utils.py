@@ -4,28 +4,30 @@ comparable to vLLM, wrappers for running tests for different modalities, etc.
 """
 import itertools
 import re
-from pathlib import PosixPath
 import types
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union, Any, Type
+from pathlib import PosixPath
+from typing import (Any, Callable, Dict, Iterable, List, Optional, Tuple, Type,
+                    Union)
 
-from PIL.Image import Image
 import torch
+from PIL.Image import Image
 from transformers import AutoConfig, AutoTokenizer, BatchEncoding
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
                                    resize_video, sample_frames_from_video)
-
 from vllm.sequence import SampleLogprobs
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.transformers_utils.tokenizer import patch_padding_side
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
-from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets, HfRunner, VllmRunner, _VideoAssets
-from .vlm_test_types import (EMBEDDING_SIZE_FACTORS, TEST_IMG_PLACEHOLDER,
-                             TEST_VIDEO_PLACEHOLDER, ImageSizeWrapper,
-                             SizeType, VllmOutput, VLMTestInfo, VlmTestType,
-                             SINGLE_IMAGE_BASE_PROMPTS, CustomTestOptions,
-                             MULTI_IMAGE_BASE_PROMPT, VIDEO_BASE_PROMPT)
+from ....conftest import (IMAGE_ASSETS, HfRunner, ImageAsset, VllmRunner,
+                          _ImageAssets, _VideoAssets)
+from .vlm_test_types import (EMBEDDING_SIZE_FACTORS, MULTI_IMAGE_BASE_PROMPT,
+                             SINGLE_IMAGE_BASE_PROMPTS, TEST_IMG_PLACEHOLDER,
+                             TEST_VIDEO_PLACEHOLDER, VIDEO_BASE_PROMPT,
+                             CustomTestOptions, ImageSizeWrapper, SizeType,
+                             VllmOutput, VLMTestInfo, VlmTestType)
+
 
 ####### vLLM output processors functions
 def blip2_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
@@ -72,7 +74,8 @@ def llava_video_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     return _llava_vllm_to_hf_output(vllm_output, model, mm_token_id)
 
 
-def _llava_vllm_to_hf_output(vllm_output: VllmOutput, model: str, mm_token_id: int):
+def _llava_vllm_to_hf_output(vllm_output: VllmOutput, model: str,
+                             mm_token_id: int):
     """Sanitize vllm output [Llava models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -112,6 +115,7 @@ def llava_onevision_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
     return hf_output_ids, hf_output_str, out_logprobs
+
 
 def phi3v_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     """Sanitize vllm output [phi3v] to be comparable with hf output."""
@@ -216,6 +220,7 @@ def qwen_prompt_path_encoder(
         )
     return prompt
 
+
 ####### Model-specific HuggingFace runner patchers
 def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4."""
@@ -246,6 +251,7 @@ def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for InternVL."""
+
     class InternVLProcessor:
         """A simple processor for InternVL2 which misses a processor."""
 
@@ -324,12 +330,12 @@ def _internvl_generate(
         **generate_kwargs,
     )
 
+
 ####### Utils for model-agnostic prompt manipulation / case filtering
 # Most of these help us handle mm tags and configure things
 # that would normally be handled by parametrize(), since we want
 # to be able to adapt settings like num_logprobs on a per-model basis
-def replace_test_placeholder(prompt: str,
-                             img_idx_to_prompt: Callable,
+def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable,
                              test_placeholder: str) -> str:
     """Given a prompt, replaces each TEST_IMG_PLACEHOLDER with the
     model-specific image prompt.
@@ -342,7 +348,7 @@ def replace_test_placeholder(prompt: str,
     return img_prompt
 
 
-def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
+def get_model_prompts(base_prompts: Iterable[str],
                       img_idx_to_prompt: Optional[Callable],
                       video_idx_to_prompt: Optional[Callable],
                       prompt_formatter: Callable) -> List[str]:
@@ -362,14 +368,14 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
         # Replace the multimodal placeholders in the base prompt with
         # the correct ones for the model that we are testing
         if img_idx_to_prompt:
-            base_prompt = replace_test_placeholder(
-                base_prompt, img_idx_to_prompt, TEST_IMG_PLACEHOLDER
-            )
+            base_prompt = replace_test_placeholder(base_prompt,
+                                                   img_idx_to_prompt,
+                                                   TEST_IMG_PLACEHOLDER)
 
         if video_idx_to_prompt:
-            base_prompt = replace_test_placeholder(
-                base_prompt, video_idx_to_prompt, TEST_VIDEO_PLACEHOLDER
-            )
+            base_prompt = replace_test_placeholder(base_prompt,
+                                                   video_idx_to_prompt,
+                                                   TEST_VIDEO_PLACEHOLDER)
 
         # Apply the prompt formatter to wrap the base prompt with
         # the correct media placeholders to get the model test prompt
@@ -385,11 +391,11 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
     of tests who have the current test type enabled, with the matching val for
     fork_per_test.
     """
+
     def matches_test_type(test_info: VLMTestInfo, test_type: VlmTestType):
         return test_info.test_type == test_type or (
             isinstance(test_info.test_type, Iterable)
-            and test_type in test_info.test_type
-        )
+            and test_type in test_info.test_type)
 
     filtered_test_settings = {}
     for test_name, test_info in test_settings.items():
@@ -424,11 +430,8 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
     through an itertools product so that each test can set things like
     size factors etc, while still running in isolated test cases.
     """
-    test_settings = get_filtered_test_settings(
-        test_settings,
-        test_type,
-        fork_new_process_for_each_test
-    )
+    test_settings = get_filtered_test_settings(test_settings, test_type,
+                                               fork_new_process_for_each_test)
 
     # Ensure that something is wrapped as an iterable it's not already
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e, )
@@ -455,6 +458,9 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
             iterables.append(get_wrapped_test_sizes(test_info, test_type))
         #Otherwise expand the custom test options instead
         else:
+            if test_info.custom_test_opts is None:
+                raise ValueError("Test has type CUSTOM_INPUTS, but none given")
+
             iterables.append(test_info.custom_test_opts)
         return list(itertools.product(*iterables))
 
@@ -546,13 +552,13 @@ def multi_image_multi_aspect_ratio_inputs(formatter):
 
 def different_patch_input_cases_internvl():
     images = [asset.pil_image.resize((896, 896)) for asset in IMAGE_ASSETS]
-    formatter = lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"
+    formatter = lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
     single_img_prompts = [
         "<image>\nWhat's the content in the center of the image?",
         "<image>\nWhat is the season?",
     ]
     multi_img_prompts = [
-        "Image-1: <image>\nImage-2: <image>\nDescribe the two images in detail.\n",
+        "Image-1: <image>\nImage-2: <image>\nDescribe the two images in detail.\n",  # noqa: E501
     ]
     formatted_sprompts = [formatter(prompt) for prompt in single_img_prompts]
     formatted_mprompts = [formatter(prompt) for prompt in multi_img_prompts]
@@ -563,14 +569,19 @@ def different_patch_input_cases_internvl():
         build_multi_image_inputs([images], formatted_mprompts, wrapped_sf),
     ]
 
+
 ####### Useful builders for setting up different types of tests
+
 
 def build_single_image_inputs_from_test_info(
         test_info: VLMTestInfo,
-        image_assets:_ImageAssets,
+        image_assets: _ImageAssets,
         size_wrapper: ImageSizeWrapper,
-        tmp_path: Optional[PosixPath]=None
-    ):
+        tmp_path: Optional[PosixPath] = None):
+    if test_info.prompt_formatter is None:
+        raise ValueError(
+            "Prompt formatter must be set to build single image inputs")
+
     model_prompts = get_model_prompts(test_info.single_image_prompts,
                                       test_info.img_idx_to_prompt,
                                       test_info.video_idx_to_prompt,
@@ -580,6 +591,8 @@ def build_single_image_inputs_from_test_info(
     # assets and encode into tmp_path for this test. This should be avoided
     # where possible (currently needed for Qwen-VL).
     if test_info.prompt_path_encoder is not None:
+        if tmp_path is None:
+            raise ValueError("Prompt path encoder requires setting local path")
         model_prompts = [
             test_info.prompt_path_encoder(tmp_path, prompt, [asset])
             for prompt, asset in zip(model_prompts, image_assets)
@@ -609,10 +622,12 @@ def build_single_image_inputs(images, model_prompts,
 
 def build_multi_image_inputs_from_test_info(
         test_info: VLMTestInfo,
-        image_assets:_ImageAssets,
+        image_assets: _ImageAssets,
         size_wrapper: ImageSizeWrapper,
-        tmp_path: Optional[PosixPath]=None
-    ):
+        tmp_path: Optional[PosixPath] = None):
+    if test_info.prompt_formatter is None:
+        raise ValueError(
+            "Prompt formatter must be set to build multi image inputs")
 
     model_prompts = get_model_prompts([MULTI_IMAGE_BASE_PROMPT],
                                       test_info.img_idx_to_prompt,
@@ -620,6 +635,8 @@ def build_multi_image_inputs_from_test_info(
                                       test_info.prompt_formatter)
 
     if test_info.prompt_path_encoder is not None:
+        if tmp_path is None:
+            raise ValueError("Prompt path encoder requires setting local path")
         model_prompts = [
             test_info.prompt_path_encoder(tmp_path, model_prompt, image_assets)
             for model_prompt in model_prompts
@@ -648,13 +665,19 @@ def build_multi_image_inputs(image_lists, model_prompts,
 
 def build_embedding_inputs_from_test_info(
     test_info: VLMTestInfo,
-    image_assets:_ImageAssets,
+    image_assets: _ImageAssets,
     size_wrapper: ImageSizeWrapper,
 ):
-    # These checks will always be true due to the way the test is invoked
-    assert size_wrapper.type != SizeType.SIZE_FACTOR or not \
-            all(factor == 1.0 for factor in size_wrapper.data)
-    assert test_info.convert_assets_to_embeddings is not None
+    # These conditions will always be true if invoked through filtering,
+    # but we still check them in case this is ever called directly
+    if test_info.prompt_formatter is None:
+        raise ValueError(
+            "Prompt formatter must be set to build image embedding inputs")
+    if size_wrapper.type != SizeType.SIZE_FACTOR or not \
+            all(factor == 1.0 for factor in size_wrapper.data):
+        raise ValueError("Embedding tests require constant (1.0) size factors")
+    if test_info.convert_assets_to_embeddings is None:
+        raise ValueError("No conversion func for getting embeddings found")
 
     model_prompts = get_model_prompts(
         SINGLE_IMAGE_BASE_PROMPTS,
@@ -679,6 +702,8 @@ def build_video_inputs_from_test_info(
     size_wrapper: ImageSizeWrapper,
     num_frames: int,
 ):
+    if test_info.prompt_formatter is None:
+        raise ValueError("Prompt formatter must be set to build video inputs")
     model_prompts = get_model_prompts(
         [VIDEO_BASE_PROMPT],
         test_info.img_idx_to_prompt,
@@ -700,11 +725,8 @@ def build_video_inputs_from_test_info(
     ) for video, prompt in zip(sampled_vids, model_prompts)]
 
 
-def apply_image_size_scaling(
-    image,
-    size: Union[float, Tuple[int, int]],
-    size_type: SizeType
-):
+def apply_image_size_scaling(image, size: Union[float, Tuple[int, int]],
+                             size_type: SizeType):
     """Applies a size scaler to one image; this can be a an image size factor,
     which scales the image while maintaining the aspect ratio"""
     # Special case for embeddings; if it's a tensor, it's only valid if we
@@ -726,119 +748,107 @@ def apply_image_size_scaling(
 # Wrappers for all the above, where the only difference
 # is that each test runs in a separate process
 def run_single_image_test(
-        *, tmp_path: PosixPath, test_info: VLMTestInfo,
-        model: str, max_tokens: int,
-        num_logprobs: int, dtype: str,
+        *, tmp_path: PosixPath, test_info: VLMTestInfo, model: str,
+        max_tokens: int, num_logprobs: int, dtype: str,
         distributed_executor_backend: Optional[str],
-        size_wrapper: ImageSizeWrapper, 
-        hf_runner: HfRunner, vllm_runner: VllmRunner,
-        image_assets: _ImageAssets):
+        size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
+        vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     # Grab the model type's global model config to leverage callables
-    inputs = build_single_image_inputs_from_test_info(
-        test_info, image_assets, size_wrapper, tmp_path
-    )
+    inputs = build_single_image_inputs_from_test_info(test_info, image_assets,
+                                                      size_wrapper, tmp_path)
 
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": 1},
-        size_factors=size_wrapper,
-        distributed_executor_backend=distributed_executor_backend,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             limit_mm_per_prompt={"image": 1},
+             distributed_executor_backend=distributed_executor_backend,
+             **test_info.get_non_parametrized_runner_kwargs())
 
 
 def run_multi_image_test(
-        *, tmp_path: PosixPath, test_info: VLMTestInfo,
-        model: str, max_tokens: int,
-        num_logprobs: int, dtype: str,
+        *, tmp_path: PosixPath, test_info: VLMTestInfo, model: str,
+        max_tokens: int, num_logprobs: int, dtype: str,
         distributed_executor_backend: Optional[str],
-        size_wrapper: ImageSizeWrapper, 
-        hf_runner: HfRunner, vllm_runner: VllmRunner,
-        image_assets: _ImageAssets
-    ):
+        size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
+        vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     # Grab the model type's global model config to leverage callables
-    inputs = build_multi_image_inputs_from_test_info(
-        test_info, image_assets, size_wrapper, tmp_path
-    )
+    inputs = build_multi_image_inputs_from_test_info(test_info, image_assets,
+                                                     size_wrapper, tmp_path)
 
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": len(image_assets)},
-        size_factors=size_wrapper,
-        distributed_executor_backend=distributed_executor_backend,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             limit_mm_per_prompt={"image": len(image_assets)},
+             distributed_executor_backend=distributed_executor_backend,
+             **test_info.get_non_parametrized_runner_kwargs())
 
 
-def run_embedding_test(
-    *, test_info: VLMTestInfo, model: str, max_tokens: int, num_logprobs: int,
-    dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, image_assets: _ImageAssets
-):
+def run_embedding_test(*, test_info: VLMTestInfo, model: str, max_tokens: int,
+                       num_logprobs: int, dtype: str,
+                       distributed_executor_backend: Optional[str],
+                       size_wrapper: ImageSizeWrapper,
+                       hf_runner: Type[HfRunner],
+                       vllm_runner: Type[VllmRunner],
+                       image_assets: _ImageAssets):
     inputs, vllm_embeddings = build_embedding_inputs_from_test_info(
-        test_info, image_assets, size_wrapper
-    )
+        test_info, image_assets, size_wrapper)
 
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"image": 1},
-        size_factors=size_wrapper,
-        vllm_embeddings=vllm_embeddings,
-        distributed_executor_backend=distributed_executor_backend,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             limit_mm_per_prompt={"image": 1},
+             vllm_embeddings=vllm_embeddings,
+             distributed_executor_backend=distributed_executor_backend,
+             **test_info.get_non_parametrized_runner_kwargs())
 
 
 def run_video_test(
-    *, test_info: VLMTestInfo, model: str, num_frames: int, max_tokens: int,
-    num_logprobs: int, dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
-    vllm_runner: VllmRunner, video_assets: _VideoAssets,
+    *,
+    test_info: VLMTestInfo,
+    model: str,
+    num_frames: int,
+    max_tokens: int,
+    num_logprobs: int,
+    dtype: str,
+    distributed_executor_backend: Optional[str],
+    size_wrapper: ImageSizeWrapper,
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    video_assets: _VideoAssets,
 ):
-    inputs = build_video_inputs_from_test_info(
-        test_info, video_assets, size_wrapper, num_frames
-    )
+    inputs = build_video_inputs_from_test_info(test_info, video_assets,
+                                               size_wrapper, num_frames)
 
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt={"video": len(video_assets)},
-        size_factors=size_wrapper,
-        distributed_executor_backend=distributed_executor_backend,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             limit_mm_per_prompt={"video": len(video_assets)},
+             distributed_executor_backend=distributed_executor_backend,
+             **test_info.get_non_parametrized_runner_kwargs())
 
 
-def run_custom_inputs_test(
-    *, test_info: VLMTestInfo, model: str, max_tokens: int, num_logprobs: int, 
-    distributed_executor_backend: Optional[str], dtype: str,
-    custom_test_opts: CustomTestOptions, hf_runner: HfRunner,
-    vllm_runner: VllmRunner
-):
+def run_custom_inputs_test(*, test_info: VLMTestInfo, model: str,
+                           max_tokens: int, num_logprobs: int,
+                           distributed_executor_backend: Optional[str],
+                           dtype: str, custom_test_opts: CustomTestOptions,
+                           hf_runner: Type[HfRunner],
+                           vllm_runner: Type[VllmRunner]):
     # Custom test cases can provide inputs directly, but they need to
     # explicitly provided a CustomTestConfig, which wraps the inputs and
     # the limit_mm_per_prompt
@@ -849,19 +859,17 @@ def run_custom_inputs_test(
     limit_mm_per_prompt = custom_test_opts.limit_mm_per_prompt
 
     assert inputs is not None and limit_mm_per_prompt is not None
-    run_test(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        inputs=inputs,
-        model=model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-        size_factors=None,
-        distributed_executor_backend=distributed_executor_backend,
-        **test_info.get_non_parametrized_runner_kwargs()
-    )
+    run_test(hf_runner=hf_runner,
+             vllm_runner=vllm_runner,
+             inputs=inputs,
+             model=model,
+             dtype=dtype,
+             max_tokens=max_tokens,
+             num_logprobs=num_logprobs,
+             limit_mm_per_prompt=limit_mm_per_prompt,
+             distributed_executor_backend=distributed_executor_backend,
+             **test_info.get_non_parametrized_runner_kwargs())
+
 
 ####### Core test implementation & details
 def run_test(
@@ -884,13 +892,12 @@ def run_test(
     comparator: Callable,
     get_stop_token_ids: Optional[Callable],
     limit_mm_per_prompt: Dict[str, int],
-    size_factors,
     model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
     runner_mm_key: str = "images",
-    distributed_executor_backend: Optional[str]=None,
-    tensor_parallel_size: int=1,
-    vllm_embeddings: Optional[torch.Tensor]=None,
+    distributed_executor_backend: Optional[str] = None,
+    tensor_parallel_size: int = 1,
+    vllm_embeddings: Optional[torch.Tensor] = None,
 ):
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
@@ -917,11 +924,9 @@ def run_test(
                      enforce_eager=enforce_eager) as vllm_model:
         for prompts, media in vllm_inputs:
             vllm_kwargs[runner_mm_key] = media
-            vllm_output =  vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs=num_logprobs, **vllm_kwargs
-            )
+            vllm_output = vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens, num_logprobs=num_logprobs, **vllm_kwargs)
             vllm_outputs_per_mm.append(vllm_output)
-        
 
     hf_model = hf_runner(model,
                          dtype=dtype,
@@ -944,9 +949,11 @@ def run_test(
         for prompts, media in inputs:
             hf_kwargs[runner_mm_key] = media
             hf_output = hf_model.generate_greedy_logprobs_limit(
-                prompts, max_tokens, num_logprobs=num_logprobs,
-                tokenizer=tokenizer, **hf_kwargs
-            )
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                tokenizer=tokenizer,
+                **hf_kwargs)
             hf_outputs_per_mm.append(hf_output)
 
     # Apply output processing / sanitation to the vLLM and HF runner results
@@ -979,10 +986,10 @@ def process_runner_outputs(
 ):
     if first_runner_processor is not None:
         first_runner_outputs = process_outputs(first_runner_processor, model,
-                                                first_runner_outputs)
+                                               first_runner_outputs)
     if second_runner_processor is not None:
-        second_runner_outputs = process_outputs(second_runner_processor,
-                                                 model, second_runner_outputs)
+        second_runner_outputs = process_outputs(second_runner_processor, model,
+                                                second_runner_outputs)
     return first_runner_outputs, second_runner_outputs
 
 

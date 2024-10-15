@@ -11,7 +11,7 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm.sequence import SampleLogprobs
 from vllm.utils import identity
 
-from ....conftest import IMAGE_ASSETS, ImageAsset, _ImageAssets, HfRunner
+from ....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, _ImageAssets
 from ...utils import check_logprobs_close
 
 # meta image tag; will be replaced by the appropriate tag for the model
@@ -55,8 +55,8 @@ class CustomTestOptions(NamedTuple):
 class ImageSizeWrapper(NamedTuple):
     type: SizeType
     # A size factor is a wrapper of 0+ floats,
-    # while a fixed size contains 2 integers
-    data: Union[Iterable[float], Iterable[int]]
+    # while a fixed size contains an iterable of integer pairs
+    data: Union[Iterable[float], Iterable[Tuple[int, int]]]
 
 
 class VLMTestInfo(NamedTuple):
@@ -77,7 +77,7 @@ class VLMTestInfo(NamedTuple):
     # default prompt fails the logprobs check.
     # If a different value is passed here, it should be of length 2 so that it
     # can be zipped up with the same assets.
-    single_image_prompts: Tuple[str, str] = SINGLE_IMAGE_BASE_PROMPTS
+    single_image_prompts: Iterable[str] = SINGLE_IMAGE_BASE_PROMPTS
 
     # Function for converting ImageAssets to image embeddings;
     # We need to define this explicitly for embedding tests
@@ -124,7 +124,7 @@ class VLMTestInfo(NamedTuple):
     # once per tests (much like concatenating and wrapping in one parametrize
     # call)
     image_size_factors: Iterable[Iterable[float]] = IMAGE_SIZE_FACTORS
-    image_sizes: Optional[Iterable[Tuple[int, int]]] = None
+    image_sizes: Optional[Iterable[Iterable[Tuple[int, int]]]] = None
 
     # Hack for updating a prompt to take into a local path; currently only used
     # for Qwen-VL, which requires encoding the image path / url into the prompt
@@ -134,10 +134,10 @@ class VLMTestInfo(NamedTuple):
                  str]] = None  # noqa: E501
 
     # kwarg to pass multimodal data in as to vllm/hf runner instances
-    runner_mm_key:str = "images"
+    runner_mm_key: str = "images"
 
     # Allows configuring a test to run with custom inputs
-    custom_test_opts: Optional[Iterable[CustomTestOptions]] = None
+    custom_test_opts: Optional[List[CustomTestOptions]] = None
 
     # Toggle for disabling instances of this class
     skip: bool = False

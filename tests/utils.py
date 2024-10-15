@@ -561,7 +561,7 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
-def get_memory_gb() -> bool:
+def get_memory_gb() -> int:
     """Gets the device memory in gb; can be leveraged via @large_gpu_test
     to skip tests in environments without enough resources, or called when
     filtering tests to run directly.
