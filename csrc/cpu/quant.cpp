@@ -26,7 +26,7 @@ struct KernelVecType<c10::BFloat16> {
 #ifdef __AVX512F__
 template <bool AZP, typename scalar_t>
 void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
-                                   const float* scale, const float zp,
+                                   const float* scale, const int32_t* azp,
                                    const int num_tokens,
                                    const int hidden_size) {
   using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
@@ -43,7 +43,7 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
 
   cvt_vec_t zp_vec;
   if constexpr (AZP) {
-    zp_vec = cvt_vec_t(zp);
+    zp_vec = cvt_vec_t(static_cast<float>(*azp));
   }
 
   #pragma omp parallel for
@@ -328,7 +328,8 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
 #else
 template <typename scalar_t>
 void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
-                                   const float* scale, const int num_tokens,
+                                   const float* scale, const int32_t* azp,
+                                   const int num_tokens,
                                    const int hidden_size) {
   TORCH_CHECK(false, "static_scaled_int8_quant_impl requires AVX512 support.")
 }
@@ -564,12 +565,12 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
         if (azp.has_value()) {
           static_scaled_int8_quant_impl<true>(
               input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-              scale.data_ptr<float>(), *azp->data_ptr<int32_t>(), num_tokens,
+              scale.data_ptr<float>(), azp->data_ptr<int32_t>(), num_tokens,
               hidden_size);
         } else {
           static_scaled_int8_quant_impl<false>(
               input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-              scale.data_ptr<float>(), 0, num_tokens, hidden_size);
+              scale.data_ptr<float>(), (int32_t*)0, num_tokens, hidden_size);
         }
       });
 }
