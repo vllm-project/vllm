@@ -87,6 +87,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     return spec_decode_worker
 
 
+# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# If the feature combo become valid
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """Worker which implements speculative decoding.
 
@@ -187,12 +189,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 logger.info(
                     "[Speculative Decoding] Disabling MQA scorer as the "
                     "MQA is only available with flash attn backend.")
-
-            if ngram_prompt_lookup_max > 0:
-                disable_mqa_scorer = True
-                logger.info(
-                    "[Speculative Decoding] Disabling MQA scorer as the "
-                    "NGramWorker does not support MQA scorer.")
 
             if "model_config" in draft_worker_kwargs and \
                 draft_worker_kwargs["model_config"].max_model_len < \

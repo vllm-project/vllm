@@ -62,6 +62,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     @staticmethod
     @functools.lru_cache()
     def _log_prompt_logprob_unsupported_warning_once():
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")

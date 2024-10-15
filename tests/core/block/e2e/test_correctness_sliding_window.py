@@ -3,6 +3,7 @@ from typing import List
 
 import pytest
 
+from tests.utils import check_deprecated_block_manager_usage
 from vllm import LLM, SamplingParams
 
 from .conftest import get_text_from_llm_generator
@@ -10,6 +11,12 @@ from .conftest import get_text_from_llm_generator
 # relatively small model with 4k sliding window
 MODEL = "bigcode/starcoder2-3b"
 BLOCK_SIZE = 16
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_deprecated_block_manager():
+    check_deprecated_block_manager_usage(
+        'tests/core/block/e2e/test_correctness_sliding_window.py')
 
 
 @pytest.mark.parametrize(
