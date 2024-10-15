@@ -237,9 +237,6 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Get the peak memory allocation recorded by torch
         peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-        available_kv_cache_memory = (
-            total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory)
 
         # Edge case: Check for any memory left around that may have been
         # allocated on the gpu outside of `torch`
@@ -252,6 +249,10 @@ class Worker(LocalOrDistributedWorkerBase):
                 "torch cache. Adding to peak memory usage.",
                 leftover_allocations / (1024**3))
             peak_memory += leftover_allocations
+
+        available_kv_cache_memory = (
+            total_gpu_memory * self.cache_config.gpu_memory_utilization -
+            peak_memory)
 
         logger.info("Initial memory usage before profile: %.2f GB",
                     (total_gpu_memory - self.init_gpu_memory) / (1024**3))
