@@ -13,6 +13,7 @@ class RMSNorm(CustomOp):
     Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
     Refer to https://arxiv.org/abs/1910.07467
     """
+    name = "rms_norm"
 
     def __init__(
         self,
@@ -20,7 +21,7 @@ class RMSNorm(CustomOp):
         eps: float = 1e-6,
         var_hidden_size: Optional[int] = None,
     ) -> None:
-        super().__init__("rms_norm")
+        super().__init__()
 
         self.hidden_size = hidden_size
         self.variance_epsilon = eps
@@ -129,13 +130,14 @@ class GemmaRMSNorm(CustomOp):
         1. x * (1 + w) instead of x * w.
         2. (x * w).to(orig_dtype) instead of x.to(orig_dtype) * w.
     """
+    name = "gemma_rms_norm"
 
     def __init__(
         self,
         hidden_size: int,
         eps: float = 1e-6,
     ) -> None:
-        super().__init__("gemma_rms_norm")
+        super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 

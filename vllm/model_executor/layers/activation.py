@@ -23,8 +23,7 @@ class SiluAndMul(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    def __init__(self):
-        super().__init__("silu_and_mul")
+    name = "silu_and_mul"
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -59,9 +58,10 @@ class GeluAndMul(CustomOp):
         x: (batch_size, seq_len, 2 * d) or (num_tokens, 2 * d)
         return: (batch_size, seq_len, d) or (num_tokens, d)
     """
+    name = "gelu_and_mul"
 
     def __init__(self, approximate: str = "none"):
-        super().__init__("gelu_and_mul")
+        super().__init__()
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
@@ -100,9 +100,7 @@ class GeluAndMul(CustomOp):
 
 
 class NewGELU(CustomOp):
-
-    def __init__(self):
-        super().__init__("gelu_new")
+    name = "gelu_new"
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -124,9 +122,7 @@ class NewGELU(CustomOp):
 
 
 class FastGELU(CustomOp):
-
-    def __init__(self):
-        super().__init__("gelu_fast")
+    name = "gelu_fast"
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -147,9 +143,7 @@ class FastGELU(CustomOp):
 
 
 class QuickGELU(CustomOp):
-
-    def __init__(self):
-        super().__init__("quick_gelu")
+    name = "quick_gelu"
 
     # https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py#L90
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
@@ -178,9 +172,7 @@ class ReLUSquaredActivation(CustomOp):
     """
     Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
     """
-
-    def __init__(self):
-        super().__init__("relu2")
+    name = "relu2"
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""

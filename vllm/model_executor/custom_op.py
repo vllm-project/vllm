@@ -1,5 +1,4 @@
-import re
-from typing import Set, Tuple
+from functools import lru_cache
 
 import torch.nn as nn
 
@@ -15,9 +14,8 @@ class CustomOp(nn.Module):
     Dispatches the forward method to the appropriate backend.
     """
 
-    def __init__(self, name: str):
+    def __init__(self):
         super().__init__()
-        self.name = name
         self._forward_method = self.dispatch_forward()
 
     def forward(self, *args, **kwargs):
@@ -77,60 +75,22 @@ class CustomOp(nn.Module):
         else:
             return self.forward_cuda
 
-    @staticmethod
-    def _get_enabled_ops() -> Tuple[bool, Set[str], Set[str]]:
-        """
-        Parse the VLLM_ENABLE_CUSTOM_OPS environment variable to determine
-         which custom ops are enabled. By default, custom ops are enabled
-         if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR.
-         Specifying 'all' or 'none' will override this default.
-
-        :return: A tuple of (default_on, enabled_ops, disabled_ops)
-        """
-
-        # filter empty strings
-        env_ops = list(
-            filter(lambda x: len(x) > 0, envs.VLLM_ENABLE_CUSTOM_OPS))
-
-        use_all, use_none = env_ops.count("all"), env_ops.count("none")
-        assert use_all + use_none <= 1, \
-            "Cannot specify both 'all' and 'none' in VLLM_ENABLE_CUSTOM_OPS"
-
-        # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR
-        default_on = envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR
-
-        # override the default if 'all' or 'none' is specified
-        default_on = default_on and not bool(use_none) or bool(use_all)
-        enabled_ops, disabled_ops = set(), set()
-
-        for op in env_ops:
-            if op == "all" or op == "none":
-                continue
-
-            assert re.match(r"^-?[a-z0-9_]+$",
-                            op), f"Invalid custom op name: '{op}'"
-
-            if op.startswith("-"):
-                assert op[1:] not in {"all", "none"}, \
-                    f"Cannot disable all or none: '{op}'"
-                disabled_ops.add(op[1:])
-            else:
-                enabled_ops.add(op)
-
-        assert (len(enabled_ops & disabled_ops) == 0
-                ), "Cannot enable and disable the same custom ops: " + str(
-                    enabled_ops & disabled_ops)
-
-        return default_on, enabled_ops, disabled_ops
-
     @classmethod
-    def _init_enabled_ops(cls):
-        cls.default_on, cls.enabled_ops, cls.disabled_ops = (
-            cls._get_enabled_ops())
+    def _enabled(cls) -> bool:
+        enabled = f"+{cls.name}" in envs.VLLM_CUSTOM_OPS
+        disabled = f"-{cls.name}" in envs.VLLM_CUSTOM_OPS
+        assert not (enabled
+                    and disabled), f"Cannot enable and disable {cls.name}"
 
-    def _enabled(self) -> bool:
-        return ((CustomOp.default_on or self.name in CustomOp.enabled_ops)
-                and self.name not in CustomOp.disabled_ops)
+        return (CustomOp.default_on() or enabled) and not disabled
 
-
-CustomOp._init_enabled_ops()
+    # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR
+    # Specifying 'all' or 'none' will override this default.
+    @staticmethod
+    @lru_cache()
+    def default_on() -> bool:
+        count_none = envs.VLLM_CUSTOM_OPS.count("none")
+        count_all = envs.VLLM_CUSTOM_OPS.count("all")
+        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+        return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR and \
+            not count_none > 0 or count_all > 0

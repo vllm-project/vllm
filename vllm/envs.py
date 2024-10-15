@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1: bool = False
     VLLM_TORCH_COMPILE_LEVEL: int = 0
-    VLLM_ENABLE_CUSTOM_OPS: List[str] = []
+    VLLM_CUSTOM_OPS: List[str] = []
 
 
 def get_default_cache_root():
@@ -215,9 +215,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - 'none,op1,op2' to enable only op1 and op2
     # By default, all custom ops are enabled when running without Inductor
     # and disabled when running with Inductor (compile_level >= Inductor).
-    "VLLM_ENABLE_CUSTOM_OPS":
-    lambda: os.environ.get("VLLM_ENABLE_CUSTOM_OPS", "").replace(" ", "").
-    split(","),
+    "VLLM_CUSTOM_OPS":
+    lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
