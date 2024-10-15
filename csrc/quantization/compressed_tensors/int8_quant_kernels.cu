@@ -1,6 +1,5 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
-#include <algorithm>
 #include <cmath>
 
 #include "../../dispatch_utils.h"
@@ -232,7 +231,7 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
   int64_t const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
-  dim3 const block(std::min(hidden_size, 1024));
+  dim3 const block(std::min(hidden_size, 1024L));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
@@ -263,7 +262,7 @@ void dynamic_scaled_int8_quant(
   int64_t const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
-  dim3 const block(std::min(hidden_size, 1024));
+  dim3 const block(std::min(hidden_size, 1024L));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_kernel", [&] {
