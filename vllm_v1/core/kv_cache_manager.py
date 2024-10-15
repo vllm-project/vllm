@@ -30,6 +30,10 @@ class KVCacheManager:
         self.ref_cnts = np.zeros(num_gpu_blocks, dtype=np.int32)
 
     def get_computed_blocks(self, request: Request) -> List[int]:
+        if not self.enable_caching:
+            # No prefix caching.
+            return []
+        # TODO(woosuk): Implement hash-based caching.
         return []
 
     def append_slots(
