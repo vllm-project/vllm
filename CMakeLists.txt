@@ -286,10 +286,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C3X=1")
     message(STATUS "Building scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
   else()
-    # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't 
-    # build any 3x kernels
-    set(SCALED_MM_3X_ARCHS)
-
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
       message(STATUS "Not building scaled_mm_c3x as CUDA Compiler version is "
                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
@@ -299,6 +295,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
                      "in CUDA target architectures")
     endif()
+
+    # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't 
+    # build any 3x kernels
+    set(SCALED_MM_3X_ARCHS)
   endif()
 
   #
