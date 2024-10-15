@@ -5,12 +5,13 @@ from typing import Dict, List, Sequence, Union
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
@@ -20,6 +21,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+@ToolParserManager.register_module("hermes")
 class Hermes2ProToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):
@@ -48,17 +50,19 @@ class Hermes2ProToolParser(ToolParser):
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction.")
-        self.tool_call_start_token_id: int = self.model_tokenizer.vocab[
-            self.tool_call_start_token]
-        self.tool_call_end_token_id: int = self.model_tokenizer.vocab[
-            self.tool_call_end_token]
+        self.tool_call_start_token_id = self.vocab.get(
+            self.tool_call_start_token)
+        self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         if not self.tool_call_start_token_id or not self.tool_call_end_token_id:
             raise RuntimeError(
                 "Hermes 2 Pro Tool parser could not locate tool call start/end "
                 "tokens in the tokenizer!")
 
-    def extract_tool_calls(self,
-                           model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
         if self.tool_call_start_token not in model_output:
@@ -114,6 +118,7 @@ class Hermes2ProToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         logger.debug("delta_text: %s", delta_text)

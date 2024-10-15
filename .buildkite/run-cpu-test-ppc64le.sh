@@ -18,7 +18,13 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
 # Run basic model test
 docker exec cpu-test bash -c "
   pip install pytest matplotlib einops transformers_stream_generator
-  pytest -v -s tests/models -m \"not vlm\" --ignore=tests/models/test_embedding.py --ignore=tests/models/test_oot_registration.py --ignore=tests/models/test_registry.py --ignore=tests/models/test_jamba.py --ignore=tests/models/test_danube3_4b.py" # Mamba and Danube3-4B on CPU is not supported
+  pytest -v -s tests/models -m \"not vlm\" \
+    --ignore=tests/models/test_embedding.py \
+    --ignore=tests/models/test_oot_registration.py \
+    --ignore=tests/models/test_registry.py \
+    --ignore=tests/models/test_jamba.py \
+    --ignore=tests/models/test_mamba.py \
+    --ignore=tests/models/test_danube3_4b.py" # Mamba kernels and Danube3-4B on CPU is not supported
 
 # online inference
 docker exec cpu-test bash -c "
