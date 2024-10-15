@@ -55,7 +55,7 @@ class ScalarType:
 
     _finite_values_only: bool = False
     """
-    Private: if NANs are supported, used `has_infs()` instead.
+    Private: if infs are supported, used `has_infs()` instead.
     """
 
     nan_repr: NanRepr = NanRepr.IEEE_754
@@ -94,8 +94,8 @@ class ScalarType:
         max_exponent_double = (max_exponent - exponent_bias +
                                exponent_bias_double)
 
-        # shift the mantissa into the position for a double and
-        # the exponent
+        # shift the mantissa and exponent into the proper positions for an
+        # IEEE double and bitwise-or them together.
         return (max_mantissa <<
                 (52 - self.mantissa)) | (max_exponent_double << 52)
 
@@ -257,14 +257,14 @@ class ScalarType:
     def int_(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
         "Create a signed integer scalar type (size_bits includes sign-bit)."
         ret = cls(0, size_bits - 1, True, bias if bias else 0)
-        ret.id  # noqa B018
+        ret.id  # noqa B018: make sure the id is cached
         return ret
 
     @classmethod
     def uint(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
         """Create a unsigned integer scalar type."""
         ret = cls(0, size_bits, False, bias if bias else 0)
-        ret.id  # noqa B018
+        ret.id  # noqa B018: make sure the id is cached
         return ret
 
     @classmethod
@@ -275,7 +275,7 @@ class ScalarType:
         """
         assert (mantissa > 0 and exponent > 0)
         ret = cls(exponent, mantissa, True, 0)
-        ret.id  # noqa B018
+        ret.id  # noqa B018: make sure the id is cached
         return ret
 
     @classmethod
@@ -290,7 +290,7 @@ class ScalarType:
             "use `float_IEEE754` constructor for floating point types that "
             "follow IEEE 754 conventions")
         ret = cls(exponent, mantissa, True, 0, finite_values_only, nan_repr)
-        ret.id  # noqa B018
+        ret.id  # noqa B018: make sure the id is cached
         return ret
 
 
