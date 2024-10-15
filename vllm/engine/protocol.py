@@ -1,5 +1,6 @@
 import asyncio
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from typing import AsyncGenerator, List, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
@@ -69,24 +70,46 @@ class EngineClient(ABC):
         ignore_eos = params.ignore_eos
         temperature = params.temperature
         length_penalty = params.length_penalty
+        include_stop_str_in_output = params.include_stop_str_in_output
 
         tokenizer = await self.get_tokenizer(lora_request=None)
-        tokenizedPrompt = prompt if isinstance(
-            prompt, list) else tokenizer.encode(prompt)
-        tokenizedLength = len(tokenizedPrompt)
+
+        if isinstance(prompt, dict):
+            if "prompt" in prompt:
+                tokenized_prompt = tokenizer.encode(prompt.get("prompt"))
+                multi_modal_data = prompt.get("multi_modal_data")
+                mm_processor_kwargs = prompt.get("mm_processor_kwargs")
+            elif "prompt_token_ids" in prompt:
+                tokenized_prompt = tokenizer.encode(prompt.get("prompt"))
+                multi_modal_data = prompt.get("multi_modal_data")
+                mm_processor_kwargs = prompt.get("mm_processor_kwargs")
+            raise TypeError("Inputs in Dictionary type must be a TextPrompt or TokensPrompt")
+        else:
+            tokenized_prompt = prompt if isinstance(
+                prompt, list) else tokenizer.encode(prompt)
+            multi_modal_data = None
+            mm_processor_kwargs = None
+
+        tokenized_length = len(tokenized_prompt)
 
         sort_beams_key = create_sort_beams_key_function(
             tokenizer.eos_token_id, length_penalty)
 
-        beam_search_params = SamplingParams(logprobs=2 * beam_width,
-                                            max_tokens=1,
-                                            temperature=temperature)
-        all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
+        beam_search_params = SamplingParams(
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+        )
+        all_beams = [BeamSearchSequence(tokens=tokenized_prompt, cum_logprob=0)]
         completed = []
 
         for _ in range(max_tokens):
             prompts_batch = [
-                TokensPrompt(prompt_token_ids=beam.tokens)
+                TokensPrompt(
+                    prompt_token_ids=beam.tokens,
+                    multi_modal_data=deepcopy(multi_modal_data), # always the values from inputs
+                    mm_processor_kwargs=deepcopy(mm_processor_kwargs)
+                )
                 for beam in all_beams
             ]
 
@@ -112,16 +135,25 @@ class EngineClient(ABC):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
-                        new_beam = BeamSearchSequence(
-                            tokens=current_beam.tokens + [token_id],
-                            cum_logprob=current_beam.cum_logprob +
-                            logprob_obj.logprob)
-
                         if token_id == tokenizer.eos_token_id and \
                             not ignore_eos:
-                            completed.append(new_beam)
+                            completed.append(
+                                BeamSearchSequence(
+                                    tokens=current_beam.tokens + [token_id] 
+                                    if include_stop_str_in_output else current_beam.tokens, #
+                                    cum_logprob=current_beam.cum_logprob +
+                                    logprob_obj.logprob,
+                                    finish_reason="stop"
+                                )
+                            )
                         else:
-                            new_beams.append(new_beam)
+                            new_beams.append(
+                                BeamSearchSequence(
+                                    tokens=current_beam.tokens + [token_id], #
+                                    cum_logprob=current_beam.cum_logprob +
+                                    logprob_obj.logprob,
+                                )
+                            )
 
             sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
             all_beams = sorted_beams[:beam_width]
@@ -131,11 +163,11 @@ class EngineClient(ABC):
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            beam.text = tokenizer.decode(beam.tokens[tokenizedLength:])
+            beam.text = tokenizer.decode(beam.tokens[tokenized_length:])
 
         beam_search_output = RequestOutput(
             request_id=request_id,
-            prompt=prompt,
+            prompt=tokenizer.decode(tokenized_prompt),
             outputs=[
                 CompletionOutput(
                     text=beam.text,
@@ -143,10 +175,11 @@ class EngineClient(ABC):
                     token_ids=beam.tokens,
                     index=i,
                     logprobs=beam.cum_logprob,
+                    finish_reason=beam.finish_reason if beam.finish_reason is not None else "length"
                 ) for (i, beam) in enumerate(best_beams)
             ],
             finished=True,
-            prompt_token_ids=tokenizedPrompt,
+            prompt_token_ids=tokenized_prompt,
             prompt_logprobs=None)
 
         yield beam_search_output

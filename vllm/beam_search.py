@@ -13,6 +13,7 @@ class BeamSearchSequence:
     tokens: List[int]
     cum_logprob: float = 0.0
     text: Optional[str] = None
+    finish_reason: Optional[str] = None
 
 
 @dataclass
