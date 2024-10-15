@@ -237,15 +237,25 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Get the peak memory allocation recorded by torch
         peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        available_kv_cache_memory = (
+            total_gpu_memory * self.cache_config.gpu_memory_utilization -
+            peak_memory)
+
+        logger.info("Initial memory usage before profile: %.2f GB",
+                    (total_gpu_memory - self.init_gpu_memory) / (1024**3))
+        logger.info("Peak memory usage during profile: %.2f GB",
+                    peak_memory / (1024**3))
+        logger.info(
+            "Available memory for KV cache with %.2f gpu utilization: %.2f GB",
+            self.cache_config.gpu_memory_utilization,
+            available_kv_cache_memory / (1024**3))
 
         cache_block_size = self.get_cache_block_size_bytes()
         if cache_block_size == 0:
             num_gpu_blocks = 0
             num_cpu_blocks = 0
         else:
-            num_gpu_blocks = int(
-                (total_gpu_memory * self.cache_config.gpu_memory_utilization -
-                 peak_memory) // cache_block_size)
+            num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
             num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                                  cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
