@@ -88,7 +88,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
-        skip=True,#(get_memory_gb() < 48), # Large GPU test
+        skip=(get_memory_gb() < 48), # Large GPU test
         patch_hf_runner=vlm_utils.glm_patch_hf_runner,
     ),
     "intern-vl": VLMTestInfo(
@@ -117,7 +117,9 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=vlm_utils.llava_image_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
-            inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs_llava(is_llava=True),
+            inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs(
+                formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:"
+            ),
             limit_mm_per_prompt={"image": 4},
         )],
     ),
@@ -129,11 +131,32 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=vlm_utils.llava_image_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
-            inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs_llava(is_llava=False),
+            inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs(
+                formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]"
+            ),
             limit_mm_per_prompt={"image": 4},
         )],
         # Llava-next tests fixed sizes & the default size factors
         image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
+    ),
+    "llava-one-vision": VLMTestInfo(
+        models="llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        test_type=VlmTestType.VIDEO,
+        prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",
+        fork_new_process_for_each_test=True,
+        dtype="half",
+        num_video_frames=16,
+        max_model_len=4096,
+        postprocess_inputs=vlm_utils.get_key_type_post_processor(
+            "pixel_values_videos",
+            "half"
+        ),
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=vlm_utils.llava_onevision_vllm_to_hf_output,
+        # Llava-one-vision tests fixed sizes & the default size factors
+        image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
+        runner_mm_key="videos",
+        skip=(get_memory_gb() < 48), # Large GPU test
     ),
     "llava-next-video": VLMTestInfo(
         models="llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -143,6 +166,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=vlm_utils.llava_video_vllm_to_hf_output,
+        # Llava-next-video tests fixed sizes & the default size factors
         image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
         runner_mm_key="videos",
     ),
@@ -225,7 +249,7 @@ VLM_TEST_SETTINGS = {
         **COMMON_BROADCAST_SETTINGS,
     ),
     ### Custom input edge-cases for specific models
-    "intern-vl_diff_patches": VLMTestInfo(
+    "intern-vl_diff-patches": VLMTestInfo(
         models="OpenGVLab/InternVL2-2B",
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         test_type=VlmTestType.CUSTOM_INPUTS,
@@ -239,6 +263,27 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 2},
             ) for inp in vlm_utils.different_patch_input_cases_internvl()
         ],
+    ),
+    "llava-one-vision_multiple-images": VLMTestInfo(
+        models="llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        test_type=VlmTestType.CUSTOM_INPUTS,
+        fork_new_process_for_each_test=True,
+        max_model_len=16384,
+        max_num_seqs=2,
+        dtype="half",
+        postprocess_inputs=vlm_utils.get_key_type_post_processor(
+            "pixel_values",
+            "half"
+        ),
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=vlm_utils.llava_onevision_vllm_to_hf_output,
+        custom_test_opts=[CustomTestOptions(
+            inputs=vlm_utils.multi_image_multi_aspect_ratio_inputs(
+                formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",
+            ),
+            limit_mm_per_prompt={"image": 4},
+        )],
+        skip=(get_memory_gb() < 48), # Large GPU test
     ),
 }
 # yapf: enable
@@ -448,7 +493,7 @@ def test_image_embedding_models_heavy(
 
 
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
+    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,num_frames,size_wrapper",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.VIDEO,
@@ -458,13 +503,13 @@ def test_image_embedding_models_heavy(
 def test_video_models_heavy(
     model_type: str, model: str, max_tokens: int, num_logprobs: int,
     dtype: str, distributed_executor_backend: Optional[str],
-    size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
+    num_frames: int, size_wrapper: ImageSizeWrapper, hf_runner: HfRunner,
     vllm_runner: VllmRunner, video_assets: _VideoAssets
 ):
     test_info = VLM_TEST_SETTINGS[model_type]
     vlm_utils.run_video_test(
-        test_info=test_info, model=model, max_tokens=max_tokens,
-        num_logprobs=num_logprobs, dtype=dtype,
+        test_info=test_info, model=model, num_frames=num_frames,
+        max_tokens=max_tokens, num_logprobs=num_logprobs, dtype=dtype,
         distributed_executor_backend=distributed_executor_backend,
         size_wrapper=size_wrapper, hf_runner=hf_runner,
         vllm_runner=vllm_runner, video_assets=video_assets,
@@ -472,7 +517,7 @@ def test_video_models_heavy(
 
 
 @pytest.mark.parametrize(
-    "model_type,model,max_tokens,num_logprobs,distributed_executor_backend,dtype",
+    "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,custom_test_opts",
     vlm_utils.get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VlmTestType.CUSTOM_INPUTS,

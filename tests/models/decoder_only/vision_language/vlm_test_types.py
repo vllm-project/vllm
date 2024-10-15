@@ -140,7 +140,7 @@ class VLMTestInfo(NamedTuple):
     custom_test_opts: Optional[Iterable[CustomTestOptions]] = None
 
     # Toggle for disabling instances of this class
-    skip: bool = True  # TODO - flip me after done testing...
+    skip: bool = False
 
     def get_non_parametrized_runner_kwargs(self):
         """Returns a dictionary of expandable kwargs for items that are used
