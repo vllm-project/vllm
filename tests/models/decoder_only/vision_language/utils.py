@@ -1,6 +1,6 @@
 """Common utility functions relating to different models that are useful
 for running tests, e.g., output sanitizers to make HF outputs more easily
-comparable to vLLM, etc.
+comparable to vLLM, wrappers for running tests for different modalities, etc.
 """
 import itertools
 import re
@@ -149,8 +149,6 @@ def get_llava_embeddings(image_assets: _ImageAssets):
 
 
 ####### postprocessors to run on HF BatchEncoding
-# NOTE: It would be helpful to rewrite this to be configured in the test info,
-# but built inside of the test so that we don't need to specify the dtype twice
 def get_key_type_post_processor(
         hf_inp_key: str,
         dtype: str) -> Callable[[BatchEncoding], BatchEncoding]:
@@ -198,7 +196,7 @@ def qwen_prompt_path_encoder(
     return prompt
 
 ####### Model-specific HuggingFace runner patchers
-def glm_patch_hf_runner(hf_model: HfRunner):
+def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4."""
     hf_processor = hf_model.processor
     patch_padding_side(hf_processor)
@@ -225,7 +223,8 @@ def glm_patch_hf_runner(hf_model: HfRunner):
     return hf_model
 
 
-def internvl_patch_hf_runner(hf_model: HfRunner):
+def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for InternVL."""
     class InternVLProcessor:
         """A simple processor for InternVL2 which misses a processor."""
 
@@ -305,7 +304,7 @@ def _internvl_generate(
     )
 
 ####### Utils for model-agnostic prompt manipulation / case filtering
-# Most of these help us handle image tags and configure things
+# Most of these help us handle mm tags and configure things
 # that would normally be handled by parametrize(), since we want
 # to be able to adapt settings like num_logprobs on a per-model basis
 def replace_test_placeholder(prompt: str,
@@ -339,7 +338,7 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
     assert isinstance(base_prompts, (list, tuple))
     model_prompts = []
     for base_prompt in base_prompts:
-        # Replace the image /video placeholders in the base prompt with
+        # Replace the multimodal placeholders in the base prompt with
         # the correct ones for the model that we are testing
         if img_idx_to_prompt:
             base_prompt = replace_test_placeholder(
@@ -360,23 +359,34 @@ def get_model_prompts(base_prompts: Union[List[str], Tuple[str]],
 
 def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
                                test_type: VlmTestType,
-                               fork_per_test: bool):
+                               fork_per_test: bool) -> Dict[str, VLMTestInfo]:
+    """Given the dict of potential test settings to run, return a subdict
+    of tests who have the current test type enabled, with the matching val for
+    fork_per_test.
+    """
+    def matches_test_type(test_info: VLMTestInfo, test_type: VlmTestType):
+        return test_info.test_type == test_type or (
+            isinstance(test_info.test_type, Iterable)
+            and test_type in test_info.test_type
+        )
+
     filtered_test_settings = {}
     for test_name, test_info in test_settings.items():
         # Skip if it's explicitly disabled
         if test_info.skip:
             continue
         # Otherwise check if the test has the right type & keep if it does
-        if test_type == test_info.test_type or (
-                isinstance(test_info.test_type, Iterable)
-                and test_type in test_info.test_type):
+        if matches_test_type(test_info, test_type):
             # Embedding tests need to have a conversion func in their test info
-            if test_type == VlmTestType.EMBEDDING:
+            if matches_test_type(test_info, VlmTestType.EMBEDDING):
                 assert test_info.convert_assets_to_embeddings is not None
             # Custom test inputs need to explicitly define the mm limit/inputs
-            if test_type == VlmTestType.CUSTOM_INPUTS:
+            if matches_test_type(test_info, VlmTestType.CUSTOM_INPUTS):
                 assert (test_info.custom_test_opts is not None
                         and isinstance(test_info.custom_test_opts, Iterable))
+            # For all types besides custom inputs, we need a prompt formatter
+            else:
+                assert test_info.prompt_formatter is not None
 
             # Everything looks okay; keep if this is has correct proc handling
             if test_info.fork_new_process_for_each_test == fork_per_test:
@@ -388,7 +398,11 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
 def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
                              test_type: VlmTestType,
                              fork_new_process_for_each_test: bool):
-    """Converts all of our VLMTestInfo into an expanded list of parameters."""
+    """Converts all of our VLMTestInfo into an expanded list of parameters.
+    This is similar to nesting pytest parametrize calls, but done directly
+    through an itertools product so that each test can set things like
+    size factors etc, while still running in isolated test cases.
+    """
     test_settings = get_filtered_test_settings(
         test_settings,
         test_type,
@@ -472,8 +486,12 @@ def get_wrapped_test_sizes(
     return tuple(wrapped_factors + wrapped_sizes)
 
 
-def multi_image_multi_aspect_ratio_inputs_llava(is_llava):
-    """Builds inputs for multi-image (varied sizes/aspect ratio) testing."""
+def multi_image_multi_aspect_ratio_inputs_llava(is_llava: bool):
+    """Builds inputs for multi-image (varied sizes/aspect ratio) testing.
+    
+    Args:
+        is_llava: Indicates whether we should use llava or llava-next format.
+    """
     stop_sign = IMAGE_ASSETS[0].pil_image
     cherry_blossom = IMAGE_ASSETS[1].pil_image
     llava_formatter = lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:"
@@ -654,7 +672,7 @@ def build_video_inputs_from_test_info(
         for asset in video_assets
     ]
 
-    video_scaler = (resize_video if test_info.test_type == SizeType.FIXED_SIZE
+    video_scaler = (resize_video if size_wrapper.type == SizeType.FIXED_SIZE
                     else rescale_video_size)
 
     return [(
@@ -849,6 +867,7 @@ def run_test(
     size_factors,
     model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
+    runner_mm_key: str = "images",
     distributed_executor_backend: Optional[str]=None,
     tensor_parallel_size: int=1,
     vllm_embeddings: Optional[torch.Tensor]=None,
@@ -857,13 +876,16 @@ def run_test(
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
 
+    vllm_outputs_per_mm = []
+    hf_outputs_per_mm = []
+
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    opt_vllm_kwargs = {}
+    vllm_kwargs = {}
     if get_stop_token_ids is not None:
-        opt_vllm_kwargs["stop_token_ids"] = get_stop_token_ids(tokenizer)
+        vllm_kwargs["stop_token_ids"] = get_stop_token_ids(tokenizer)
 
     with vllm_runner(model,
                      max_model_len=max_model_len,
@@ -873,14 +895,13 @@ def run_test(
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=enforce_eager) as vllm_model:
-        vllm_outputs_per_image = [
-            vllm_model.generate_greedy_logprobs(prompts,
-                                                max_tokens,
-                                                num_logprobs=num_logprobs,
-                                                images=images,
-                                                **opt_vllm_kwargs)
-            for prompts, images in vllm_inputs
-        ]
+        for prompts, media in vllm_inputs:
+            vllm_kwargs[runner_mm_key] = media
+            vllm_output =  vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens, num_logprobs=num_logprobs, **vllm_kwargs
+            )
+            vllm_outputs_per_mm.append(vllm_output)
+        
 
     hf_model = hf_runner(model,
                          dtype=dtype,
@@ -895,26 +916,24 @@ def run_test(
     # Some models need to explicitly pass the eos_token_id off the tokenizer or
     # processor for a good comparison; currently assume processor/tokenizer
     # agree on the EOS, and pull it off the tokenizer if requested.
-    opt_hf_kwargs = {}
+    hf_kwargs = {}
     if use_tokenizer_eos:
-        opt_hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
+        hf_kwargs["eos_token_id"] = tokenizer.eos_token_id
 
     with hf_model, torch.no_grad():
-        hf_outputs_per_image = [
-            hf_model.generate_greedy_logprobs_limit(prompts,
-                                                    max_tokens,
-                                                    num_logprobs=num_logprobs,
-                                                    images=images,
-                                                    tokenizer=tokenizer,
-                                                    **opt_hf_kwargs)
-            for prompts, images in inputs
-        ]
+        for prompts, media in inputs:
+            hf_kwargs[runner_mm_key] = media
+            hf_output = hf_model.generate_greedy_logprobs_limit(
+                prompts, max_tokens, num_logprobs=num_logprobs,
+                tokenizer=tokenizer, **hf_kwargs
+            )
+            hf_outputs_per_mm.append(hf_output)
 
     # Apply output processing / sanitation to the vLLM and HF runner results
-    hf_outputs_per_image, vllm_outputs_per_image = process_runner_outputs(
+    hf_outputs_per_mm, vllm_outputs_per_mm = process_runner_outputs(
         model,
-        first_runner_outputs=hf_outputs_per_image,
-        second_runner_outputs=vllm_outputs_per_image,
+        first_runner_outputs=hf_outputs_per_mm,
+        second_runner_outputs=vllm_outputs_per_mm,
         first_runner_processor=hf_output_post_proc,
         second_runner_processor=vllm_output_post_proc,
     )
@@ -926,13 +945,13 @@ def run_test(
         export_info=[
             {"config": {"inputs": inputs, "max_tokens": max_tokens, "num_logprobs": num_logprobs}},
             {"hf_runner": {"dtype": dtype, "model": model}},
-            {"hf_out": hf_outputs_per_image},
-            {"vllm_out": vllm_outputs_per_image},
+            {"hf_out": hf_outputs_per_mm},
+            {"vllm_out": vllm_outputs_per_mm},
         ],
     )
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
-                                        vllm_outputs_per_image):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_mm,
+                                        vllm_outputs_per_mm):
         # This is usually check_logprobs_close, but it's passed through to
         # allow things like check_outputs_equal where needed
         comparator(

@@ -25,7 +25,7 @@ SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
-VIDEO_BASE_PROMPT = f"${TEST_VIDEO_PLACEHOLDER}why is this video funny?"
+VIDEO_BASE_PROMPT = f"{TEST_VIDEO_PLACEHOLDER}Why is this video funny?"
 
 
 IMAGE_SIZE_FACTORS = ((), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0))
@@ -61,9 +61,11 @@ class ImageSizeWrapper(NamedTuple):
 
 class VLMTestInfo(NamedTuple):
     models: Union[Iterable[str], str]
-    # Should be None only if this is a CUSTOM_INPUTS test
-    prompt_formatter: Optional[Callable]
     test_type: Union[VlmTestType, Iterable[VlmTestType]]
+
+    # Should be None only if this is a CUSTOM_INPUTS test
+    prompt_formatter: Optional[Callable] = None
+
     # Indicates whether or not we need to run every case in a new process
     fork_new_process_for_each_test: bool = False
 
@@ -131,6 +133,9 @@ class VLMTestInfo(NamedTuple):
         Callable[[PosixPath, str, Union[List[ImageAsset], _ImageAssets]],
                  str]] = None  # noqa: E501
 
+    # kwarg to pass multimodal data in as to vllm/hf runner instances
+    runner_mm_key:str = "images"
+
     # Allows configuring a test to run with custom inputs
     custom_test_opts: Optional[Iterable[CustomTestOptions]] = None
 
@@ -155,4 +160,5 @@ class VLMTestInfo(NamedTuple):
             "get_stop_token_ids": self.get_stop_token_ids,
             "model_kwargs": self.model_kwargs,
             "patch_hf_runner": self.patch_hf_runner,
+            "runner_mm_key": self.runner_mm_key,
         }
