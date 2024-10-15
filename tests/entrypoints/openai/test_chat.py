@@ -433,18 +433,28 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
         model=model_name,
         messages=messages,
         max_tokens=10,
+        extra_body=dict(min_tokens=10),
         temperature=0.0,
         stream=True,
         stream_options={
             "include_usage": True,
-            "continuous_usage_stats": True
+            "continuous_usage_stats": True,
         },
     )
+    last_completion_tokens = 0
     async for chunk in stream:
         assert chunk.usage.prompt_tokens >= 0
-        assert chunk.usage.completion_tokens >= 0
+        assert last_completion_tokens == 0 or \
+               chunk.usage.completion_tokens > last_completion_tokens or \
+               (
+                   not chunk.choices and
+                   chunk.usage.completion_tokens == last_completion_tokens
+               )
         assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
                                             chunk.usage.completion_tokens)
+        last_completion_tokens = chunk.usage.completion_tokens
+
+    assert last_completion_tokens == 10
 
 
 @pytest.mark.asyncio

@@ -144,6 +144,39 @@ def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_nvlm_d(question: str, image_urls: List[str]):
+    model_name = "nvidia/NVLM-D-72B"
+
+    # Adjust this as necessary to fit in GPU
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        tensor_parallel_size=4,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={"max_dynamic_patch": 4},
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+    stop_token_ids = None
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
     try:
         from qwen_vl_utils import process_vision_info
@@ -201,11 +234,35 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
+    model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    llm = LLM(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    prompt = f"<|image|><|image|><|begin_of_text|>{question}"
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 model_example_map = {
     "phi3_v": load_phi3v,
     "internvl_chat": load_internvl,
+    "NVLM_D": load_nvlm_d,
     "qwen2_vl": load_qwen2_vl,
     "qwen_vl_chat": load_qwenvl_chat,
+    "mllama": load_mllama,
 }
 
 
