@@ -7,13 +7,13 @@ import torch.nn as nn
 from vllm.model_executor.custom_op import CustomOp
 
 
+@CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
     """Root mean square normalization.
 
     Computes x -> w * x / sqrt(E[x^2] + eps) where w is the learned weight.
     Refer to https://arxiv.org/abs/1910.07467
     """
-    name = "rms_norm"
 
     def __init__(
         self,
@@ -123,6 +123,7 @@ class RMSNorm(CustomOp):
         return s
 
 
+@CustomOp.register("gemma_rms_norm")
 class GemmaRMSNorm(CustomOp):
     """RMS normalization for Gemma.
 
@@ -130,7 +131,6 @@ class GemmaRMSNorm(CustomOp):
         1. x * (1 + w) instead of x * w.
         2. (x * w).to(orig_dtype) instead of x.to(orig_dtype) * w.
     """
-    name = "gemma_rms_norm"
 
     def __init__(
         self,

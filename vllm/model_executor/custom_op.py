@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Dict, Type
 
 import torch.nn as nn
 
@@ -61,7 +62,7 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
 
-        if not self._enabled():
+        if not self.enabled():
             return self.forward_native
 
         if is_hip():
@@ -76,7 +77,7 @@ class CustomOp(nn.Module):
             return self.forward_cuda
 
     @classmethod
-    def _enabled(cls) -> bool:
+    def enabled(cls) -> bool:
         enabled = f"+{cls.name}" in envs.VLLM_CUSTOM_OPS
         disabled = f"-{cls.name}" in envs.VLLM_CUSTOM_OPS
         assert not (enabled
@@ -85,7 +86,7 @@ class CustomOp(nn.Module):
         return (CustomOp.default_on() or enabled) and not disabled
 
     # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR
-    # Specifying 'all' or 'none' will override this default.
+    # Specifying 'all' or 'none' in VLLM_CUSTOM_OPS takes precedence.
     @staticmethod
     @lru_cache()
     def default_on() -> bool:
@@ -94,3 +95,20 @@ class CustomOp(nn.Module):
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
         return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR and \
             not count_none > 0 or count_all > 0
+
+    # Dictionary of all custom ops.
+    # To check if an op with a name is enabled, call .enabled() on the class.
+    # Example: op_registry["my_op"].enabled()
+    op_registry: Dict[str, Type['CustomOp']] = {}
+
+    # Decorator to register custom ops.
+    @classmethod
+    def register(cls, name: str):
+
+        def decorator(op_cls):
+            assert name not in cls.op_registry, f"Duplicate op name: {name}"
+            op_cls.name = name
+            cls.op_registry[name] = op_cls
+            return op_cls
+
+        return decorator

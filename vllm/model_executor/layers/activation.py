@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
 
+@CustomOp.register("silu_and_mul")
 class SiluAndMul(CustomOp):
     """An activation function for SwiGLU.
 
@@ -22,8 +23,6 @@ class SiluAndMul(CustomOp):
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
-
-    name = "silu_and_mul"
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -49,6 +48,7 @@ class SiluAndMul(CustomOp):
         return out
 
 
+@CustomOp.register("gelu_and_mul")
 class GeluAndMul(CustomOp):
     """An activation function for GeGLU.
 
@@ -58,7 +58,6 @@ class GeluAndMul(CustomOp):
         x: (batch_size, seq_len, 2 * d) or (num_tokens, 2 * d)
         return: (batch_size, seq_len, d) or (num_tokens, d)
     """
-    name = "gelu_and_mul"
 
     def __init__(self, approximate: str = "none"):
         super().__init__()
@@ -99,8 +98,8 @@ class GeluAndMul(CustomOp):
         return f'approximate={repr(self.approximate)}'
 
 
+@CustomOp.register("gelu_new")
 class NewGELU(CustomOp):
-    name = "gelu_new"
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -121,8 +120,8 @@ class NewGELU(CustomOp):
         return ops.gelu_new(x)
 
 
+@CustomOp.register("gelu_fast")
 class FastGELU(CustomOp):
-    name = "gelu_fast"
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -142,9 +141,8 @@ class FastGELU(CustomOp):
         return ops.gelu_fast(x)
 
 
+@CustomOp.register("quick_gelu")
 class QuickGELU(CustomOp):
-    name = "quick_gelu"
-
     # https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py#L90
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -168,11 +166,11 @@ class QuickGELU(CustomOp):
     # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
 
 
+@CustomOp.register("relu2")
 class ReLUSquaredActivation(CustomOp):
     """
     Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
     """
-    name = "relu2"
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""

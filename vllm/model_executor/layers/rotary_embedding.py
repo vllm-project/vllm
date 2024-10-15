@@ -72,9 +72,9 @@ def _apply_rotary_emb(
         return torch.stack((o1, o2), dim=-1).flatten(-2)
 
 
+@CustomOp.register("rotary_embedding")
 class RotaryEmbedding(CustomOp):
     """Original rotary positional embedding."""
-    name = "rotary_embedding"
 
     def __init__(
         self,
@@ -469,7 +469,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.long_factor = long_factor
 
         scale = self.max_position_embeddings / \
-            self.original_max_position_embeddings
+                self.original_max_position_embeddings
         if scale <= 1.0:
             scaling_factor = 1.0
         else:

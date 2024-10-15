@@ -37,9 +37,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
+@CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
-    name = "unquantized_fused_moe"
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,

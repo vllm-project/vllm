@@ -53,10 +53,19 @@ def test_enabled_ops(env: str, torch_level: int, ops_enabled: List[int],
 
     assert CustomOp.default_on() == default_on
 
-    assert RMSNorm(1024)._enabled() == bool(ops_enabled[0])
-    assert SiluAndMul()._enabled() == bool(ops_enabled[1])
-    assert GeluAndMul()._enabled() == bool(ops_enabled[2])
-    assert ReLUSquaredActivation()._enabled() == bool(ops_enabled[3])
+    ops_enabled = [bool(x) for x in ops_enabled]
+
+    assert RMSNorm(1024).enabled() == ops_enabled[0]
+    assert CustomOp.op_registry["rms_norm"].enabled() == ops_enabled[0]
+
+    assert SiluAndMul().enabled() == ops_enabled[1]
+    assert CustomOp.op_registry["silu_and_mul"].enabled() == ops_enabled[1]
+
+    assert GeluAndMul().enabled() == ops_enabled[2]
+    assert CustomOp.op_registry["gelu_and_mul"].enabled() == ops_enabled[2]
+
+    assert ReLUSquaredActivation().enabled() == ops_enabled[3]
+    assert CustomOp.op_registry["relu2"].enabled() == ops_enabled[3]
 
 
 @pytest.mark.parametrize(
@@ -66,4 +75,4 @@ def test_enabled_ops_invalid(env: str):
     CustomOp.default_on.cache_clear()
 
     with pytest.raises(AssertionError):
-        RMSNorm(1024)._enabled()
+        RMSNorm(1024).enabled()
