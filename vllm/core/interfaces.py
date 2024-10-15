@@ -36,15 +36,17 @@ class BlockSpaceManager(ABC):
             from vllm.core.block_manager_v2 import BlockSpaceManagerV2
             return BlockSpaceManagerV2
 
-        if version == "embedding":
-            from vllm.core.embedding_model_block_manager import (
-                EmbeddingModelBlockSpaceManager)
-            return EmbeddingModelBlockSpaceManager
+        if version == "placeholder":
+            from vllm.core.placeholder_block_space_manager import (
+                PlaceholderBlockSpaceManager)
+            return PlaceholderBlockSpaceManager
 
         raise ValueError(f"Unknown version {version=}")
 
     @abstractmethod
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+    def can_allocate(self,
+                     seq_group: SequenceGroup,
+                     num_lookahead_slots: int = 0) -> AllocStatus:
         pass
 
     @abstractmethod

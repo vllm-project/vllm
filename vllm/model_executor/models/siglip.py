@@ -4,6 +4,7 @@ within a vision language model."""
 import math
 from typing import Iterable, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from PIL import Image
 from torch import nn
@@ -87,6 +88,24 @@ def dummy_image_for_siglip(
 
     image = Image.new("RGB", (width, height), color=0)
     return {"image": image if num_images == 1 else [image] * num_images}
+
+
+def dummy_video_for_siglip(
+    hf_config: SiglipVisionConfig,
+    num_frames: int,
+    *,
+    image_width_override: Optional[int] = None,
+    image_height_override: Optional[int] = None,
+):
+    pil_frame = dummy_image_for_siglip(
+        hf_config,
+        num_images=1,
+        image_width_override=image_width_override,
+        image_height_override=image_height_override)
+    np_frame = np.array(pil_frame["image"])
+    mm_data_per_video = np.repeat([np_frame], num_frames, axis=0)
+    mm_data = {"video": mm_data_per_video}
+    return mm_data
 
 
 def input_processor_for_siglip(
@@ -227,7 +246,7 @@ class SiglipParallelAttention(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -293,7 +312,7 @@ class SiglipMLP(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -501,6 +520,7 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
     ):
         super().__init__()
+
         num_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
         self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
@@ -510,10 +530,6 @@ class SiglipVisionModel(nn.Module):
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-
-    @property
-    def _require_post_layernorm(self) -> bool:
-        return self.vision_model.post_layernorm is not None
 
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
@@ -540,12 +556,12 @@ class SiglipVisionModel(nn.Module):
 
         for name, loaded_weight in weights:
             # post_layernorm is optional in SiglipVisionModel
-            if ("vision_model.post_layernorm" in name
-                    and not self._require_post_layernorm):
+            if (name.startswith("vision_model.post_layernorm")
+                    and self.vision_model.post_layernorm is None):
                 continue
 
             # omit layers when num_hidden_layers_override is set
-            if "vision_model.encoder.layers." in name:
+            if name.startswith("vision_model.encoder.layers"):
                 layer_idx = int(name.split(".")[3])
                 if layer_idx >= layer_count:
                     continue

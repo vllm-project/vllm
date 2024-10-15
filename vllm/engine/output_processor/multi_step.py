@@ -9,8 +9,8 @@ from vllm.engine.output_processor.single_step import (
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
-                           SequenceOutput, SequenceStatus)
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Sequence, SequenceGroup,
+                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Counter
@@ -62,6 +62,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     @staticmethod
     @functools.lru_cache()
     def _log_prompt_logprob_unsupported_warning_once():
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")
@@ -97,6 +99,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
+        seq_id = seq.seq_id
+        assert all(
+            [seq_id == output.samples[0].parent_seq_id for output in outputs])
 
         if is_async:
             # Async case: We process tokens one by one. Here, we know the token
@@ -110,10 +115,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             # we can take the first sample.
             samples = [output.samples[0] for output in outputs]
 
-            # -1 means the output token is not valid (eg. due to spec decode
+            # entries in sample tokens may be invalid (eg. due to spec decode
             # rejecting tokens).
             valid_samples = [
-                sample for sample in samples if sample.output_token != -1
+                sample for sample in samples
+                if sample.output_token != VLLM_INVALID_TOKEN_ID
             ]
             assert valid_samples
 
@@ -144,7 +150,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
                                                          len(output_token_ids))
         if remaining_tokens < 0:
-            valid_samples = valid_samples[:remaining_tokens]
             output_token_ids = output_token_ids[:remaining_tokens]
 
         # Truncate any tokens after EOS. This is required as spec decode
@@ -158,9 +163,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             for i in range(len(output_token_ids)):
                 if output_token_ids[i] == eos_token_id:
                     output_token_ids = output_token_ids[:i + 1]
-                    valid_samples = valid_samples[:i + 1]
                     break
 
+        is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
         for output_token_id, output_logprob in zip(output_token_ids,
@@ -169,6 +174,13 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 token_id=output_token_id,
                 logprobs=output_logprob,
             )
+
+            if is_prefill_sampled_token:
+                is_prefill_sampled_token = False
+            else:
+                # Update num_computed_tokens iff the sampled token is not from
+                # a prefill step.
+                seq.data.update_num_computed_tokens(1)
 
             self._process_decode_and_stop(seq, sampling_params)
 

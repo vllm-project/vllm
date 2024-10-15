@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
@@ -62,6 +63,9 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+    VLLM_SKIP_P2P_CHECK: bool = False
+    VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1: bool = False
+    VLLM_TORCH_COMPILE_LEVEL: int = 0
 
 
 def get_default_cache_root():
@@ -195,23 +199,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
-    # Internal flag to enable Dynamo graph capture
-    "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
-    lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
-    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
-    lambda:
-    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
-     ("true", "1")),
-
-    # Internal flag to control whether we use custom op,
-    # or use the native pytorch implementation
-    "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
-    lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
-
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+    "VLLM_TORCH_COMPILE_LEVEL":
+    lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -295,6 +288,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
     lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+
+    # OpenVINO device selection
+    # default is CPU
+    "VLLM_OPENVINO_DEVICE":
+    lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
     # default is 4GB
@@ -390,6 +388,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
+    "VLLM_TEST_FORCE_LOAD_FORMAT":
+    lambda: os.getenv("VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"),
 
     # Time in ms for the zmq client to wait for a response from the backend
     # server for simple data operations
@@ -418,6 +418,18 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
      ("1", "true")),
+
+    # By default, vLLM will check the peer-to-peer capability itself,
+    # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
+    # If this env var is set to 1, vLLM will skip the peer-to-peer check,
+    # and trust the driver's peer-to-peer capability report.
+    "VLLM_SKIP_P2P_CHECK":
+    lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
+
+    # If set, allowing the use of deprecated block manager V1
+    "VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1":
+    lambda: os.environ.get("VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1", "0"
+                           ) == "1",
 }
 
 # end-env-vars-definition

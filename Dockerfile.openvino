@@ -4,20 +4,12 @@
 FROM ubuntu:22.04 AS dev
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git && \
-    apt-get install -y ffmpeg libsm6 libxext6 libgl1 
+    apt-get install -y \
+        git python3-pip \
+        ffmpeg libsm6 libxext6 libgl1
 WORKDIR /workspace
 
-# copy requirements
-COPY requirements-build.txt /workspace/vllm/
-COPY requirements-common.txt /workspace/vllm/
-COPY requirements-openvino.txt /workspace/vllm/
-
-COPY vllm/ /workspace/vllm/vllm
-COPY csrc/core /workspace/vllm/csrc/core
-COPY cmake/utils.cmake /workspace/vllm/cmake/
-COPY CMakeLists.txt /workspace/vllm/
-COPY setup.py /workspace/vllm/
+COPY . .
 
 # install build requirements
 RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/vllm/requirements-build.txt

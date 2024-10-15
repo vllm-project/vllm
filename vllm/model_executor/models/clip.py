@@ -2,6 +2,7 @@
 within a vision language model."""
 from typing import Iterable, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -82,6 +83,24 @@ def dummy_image_for_clip(
 
     image = Image.new("RGB", (width, height), color=0)
     return {"image": image if num_images == 1 else [image] * num_images}
+
+
+def dummy_video_for_clip(
+    hf_config: CLIPVisionConfig,
+    num_frames: int,
+    *,
+    image_width_override: Optional[int] = None,
+    image_height_override: Optional[int] = None,
+):
+    pil_frame = dummy_image_for_clip(
+        hf_config,
+        num_images=1,
+        image_width_override=image_width_override,
+        image_height_override=image_height_override)
+    np_frame = np.array(pil_frame["image"])
+    mm_data_per_video = np.repeat([np_frame], num_frames, axis=0)
+    mm_data = {"video": mm_data_per_video}
+    return mm_data
 
 
 def input_processor_for_clip(
@@ -391,6 +410,7 @@ class CLIPVisionModel(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  num_hidden_layers_override: Optional[int] = None):
         super().__init__()
+
         tp_size = get_tensor_model_parallel_world_size()
         num_heads = config.num_attention_heads
         self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
@@ -399,10 +419,6 @@ class CLIPVisionModel(nn.Module):
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override)
-
-    @property
-    def _require_post_layernorm(self) -> bool:
-        return self.vision_model.post_layernorm is not None
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         return self.vision_model(pixel_values)
@@ -425,12 +441,12 @@ class CLIPVisionModel(nn.Module):
 
         for name, loaded_weight in weights:
             # post_layernorm is not needed in CLIPVisionModel
-            if ("vision_model.post_layernorm" in name
-                    and not self._require_post_layernorm):
+            if (name.startswith("vision_model.post_layernorm")
+                    and self.vision_model.post_layernorm is None):
                 continue
 
             # omit layers when num_hidden_layers_override is set
-            if "vision_model.encoder.layers." in name:
+            if name.startswith("vision_model.encoder.layers"):
                 layer_idx = int(name.split(".")[3])
                 if layer_idx >= layer_count:
                     continue

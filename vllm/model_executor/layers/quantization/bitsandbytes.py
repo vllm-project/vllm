@@ -108,7 +108,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         return None
 
     def get_scaled_act_names(self) -> List[str]:
-        return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
+        return []
 
 
 class BitsAndBytesLinearMethod(LinearMethodBase):
@@ -121,12 +121,12 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.42.0":
+            if bitsandbytes.__version__ < "0.44.0":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.42.0.")
+                                  "install bitsandbytes>=0.44.0.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.42.0 via "
-                              "`pip install bitsandbytes>=0.42.0` to use "
+            raise ImportError("Please install bitsandbytes>=0.44.0 via "
+                              "`pip install bitsandbytes>=0.44.0` to use "
                               "bitsandbytes quantizer.") from err
 
         self.quant_config = quant_config
@@ -236,7 +236,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             if generation == 0 or generation == 1:
                 matmul_states[i] = MatmulLtState()
                 matmul_states[i].CB = qweight[offsets[i]:offsets[i + 1]]
-                matmul_states[i].SCB = quant_states[i]
+                matmul_states[i].SCB = quant_states[i].to(x.device)
                 matmul_states[i].threshold = (
                     self.quant_config.llm_int8_threshold)
                 matmul_states[i].has_fp16_weights = (

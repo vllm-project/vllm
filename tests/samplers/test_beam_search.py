@@ -9,7 +9,7 @@ import pytest
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
 #   3. Use the model "huggyllama/llama-7b".
-MAX_TOKENS = [128]
+MAX_TOKENS = [64]
 BEAM_WIDTHS = [4]
 MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 

@@ -267,13 +267,16 @@ def get_neuron_sdk_version(run_lambda):
 
 
 def get_vllm_version():
-    try:
-        import vllm
-        return vllm.__version__ + "@" + vllm.__commit__
-    except Exception:
-        # old version of vllm does not have __commit__
-        return 'N/A'
+    from vllm import __version__, __version_tuple__
 
+    if __version__ == "dev":
+        return "N/A (dev)"
+
+    if len(__version_tuple__) == 4: # dev build
+        git_sha = __version_tuple__[-1][1:] # type: ignore
+        return f"{__version__} (git sha: {git_sha}"
+
+    return __version__
 
 def summarize_vllm_build_flags():
     # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.

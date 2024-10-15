@@ -4,12 +4,16 @@ requires = [
     "cmake>=3.26",
     "ninja",
     "packaging",
-    "setuptools >= 49.4.0",
+    "setuptools>=61",
+    "setuptools-scm>=8.0",
     "torch == 2.4.0",
     "wheel",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# version_file = "vllm/_version.py" # currently handled by `setup.py:get_version()`
 
 [tool.ruff]
 # Allow lines to be as long as 80.
@@ -18,6 +22,10 @@ exclude = [
     # External file, leaving license intact
     "examples/fp8/quantizer/quantize.py"
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"vllm/version.py" = ["F401"]
+"vllm/_version.py" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
