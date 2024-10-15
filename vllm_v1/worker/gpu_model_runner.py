@@ -69,6 +69,12 @@ class GPUModelRunner:
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
 
+        # Model-related.
+        self.num_attn_layers = model_config.get_num_attention_layers(
+            parallel_config)
+        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        self.head_size = model_config.get_head_size()
+
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
         self.kv_caches: List[torch.Tensor] = []
@@ -277,7 +283,7 @@ class GPUModelRunner:
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
-        # partial request, we do so for simplicty. We will ignore the sampled
+        # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
@@ -373,34 +379,44 @@ class GPUModelRunner:
         from vllm_v1.sample.logits_processor import LogitsProcessor
         from vllm_v1.sample.sampler import Sampler
         with DeviceMemoryProfiler() as m:
-            with patch("vllm.model_executor.layers.logits_processor.LogitsProcessor",
-                       LogitsProcessor):
+            with patch(
+                    "vllm.model_executor.layers.logits_processor.LogitsProcessor",
+                    LogitsProcessor):
                 with patch("vllm.model_executor.layers.sampler.Sampler",
                            Sampler):
-                    self.model = get_model(model_config=self.model_config,
-                                        device_config=self.device_config,
-                                        load_config=self.load_config,
-                                        lora_config=self.lora_config,
-                                        parallel_config=self.parallel_config,
-                                        scheduler_config=self.scheduler_config,
-                                        cache_config=self.cache_config)
+                    self.model = get_model(
+                        model_config=self.model_config,
+                        device_config=self.device_config,
+                        load_config=self.load_config,
+                        lora_config=self.lora_config,
+                        parallel_config=self.parallel_config,
+                        scheduler_config=self.scheduler_config,
+                        cache_config=self.cache_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
-    @torch.inference_mode()
-    def profile_run(self) -> None:
-        # FIXME
-        hidden_size = self.model_config.get_hidden_size()
-        intermediate_size = int(hidden_size * 3.5)
-        tp_size = self.parallel_config.tensor_parallel_size
-        d = max(6 * hidden_size, 4 * intermediate_size // tp_size)
-        tmp = torch.empty((self.max_num_tokens, d),
-                          dtype=self.dtype,
-                          device=self.device)
+    def _dummy_run(self, model: nn.Module, num_tokens: int) -> None:
+        input_ids = torch.randint(0,
+                                  1000, (num_tokens, ),
+                                  dtype=torch.int32,
+                                  device=self.device)
+        positions = torch.randint(0,
+                                  1000, (num_tokens, ),
+                                  dtype=torch.long,
+                                  device=self.device)
+        kv_caches = [None for _ in range(self.num_attn_layers)]
+        model(input_ids, positions, kv_caches, attn_metadata=None)
         return
 
+    @torch.inference_mode()
+    def profile_run(self) -> None:
+        self._dummy_run(self.model, self.max_num_tokens)
+        torch.cuda.synchronize()
+        return
+
+    @torch.inference_mode()
     def capture_model(self) -> None:
         return
 

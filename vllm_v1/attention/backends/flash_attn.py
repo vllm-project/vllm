@@ -175,6 +175,10 @@ def unified_flash_attention(
     logits_soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     current_metadata = get_forward_context()
+    if current_metadata is None:
+        # Profiling run.
+        return torch.empty_like(query)
+
     assert current_metadata is not None
     assert isinstance(current_metadata, FlashAttentionMetadata)
     attn_metadata: FlashAttentionMetadata = current_metadata
@@ -185,31 +189,21 @@ def unified_flash_attention(
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
 
-    if kv_cache is not None:
-        key_cache = kv_cache[0]
-        value_cache = kv_cache[1]
+    # Reshape the input keys and values and store them in the cache.
+    key_cache = kv_cache[0]
+    value_cache = kv_cache[1]
+    torch.ops._C_cache_ops.reshape_and_cache_flash(
+        key,
+        value,
+        kv_cache[0],
+        kv_cache[1],
+        attn_metadata.slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
 
-        # Reshape the input keys and values and store them in the cache.
-        # If kv_cache is not provided, the new key and value tensors are
-        # not cached. This happens during the initial memory profiling run.
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
-            key,
-            value,
-            kv_cache[0],
-            kv_cache[1],
-            attn_metadata.slot_mapping,
-            kv_cache_dtype,
-            k_scale,
-            v_scale,
-        )
-
-    if (attn_metadata.block_table is None
-            or attn_metadata.block_table.numel() == 0):
-        # Profiling run.
-        output = torch.empty_like(query)
-        return output
-
-    output = flash_attn_varlen_func(  # noqa
+    output = flash_attn_varlen_func(
         q=query,
         k=key_cache,
         v=value_cache,
