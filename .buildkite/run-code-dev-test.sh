@@ -3,6 +3,11 @@
 set -ex
 BUILDKITE_COMMIT=$BUILDKITE_COMMIT
 
+# Setup cleanup
+remove_docker_container() { docker rm -f vllm-dev-test || true; }
+trap remove_docker_container EXIT
+remove_docker_container
+
 # Use docker from building wheel stage
 DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --tag vllm-ci:dev --target base --progress plain .
 docker run -dit --entrypoint /bin/bash --privileged=true --network host --name vllm-dev-test vllm-ci:dev
@@ -33,7 +38,7 @@ docker exec vllm-dev-test bash -c '
     cd vllm && \
     python3 python_only_dev.py --quit-dev && \
     cd / && \
-    pip uninstall vllm && \
+    pip uninstall -y vllm && \
     pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${BUILDKITE_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl'
 
 docker rm -f vllm-dev-test
