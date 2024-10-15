@@ -25,7 +25,6 @@ class KVCacheManager:
         self.enable_caching = enable_caching
         self.watermark = watermark
 
-        # Reserve block id 0 for padding.
         self.free_block_ids = list(range(num_gpu_blocks))
         self.req_to_block_ids: Dict[str, List[int]] = {}
         self.ref_cnts = np.zeros(num_gpu_blocks, dtype=np.int32)
