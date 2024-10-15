@@ -46,9 +46,6 @@ from vllm.platforms import current_platform
 from vllm.utils import supports_custom_op
 
 
-#torch._inductor.config._micro_pipeline_tp = True
-
-
 @dataclass
 class GraphCaptureContext:
     stream: torch.cuda.Stream
@@ -1063,10 +1060,6 @@ def initialize_model_parallel(
                                     backend,
                                     use_message_queue_broadcaster=True,
                                     group_name="tp")
-
-    #print(f"ENABLE! {_TP.device_group.group_name}, {backend}")
-    #_symmetric_memory.enable_symm_mem_for_group(_TP.device_group.group_name)
-
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //

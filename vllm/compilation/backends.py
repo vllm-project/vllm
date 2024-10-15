@@ -22,6 +22,8 @@ def fix_functionalization(graph: fx.Graph):
     # TODO: check if PyTorch nightly has fixed this issue
     """
 
+    #print(graph)
+
     # debug code, if we want to see the graph before the transformation
     # with open("before.py", "w") as f:
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
