@@ -1,5 +1,5 @@
 """Common tests for testing .generate() functionality for single / multiple
-image support for different VLMs in vLLM.
+image, embedding, and video support for different VLMs in vLLM.
 """
 import os
 from pathlib import PosixPath
