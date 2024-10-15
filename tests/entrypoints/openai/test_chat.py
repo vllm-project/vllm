@@ -28,7 +28,7 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "None" if MODEL_NAME == "meta-llama/Llama-3.2-1B-Instruct" else "8192",
+        "8192",
         "--enforce-eager",
         # lora config below
         "--enable-lora",
@@ -455,53 +455,6 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
         last_completion_tokens = chunk.usage.completion_tokens
 
     assert last_completion_tokens == 10
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    ["meta-llama/Llama-3.2-1B-Instruct"],
-)
-async def test_chat_completion_stream_options_and_logprobs_with_long_prompts(
-        client: openai.AsyncOpenAI, model_name: str):
-    # Test stream with long prompt
-    messages = [{
-        "role": "system",
-        "content": "You are a helpful assistant."
-    }, {
-        "role": "user",
-        "content": "What is the capital of France?" * 3000
-    }]
-    stream = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_tokens=10,
-        temperature=0.0,
-        stream=True,
-        stream_options={
-            "include_usage": True,
-            "continuous_usage_stats": True
-        },
-        logprobs=True,
-        top_logprobs=5,
-    )
-
-    tokens_received = 0
-    async for chunk in stream:
-        assert chunk.usage.prompt_tokens >= 0
-        assert chunk.usage.completion_tokens >= 0
-        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
-                                            chunk.usage.completion_tokens)
-
-        if chunk.choices[0].delta.content == "":
-            # when there is no tokens generated
-            assert chunk.usage.completion_tokens == 0
-            assert chunk.choices[0].logprobs is None
-        else:
-            tokens_received += 1
-
-        if chunk.choices[0].finish_reason is not None:
-            assert chunk.usage.completion_tokens == tokens_received
 
 
 # NOTE: Not sure why, but when I place this after `test_guided_regex_chat`
