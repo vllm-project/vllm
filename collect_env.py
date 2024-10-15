@@ -517,12 +517,12 @@ def is_xnnpack_available():
 
 def get_env_vars():
     env_vars = ''
-    BLACK_LIST=('S3_SECRET_ACCESS_KEY', 'VLLM_API_KEY', 'S3_ACCESS_KEY_ID')
+    secret_terms=('secret', 'token', 'api', 'access', 'password')
     for k, v in os.environ.items():
-        if k in BLACK_LIST:
-            continue
+        if any(term in k.lower() for term in secret_terms):
+            v = '***'
         if k not in environment_variables:
-            continue
+            v = '***'
         env_vars = env_vars + "{}={}".format(k, v) + "\n"
     return env_vars
 
