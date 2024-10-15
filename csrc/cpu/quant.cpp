@@ -394,6 +394,14 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
     if (a_scales.numel() != 1) {
       // per-token
       // Note: oneDNN doesn't support per-token activation quantization
+      // Ideally we want to fuse the GEMM and the scale procedure with oneDNN
+      // JIT, the intermediate data is cached in registers or L1. But for now
+      // the oneDNN GEMM code generation only supports two quantization
+      // patterns: per-tensor or per-output-channel of weight.
+      // So we have to apply the per-token scale with a 'epilogue'. In C=s_a *
+      // s_b * (A@B) + bias, the C_inter = s_b * (A@B) is computed by oneDNN
+      // GEMM, then the per-token scale (and bias) is applied with the epilogue
+      // C=s_a * C_inter + bias.
       torch::Tensor tmp_fp32_out =
           torch::empty_like(c, ::at::ScalarType::Float);
       DNNLPrimitiveHelper<true>::gemm_s8s8_jit(
