@@ -488,7 +488,7 @@ Multimodal Embedding
 
 .. note::
   The :code:`Phi3VForCausalLM` architecture supports both generation and embedding tasks.
-  For text generation, please pass (:code:`--task ebed`) to run the model in embedding mode.
+  For text generation, please pass (:code:`--task embed`) to run the model in embedding mode.
 
 ----
 
