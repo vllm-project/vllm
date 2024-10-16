@@ -1,3 +1,4 @@
+import copy
 import time
 from collections import deque
 from contextlib import contextmanager
@@ -43,8 +44,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           Sequence, SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
+                           SeqGroupHolder, Sequence, SequenceGroup,
+                           SequenceGroupMetadata, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -474,6 +475,8 @@ class LLMEngine:
                 ),
             ))
 
+        self.group_id_to_holders: Dict[str, SeqGroupHolder] = {}
+
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
 
@@ -788,6 +791,30 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+
+        if isinstance(params, SamplingParams) and params.n > 1:
+            params = copy.deepcopy(params)
+            n = params.n
+            params.n = 1
+            params.output_kind = RequestOutputKind.FINAL_ONLY
+            holder = SeqGroupHolder(request_id)
+            for i in range(n):
+                request_id_i = f"{request_id}_parallel_sample_{i}"
+                holder.seq_ids.add(request_id_i)
+                self.add_request(
+                    request_id_i,
+                    prompt=prompt,
+                    params=params,
+                    arrival_time=arrival_time,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=priority,
+                    inputs=inputs,
+                )  # type: ignore
+                self.group_id_to_holders[request_id_i] = holder
+            return
+
         if inputs is not None:
             prompt = inputs
         assert prompt is not None and params is not None
@@ -1133,7 +1160,9 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutputFactory.create(
-                seq_group, use_cache=self.use_cached_outputs)
+                seq_group,
+                self.group_id_to_holders,
+                use_cache=self.use_cached_outputs)
             if request_output:
                 ctx.request_outputs.append(request_output)
 
@@ -1173,7 +1202,9 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutputFactory.create(
-                seq_group, use_cache=self.use_cached_outputs)
+                seq_group,
+                self.group_id_to_holders,
+                use_cache=self.use_cached_outputs)
             if request_output:
                 ctx.request_outputs.append(request_output)
 
@@ -1192,7 +1223,10 @@ class LLMEngine:
                 continue
 
             request_output = RequestOutputFactory.create(
-                seq_group, use_cache=self.use_cached_outputs)
+                seq_group,
+                self.group_id_to_holders,
+                use_cache=self.use_cached_outputs,
+            )
             if request_output:
                 ctx.request_outputs.append(request_output)
 
