@@ -788,7 +788,7 @@ class SequenceGroup:
             assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
             self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
-    def get_last_latency(self, now: float) -> Optional[float]:
+    def get_last_latency(self, now: float) -> float:
         """Sets the last token time for Request level timings."""
         # If still in prefill phase, raise Error.
         if self.is_prefill():
@@ -1198,7 +1198,7 @@ class PoolerOutput(
 
     spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> EmbeddingSequenceGroupOutput:
         return self.outputs[idx]
 
     def __setitem__(self, idx: int, value):

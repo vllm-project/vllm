@@ -1,4 +1,4 @@
-from typing import List, Literal, Sequence, TypedDict, Union, overload
+from typing import List, Literal, Sequence, TypedDict, Union, cast, overload
 
 from typing_extensions import TypeIs
 
@@ -44,13 +44,16 @@ def parse_and_batch_prompt(
 
         if is_list_of(prompt, str):
             # case 2: array of strings
+            prompt = cast(List[str], prompt)
             return [
                 ParsedText(content=elem, is_tokens=False) for elem in prompt
             ]
         if is_list_of(prompt, int):
             # case 3: array of tokens
+            prompt = cast(List[int], prompt)
             return [ParsedTokens(content=prompt, is_tokens=True)]
         if is_list_of(prompt, list):
+            prompt = cast(List[List[int]], prompt)
             if len(prompt[0]) == 0:
                 raise ValueError("please provide at least one prompt")
 

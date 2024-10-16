@@ -1,5 +1,5 @@
 import functools
-from typing import Callable, List
+from typing import Callable, List, cast
 
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
@@ -9,8 +9,10 @@ from vllm.engine.output_processor.single_step import (
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
+                           CompletionSequenceGroupOutput, Sequence,
+                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Counter
@@ -57,6 +59,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         """
         for output in outputs:
             # Concatenate single-step prompt logprob processing results.
+            assert isinstance(output, CompletionSequenceGroupOutput)
             single_step_process_prompt_logprob(self, seq_group, output)
 
     @staticmethod
@@ -100,8 +103,18 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
         seq_id = seq.seq_id
-        assert all(
-            [seq_id == output.samples[0].parent_seq_id for output in outputs])
+        # This method is defined in the more generic
+        # SequenceGroupOutputProcessor, but here we assume that the outputs are
+        # of a more specific type.
+        assert all([
+            isinstance(output, CompletionSequenceGroupOutput)
+            for output in outputs
+        ])
+        compl_outputs = cast(List[CompletionSequenceGroupOutput], outputs)
+        assert all([
+            seq_id == output.samples[0].parent_seq_id
+            for output in compl_outputs
+        ])
 
         if is_async:
             # Async case: We process tokens one by one. Here, we know the token
@@ -113,7 +126,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
             # Since there's only one sequence per sequence group,
             # we can take the first sample.
-            samples = [output.samples[0] for output in outputs]
+            samples = [output.samples[0] for output in compl_outputs]
 
             # entries in sample tokens may be invalid (eg. due to spec decode
             # rejecting tokens).
