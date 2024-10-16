@@ -2,9 +2,16 @@ from itertools import cycle
 
 import pytest
 
+from tests.utils import check_deprecated_block_manager_usage
 from vllm import SamplingParams
 
 from .conftest import get_token_ids_from_llm_generator
+
+
+@pytest.fixture(scope="module", autouse=True)
+def check_deprecated_block_manager():
+    check_deprecated_block_manager_usage(
+        'tests/core/block/e2e/test_correctness.py')
 
 
 @pytest.mark.parametrize(
@@ -50,67 +57,6 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
     # We want to ensure equality even with preemption.
     # We force the total block size to be 1 + cdiv(output_len, block_size)
     # so that only one sequence can fit at a time (once the sequences grow).
-
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
-
-    sampling_params = SamplingParams(
-        max_tokens=output_len,
-        ignore_eos=True,
-        temperature=temperature,
-    )
-
-    print('Getting token ids from block manager v1')
-    baseline_token_ids = get_token_ids_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
-
-    print('Getting token ids from block manager v2')
-    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
-                                                      prompts, sampling_params)
-
-    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
-                                                    test_token_ids):
-        assert expected_token_ids == actual_token_ids
-
-    assert baseline_token_ids == test_token_ids
-
-
-@pytest.mark.parametrize(
-    "common_llm_kwargs",
-    [{
-        # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
-
-        # skip cuda graph creation for fast test.
-        "enforce_eager": True,
-
-        # Use a large block size to trigger more copy-on-writes.
-        "block_size": 32,
-    }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "preemption_mode": "swap"
-}, {
-    "preemption_mode": "recompute"
-}])
-@pytest.mark.parametrize("batch_size", [10])
-@pytest.mark.parametrize("seed", [1])
-def test_v1_v2_greedy_equality_with_cow(baseline_llm_generator,
-                                        test_llm_generator, batch_size):
-    """Verify beam search equality with block manager v1 and v2.
-
-    This requires copy-on-writes; if the v1 and v2 output is the same, then
-    we have some confidence cow is working.
-    """
-    output_len = 128
-    temperature = 0.0
 
     prompts = [
         "Hello, my name is",

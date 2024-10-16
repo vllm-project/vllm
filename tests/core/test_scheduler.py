@@ -17,6 +17,7 @@ from .utils import (append_new_token, append_new_token_seq_group,
                     schedule_and_update_computed_tokens)
 
 
+
 def test_scheduler_add_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(

@@ -50,9 +50,8 @@ def main(args: argparse.Namespace):
 
     sampling_params = SamplingParams(
         n=args.n,
-        temperature=0.0 if args.use_beam_search else 1.0,
+        temperature=1.0,
         top_p=1.0,
-        use_beam_search=args.use_beam_search,
         ignore_eos=True,
         max_tokens=args.output_len,
     )
@@ -221,7 +220,9 @@ if __name__ == '__main__':
     parser.add_argument("--enable-prefix-caching",
                         action='store_true',
                         help="Enable automatic prefix caching")
-    parser.add_argument('--use-v2-block-manager', action='store_true')
+    parser.add_argument('--use-v2-block-manager',
+                        action='store_true',
+                        default=EngineArgs.use_v2_block_manager)
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

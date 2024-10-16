@@ -145,7 +145,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
-    multi_step_stream_outputs: bool = False
+    multi_step_stream_outputs: bool = True
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
@@ -183,6 +183,10 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
+
+        # Setup plugins
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -603,13 +607,17 @@ class EngineArgs:
 
         parser.add_argument(
             '--multi-step-stream-outputs',
-            action='store_true',
-            help='If True, then multi-step will stream outputs for every step')
+            action=StoreBoolean,
+            default=EngineArgs.multi_step_stream_outputs,
+            nargs="?",
+            const="True",
+            help='If False, then multi-step will stream outputs at the end '
+            'of all steps')
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
             default=EngineArgs.scheduler_delay_factor,
-            help='Apply a delay (of delay factor multiplied by previous'
+            help='Apply a delay (of delay factor multiplied by previous '
             'prompt latency) before scheduling next prompt.')
         parser.add_argument(
             '--enable-chunked-prefill',
@@ -632,7 +640,7 @@ class EngineArgs:
             type=nullable_str,
             choices=[*QUANTIZATION_METHODS, None],
             default=EngineArgs.speculative_model_quantization,
-            help='Method used to quantize the weights of speculative model.'
+            help='Method used to quantize the weights of speculative model. '
             'If None, we first check the `quantization_config` '
             'attribute in the model config file. If that is '
             'None, we assume the model weights are not '
@@ -800,13 +808,10 @@ class EngineArgs:
             "lower performance.")
         parser.add_argument(
             '--override-neuron-config',
-            type=lambda configs: {
-                str(key): value
-                for key, value in
-                (config.split(':') for config in configs.split(','))
-            },
+            type=json.loads,
             default=None,
-            help="override or set neuron device configuration.")
+            help="Override or set neuron device configuration. "
+            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
 
         parser.add_argument(
             '--scheduling-policy',
@@ -907,6 +912,7 @@ class EngineArgs:
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
+            is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
@@ -940,13 +946,9 @@ class EngineArgs:
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
                 use_spec_decode = self.speculative_model is not None
-                has_seqlen_agnostic_layers = (
-                    model_config.contains_seqlen_agnostic_layers(
-                        parallel_config))
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
-                        and not self.enable_prompt_adapter
-                        and not has_seqlen_agnostic_layers):
+                        and not self.enable_prompt_adapter):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -991,6 +993,8 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "

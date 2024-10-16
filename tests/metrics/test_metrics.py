@@ -326,7 +326,6 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
             "vllm:e2e_request_latency_seconds",
             "vllm:request_prompt_tokens",
             "vllm:request_generation_tokens",
-            "vllm:request_params_best_of",
             "vllm:request_params_n",
         ]
         for metric_name in request_histogram_metrics:
