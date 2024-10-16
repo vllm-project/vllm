@@ -17,8 +17,9 @@ import base64
 
 import requests
 from openai import OpenAI
-from vllm.utils import FlexibleArgumentParser
+
 from vllm.assets.audio import AudioAsset
+from vllm.utils import FlexibleArgumentParser
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
@@ -33,6 +34,7 @@ client = OpenAI(
 models = client.models.list()
 model = models.data[0].id
 
+
 def encode_base64_content_from_url(content_url: str) -> str:
     """Encode a content retrieved from a remote url to base64 format."""
 
@@ -41,6 +43,7 @@ def encode_base64_content_from_url(content_url: str) -> str:
         result = base64.b64encode(response.content).decode('utf-8')
 
     return result
+
 
 # Text-only inference
 def run_text_only() -> None:
@@ -55,6 +58,7 @@ def run_text_only() -> None:
 
     result = chat_completion.choices[0].message.content
     print("Chat completion output:", result)
+
 
 # Single-image input inference
 def run_single_image() -> None:
@@ -111,6 +115,7 @@ def run_single_image() -> None:
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from base64 encoded image:", result)
 
+
 # Multi-image input inference
 def run_multi_image() -> None:
     image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
@@ -145,6 +150,7 @@ def run_multi_image() -> None:
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output:", result)
 
+
 # Audio input inference
 def run_audio() -> None:
     # Any format supported by librosa is supported
@@ -175,7 +181,6 @@ def run_audio() -> None:
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output from audio url:", result)
 
-
     audio_base64 = encode_base64_content_from_url(audio_url=audio_url)
     chat_completion_from_base64 = client.chat.completions.create(
         messages=[{
@@ -202,12 +207,14 @@ def run_audio() -> None:
     result = chat_completion_from_base64.choices[0].message.content
     print("Chat completion output from base64 encoded audio:", result)
 
+
 example_function_map = {
-    "text-only":run_text_only,
-    "single-image":run_single_image,
-    "multi-image":run_multi_image,
-    "audio":run_audio,
+    "text-only": run_text_only,
+    "single-image": run_single_image,
+    "multi-image": run_multi_image,
+    "audio": run_audio,
 }
+
 
 def main(args) -> None:
     chat_type = args.chat_type
@@ -218,11 +225,12 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using OpenAI client for online inference with '
         'multimodal language models served with vLLM.')
-    parser.add_argument('--chat-type',
-                        '-c',
-                        type=str,
-                        default="single-image",
-                        choices=["text-only", "single-image", "multi-image", "audio"],
-                        help='Conversation type with multimodal data.')
+    parser.add_argument(
+        '--chat-type',
+        '-c',
+        type=str,
+        default="single-image",
+        choices=["text-only", "single-image", "multi-image", "audio"],
+        help='Conversation type with multimodal data.')
     args = parser.parse_args()
     main(args)
