@@ -260,7 +260,7 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation,
 @pytest.mark.parametrize("width", [2, 3, 4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # tests correctness in case subset of the sequences are padded
-@pytest.mark.parametrize("with_padding", [True, False]) 
+@pytest.mark.parametrize("with_padding", [True, False])
 def test_causal_conv1d_update_with_batch_gather(with_padding, dim, width,
                                                 seqlen, has_bias,
                                                 silu_activation, itype):

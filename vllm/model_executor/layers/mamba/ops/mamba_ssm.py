@@ -146,7 +146,7 @@ def _selective_scan_update_kernel(
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
         mask &= (state_batch_idx != pad_slot_id)
-    state = tl.load(state_ptrs, mask= mask, other=0.0)
+    state = tl.load(state_ptrs, mask=mask, other=0.0)
 
     x = tl.load(x_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
     if not TIE_HDIM:
@@ -182,9 +182,7 @@ def _selective_scan_update_kernel(
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
         mask &= (state_batch_idx != pad_slot_id)
-    tl.store(state_ptrs,
-             state,
-             mask= mask)
+    tl.store(state_ptrs, state, mask=mask)
     out = tl.sum(state * C[None, :], axis=1)
     if HAS_D:
         out += x * D
