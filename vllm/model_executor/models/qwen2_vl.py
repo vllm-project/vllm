@@ -64,7 +64,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
                                                      Qwen2VLVisionConfig)
-from vllm.transformers_utils.processor import get_processor
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_cpu
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -569,8 +569,6 @@ class Qwen2VisionTransformer(nn.Module):
 
 
 # === Vision input helpers === #
-
-cached_get_processor = lru_cache(get_processor)
 
 
 def mm_input_mapper_for_qwen2_vl(

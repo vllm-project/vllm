@@ -9,8 +9,11 @@ import torch.nn.functional as F
 from mistral_common.protocol.instruct.messages import ImageChunk
 from PIL import Image
 from transformers import PixtralVisionConfig, PretrainedConfig
+from transformers.models.pixtral.image_processing_pixtral import (
+        _num_image_tokens)
 from xformers.ops.fmha import memory_efficient_attention
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
+import numpy
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
@@ -23,8 +26,9 @@ from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   repeat_and_pad_placeholder_tokens)
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import is_list_of
 
@@ -540,7 +544,6 @@ class VisionTransformer(nn.Module):
             image_features: tensor of token features for 
                 all tokens of all images of shape (N_toks, D)
         """
-        print("VisionTransformer.forward", [img.shape for img in images])
         # pass images through initial convolution independently
         patch_embeds_list = [
             self.patch_conv(img.unsqueeze(0).to(self.dtype)) for img in images
@@ -649,25 +652,22 @@ def dummy_image_for_pixtral_hf(
 
 
 def get_pixtral_hf_image_feature_size(hf_config: PixtralVisionConfig,
-                                      image_width: int, image_height: int):
+                                      image_width: int, image_height: int) -> Tuple[int, int]:
     # Adapted from transformers.models.pixtral.image_processing_pixtral.get_resize_output_image_size # noqa: E501
     # https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/models/pixtral/image_processing_pixtral.py#L180 # noqa: E501
-    max_height, max_width = hf_config.image_size, hf_config.image_size
-    patch_height, patch_width = hf_config.patch_size, hf_config.patch_size
+    max_width, max_height = hf_config.image_size, hf_config.image_size
+    patch_width, patch_height = hf_config.patch_size, hf_config.patch_size
 
-    ratio = max(image_height / max_height, image_width / max_width)
+    ratio = max(image_width / max_width, image_height / max_height)
 
     if ratio > 1:
-        import numpy
-        image_height = int(numpy.ceil(image_height / ratio))
         image_width = int(numpy.ceil(image_width / ratio))
+        image_height = int(numpy.ceil(image_height / ratio))
 
-    from transformers.models.pixtral.image_processing_pixtral import (  # noqa: E501
-        _num_image_tokens)
     num_height_tokens, num_width_tokens = _num_image_tokens(
         (image_height, image_width), (patch_height, patch_width))
 
-    return num_height_tokens * num_width_tokens
+    return num_width_tokens, num_height_tokens
 
 
 def input_processor_for_pixtral_hf(
@@ -686,41 +686,117 @@ def input_processor_for_pixtral_hf(
         return llm_inputs
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
+    processor = cached_get_processor(model_config.model)
 
     image_data = multi_modal_data["image"]
     if isinstance(image_data, Image.Image):
-        w, h = image_data.size
-        image_feature_size = get_pixtral_hf_image_feature_size(hf_config,
-                                                               image_width=w,
-                                                               image_height=h)
-    elif is_list_of(image_data, Image.Image):
-        image_feature_size = []
-        for image in image_data:
-            w, h = image.size
-            image_feature_size.append(
-                get_pixtral_hf_image_feature_size(hf_config,
-                                                  image_width=w,
-                                                  image_height=h))
-    elif isinstance(image_data, torch.Tensor):
-        num_images, image_feature_size, hidden_size = image_data.shape
-    else:
+        image_data = [image_data]
+    elif not is_list_of(image_data, Image.Image):
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
-        tokenizer,
-        llm_inputs.get("prompt"),
-        llm_inputs["prompt_token_ids"],
-        placeholder_token_id=image_token_id,
-        repeat_count=image_feature_size,
-    )
+    replace_strings = []
+    new_prompt = llm_inputs.get("prompt")
+    for image in image_data:
+        w, h = image.size
+        
+        num_width_tokens, num_height_tokens = get_pixtral_hf_image_feature_size(hf_config,
+                                                image_width=w,
+                                                image_height=h)
+
+        replace_tokens = [
+            [processor.image_token] * num_width_tokens + [processor.image_break_token]
+        ] * num_height_tokens
+        # Flatten list
+        replace_tokens = [item for sublist in replace_tokens for item in sublist]
+        replace_tokens[-1] = processor.image_end_token
+        replace_str = "".join(replace_tokens)
+        replace_strings.append(replace_str)
+        new_prompt = new_prompt.replace(processor.image_token, "<placeholder>", 1)
+
+    while "<placeholder>" in new_prompt:
+        replace_str = replace_strings.pop(0)
+        new_prompt = new_prompt.replace("<placeholder>", replace_str, 1)
+
+    new_token_ids = tokenizer(new_prompt)["input_ids"]
+
+    # print("new_token_ids", new_token_ids)
+    # print("new_token_ids", len(new_token_ids))
+    # print("new_prompt", new_prompt)
 
     # NOTE: Create a defensive copy of the original inputs
     return LLMInputs(prompt_token_ids=new_token_ids,
                      prompt=new_prompt,
                      multi_modal_data=multi_modal_data)
 
+class PixtralHFRotaryEmbedding(nn.Module):
+    """
+    The key with pixtral embedding is just that you have a frequency for each pixel positions.
+    If you have height x width pixels (or embedding pixels), then the frequency used for ROPE
+    is given by indexing the pre_computed frequency on the width and height.
 
-class PixtralHFFeedForward(nn.Module):
+    What you output is of dimension (batch, height * width, dim) with dim the embed dim.
+
+    This simply means that for each image hidden state, you are going to add
+    a corresponding positional embedding, based on its index in the grid.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.rope_type = "default"
+        self.dim = config.head_dim
+        self.base = config.rope_theta
+        max_patches_per_side = config.image_size // config.patch_size
+        freqs = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
+
+        h = torch.arange(max_patches_per_side, device=freqs.device)
+        w = torch.arange(max_patches_per_side, device=freqs.device)
+
+        freqs_h = torch.outer(h, freqs[::2]).float()
+        freqs_w = torch.outer(w, freqs[1::2]).float()
+        inv_freq = torch.cat(
+            [
+                freqs_h[:, None, :].repeat(1, max_patches_per_side, 1),
+                freqs_w[None, :, :].repeat(max_patches_per_side, 1, 1),
+            ],
+            dim=-1,
+        ).reshape(-1, self.dim // 2)  # we reshape to only index on the position indexes, not tuple of indexes
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+
+        # TODO maybe make it torch compatible later on. We can also just slice
+        self.register_buffer("inv_freq", torch.cat((inv_freq, inv_freq), dim=-1), persistent=False)
+
+    @torch.no_grad()
+    def forward(self, x, position_ids):
+        # Core RoPE block
+        freqs = self.inv_freq[position_ids]
+        # position_ids_expanded = position_ids[:, None, :].float()
+        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            emb = freqs
+            cos = emb.cos()
+            sin = emb.sin()
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+
+# Copied from transformers.models.llama.modeling_llama.rotate_half
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+# Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+class PixtralHFMLP(nn.Module):
 
     def __init__(self, config: PixtralVisionConfig):
         super().__init__()
@@ -728,12 +804,13 @@ class PixtralHFFeedForward(nn.Module):
         self.gate_proj = nn.Linear(config.hidden_size,
                                    config.intermediate_size,
                                    bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size,
-                                   config.hidden_size,
-                                   bias=False)
         self.up_proj = nn.Linear(config.hidden_size,
                                  config.intermediate_size,
                                  bias=False)
+        self.down_proj = nn.Linear(config.intermediate_size,
+                                   config.hidden_size,
+                                   bias=False)
+        self.act_fn = get_act_fn(config.hidden_act)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -747,6 +824,8 @@ class PixtralHFAttention(nn.Module):
         assert not config.hidden_size % config.num_attention_heads
         self.n_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
+
+        self.scale = self.head_dim**-0.5
 
         self.q_proj = nn.Linear(config.hidden_size,
                                 config.hidden_size,
@@ -763,42 +842,59 @@ class PixtralHFAttention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        mask: BlockDiagonalMask,
-        freqs_cis: torch.Tensor,
-    ) -> torch.Tensor:
-        batch, patches, _ = x.shape
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_embeddings: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Input shape: Batch x Time x Channel"""
 
-        q, k, v = self.q_proj(x), self.k_proj(x), self.v_proj(x)
-        q = q.reshape(batch, patches, self.n_heads, self.head_dim)
-        k = k.reshape(batch, patches, self.n_heads, self.head_dim)
-        v = v.reshape(batch, patches, self.n_heads, self.head_dim)
+        batch_size, patches, _ = hidden_states.size()
 
-        q, k = apply_rotary_emb_vit(q, k, freqs_cis=freqs_cis)
-        out = memory_efficient_attention(q, k, v, attn_bias=mask)
-        out = out.reshape(batch, patches, self.n_heads * self.head_dim)
-        return self.o_proj(out)
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        query_states = query_states.view(batch_size, patches, self.n_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(batch_size, patches, self.n_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, patches, self.n_heads, self.head_dim).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=0)
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
+
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(batch_size, patches, -1)
+
+        return self.o_proj(attn_output)
 
 
 class PixtralHFTransformerBlock(nn.Module):
 
     def __init__(self, config: PixtralVisionConfig):
         super().__init__()
-        self.attention = PixtralHFAttention(config)
-        self.feed_forward = PixtralHFFeedForward(config)
         self.attention_norm = RMSNorm(config.hidden_size, eps=1e-5)
+        self.attention = PixtralHFAttention(config)
+        self.feed_forward = PixtralHFMLP(config)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=1e-5)
 
     def forward(
         self,
-        x: torch.Tensor,
-        mask: BlockDiagonalMask,
-        freqs_cis: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        r = self.attention.forward(self.attention_norm(x),
-                                   mask=mask,
-                                   freqs_cis=freqs_cis)
-        h = x + r
+        r = self.attention.forward(self.attention_norm(hidden_states),
+                                   attention_mask=attention_mask,
+                                   position_embeddings=position_embeddings)
+        h = hidden_states + r
         r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
         return out
@@ -815,12 +911,37 @@ class PixtralHFTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        mask: BlockDiagonalMask,
-        freqs_cis: Optional[torch.Tensor],
+        attention_mask: torch.Tensor,
+        position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
         for layer in self.layers:
-            x = layer(x, mask=mask, freqs_cis=freqs_cis)
+            x = layer(x, attention_mask, position_embeddings)
         return x
+    
+def position_ids_in_meshgrid(patch_embeds_list, max_width):
+    positions = []
+    for patch in patch_embeds_list:
+        height, width = patch.shape[-2:]
+        mesh = torch.meshgrid(torch.arange(height), torch.arange(width), indexing="ij")
+        h_grid, v_grid = torch.stack(mesh, dim=-1).reshape(-1, 2).chunk(2, -1)
+        ids = h_grid * max_width + v_grid
+        positions.append(ids[:, 0])
+    return torch.cat(positions)
+
+def generate_block_attention_mask(patch_embeds_list, tensor):
+    dtype = tensor.dtype
+    device = tensor.device
+    seq_len = tensor.shape[1]
+    d_min = torch.finfo(dtype).min
+    causal_mask = torch.full((seq_len, seq_len), fill_value=d_min, dtype=dtype, device=device)
+
+    block_end_idx = torch.tensor(patch_embeds_list).cumsum(-1)
+    block_start_idx = torch.tensor([0] + patch_embeds_list[:-1]).cumsum(-1)
+    for start, end in zip(block_start_idx, block_end_idx):
+        causal_mask[start:end, start:end] = 0
+
+    causal_mask = causal_mask[None, None, :, :].expand(tensor.shape[0], 1, -1, -1)
+    return causal_mask
 
 
 class PixtralHFVisionModel(nn.Module):
@@ -841,14 +962,7 @@ class PixtralHFVisionModel(nn.Module):
         )
         self.ln_pre = RMSNorm(config.hidden_size, eps=1e-5)
         self.transformer = PixtralHFTransformer(config)
-
-        head_dim = self.config.hidden_size // self.config.num_attention_heads
-        assert head_dim % 2 == 0, "ROPE requires even head_dim"
-        self._freqs_cis: Optional[torch.Tensor] = None
-
-    @property
-    def max_patches_per_side(self) -> int:
-        return self.config.image_size // self.config.patch_size
+        self.patch_positional_embedding = PixtralHFRotaryEmbedding(config)
 
     @property
     def device(self) -> torch.device:
@@ -857,21 +971,6 @@ class PixtralHFVisionModel(nn.Module):
     @property
     def dtype(self) -> torch.device:
         return next(self.parameters()).dtype
-
-    @property
-    def freqs_cis(self) -> torch.Tensor:
-        if self._freqs_cis is None:
-            self._freqs_cis = precompute_freqs_cis_2d(
-                dim=self.config.hidden_size // self.config.num_attention_heads,
-                height=self.max_patches_per_side,
-                width=self.max_patches_per_side,
-                theta=self.config.rope_theta,
-            )
-
-        if self._freqs_cis.device != self.device:
-            self._freqs_cis = self._freqs_cis.to(device=self.device)
-
-        return self._freqs_cis
 
     def forward(
         self,
@@ -885,8 +984,6 @@ class PixtralHFVisionModel(nn.Module):
             image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
         """
-        print("PixtralHFVisionModel.forward",
-              [img.shape for img in pixel_values])
         # pass images through initial convolution independently
         patch_embeds_list = [
             self.patch_conv(img.unsqueeze(0).to(self.dtype))
@@ -899,16 +996,17 @@ class PixtralHFVisionModel(nn.Module):
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
-        positions = position_meshgrid(patch_embeds_list).to(self.device)
-        freqs_cis = self.freqs_cis[positions[:, 0], positions[:, 1]]
+        position_ids = position_ids_in_meshgrid(
+            patch_embeds_list, max_width=self.config.image_size // self.config.patch_size
+        ).to(self.device)
 
-        # pass through Transformer with a block diagonal mask delimiting images
-        mask = BlockDiagonalMask.from_seqlens(
-            [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], )
-        out = self.transformer(patch_embeds, mask=mask, freqs_cis=freqs_cis)
+        position_embedding = self.patch_positional_embedding(patch_embeds, position_ids)
+        attention_mask = generate_block_attention_mask(
+            [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds
+        )
+        out = self.transformer(patch_embeds, attention_mask, position_embedding)
 
-        # remove batch dimension of the single sequence
-        return out.squeeze(0)
+        return out
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
