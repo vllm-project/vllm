@@ -1,15 +1,18 @@
 import functools
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
-                    Protocol, Tuple, Type)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
+                    Optional, Protocol, Tuple, Type, cast)
 
 from torch import nn
 from transformers import PretrainedConfig
 from typing_extensions import TypeVar
 
+from vllm.inputs import SingletonInputs
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.logger import init_logger
-from vllm.utils import get_allowed_kwarg_only_overrides, print_warning_once
+from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
+                        resolve_mm_processor_kwargs)
 
 from .data import ProcessorInputs
 
@@ -133,7 +136,7 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        dummy_seq_data = SequenceData.from_token_counts((0, seq_len))
+        dummy_seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data
@@ -296,11 +299,29 @@ class InputRegistry:
         model_cls, _ = get_model_architecture(model_config)
         processor = self._get_model_input_processor(model_cls)
 
-        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-            processor, overrides=model_config.mm_processor_kwargs)
+        inputs_mm_processor_kwargs: Dict[str, Any] = {}
+        singleton_inputs = cast(
+            List[SingletonInputs],
+            ([inputs["encoder"], inputs["decoder"]]
+             if is_encoder_decoder_inputs(inputs) else [inputs]),
+        )
+        for singleton_input in singleton_inputs:
+            if singleton_input["type"] == "token":
+                kw = singleton_input.pop("mm_processor_kwargs")
+                if kw is not None:
+                    inputs_mm_processor_kwargs.update(kw)
+
+        # Handle multimodal processor kwargs with priority:
+        #     Inference kwargs -> Init kwargs -> {}
+        # If it's empty, it'll fall back to the default kwarg values
+        inputs_mm_processor_kwargs = resolve_mm_processor_kwargs(
+            model_config.mm_processor_kwargs,
+            inputs_mm_processor_kwargs,
+            processor,
+        )
 
         return processor(InputContext(model_config), inputs,
-                         **mm_processor_kwargs)
+                         **inputs_mm_processor_kwargs)
 
     def create_input_processor(self, model_config: "ModelConfig"):
         """

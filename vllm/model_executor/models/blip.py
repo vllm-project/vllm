@@ -63,7 +63,7 @@ def dummy_seq_data_for_blip(
     else:
         image_feature_size = image_feature_size_override
 
-    return SequenceData.from_token_counts(
+    return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
     )
@@ -89,14 +89,14 @@ def dummy_image_for_blip(
 def input_processor_for_blip(
     model_config: ModelConfig,
     hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
-    llm_inputs: DecoderOnlyInputs,
+    inputs: DecoderOnlyInputs,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
 ):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
@@ -107,8 +107,8 @@ def input_processor_for_blip(
 
     new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
         tokenizer,
-        llm_inputs.get("prompt"),
-        llm_inputs["prompt_token_ids"],
+        inputs.get("prompt"),
+        inputs["prompt_token_ids"],
         placeholder_token_id=image_token_id,
         repeat_count=image_feature_size,
     )

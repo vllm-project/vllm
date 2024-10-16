@@ -475,17 +475,18 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         unpadded_vocab_size = config.vocab_size
         if lora_config:
             unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        if not self.config.tie_word_embeddings:
-            self.lm_head = ParallelLMHead(
-                unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config else lora_config.lora_vocab_padding_size,
-                quant_config=quant_config,
-            )
+        self.lm_head = ParallelLMHead(
+            unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            if not lora_config else lora_config.lora_vocab_padding_size,
+            quant_config=quant_config,
+        )
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
         self.logits_processor = LogitsProcessor(unpadded_vocab_size,
@@ -521,11 +522,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         hidden_states = hidden_states / self.scale_width
-        if self.config.tie_word_embeddings:
-            lm_head = self.model.embed_tokens
-        else:
-            lm_head = self.lm_head
-        logits = self.logits_processor(lm_head, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

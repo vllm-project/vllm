@@ -16,6 +16,7 @@ import requests
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec, assert_never
 
+import vllm.envs as envs
 from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -310,14 +311,38 @@ def compare_two_settings(model: str,
         env2: The second set of environment variables to pass to the API server.
     """
 
+    compare_all_settings(
+        model,
+        [arg1, arg2],
+        [env1, env2],
+        method=method,
+        max_wait_seconds=max_wait_seconds,
+    )
+
+
+def compare_all_settings(model: str,
+                         all_args: List[List[str]],
+                         all_envs: List[Optional[Dict[str, str]]],
+                         *,
+                         method: Literal["generate", "encode"] = "generate",
+                         max_wait_seconds: Optional[float] = None) -> None:
+    """
+    Launch API server with several different sets of arguments/environments
+    and compare the results of the API calls with the first set of arguments.
+    Args:
+        model: The model to test.
+        all_args: A list of argument lists to pass to the API server.
+        all_envs: A list of environment dictionaries to pass to the API server.
+    """
+
     trust_remote_code = False
-    for args in (arg1, arg2):
+    for args in all_args:
         if "--trust-remote-code" in args:
             trust_remote_code = True
             break
 
     tokenizer_mode = "auto"
-    for args in (arg1, arg2):
+    for args in all_args:
         if "--tokenizer-mode" in args:
             tokenizer_mode = args[args.index("--tokenizer-mode") + 1]
             break
@@ -328,10 +353,28 @@ def compare_two_settings(model: str,
         tokenizer_mode=tokenizer_mode,
     )
 
+    can_force_load_format = True
+
+    for args in all_args:
+        if "--load-format" in args:
+            can_force_load_format = False
+            break
+
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt).input_ids
-    results = []
-    for args, env in ((arg1, env1), (arg2, env2)):
+    ref_results: List = []
+    for i, (args, env) in enumerate(zip(all_args, all_envs)):
+        if can_force_load_format:
+            # we are comparing the results and
+            # usually we don't need real weights.
+            # we force to use dummy weights by default,
+            # and it should work for most of the cases.
+            # if not, we can use VLLM_TEST_FORCE_LOAD_FORMAT
+            # environment variable to force the load format,
+            # e.g. in quantization tests.
+            args = args + ["--load-format", envs.VLLM_TEST_FORCE_LOAD_FORMAT]
+        compare_results: List = []
+        results = ref_results if i == 0 else compare_results
         with RemoteOpenAIServer(model,
                                 args,
                                 env_dict=env,
@@ -355,13 +398,20 @@ def compare_two_settings(model: str,
             else:
                 assert_never(method)
 
-    n = len(results) // 2
-    arg1_results = results[:n]
-    arg2_results = results[n:]
-    for arg1_result, arg2_result in zip(arg1_results, arg2_results):
-        assert arg1_result == arg2_result, (
-            f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
-            f"{arg1_result=} != {arg2_result=}")
+            if i > 0:
+                # if any setting fails, raise an error early
+                ref_args = all_args[0]
+                ref_envs = all_envs[0]
+                compare_args = all_args[i]
+                compare_envs = all_envs[i]
+                for ref_result, compare_result in zip(ref_results,
+                                                      compare_results):
+                    assert ref_result == compare_result, (
+                        f"Results for {model=} are not the same.\n"
+                        f"{ref_args=} {ref_envs=}\n"
+                        f"{compare_args=} {compare_envs=}\n"
+                        f"{ref_result=}\n"
+                        f"{compare_result=}\n")
 
 
 def init_test_distributed_environment(
@@ -628,3 +678,12 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def check_deprecated_block_manager_usage(test_name: str):
+    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
+        f"To allow the use of deprecated BlockSpaceManagerV1, set the "
+        f"environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
+        f"You can run the tests with: "
+        f"`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest {test_name}`"  #noqa
+    )

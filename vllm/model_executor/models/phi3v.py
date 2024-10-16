@@ -30,27 +30,26 @@ from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (flatten_bn, group_weights_with_prefix,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
-
-_KEYS_TO_MODIFY_MAPPING = {
-    "model.vision_embed_tokens": "vision_embed_tokens",
-}
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 32044
@@ -295,37 +294,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             dim=2).reshape(num_images, -1, hid_dim)
         return image_features_hd_newline
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(weights)
-
-        # load vision encoder
-        self.img_processor.load_weights(weights_group["img_processor"])
-
-        # load glb_GN
-        for name, loaded_weight in weights_group["glb_GN"]:
-            assert name == ""
-            param = self.glb_GN
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load sub_GN
-        for name, loaded_weight in weights_group["sub_GN"]:
-            assert name == ""
-            param = self.sub_GN
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load mlp projector
-        mlp_params_dict = dict(self.img_projection.named_parameters())
-        for name, loaded_weight in weights_group["img_projection"]:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
 def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
@@ -418,32 +386,37 @@ def dummy_data_for_phi3v(ctx: InputContext,
     return seq_data, mm_data
 
 
-# Reserve this function to also handle placeholders for additional images
-# [ref: PR #5820]
 @lru_cache
-def _get_image_placeholder_token_ids(model_config: ModelConfig,
-                                     idx: int) -> List[int]:
+def _get_image_placeholder_token_id_candidates(
+    model_config: ModelConfig,
+    idx: int,
+) -> List[List[int]]:
     assert idx > 0
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
+    # This is used when the image token is at the start of the string
+    start_candidate = tokenizer.encode(f"<|image_{idx}|>",
+                                       add_special_tokens=False)
+
+    # This is used when the image token is in the middle of the string
     # We need to get the token for "<", not "▁<"
     # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
     a_token_id, = tokenizer.encode("a", add_special_tokens=False)
-    a_token_id_, *image_placeholder_token_ids = tokenizer.encode(
-        f"a<|image_{idx}|>", add_special_tokens=False)
+    a_token_id_, *middle_candidate = tokenizer.encode(f"a<|image_{idx}|>",
+                                                      add_special_tokens=False)
     assert a_token_id == a_token_id_
 
-    return image_placeholder_token_ids
+    return [start_candidate, middle_candidate]
 
 
 def input_processor_for_phi3v(ctx: InputContext,
-                              llm_inputs: DecoderOnlyInputs,
+                              inputs: DecoderOnlyInputs,
                               *,
                               num_crops: Optional[int] = None):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     model_config = ctx.model_config
     hf_config = ctx.get_hf_image_processor_config()
@@ -475,7 +448,7 @@ def input_processor_for_phi3v(ctx: InputContext,
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
-    prompt = llm_inputs.get("prompt")
+    prompt = inputs.get("prompt")
     if prompt is None:
         # for async server request, we assume prompt and its token_ids is always
         # in correct format. And num_image_tags == len(image_data) always True.
@@ -492,18 +465,22 @@ def input_processor_for_phi3v(ctx: InputContext,
                 image_data), "The count of image_placeholder not match image's"
         new_prompt = prompt
 
-    prompt_token_ids = llm_inputs["prompt_token_ids"].copy()
+    prompt_token_ids = inputs["prompt_token_ids"].copy()
 
-    # masked place_holder with image token id
+    print("prompt_token_ids (old)", prompt_token_ids)
+
+    # masked placeholder with image token id
     for idx in image_idx:
-        image_token_ids = _get_image_placeholder_token_ids(model_config,
-                                                           idx=idx)
-        for i in range(len(prompt_token_ids) - len(image_token_ids) + 1):
-            if prompt_token_ids[i:i + len(image_token_ids)] == image_token_ids:
-                prompt_token_ids[i:i + len(image_token_ids)] = [
-                    _IMAGE_TOKEN_ID
-                ] * len(image_token_ids)
-                break
+        candidates = _get_image_placeholder_token_id_candidates(model_config,
+                                                                idx=idx)
+
+        for candidate in candidates:
+            for i in range(len(prompt_token_ids) - len(candidate) + 1):
+                if prompt_token_ids[i:i + len(candidate)] == candidate:
+                    prompt_token_ids[i:i +
+                                     len(candidate)] = ([_IMAGE_TOKEN_ID] *
+                                                        len(candidate))
+                    break
 
     # merge consecutive tag ids
     merged_token_ids: List[int] = []
@@ -552,11 +529,22 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
         self.image_token_id = _IMAGE_TOKEN_ID
 
-        # TODO: Optionally initializes this for supporting embeddings.
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
+        )
+
+        # TODO: Optionally initializes this for supporting input embeddings.
         self.vision_embed_tokens = Phi3HDImageEmbedding(config)
 
         self.language_model = LlamaForCausalLM(config, cache_config,
                                                quant_config)
+
+        # The same model class supports both language generation and embedding
+        # because the architecture name is the same
+        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -683,8 +671,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
             if image_input is not None:
                 vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
+                inputs_embeds = self.embed_tokens(input_ids)
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, vision_embeddings,
                     self.image_token_id)
@@ -716,28 +703,27 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapping = {
-            "model.vision_embed_tokens.": "vision_embed_tokens.",
-            "lm_head.": "language_model.lm_head.",
-            "model.": "language_model.model.",
-        }
+        hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_prefix={
+                "model.vision_embed_tokens.wte": "embed_tokens",
+                "model.vision_embed_tokens.": "vision_embed_tokens.",
+                "lm_head.": "language_model.lm_head.",
+                "model.": "language_model.model.",
+            })
 
-        def hf_to_vllm_name(key: str) -> str:
-            for hf_name, vllm_name in hf_to_vllm_mapping.items():
-                if key.startswith(hf_name):
-                    return key.replace(hf_name, vllm_name, 1)
+        loader = AutoWeightsLoader(self)
+        autoloaded_weights = loader.load_weights(weights,
+                                                 mapper=hf_to_vllm_mapper)
 
-            return key
-
-        vllm_weights = {hf_to_vllm_name(k): v for k, v in weights}
-
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(vllm_weights.items())
-
-        # load vision embeddings and encoder
-        self.vision_embed_tokens.load_weights(
-            weights_group["vision_embed_tokens"])
-
-        # load llm backbone
-        self.language_model.load_weights(weights_group["language_model"])
+        # The HF config doesn't specify whether these are tied,
+        # so we detect it this way
+        if "embed_tokens" not in autoloaded_weights:
+            self.embed_tokens = self.language_model.model.embed_tokens

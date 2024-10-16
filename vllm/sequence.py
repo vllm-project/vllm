@@ -8,12 +8,12 @@ from dataclasses import dataclass
 from functools import cached_property, reduce
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Union, cast
+from typing import Set, Tuple, Union
 
 import msgspec
 import torch
+from typing_extensions import assert_never
 
-from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -21,12 +21,17 @@ from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
-    from vllm.inputs import DecoderOnlyInputs, EncoderDecoderInputs
+    from vllm.inputs import SingletonInputs
     from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
 VLLM_INVALID_TOKEN_ID = -1
+
+
+def array_full(token_id: int, count: int):
+    """:class:`array` equivalent of :func:`numpy.full`."""
+    return array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
 
 
 # We use dataclass for now because it is used for
@@ -172,16 +177,24 @@ class SequenceData(msgspec.Struct,
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+    def from_prompt_token_counts(
+            *token_counts: Tuple[int, int]) -> "SequenceData":
+        """
+        Construct a :class:`SequenceData` instance by concatenating
+        prompt token sequences.
+
+        Each tuple represents one token sequence, expressed in the form
+        :code:`(token_id, count)`.
+        """
         if len(token_counts) == 0:
             return SequenceData.from_seqs([])
 
-        arrs = [
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
-            for token_id, count in token_counts
-        ]
+        prompt_token_ids_arr = reduce(
+            array.__iadd__,
+            (array_full(token_id, count) for token_id, count in token_counts),
+        )
 
-        return SequenceData(reduce(array.__add__, arrs))
+        return SequenceData(prompt_token_ids_arr)
 
     @staticmethod
     def from_seqs(
@@ -190,6 +203,10 @@ class SequenceData(msgspec.Struct,
         *,
         prompt_embeds: Optional[torch.Tensor] = None,
     ) -> "SequenceData":
+        """
+        Construct a :class:`SequenceData` instance from prompt and output
+        token sequences.
+        """
         prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      prompt_token_ids)
 
@@ -393,7 +410,7 @@ class Sequence:
     def __init__(
         self,
         seq_id: int,
-        inputs: Union["DecoderOnlyInputs", "EncoderDecoderInputs"],
+        inputs: "SingletonInputs",
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -437,49 +454,78 @@ class Sequence:
 
     @cached_property
     def prompt(self) -> Optional[str]:
-        # Select decoder or encoder input prompt str, as appropriate
         inputs = self.inputs
-        if is_encoder_decoder_inputs(inputs):
-            prompt = inputs["encoder"].get("prompt")
-        else:
-            prompt = cast(Optional[str], inputs.get("prompt"))
 
-        return prompt
+        if inputs["type"] == "token":
+            return inputs.get("prompt")
+
+        if inputs["type"] == "embed":
+            return None
+
+        if inputs["type"] == "empty":
+            return None
+
+        assert_never(inputs)
 
     @cached_property
     def prompt_token_ids(self) -> List[int]:
-        # Select decoder or encoder input prompt token ids, as appropriate
         inputs = self.inputs
-        if is_encoder_decoder_inputs(inputs):
-            prompt_token_ids = inputs["encoder"].get("prompt_token_ids")
-        else:
-            prompt_token_ids = cast(Optional[List[int]],
-                                    inputs.get("prompt_token_ids"))
 
-        return prompt_token_ids or []
+        if inputs["type"] == "token":
+            return inputs.get("prompt_token_ids", [])
+
+        if inputs["type"] == "embed":
+            return []
+
+        if inputs["type"] == "empty":
+            return []
+
+        assert_never(inputs)
 
     @cached_property
     def prompt_embeds(self) -> Optional[torch.Tensor]:
-        # Select decoder or encoder input prompt embeds, as appropriate
         inputs = self.inputs
-        if is_encoder_decoder_inputs(inputs):
-            prompt_embeds = inputs["encoder"].get("prompt_embeds")
-        else:
-            prompt_embeds = cast(Optional[torch.Tensor],
-                                 inputs.get("prompt_embeds"))
 
-        return prompt_embeds
+        if inputs["type"] == "token":
+            return None
+
+        if inputs["type"] == "embed":
+            return inputs.get("prompt_embeds", [])
+
+        if inputs["type"] == "empty":
+            return None
+
+        assert_never(inputs)
 
     @cached_property
     def multi_modal_data(self) -> "MultiModalDataDict":
         inputs = self.inputs
-        if is_encoder_decoder_inputs(inputs):
-            multi_modal_data = inputs["encoder"].get("multi_modal_data")
-        else:
-            multi_modal_data = cast(Optional["MultiModalDataDict"],
-                                    inputs.get("multi_modal_data"))
 
-        return multi_modal_data or {}
+        if inputs["type"] == "token":
+            return inputs.get("multi_modal_data", {})
+
+        if inputs["type"] == "embed":
+            return inputs.get("multi_modal_data", {})
+
+        if inputs["type"] == "empty":
+            return {}
+
+        assert_never(inputs)
+
+    @cached_property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        inputs = self.inputs
+
+        if inputs["type"] == "token":
+            return inputs.get("mm_processor_kwargs", {})
+
+        if inputs["type"] == "embed":
+            return {}
+
+        if inputs["type"] == "empty":
+            return {}
+
+        assert_never(inputs)
 
     @property
     def lora_int_id(self) -> int:
@@ -527,6 +573,9 @@ class Sequence:
             # Optimization for single decode token case
             # (which is what we have most of the time)
             return self.data._cached_all_token_ids[-1]
+
+        if num_new_tokens == 0:
+            return []
 
         return self.data._cached_all_token_ids[-num_new_tokens:]
 
@@ -717,6 +766,14 @@ class SequenceGroup:
         return self.seqs[0].multi_modal_data
 
     @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        # As with multi-modal data, all sequences in the group should have the
+        # same processor kwargs (i.e., mm_processor_kwargs are optionally
+        # provided per request; note that are independent of whether the model
+        # decoder-only or an encoder-decoder).
+        return self.seqs[0].mm_processor_kwargs
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -797,14 +854,14 @@ class SequenceGroup:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
         if self.sampling_params:
-            best_of = self.sampling_params.best_of
-            assert isinstance(best_of, int)
-            if best_of > self.num_seqs():
+            n = self.sampling_params.n
+            assert isinstance(n, int)
+            if n > self.num_seqs():
                 # At prompt stage, the sequence group is not yet filled up
                 # and only have one sequence running. However, in the
-                # generation stage, we will have `best_of` sequences
+                # generation stage, we will have `n` sequences
                 # running.
-                return best_of
+                return n
         # At sampling stages, return the number of actual sequences
         # that are not finished yet.
         return self.num_unfinished_seqs()
@@ -955,6 +1012,7 @@ class SequenceGroupMetadata(
             used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
+        mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
@@ -981,6 +1039,7 @@ class SequenceGroupMetadata(
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
@@ -1129,10 +1188,9 @@ class EmbeddingSequenceGroupOutput(
         return self.embeddings == other.embeddings
 
 
-class IntermediateTensors(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
+# cannot use msgspec.Struct here because Dynamo does not support it
+@dataclass
+class IntermediateTensors:
     """For all pipeline stages except the last, we need to return the hidden
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.

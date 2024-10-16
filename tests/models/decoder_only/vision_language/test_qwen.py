@@ -76,7 +76,7 @@ def test_input_processor_valid_mm_data(input_processor_for_qwen,
         # When processing multimodal data for a multimodal model, the qwen
         # input processor will overwrite the provided prompt_token_ids with
         # the image prompts
-        prompt_token_ids=None,
+        prompt_token_ids=[],
         multi_modal_data={"image": torch.rand(num_images, TOKS_PER_IMG, 4096)},
     )
     proc_inputs = input_processor_for_qwen(qwen_vl_context, inputs)

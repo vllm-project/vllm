@@ -228,6 +228,7 @@ class InputPreprocessor:
         * prompt
         * prompt_token_ids
         * multi_modal_data
+        * mm_processor_kwargs (request-level input processor/mapper overrides)
         '''
 
         parsed = parse_singleton_prompt(prompt)
@@ -248,10 +249,12 @@ class InputPreprocessor:
         if parsed["type"] == "tokens":
             prompt_token_ids = parsed["content"]["prompt_token_ids"]
             multi_modal_data = parsed["content"].get("multi_modal_data")
+            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data=multi_modal_data,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         if parsed["type"] == "text":
@@ -262,11 +265,13 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
             multi_modal_data = parsed["content"].get("multi_modal_data")
+            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data=multi_modal_data,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         if parsed["type"] == "embeds":
@@ -305,10 +310,12 @@ class InputPreprocessor:
         if parsed["type"] == "tokens":
             prompt_token_ids = parsed["content"]["prompt_token_ids"]
             multi_modal_data = parsed["content"].get("multi_modal_data")
+            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data=multi_modal_data,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         if parsed["type"] == "text":
@@ -319,11 +326,13 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
             multi_modal_data = parsed["content"].get("multi_modal_data")
+            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt=prompt_text,
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data=multi_modal_data,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         if parsed["type"] == "embeds":
@@ -385,8 +394,7 @@ class InputPreprocessor:
     ) -> EncoderDecoderInputs:
         '''
         For encoder/decoder models only:
-        Process an input prompt into an
-        :class:`EncoderDecoderDecoderOnlyInputs` instance.
+        Process an input prompt into an :class:`EncoderDecoderInputs` instance.
 
         There are two types of input prompts:
         singleton prompts which carry only the
@@ -413,7 +421,7 @@ class InputPreprocessor:
 
         Returns:
 
-        * :class:`EncoderDecoderDecoderOnlyInputs` instance
+        * :class:`EncoderDecoderInputs` instance
         '''
 
         encoder_inputs: DecoderOnlyInputs
