@@ -951,7 +951,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
     lora_rope.create_lora_weights(max_loras, lora_config)
     linear_rope = get_rope(head_size, rotary_dim, max_position, base,
                            is_neox_style, {
-                               "type": "linear",
+                               "rope_type": "linear",
                                "factor": scaling_factors
                            })
     linear_rope = linear_rope.to(dtype=dtype)
