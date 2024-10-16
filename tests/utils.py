@@ -618,7 +618,7 @@ async def completions_with_server_args(
     max_tokens: Union[int, list] = 5,
     best_of: Union[int, NotGiven] = NOT_GIVEN,
     n: Union[int, NotGiven] = NOT_GIVEN,
-    temperature: Union[float, NotGiven] = NOT_GIVEN,
+    temperature: Union[float, NotGiven] = 0,
     seed: Union[int, NotGiven] = NOT_GIVEN,
 ) -> List[Completion]:
     '''Construct a remote OpenAI server, obtain an async client to the
