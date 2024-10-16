@@ -34,6 +34,8 @@ from PIL import Image
 from transformers.image_utils import (get_image_size,
                                       infer_channel_dimension_format,
                                       to_numpy_array)
+from transformers.models.qwen2_vl.configuration_qwen2_vl import (
+    Qwen2VLConfig, Qwen2VLVisionConfig)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     make_batched_images, make_batched_videos, smart_resize)
 
@@ -63,8 +65,7 @@ from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceData
-from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
-                                                     Qwen2VLVisionConfig)
+from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import get_processor
 from vllm.utils import is_cpu
 
@@ -1064,8 +1065,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             if image_input is None and video_input is None:
                 inputs_embeds = None
             else:
-                rope_scaling = getattr(self.config, "rope_scaling", {})
-                if rope_scaling.get("type", None) == "mrope":
+                if uses_mrope(self.config):
                     assert positions.ndim == 2 and positions.size(0) == 3, (
                         "multimodal section rotary embedding requires "
                         f"(3, seq_len) positions, but got {positions.size()}")
@@ -1170,8 +1170,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                         continue
                     param = params_dict[name]
                 except KeyError:
-                    print(params_dict.keys())
-                    raise
+                    raise ValueError(f"Unexpected weight: {name}") from None
 
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
