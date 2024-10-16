@@ -104,49 +104,49 @@ class Scheduler:
                     break
 
         # Next, schedule the WAITING requests.
-        while self.waiting:
-            if preempted_reqs:
-                break
-            if len(self.running) == self.max_num_running_reqs:
-                break
-            if token_budget == 0:
-                break
+        if not preempted_reqs:
+            while self.waiting:
+                if len(self.running) == self.max_num_running_reqs:
+                    break
+                if token_budget == 0:
+                    break
 
-            request = self.waiting[0]
-            # Get already-cached tokens.
-            computed_block_ids = self.kv_cache_manager.get_computed_blocks(
-                request)
-            # NOTE(woosuk): Since incomplete blocks are not eligible for
-            # sharing, `num_computed_tokens` is always a multiple of
-            # `block_size`.
-            num_computed_tokens = len(computed_block_ids) * self.block_size
-            # Number of tokens to be scheduled.
-            # We use `request.num_tokens` instead of `request.num_prompt_tokens`
-            # to consider the resumed requests, which have output tokens.
-            num_tokens = request.num_tokens - num_computed_tokens
-            num_tokens = min(num_tokens, token_budget)
-            assert num_tokens > 0
-            new_block_ids = self.kv_cache_manager.allocate_slots(
-                request, num_tokens, computed_block_ids)
-            if new_block_ids is None:
-                # The request cannot be scheduled.
-                break
-            request.num_computed_tokens = num_computed_tokens
+                request = self.waiting[0]
+                # Get already-cached tokens.
+                computed_block_ids = self.kv_cache_manager.get_computed_blocks(
+                    request)
+                # NOTE(woosuk): Since incomplete blocks are not eligible for
+                # sharing, `num_computed_tokens` is always a multiple of
+                # `block_size`.
+                num_computed_tokens = len(computed_block_ids) * self.block_size
+                # Number of tokens to be scheduled.
+                # We use `request.num_tokens` instead of
+                # `request.num_prompt_tokens` to consider the resumed requests,
+                # which have output tokens.
+                num_tokens = request.num_tokens - num_computed_tokens
+                num_tokens = min(num_tokens, token_budget)
+                assert num_tokens > 0
+                new_block_ids = self.kv_cache_manager.allocate_slots(
+                    request, num_tokens, computed_block_ids)
+                if new_block_ids is None:
+                    # The request cannot be scheduled.
+                    break
+                request.num_computed_tokens = num_computed_tokens
 
-            self.waiting.popleft()
-            self.running.append(request)
-            if request.status == RequestStatus.WAITING:
-                scheduled_new_reqs.append(request)
-            elif request.status == RequestStatus.PREEMPTED:
-                scheduled_resumed_reqs.append(request)
-            else:
-                assert False, f"Invalid request status: {request.status}"
+                self.waiting.popleft()
+                self.running.append(request)
+                if request.status == RequestStatus.WAITING:
+                    scheduled_new_reqs.append(request)
+                elif request.status == RequestStatus.PREEMPTED:
+                    scheduled_resumed_reqs.append(request)
+                else:
+                    assert False, f"Invalid request status: {request.status}"
 
-            req_to_new_block_ids[request.request_id] = (computed_block_ids +
-                                                        new_block_ids)
-            num_scheduled_tokens[request.request_id] = num_tokens
-            token_budget -= num_tokens
-            request.status = RequestStatus.RUNNING
+                req_to_new_block_ids[request.request_id] = (
+                    computed_block_ids + new_block_ids)
+                num_scheduled_tokens[request.request_id] = num_tokens
+                token_budget -= num_tokens
+                request.status = RequestStatus.RUNNING
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -157,6 +157,8 @@ class Scheduler:
                 len(scheduled_running_reqs) == len(self.running))
 
         # Construct the scheduler output.
+        # NOTE(woosuk): When the batch size is large, creating these objects
+        # can be expensive. We may need to optimize this.
         new_reqs_data = [
             NewRequestData.from_request(req,
                                         req_to_new_block_ids[req.request_id],
