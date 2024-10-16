@@ -244,7 +244,7 @@ void static_quant_epilogue(const float* input, scalar_t* output,
 template <bool AZP, bool PerChannel, bool Bias, typename scalar_t>
 void dynamic_quant_epilogue(const float* input, scalar_t* output,
                             const float* a_scale, const float* b_scale,
-                            const int32_t* azp, const int32_t* azp_with_adj,
+                            const int32_t* azp, const int32_t* azp_adj,
                             const scalar_t* bias, const int num_tokens,
                             const int hidden_size) {
   CPU_KERNEL_GUARD_IN(dynamic_quant_epilogue)
@@ -272,7 +272,7 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
       elems_fp32 = elems_fp32 * token_scale_vec;
 
       if constexpr (AZP) {
-        azp_adj_load_vec_t azp_adj(azp_with_adj + j);
+        azp_adj_load_vec_t azp_adj(azp_adj + j);
         cvt_vec_t azp_adj_fp32(azp_adj);
         azp_adj_fp32 = azp_adj_fp32 * token_zp_scale_vec;
 
@@ -298,7 +298,7 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
     elems_fp32 = elems_fp32 * token_scale_vec;
 
     if constexpr (AZP) {
-      azp_adj_load_vec_t azp_adj(azp_with_adj + j);
+      azp_adj_load_vec_t azp_adj(azp_adj + j);
       cvt_vec_t azp_adj_fp32(azp_adj);
       azp_adj_fp32 = azp_adj_fp32 * token_zp_scale_vec;
 
