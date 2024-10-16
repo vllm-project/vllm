@@ -1,4 +1,5 @@
 """Attention backend utils"""
+from collections import defaultdict
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar, Union
 
@@ -7,6 +8,7 @@ import torch
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
+from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -129,6 +131,9 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
         self.curr_seq_lens: List[int] = []
+        self.multimodal_placeholder_maps: Dict[
+            str,
+            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
@@ -156,6 +161,12 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                  inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
             if is_prompt:
+                mm_maps = inter_data.multi_modal_placeholder_maps
+                if mm_maps:
+                    for key, placeholders in mm_maps.items():
+                        self.multimodal_placeholder_maps[key].extend(
+                            placeholders)
+
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
@@ -247,6 +258,11 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
+        placeholder_maps = {
+            key: placeholder_map.index_map()
+            for key, placeholder_map in
+            self.multimodal_placeholder_maps.items()
+        }
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
@@ -259,6 +275,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
+            multi_modal_placeholder_maps=placeholder_maps,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -310,6 +327,7 @@ class CommonAttentionState(AttentionState):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             slot_mapping=self._graph_slot_mapping[:batch_size],
+            multi_modal_placeholder_maps=None,
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
             max_query_len=1,

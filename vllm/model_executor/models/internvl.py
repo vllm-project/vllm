@@ -18,6 +18,7 @@ from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.models.intern_vit import InternVisionModel
@@ -376,7 +377,7 @@ class InternVLInputPipeline:
             model_config.tokenizer,
             trust_remote_code=model_config.trust_remote_code)
 
-        seq_data = dummy_seq_data_for_clip(
+        seq_data, ranges = dummy_seq_data_for_clip(
             hf_config.vision_config,
             seq_len,
             num_images,
@@ -395,7 +396,7 @@ class InternVLInputPipeline:
             image_height_override=max_image_height,
         )
 
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
 
 
 input_pipeline = InternVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)

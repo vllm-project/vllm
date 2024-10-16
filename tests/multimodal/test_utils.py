@@ -92,18 +92,50 @@ def test_repeat_and_pad_placeholder_tokens(model):
     tokenizer = AutoTokenizer.from_pretrained(model)
 
     test_cases = [
-        ("<image>", 2, "<image><image>", [32000, 32000]),
-        ("<image><image>", 2, "<image><image><image>", [32000, 32000, 32000]),
-        ("<image><image>", [3, 2], "<image><image><image><image><image>",
-         [32000, 32000, 32000, 32000, 32000]),
-        ("Image:<image>Image:<image>!", [3, 2],
-         "Image:<image><image><image>Image:<image><image>!",
-         [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918]),
-        ("<image>", [3, 2], "<image><image><image>", [32000, 32000, 32000]),
-    ]
+        (
+            "<image>",
+            2,
+            "<image><image>",
+            [32000, 32000],
+            [{ "offset": 0, "length": 2 }],
+        ),
+        (
+            "<image><image>",
+            2,
+            "<image><image><image>",
+            [32000, 32000, 32000],
+            [{ "offset": 0, "length": 2 }]),
+        (
+            "<image><image>",
+            [3, 2],
+            "<image><image><image><image><image>",
+            [32000, 32000, 32000, 32000, 32000],
+            [{ "offset": 0, "length": 3 }, { "offset": 3, "length": 2 }],
+        ),
+        (
+            "Image:<image>Image:<image>!",
+            [3, 2],
+            "Image:<image><image><image>Image:<image><image>!",
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+            [{ "offset": 2, "length": 3 }, { "offset": 7, "length": 2 }],
+        ),
+        (
+            "<image>",
+            [3, 2],
+            "<image><image><image>",
+            [32000, 32000, 32000],
+            [{ "offset": 0, "length": 3 }],
+        ),
+    ]  # yapf: disable
 
-    for prompt, repeat_count, expected_prompt, expected_token_ids in test_cases:
-        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    for (
+            prompt,
+            repeat_count,
+            expected_prompt,
+            expected_token_ids,
+            expected_ranges,
+    ) in test_cases:
+        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
             tokenizer=tokenizer,
             prompt=prompt,
             prompt_token_ids=tokenizer.encode(prompt,
@@ -113,3 +145,4 @@ def test_repeat_and_pad_placeholder_tokens(model):
         )
         assert new_prompt == expected_prompt
         assert new_token_ids == expected_token_ids
+        assert ranges == expected_ranges

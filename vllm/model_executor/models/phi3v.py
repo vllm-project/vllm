@@ -28,6 +28,7 @@ from transformers import CLIPVisionConfig, PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs.registry import DummyData
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -368,7 +369,7 @@ def dummy_data_for_phi3v(ctx: InputContext,
 
     image_feature_size = get_max_phi3v_image_tokens(ctx, num_crops=num_crops)
 
-    seq_data = dummy_seq_data_for_clip(
+    seq_data, ranges = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
         num_images,
@@ -382,7 +383,7 @@ def dummy_data_for_phi3v(ctx: InputContext,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
 
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data, ranges)
 
 
 @lru_cache

@@ -6,7 +6,7 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import cached_property, reduce
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union, cast
 
@@ -16,13 +16,11 @@ import torch
 from vllm.inputs import EncoderDecoderLLMInputs, LLMInputs
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
-
-if TYPE_CHECKING:
-    from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -470,7 +468,7 @@ class Sequence:
         return cast(List[int], self.inputs.get(prompt_token_ids_key))
 
     @property
-    def multi_modal_data(self) -> "MultiModalDataDict":
+    def multi_modal_data(self) -> MultiModalDataDict:
         if self.inputs.get("multi_modal_data") and self.inputs.get(
                 "encoder_multi_modal_data"):
             raise ValueError(
@@ -480,6 +478,10 @@ class Sequence:
         return self.inputs.get("multi_modal_data") or (cast(
             EncoderDecoderLLMInputs,
             inputs).get("encoder_multi_modal_data")) or {}
+
+    @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        return self.inputs.get("multi_modal_placeholders") or {}
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
@@ -712,10 +714,14 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def multi_modal_data(self) -> "MultiModalDataDict":
+    def multi_modal_data(self) -> MultiModalDataDict:
         # All sequences in the group should have the same multi-modal data.
         # We use the multi-modal data of an arbitrary sequence.
         return self.seqs[0].multi_modal_data
+
+    @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        return self.seqs[0].multi_modal_placeholders
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
@@ -991,6 +997,7 @@ class SequenceGroupMetadata(
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
+    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
