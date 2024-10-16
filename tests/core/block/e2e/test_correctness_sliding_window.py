@@ -52,7 +52,6 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
 
     prompts, answer, indices = prep_prompts(batch_size)
 
-    print('Getting token ids from block manager v1')
     baseline_texts = get_text_from_llm_generator(baseline_llm_generator,
                                                  prompts,
                                                  sampling_params,

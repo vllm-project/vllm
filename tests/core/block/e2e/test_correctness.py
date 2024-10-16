@@ -43,6 +43,11 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
 
     NOTE: We want a significant number of generated tokens so that any incorrect
     KV mapping has time to build up error.
+
+    NOTE(Kuntai): Though we have removed block manager v1, this test is still
+    useful as it asserts the behavior of block manager v2 (now it is called 
+    SelfAttnBlockManager) is the same when swapping / preemption, so we keep 
+    this test.
     """
     output_len = 1024
     temperature = 0.0
@@ -66,11 +71,9 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
         temperature=temperature,
     )
 
-    print('Getting token ids from block manager v1')
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids from block manager v2')
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
@@ -294,6 +297,11 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
 
     NOTE: We want a significant number of generated tokens so that any incorrect
     KV mapping has time to build up error.
+
+    NOTE(Kuntai): Though we have removed block manager v1, this test is still
+    useful as it asserts the behavior of block manager v2 (now it is called 
+    SelfAttnBlockManager) is the same when swapping / preemption, so we keep 
+    this test.
     """
     output_len = 1024
     temperature = 0.0
