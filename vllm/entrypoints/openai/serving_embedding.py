@@ -135,9 +135,11 @@ class OpenAIServingEmbedding(OpenAIServing):
             pooling_params = request.to_pooling_params()
 
             prompts = list(
-                self._tokenize_prompt_input_or_inputs(request, tokenizer,
-                                                      request.input,
-                                                      truncate_prompt_tokens))
+                self._tokenize_prompt_input_or_inputs(
+                    request,
+                    tokenizer,
+                    request.input,
+                    truncate_prompt_tokens=truncate_prompt_tokens))
 
             for i, prompt_inputs in enumerate(prompts):
                 request_id_item = f"{request_id}-{i}"

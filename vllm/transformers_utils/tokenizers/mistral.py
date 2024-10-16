@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from mistral_common.tokens.instruct.request import FIMRequest
 # yapf: disable
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as PublicMistralTokenizer)
@@ -188,6 +189,10 @@ class MistralTokenizer:
         # it should never be used for chat_completion.
         # For chat completion use `apply_chat_template`
         return self.tokenizer.encode(prompt, bos=True, eos=False)
+
+    def encode_with_suffix(self, prompt: str, suffix: str) -> List[int]:
+        fim = FIMRequest(prompt=prompt, suffix=suffix)
+        return self.mistral.encode_fim(fim)
 
     def apply_chat_template(self,
                             messages: List["ChatCompletionMessageParam"],
