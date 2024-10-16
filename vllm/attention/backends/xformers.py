@@ -118,6 +118,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
 
+    # Max number of query tokens among request in the batch.
+    max_decode_query_len: Optional[int] = None
+
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -445,7 +448,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         key: Optional[torch.Tensor],
         value: Optional[torch.Tensor],
-        kv_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
         k_scale: float = 1.0,
         v_scale: float = 1.0,
@@ -489,6 +492,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
             attn_type: Select attention type, between encoder attention,
                        decoder self-attention, or encoder/decoder cross-
@@ -522,7 +527,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
 
-        if (attn_type != AttentionType.ENCODER and kv_cache is not None):
+        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
             # KV-cache during decoder-self- or
             # encoder-decoder-cross-attention, but not
             # during encoder attention.
@@ -554,25 +559,32 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                                     self.kv_cache_dtype,
                                                     k_scale, v_scale)
 
-        if attn_type != AttentionType.ENCODER:
-            # Decoder self-attention supports chunked prefill.
-            # Encoder/decoder cross-attention requires no chunked
-            # prefill (100% prefill or 100% decode tokens, no mix)
-            num_prefill_tokens = attn_metadata.num_prefill_tokens
-            num_decode_tokens = attn_metadata.num_decode_tokens
-        else:
+        if attn_type == AttentionType.ENCODER:
             # Encoder attention - chunked prefill is not applicable;
             # derive token-count from query shape & and treat them
             # as 100% prefill tokens
             assert attn_metadata.num_encoder_tokens is not None
             num_prefill_tokens = attn_metadata.num_encoder_tokens
+            num_encoder_tokens = attn_metadata.num_encoder_tokens
             num_decode_tokens = 0
-
-        if attn_type == AttentionType.DECODER:
+        elif attn_type == AttentionType.DECODER:
+            # Decoder self-attention supports chunked prefill.
+            num_prefill_tokens = attn_metadata.num_prefill_tokens
+            num_encoder_tokens = attn_metadata.num_prefill_tokens
+            num_decode_tokens = attn_metadata.num_decode_tokens
             # Only enforce this shape-constraint for decoder
             # self-attention
             assert key.shape[0] == num_prefill_tokens + num_decode_tokens
             assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+        else:  # attn_type == AttentionType.ENCODER_DECODER
+            # Encoder/decoder cross-attention requires no chunked
+            # prefill (100% prefill or 100% decode tokens, no mix)
+            num_prefill_tokens = attn_metadata.num_prefill_tokens
+            if attn_metadata.num_encoder_tokens is not None:
+                num_encoder_tokens = attn_metadata.num_encoder_tokens
+            else:
+                num_encoder_tokens = attn_metadata.num_prefill_tokens
+            num_decode_tokens = attn_metadata.num_decode_tokens
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
@@ -580,15 +592,15 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # QKV for prefill.
         query = query[:num_prefill_tokens]
         if key is not None and value is not None:
-            key = key[:num_prefill_tokens]
-            value = value[:num_prefill_tokens]
+            key = key[:num_encoder_tokens]
+            value = value[:num_encoder_tokens]
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.

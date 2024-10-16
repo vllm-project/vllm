@@ -2,26 +2,28 @@
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
+from typing import Optional
 
 import pytest
 import torch
+from compressed_tensors.quantization import QuantizationType
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    QuantizationType)
 
 
-@pytest.mark.parametrize("model_args", [
-    ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", "tensor",
-     QuantizationType.INT, 2560),
-    ("nm-testing/tinyllama-oneshot-w8-channel-a8-tensor", "channel",
-     QuantizationType.INT, 2560),
-])
+@pytest.mark.parametrize(
+    "model_args",
+    [("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", "tensor",
+      QuantizationType.INT, 2560, True),
+     ("nm-testing/tinyllama-oneshot-w8-channel-a8-tensor", "channel",
+      QuantizationType.INT, 2560, True),
+     ("nm-testing/asym-w8w8-int8-static-per-tensor-tiny-llama", "tensor",
+      QuantizationType.INT, 2560, False)])
 def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
-    model_path, strategy, quant_type, shape_0 = model_args
+    model_path, strategy, quant_type, shape_0, is_symmetric = model_args
     with vllm_runner(model_path, enforce_eager=True) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
@@ -30,6 +32,18 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         o_proj = layer.self_attn.o_proj
         gate_up_proj = layer.mlp.gate_up_proj
         down_proj = layer.mlp.down_proj
+
+        # assert zp for symmetric and asymmetric cases
+        def zp_valid(zp: Optional[torch.Tensor]):
+            if is_symmetric:
+                return zp is None
+
+            return zp is not None and zp.dtype is torch.int32
+
+        assert zp_valid(qkv_proj.input_zero_point)
+        assert zp_valid(o_proj.input_zero_point)
+        assert zp_valid(gate_up_proj.input_zero_point)
+        assert zp_valid(down_proj.input_zero_point)
 
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
         assert isinstance(o_proj.quant_method, CompressedTensorsLinearMethod)
@@ -56,7 +70,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         assert qkv_proj.weight_scale.dtype is torch.float32
         assert qkv_proj.input_scale.dtype is torch.float32
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
         assert output
 
 
@@ -69,9 +83,12 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
 
 @pytest.mark.parametrize("model_args", [
     ("nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2", "tensor"),
+    ("nm-testing/tinyllama-oneshot-w8a8-dynamic-token-v2-asym", "tensor"),
     ("nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2", "channel"),
+    ("nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2-asym",
+     "channel"),
 ])
-def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner, model_args):
+def test_compressed_tensors_w8a8_dynamic_per_token(vllm_runner, model_args):
     model_path, strategy = model_args
     with vllm_runner(model_path, dtype=torch.float16) as llm:
         model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
@@ -85,7 +102,7 @@ def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner, model_args):
         assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.weight.dtype is torch.int8
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
         assert output
 
 

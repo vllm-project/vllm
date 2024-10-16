@@ -3,8 +3,8 @@
 Installation with Neuron
 ========================
 
-vLLM 0.3.3 onwards supports model inferencing and serving on AWS Trainium/Inferentia with Neuron SDK.
-At the moment Paged Attention is not supported in Neuron SDK, but naive continuous batching is supported in transformers-neuronx.
+vLLM 0.3.3 onwards supports model inferencing and serving on AWS Trainium/Inferentia with Neuron SDK with continuous batching.
+Paged Attention and Chunked Prefill are currently in development and will be available soon.
 Data types currently supported in Neuron SDK are FP16 and BF16.
 
 Requirements
@@ -26,6 +26,10 @@ Installation steps:
   - :ref:`Step 3. Install vLLM from source <install_vllm>`
 
 .. _build_from_source_neuron:
+
+.. note::
+
+    The currently supported version of Pytorch for Neuron installs `triton` version `2.1.0`. This is incompatible with vLLM >= 0.5.3. You may see an error `cannot import name 'default_dump_dir...`. To work around this, run a `pip install --upgrade triton==3.0.0` after installing the vLLM wheel.
 
 Build from source
 -----------------

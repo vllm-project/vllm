@@ -5,7 +5,8 @@ from typing_extensions import TypeIs
 from vllm.utils import is_list_of
 
 from .data import (EncoderDecoderLLMInputs, ExplicitEncoderDecoderPrompt,
-                   LLMInputs, PromptInputs)
+                   LLMInputs, PromptType, SingletonPrompt, TextPrompt,
+                   TokensPrompt)
 
 
 class ParsedText(TypedDict):
@@ -60,13 +61,43 @@ def parse_and_batch_prompt(
                     for elem in prompt
                 ]
 
-    raise ValueError("prompt must be a string, array of strings, "
-                     "array of tokens, or array of token arrays")
+    raise TypeError("prompt must be a string, array of strings, "
+                    "array of tokens, or array of token arrays")
+
+
+class ParsedStrPrompt(TypedDict):
+    type: Literal["str"]
+    content: str
+
+
+class ParsedTextPrompt(TypedDict):
+    type: Literal["text"]
+    content: TextPrompt
+
+
+class ParsedTokensPrompt(TypedDict):
+    type: Literal["tokens"]
+    content: TokensPrompt
+
+
+def parse_singleton_prompt(
+    prompt: SingletonPrompt,
+) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt]:
+    if isinstance(prompt, str):
+        return ParsedStrPrompt(type="str", content=prompt)
+    elif isinstance(prompt, dict):
+        if "prompt_token_ids" in prompt:
+            return ParsedTokensPrompt(type="tokens",
+                                      content=prompt)  # type: ignore
+        elif "prompt" in prompt:
+            return ParsedTextPrompt(type="text", content=prompt)
+
+    raise TypeError("inputs must be a string, TextPrompt, or TokensPrompt")
 
 
 def is_explicit_encoder_decoder_prompt(
-        inputs: PromptInputs) -> TypeIs[ExplicitEncoderDecoderPrompt]:
-    return isinstance(inputs, dict) and "encoder_prompt" in inputs
+        prompt: PromptType) -> TypeIs[ExplicitEncoderDecoderPrompt]:
+    return isinstance(prompt, dict) and "encoder_prompt" in prompt
 
 
 def is_valid_encoder_decoder_llm_inputs(

@@ -1,39 +1,55 @@
 import json
 import re
+from random import choices
+from string import ascii_letters, digits
 from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
+from pydantic import Field
 
-from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall,
-                                              InitialDeltaToolCall, ToolCall)
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
+ALPHANUMERIC = ascii_letters + digits
 
+
+class MistralToolCall(ToolCall):
+    id: str = Field(
+        default_factory=lambda: MistralToolCall.generate_random_id())
+
+    @staticmethod
+    def generate_random_id():
+        # Mistral Tool Call Ids must be alphanumeric with a maximum length of 9.
+        # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
+        return "".join(choices(ALPHANUMERIC, k=9))
+
+
+@ToolParserManager.register_module("mistral")
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with the
     examples/tool_chat_template_mistral.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser gmistral are all set
+    Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
 
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
-        if isinstance(self.model_tokenizer, MistralTokenizer):
-            self.model_tokenizer = self.model_tokenizer.tokenizer
-        else:
+        if not isinstance(self.model_tokenizer, MistralTokenizer):
             logger.info("Non-Mistral tokenizer detected when using a Mistral "
                         "model...")
 
@@ -42,15 +58,21 @@ class MistralToolParser(ToolParser):
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "[TOOL_CALLS]"
-        self.bot_token_id = self.model_tokenizer.vocab[self.bot_token]
+        self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
+        if not self.bot_token_id:
+            raise RuntimeError(
+                "Mistral Tool Parser could not locate the tool call token in "
+                "the tokenizer!")
 
-    def extract_tool_calls(self,
-                           model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response. Requires
         find-and-replacing single quotes with double quotes for JSON parsing,
@@ -72,8 +94,8 @@ class MistralToolParser(ToolParser):
             # load the JSON, and then use it to build the Function and
             # Tool Call
             function_call_arr = json.loads(raw_tool_call)
-            tool_calls: List[ToolCall] = [
-                ToolCall(
+            tool_calls: List[MistralToolCall] = [
+                MistralToolCall(
                     type="function",
                     function=FunctionCall(
                         name=raw_function_call["name"],
@@ -91,7 +113,6 @@ class MistralToolParser(ToolParser):
 
         except Exception as e:
             logger.error("Error in extracting tool call from response: %s", e)
-            print("ERROR", e)
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -105,11 +126,12 @@ class MistralToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         # if the tool call token is not in the tokens generated so far, append
         # output to contents since it's not a tool
-        if self.bot_token_id not in current_token_ids:
+        if self.bot_token not in current_text:
             return DeltaMessage(content=delta_text)
 
         # if the tool call token ID IS in the tokens generated so far, that
@@ -134,7 +156,7 @@ class MistralToolParser(ToolParser):
             # replace BOT token with empty string, and convert single quotes
             # to double to allow parsing as JSON since mistral uses single
             # quotes instead of double for tool calls
-            parsable_arr = current_text.split(self.bot_token)[1]
+            parsable_arr = current_text.split(self.bot_token)[-1]
 
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
@@ -186,31 +208,22 @@ class MistralToolParser(ToolParser):
                 # re-set stuff pertaining to progress in the current tool
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
-                self.current_tool_initial_sent = False
                 self.streamed_args_for_tool.append("")
                 logger.debug("starting on new tool %d", self.current_tool_id)
                 return delta
 
             # case: update an existing tool - this is handled below
 
-            # if the current tool initial data incl. the id, type=function
-            # and idx not sent, send that
-            if not self.current_tool_initial_sent:
-                self.current_tool_initial_sent = True
-                delta = DeltaMessage(tool_calls=[
-                    InitialDeltaToolCall(
-                        index=self.current_tool_id).model_dump(
-                            exclude_none=True)
-                ])
-
             # if the current tool name hasn't been sent, send if available
             # - otherwise send nothing
-            elif not self.current_tool_name_sent:
+            if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
 
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
+                                      type="function",
+                                      id=f"chatcmpl-tool-{random_uuid()}",
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))

@@ -121,6 +121,10 @@ class GPUExecutor(ExecutorBase):
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
+        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
+                           self.model_config.max_model_len)
+        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                    self.model_config.max_model_len, max_concurrency)
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
@@ -168,6 +172,12 @@ class GPUExecutor(ExecutorBase):
         # GPUExecutor will always be healthy as long as
         # it's running.
         return
+
+    def start_profile(self) -> None:
+        self.driver_worker.start_profile()
+
+    def stop_profile(self) -> None:
+        self.driver_worker.stop_profile()
 
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):

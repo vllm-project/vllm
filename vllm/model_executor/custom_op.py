@@ -1,5 +1,7 @@
 import torch.nn as nn
 
+import vllm.envs as envs
+from vllm.compilation.levels import CompilationLevel
 from vllm.platforms import current_platform
 from vllm.utils import is_cpu, is_hip, is_xpu
 
@@ -53,6 +55,10 @@ class CustomOp(nn.Module):
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
+
+        if envs.VLLM_TORCH_COMPILE_LEVEL >= CompilationLevel.INDUCTOR:
+            return self.forward_native
+
         if is_hip():
             return self.forward_hip
         elif is_cpu():

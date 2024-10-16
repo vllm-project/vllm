@@ -181,9 +181,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               num_lookahead_slots: int = 0) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
         pass
 
     @abstractmethod
@@ -260,10 +258,8 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               device: Device,
-                               num_lookahead_slots: int = 0) -> int:
+    def get_num_full_blocks_touched(self, blocks: List[Block],
+                                    device: Device) -> int:
         pass
 
     @abstractmethod

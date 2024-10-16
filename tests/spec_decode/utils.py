@@ -1,4 +1,3 @@
-from array import array
 from itertools import count
 from typing import Callable, Dict, List, Optional
 from typing import Sequence as GenericSequence
@@ -11,8 +10,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE,
-                           CompletionSequenceGroupOutput, Logprob,
+from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceData, SequenceGroupMetadata, SequenceOutput)
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.cache_engine import CacheEngine
@@ -133,23 +131,22 @@ def create_seq_group_metadata_from_prompts(
         for i, final_len in enumerate(final_prompt_lens)
     }
 
-    return [
-        SequenceGroupMetadata(
-            request_id=str(i),
-            is_prompt=len(cont_token_ids) == 0,
-            seq_data={
-                i:
-                SequenceData(
-                    array(VLLM_TOKEN_ID_ARRAY_TYPE, prompt_token_ids[:]),
-                    _output_token_ids=array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                            cont_token_ids[:]),
-                ),
-            },
-            sampling_params=SamplingParams(temperature=0.0, ),
-            block_tables={i: block_allocations[i][:]},
-        ) for i, (prompt_token_ids,
-                  cont_token_ids) in enumerate(zip(prompts, continuations))
-    ]
+    seq_grou_metadata_list = []
+    for i, (prompt_token_ids,
+            cont_token_ids) in enumerate(zip(prompts, continuations)):
+        data = SequenceData.from_seqs(prompt_token_ids, cont_token_ids)
+        data.update_num_computed_tokens(
+            len(prompt_token_ids) + len(cont_token_ids) - 1)
+        seq_data = {i: data}
+        seq_grou_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=str(i),
+                is_prompt=len(cont_token_ids) == 0,
+                seq_data=seq_data,
+                sampling_params=SamplingParams(temperature=0.0),
+                block_tables={i: block_allocations[i][:]},
+            ))
+    return seq_grou_metadata_list
 
 
 def assert_logprobs_dict_allclose(
