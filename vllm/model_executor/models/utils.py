@@ -263,7 +263,7 @@ def flatten_bn(
         return x.flatten(0, 1)
 
     if concat:
-        return torch.cat(x).squeeze()
+        return torch.cat(x)
 
     return [x_n for x_b in x for x_n in x_b]
 
