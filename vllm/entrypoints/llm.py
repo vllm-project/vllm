@@ -316,7 +316,7 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if self.llm_engine.model_config.embedding_mode:
+        if self.llm_engine.model_config.task != "generate":
             raise ValueError(
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).")
@@ -691,7 +691,7 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if not self.llm_engine.model_config.embedding_mode:
+        if self.llm_engine.model_config.task != "embed":
             raise ValueError(
                 "LLM.encode() is only supported for embedding models (XModel)."
             )
@@ -904,6 +904,3 @@ class LLM:
 
     def _is_encoder_decoder_model(self):
         return self.llm_engine.is_encoder_decoder_model()
-
-    def _is_embedding_model(self):
-        return self.llm_engine.is_embedding_model()

@@ -314,7 +314,7 @@ class Scheduler:
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
-        if (self.scheduler_config.embedding_mode
+        if (self.scheduler_config.task == "embed"
                 or self.cache_config.is_attention_free):
             version = "placeholder"
 

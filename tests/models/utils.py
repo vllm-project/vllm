@@ -273,7 +273,8 @@ def build_model_context(model_name: str,
 
     model_config = ModelConfig(
         model_name,
-        tokenizer_name,
+        task="auto",
+        tokenizer=tokenizer_name,
         tokenizer_mode="auto",
         trust_remote_code=trust_remote_code,
         dtype=dtype,
