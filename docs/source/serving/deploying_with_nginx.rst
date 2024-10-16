@@ -74,7 +74,7 @@ Build vLLM Container
 .. code-block:: console
 
     cd $vllm_root
-    docker build -f Dockerfile.cpu . --tag vllm
+    docker build -f Dockerfile . --tag vllm
 
 
 If you are behind proxy, you can pass the proxy settings to the docker build command as shown below:
@@ -82,7 +82,7 @@ If you are behind proxy, you can pass the proxy settings to the docker build com
 .. code-block:: console
 
     cd $vllm_root
-    docker build -f Dockerfile.cpu . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
+    docker build -f Dockerfile . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
 
 .. _nginxloadbalancer_nginx_docker_network:
 
@@ -103,17 +103,15 @@ Notes:
 
 * If you have your HuggingFace models cached somewhere else, update ``hf_cache_dir`` below. 
 * If you don't have an existing HuggingFace cache you will want to start ``vllm0`` and wait for the model to complete downloading and the server to be ready. This will ensure that ``vllm1`` can leverage the model you just downloaded and it won't have to be downloaded again.
-* The below example assumes a machine where socket 0 has cores 0-47 and socket 1 has cores 48-95. Adjust as needed for your application.
+* The below example assumes GPU backend used. If you are using CPU backend, remove ``--gpus all``, add ``VLLM_CPU_KVCACHE_SPACE`` and ``VLLM_CPU_OMP_THREADS_BIND`` environment variables to the docker run command.
 * Adjust the model name that you want to use in your vLLM servers if you don't want to use ``Llama-2-7b-chat-hf``. 
 
 .. code-block:: console
 
     mkdir -p ~/.cache/huggingface/hub/
     hf_cache_dir=~/.cache/huggingface/
-    SVR_0_CORES=0-47
-    SVR_1_CORES=48-95
-    docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_0_CORES -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm --model meta-llama/Llama-2-7b-chat-hf
-    docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_1_CORES -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm --model meta-llama/Llama-2-7b-chat-hf
+    docker run -itd --ipc host --privileged --network vllm_nginx --gpus all --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm --model meta-llama/Llama-2-7b-chat-hf
+    docker run -itd --ipc host --privileged --network vllm_nginx --gpus all --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm --model meta-llama/Llama-2-7b-chat-hf
 
 .. note::
     If you are behind proxy, you can pass the proxy settings to the docker run command via ``-e http_proxy=$http_proxy -e https_proxy=$https_proxy``.
