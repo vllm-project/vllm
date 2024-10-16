@@ -354,8 +354,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                                               mamba_cache_tensors[1],
                                               state_indices_tensor)
 
-        hidden_states = self.backbone(input_ids, positions, kv_caches,
-                                      attn_metadata, mamba_cache_params)
+        hidden_states = self.backbone(input_ids, positions, attn_metadata,
+                                      mamba_cache_params)
 
         return hidden_states
 
