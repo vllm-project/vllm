@@ -46,6 +46,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.processor import get_processor
+from vllm.utils import is_cpu
 
 log = logging.getLogger(__name__)
 
@@ -196,7 +197,7 @@ class MultiHeadDotProductAttention(nn.Module):
                 selected_backend = backend_name_to_enum(backend_by_env_var)
         if selected_backend is None:
             # For Volta and Turing GPUs, use xformers instead.
-            device_available = current_platform.get_device_capability()[0] >= 8
+            device_available = current_platform.has_device_capability(80)
             if device_available:
                 from transformers.utils import is_flash_attn_2_available
                 if is_flash_attn_2_available():
@@ -213,7 +214,7 @@ class MultiHeadDotProductAttention(nn.Module):
         else:
             if selected_backend == _Backend.FLASH_ATTN:
                 self._use_flash_attn = True
-            elif selected_backend == _Backend.XFORMERS:
+            elif selected_backend in [_Backend.XFORMERS, _Backend.TORCH_SDPA]:
                 self._use_flash_attn = False
             else:
                 raise RuntimeError(
@@ -242,6 +243,10 @@ class MultiHeadDotProductAttention(nn.Module):
         if self._use_flash_attn:
             from flash_attn import flash_attn_func
             output = flash_attn_func(xq, xk, xv, dropout_p=0.0, causal=False)
+        elif is_cpu():
+            xq, xk, xv = (rearrange(x, "b s h d -> b h s d") for x in (xq, xk, xv))
+            output = F.scaled_dot_product_attention(xq, xk, xv)
+            output = rearrange(output, "b h s d -> b s h d ")
         else:
             from xformers import ops as xops
             output = xops.memory_efficient_attention_forward(xq, xk, xv, p=0)
