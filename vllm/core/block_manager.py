@@ -17,7 +17,7 @@ SeqId = int
 EncoderSeqId = str
 
 
-class SelfAttnBlockSpaceManagerManager(BlockSpaceManager):
+class SelfAttnBlockSpaceManager(BlockSpaceManager):
     """BlockSpaceManager which manages the allocation of KV cache.
 
     It owns responsibility for allocation, swapping, allocating memory for
