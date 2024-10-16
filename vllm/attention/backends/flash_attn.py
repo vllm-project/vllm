@@ -700,6 +700,7 @@ def unified_flash_attention(
                 max_seqlen_k=max_seq_len,
                 softmax_scale=softmax_scale,
                 causal=True,
+                window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 block_table=prefill_meta.block_tables,
                 softcap=logits_soft_cap,
@@ -721,6 +722,7 @@ def unified_flash_attention(
                 max_seqlen_k=decode_meta.max_decode_seq_len,
                 softmax_scale=softmax_scale,
                 causal=True,
+                window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
                 block_table=decode_meta.block_tables,
@@ -735,6 +737,7 @@ def unified_flash_attention(
                 cache_seqlens=decode_meta.seq_lens_tensor,
                 softmax_scale=softmax_scale,
                 causal=True,
+                window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
             ).squeeze(1)
