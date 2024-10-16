@@ -25,6 +25,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import DeviceMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -64,6 +65,7 @@ class ModelInputForXPU(ModelRunnerInputBase):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
 
@@ -92,6 +94,7 @@ class ModelInputForXPUWithSamplingMetadata(ModelInputForXPU):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -124,6 +127,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         self.sliding_window = self.runner.sliding_window
         self.block_size = self.runner.block_size
         self.device = self.runner.device
+        # Multi-modal data support
+        self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
@@ -181,6 +186,40 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                multi_modal_inputs_list.append(mm_kwargs)
+            if self.runner.model_is_mrope and mm_data:
+                image_grid_thw = mm_kwargs.get("image_grid_thw", None)
+                video_grid_thw = mm_kwargs.get("video_grid_thw", None)
+                assert image_grid_thw is not None or video_grid_thw is not None, (
+                    "mrope embedding type requires multi-modal input mapper "
+                    "returns 'image_grid_thw' or 'video_grid_thw'.")
+
+                hf_config = self.runner.model_config.hf_config
+                token_ids = seq_data.get_token_ids()
+                temp_mrope_input_positions, mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions(
+                        token_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        image_token_id=hf_config.image_token_id,
+                        video_token_id=hf_config.video_token_id,
+                        vision_start_token_id=hf_config.vision_start_token_id,
+                        vision_end_token_id=hf_config.vision_end_token_id,
+                        spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                        context_len=0,
+                    )
+                seq_data.mrope_position_delta = mrope_position_delta
+                mrope_input_positions = [[] for _ in range(3)]
+                for idx in range(3):
+                    # msections = temp_mrope_input_positions
+                    # for _seq_mrope_input_positions in msections:
+                    mrope_input_positions[idx].extend(
+                        temp_mrope_input_positions[idx])
+                input_positions = mrope_input_positions
+
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -243,7 +282,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         )
 
         multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
-
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)
 
@@ -416,6 +454,15 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+    @property
+    def model_is_mrope(self) -> bool:
+        """Detect if the model has "mrope" rope_scaling type.
+        mrope requires keep "rope_deltas" between prompt and decoding phases."""
+        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
+        if rope_scaling is None:
+            return False
+        return rope_scaling.get("type", None) == "mrope"
 
     @torch.inference_mode()
     def profile_run(self) -> None:
