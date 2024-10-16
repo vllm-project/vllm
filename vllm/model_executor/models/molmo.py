@@ -1,4 +1,3 @@
-import logging
 import math
 import re
 from array import array
@@ -45,8 +44,6 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
 from vllm.transformers_utils.processor import get_processor
 
 from .utils import get_vit_attn_backend
-
-log = logging.getLogger(__name__)
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
