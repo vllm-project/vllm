@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.utils import is_cpu
@@ -248,6 +248,7 @@ def check_logprobs_close(
 
 
 def build_model_context(model_name: str,
+                        task: TaskOption = "auto",
                         tokenizer_name: Optional[str] = None,
                         trust_remote_code: bool = False,
                         dtype: Optional[Union[str, torch.dtype]] = None,
@@ -273,7 +274,7 @@ def build_model_context(model_name: str,
 
     model_config = ModelConfig(
         model_name,
-        task="auto",
+        task=task,
         tokenizer=tokenizer_name,
         tokenizer_mode="auto",
         trust_remote_code=trust_remote_code,

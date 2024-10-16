@@ -87,6 +87,7 @@ def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
     # https://huggingface.co/microsoft/Phi-3.5-vision-instruct/blob/main/processing_phi3_v.py#L194
     llm = LLM(
         model="microsoft/Phi-3.5-vision-instruct",
+        task="generate",
         trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=2,
