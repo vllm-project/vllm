@@ -1,0 +1,15 @@
+# FIXME(kzawora): these scores were generated using vLLM on HPU, we need to confirm them on HF
+# VLLM_SKIP_WARMUP=true bash run-lm-eval-gsm-cot-llama-vllm-baseline.sh -m "/mnt/weka/data/pytorch/llama3.1/Meta-Llama-3.1-8B-Instruct" -b 128 -l 1319 -f 8 -t 1
+model_name: "/mnt/weka/data/pytorch/llama3.1/Meta-Llama-3.1-8B-Instruct"
+tasks:
+- name: "gsm8k_cot_llama"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.8317
+  - name: "exact_match,flexible-extract"
+    value: 0.8355
+limit: null
+num_fewshot: 8
+dtype: "bfloat16"
+fewshot_as_multiturn: true
+apply_chat_template: true

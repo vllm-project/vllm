@@ -33,7 +33,6 @@ CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
 
 logger = init_logger(__name__)
 
-POLLING_TIMEOUT_MS = 10000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
@@ -131,6 +130,9 @@ class MQLLMEngine:
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
                          usage_context: UsageContext, ipc_path: str):
         """Creates an MQLLMEngine from the engine arguments."""
+        # Setup plugins for each process
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
 
         engine_config = engine_args.create_engine_config()
 
@@ -207,7 +209,7 @@ class MQLLMEngine:
             self._alive()
             if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
-                while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                while self.input_socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
                     self._alive()
                     self.engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
@@ -283,7 +285,8 @@ class MQLLMEngine:
                 params=request.params,
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
-                prompt_adapter_request=request.prompt_adapter_request)
+                prompt_adapter_request=request.prompt_adapter_request,
+                priority=request.priority)
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)

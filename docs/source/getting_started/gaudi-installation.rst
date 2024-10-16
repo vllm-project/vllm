@@ -8,8 +8,8 @@ Requirements and Installation
 
 Please follow the instructions provided in the `Gaudi Installation
 Guide <https://docs.habana.ai/en/latest/Installation_Guide/index.html>`__
-to set up the environment. To achieve the best performance, please
-follow the methods outlined in the `Optimizing Training Platform
+to set up the execution environment. To achieve the best performance,
+please follow the methods outlined in the `Optimizing Training Platform
 Guide <https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html>`__.
 
 Requirements
@@ -18,14 +18,33 @@ Requirements
 -  OS: Ubuntu 22.04 LTS
 -  Python: 3.10
 -  Intel Gaudi accelerator
--  Intel Gaudi software version 1.17.0
+-  Intel Gaudi software version 1.18.0
+
+
+Quick start using Dockerfile
+============================
+.. code:: console
+
+   $ docker build -f Dockerfile.hpu -t vllm-hpu-env  .
+   $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
+
+
+.. tip::
+   If you're observing the following error: ``docker: Error response from daemon: Unknown runtime specified habana.``, please refer to "Install Using Containers" section of `Intel Gaudi Software Stack and Driver Installation <https://docs.habana.ai/en/v1.18.0/Installation_Guide/Bare_Metal_Fresh_OS.html`__. Make sure you have ``habana-container-runtime`` package installed and that ```habana`` container runtime is registered.
+
+
+Build from source
+=================
+
+Environment verification
+------------------------
 
 To verify that the Intel Gaudi software was correctly installed, run:
 
 .. code:: console
 
    $ hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
-   $ apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core and habanalabs-thunk are installed
+   $ apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
    $ pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
    $ pip list | grep neural # verify that neural_compressor is installed
 
@@ -45,8 +64,8 @@ Use the following commands to run a Docker image:
 
 .. code:: console
 
-   $ docker pull vault.habana.ai/gaudi-docker/1.17.0/ubuntu22.04/habanalabs/pytorch-installer-2.3.1:latest
-   $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.17.0/ubuntu22.04/habanalabs/pytorch-installer-2.3.1:latest
+   $ docker pull vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
+   $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 
 Build and Install vLLM
 ---------------------------
@@ -85,6 +104,7 @@ Supported Features
 -  Tensor parallelism support for multi-card inference
 -  Inference with `HPU Graphs <https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html>`__
    for accelerating low-batch latency and throughput
+-  Attention with Linear Biases (ALiBi)
 -  INC quantization
 
 Unsupported Features
@@ -92,7 +112,6 @@ Unsupported Features
 
 -  Beam search
 -  LoRA adapters
--  Attention with Linear Biases (ALiBi)
 -  AWQ quantization
 -  Prefill chunking (mixed-batch inferencing)
 
@@ -166,7 +185,7 @@ Currently in vLLM for HPU we support four execution modes, depending on selected
      - PyTorch lazy mode
 
 .. warning::
-   In 1.17.0, all modes utilizing ``PT_HPU_LAZY_MODE=0`` are highly experimental and should be only used for validating functional correctness. Their performance will be improved in the next releases. For obtaining the best performance in 1.17.0, please use HPU Graphs, or PyTorch lazy mode.
+   In 1.18.0, all modes utilizing ``PT_HPU_LAZY_MODE=0`` are highly experimental and should be only used for validating functional correctness. Their performance will be improved in the next releases. For obtaining the best performance in 1.18.0, please use HPU Graphs, or PyTorch lazy mode.
 
 
 Bucketing mechanism
@@ -219,7 +238,7 @@ As an example, if a request of 3 sequences, with max sequence length of 412 come
    Bucketing is transparent to a client - padding in sequence length dimension is never returned to the client, and padding in batch dimension does not create new requests.
 
 Warmup
-------------
+------
 
 Warmup is an optional, but highly recommended step occurring before vLLM server starts listening. It executes a forward pass for each bucket with dummy data. The goal is to pre-compile all graphs and not incur any graph compilation overheads within bucket boundaries during server runtime. Each warmup step is logged during vLLM startup:
 

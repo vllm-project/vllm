@@ -296,9 +296,19 @@ class HpuModelAdapter():
         mask = mask >= metadata.block_usage.unsqueeze(-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
-        block_mapping = torch.nn.functional.one_hot(
-            metadata.block_mapping.to(torch.long),
-            num_classes=batch_size).to(dtype)
+        if is_fake_hpu():
+            # Unfortunately one_hot on CPU doesn't handle
+            # out of bounds classes. We need to mask those
+            # values manually
+            oob_values = metadata.block_mapping.lt(0)
+            block_mapping = metadata.block_mapping.masked_fill(oob_values, 0)
+            block_mapping = torch.nn.functional.one_hot(block_mapping,
+                                                        num_classes=batch_size)
+            block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
+        else:
+            block_mapping = torch.nn.functional.one_hot(metadata.block_mapping,
+                                                        num_classes=batch_size)
+        block_mapping = block_mapping.to(dtype)
         metadata = metadata._replace(block_mapping=block_mapping,
                                      attn_bias=attn_bias)
         return metadata
@@ -519,7 +529,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.prompt_adapter_config = prompt_adapter_config
         self.return_hidden_states = return_hidden_states
         self.observability_config = observability_config
-        self.profiler = HabanaHighLevelProfiler()
 
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
@@ -538,13 +547,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.kv_cache_dtype = kv_cache_dtype
 
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
+            self.model_config.is_attention_free,
         )
 
         # Lazy initialization
@@ -553,6 +561,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.inc_initialized_successfully = False
 
         # Profiler stats
+        self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
         self.seen_configs: set = set()
         self._mem_margin: Optional[int] = None
@@ -587,7 +596,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
-        if self.model_config.quantization == 'inc':
+        if self.model_config.quantization == 'inc' or \
+           self.model_config.quantization == 'fp8':
             htcore.hpu_set_env()
         with HabanaMemoryProfiler() as m:
             with HabanaMemoryProfiler() as m_getmodel:
@@ -667,9 +677,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def _setup_buckets(self) -> None:
         align_bs = lambda x: min(self.max_num_seqs, x)
         max_bucket_cfg = 64
-        if self.lora_config and \
-            max_bucket_cfg > self.max_num_batched_tokens // self.block_size:
-            max_bucket_cfg = self.max_num_batched_tokens // self.block_size
         #FIXME: The default values should be max_model_len
         max_prompt_seq = 1024
         max_decode_seq = 2048
@@ -872,6 +879,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_usage=None,
             block_indices=block_indices,
             block_offsets=block_offsets,
+            block_scales=None,
             attn_bias=None,
             seq_lens_tensor=seq_lens_tensor,
             num_prefills=real_num_seqs,
@@ -967,7 +975,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         num_decode_tokens = sum(seq_lens)
 
         blocks_used = [len(bt) for bt in block_tables if bt]
-        block_list = list(itertools.chain(*block_tables))
+        block_list = []
+        block_scales = []
+        for i, bt in enumerate(block_tables):
+            block_list.extend(bt)
+            blocks_in_group = len(bt)
+            if blocks_in_group > 0:
+                scale = 1.0 / blocks_in_group
+                block_scales.extend([scale] * blocks_in_group)
+
         block_mapping_nested: List[List[int]] = [
             [i] * b_u for i, b_u in enumerate(blocks_used)
         ]
@@ -983,18 +999,19 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         block_bucket_size = find_bucket(len(block_list),
                                         self.decode_block_bucket_cfg)
-        block_list = pad_list(block_list, block_bucket_size, _PAD_SLOT_ID)
-        block_mapping = pad_list(block_mapping, block_bucket_size, 0)
-        block_usage = pad_list(block_usage, block_bucket_size, 0)
+        block_list = pad_list(block_list, block_bucket_size, _PAD_BLOCK_ID)
+        block_mapping = pad_list(block_mapping, block_bucket_size, -1)
+        block_usage = pad_list(block_usage, block_bucket_size, 1)
+        block_scales = pad_list(block_scales, block_bucket_size, 0.0)
 
         block_list = torch.tensor(block_list,
                                   dtype=torch.int,
                                   device=self.device)
         block_mapping = torch.tensor(block_mapping,
-                                     dtype=torch.int,
+                                     dtype=torch.long,
                                      device=self.device)
         block_usage = torch.tensor(block_usage,
-                                   dtype=torch.bfloat16,
+                                   dtype=self.model_config.dtype,
                                    device=self.device)
 
         slot_mapping = torch.tensor(slot_mapping,
@@ -1003,6 +1020,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         block_indices, block_offsets = precompute_indices_and_offsets(
             self.block_size, slot_mapping, False)
+        block_scales = torch.tensor(block_scales,
+                                    dtype=self.model_config.dtype,
+                                    device=self.device)
+
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             block_list=block_list,
@@ -1010,6 +1031,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_usage=block_usage,
             block_indices=block_indices,
             block_offsets=block_offsets,
+            block_scales=block_scales,
             attn_bias=None,
             seq_lens_tensor=None,
             num_prefills=0,
@@ -1221,7 +1243,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
             'attn_bias', 'seq_lens_tensor', 'block_list', 'block_mapping',
             'block_usage', 'slot_mapping', 'is_prompt', 'block_indices',
-            'block_offsets'
+            'block_offsets', 'block_scales'
         ])
         return attention_metadata
 
@@ -1475,11 +1497,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.prompt_buckets, prompt_omitted_buckets = generate_prompt_buckets(
             self.prompt_bs_bucket_cfg, self.prompt_seq_bucket_cfg,
             self.max_num_batched_tokens)
-        if self.lora_config:
-            self.prompt_buckets[:] = [
-                bucket for bucket in self.prompt_buckets
-                if self._is_valid_bucket(bucket)
-            ]
 
         msg = (
             f"Generated {len(self.prompt_buckets)} "
@@ -1497,11 +1514,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.decode_buckets = generate_decode_buckets(
             self.decode_bs_bucket_cfg, self.decode_block_bucket_cfg,
             max_blocks)
-        if self.lora_config:
-            self.decode_buckets[:] = [
-                bucket for bucket in self.decode_buckets
-                if self._is_valid_bucket(bucket)
-            ]
         logger.info("Generated %d decode buckets [bs, total_blocks]: %s",
                     len(self.decode_buckets),
                     list(sorted(self.decode_buckets)))
@@ -1762,8 +1774,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         """
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             assert seq_group_metadata_list is not None
-            self.profiler_counter_helper.capture_seq_group_metadata_stats(
-                seq_group_metadata_list=seq_group_metadata_list)
+            if self.profiler.enabled:
+                self.profiler_counter_helper.capture_seq_group_metadata_stats(
+                    seq_group_metadata_list=seq_group_metadata_list)
             model_input, sampling_metadata = self.prepare_input_tensors(
                 seq_group_metadata_list)
             assert model_input.attn_metadata is not None

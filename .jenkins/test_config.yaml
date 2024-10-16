@@ -1,0 +1,24 @@
+# test_config.yaml
+stages:
+  - name: test_gsm8k_small_models
+    steps:
+      - name: gsm8k_small_g3_tp1
+        flavor: g3
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
+      - name: gsm8k_small_g3_tp2
+        flavor: g3.s
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
+      - name: gsm8k_small_g2_tp1
+        flavor: g2
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
+      - name: gsm8k_small_g2_tp2
+        flavor: g2.s
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
+  - name: test_gsm8k_large_models
+    steps:
+      - name: gsm8k_large_g3_tp2
+        flavor: g3.s
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 2
+      - name: gsm8k_large_g2_tp4
+        flavor: g2.m
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 4

@@ -157,7 +157,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat"):
+            if model_type in ("chameleon", "internvl_chat", "NVLM_D"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
@@ -301,6 +301,28 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("audio", audio_coro)
         self._add_placeholder(placeholder)
+
+
+def validate_chat_template(chat_template: Optional[Union[Path, str]]):
+    """Raises if the provided chat template appears invalid."""
+    if chat_template is None:
+        return
+
+    elif isinstance(chat_template, Path) and not chat_template.exists():
+        raise FileNotFoundError(
+            "the supplied chat template path doesn't exist")
+
+    elif isinstance(chat_template, str):
+        JINJA_CHARS = "{}\n"
+        if not any(c in chat_template
+                   for c in JINJA_CHARS) and not Path(chat_template).exists():
+            raise ValueError(
+                f"The supplied chat template string ({chat_template}) "
+                f"appears path-like, but doesn't exist!")
+
+    else:
+        raise TypeError(
+            f"{type(chat_template)} is not a valid chat template type")
 
 
 def load_chat_template(
