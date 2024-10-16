@@ -239,8 +239,7 @@ void causal_conv1d_update(const at::Tensor &x,
     set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
                         bias_,
                         silu_activation,
-                        pad_slot_id
-                        );
+                        pad_slot_id);
     params.conv_state_ptr = conv_state.data_ptr();
     params.conv_state_len = conv_state_len;
     // All stride are in elements, not bytes.

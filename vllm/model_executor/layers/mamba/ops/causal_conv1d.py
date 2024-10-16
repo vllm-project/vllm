@@ -40,7 +40,7 @@ def causal_conv1d_fn(x: torch.Tensor,
     pad_slot_id: int
             if cache_indices is passed, lets the kernel identify padded 
             entries that will not be processed, 
-            for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id] 
+            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id] 
             in this case, the kernel will not process entries at 
             indices 0 and 3
 

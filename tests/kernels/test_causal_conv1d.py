@@ -259,7 +259,8 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation,
 @pytest.mark.parametrize("seqlen", [1, 4, 5])
 @pytest.mark.parametrize("width", [2, 3, 4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
-@pytest.mark.parametrize("with_padding", [True, False])
+# tests correctness in case subset of the sequences are padded
+@pytest.mark.parametrize("with_padding", [True, False]) 
 def test_causal_conv1d_update_with_batch_gather(with_padding, dim, width,
                                                 seqlen, has_bias,
                                                 silu_activation, itype):
@@ -332,6 +333,7 @@ def test_causal_conv1d_update_with_batch_gather(with_padding, dim, width,
 @pytest.mark.parametrize('seqlen',
                          [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 4096])
 @pytest.mark.parametrize('dim', [64, 4096])
+# tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize('with_padding', [True, False])
 def test_causal_conv1d_varlen(with_padding, dim, seqlen, width, has_bias,
                               silu_activation, itype):
@@ -344,8 +346,6 @@ def test_causal_conv1d_varlen(with_padding, dim, seqlen, width, has_bias,
     seqlens = []
     batch_size = 4
     if seqlen < 10:
-        if with_padding:
-            pytest.skip()
         batch_size = 1
     padding = 3 if with_padding else 0
     padded_batch_size = batch_size + padding

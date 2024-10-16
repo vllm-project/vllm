@@ -143,18 +143,11 @@ def _selective_scan_update_kernel(
     if HAS_Z:
         z_ptrs = z_ptr + offs_m * stride_z_dim
     out_ptrs = out_ptr + offs_m * stride_out_dim
-
+    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
-        state = tl.load(state_ptrs,
-                        mask=(offs_m[:, None] < dim) &
-                        (offs_n[None, :] < dstate) &
-                        (state_batch_idx != pad_slot_id),
-                        other=0.0)
-    else:
-        state = tl.load(state_ptrs,
-                        mask=(offs_m[:, None] < dim) &
-                        (offs_n[None, :] < dstate),
-                        other=0.0)
+        mask &= (state_batch_idx != pad_slot_id)
+    state = tl.load(state_ptrs, mask= mask, other=0.0)
+
     x = tl.load(x_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
     if not TIE_HDIM:
         dt = tl.load(dt_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
@@ -185,15 +178,13 @@ def _selective_scan_update_kernel(
 
     dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
     state = state * dA + dB * x[:, None]
+
+    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
-        tl.store(state_ptrs,
-                 state,
-                 mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate) &
-                 (state_batch_idx != pad_slot_id))
-    else:
-        tl.store(state_ptrs,
-                 state,
-                 mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate))
+        mask &= (state_batch_idx != pad_slot_id)
+    tl.store(state_ptrs,
+             state,
+             mask= mask)
     out = tl.sum(state * C[None, :], axis=1)
     if HAS_D:
         out += x * D
@@ -228,7 +219,7 @@ def selective_state_update(state,
         pad_slot_id: int
             if cache_indices is passed, lets the kernel identify padded 
             entries that will not be processed, 
-            for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id] 
+            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id] 
             in this case, the kernel will not process entries at 
             indices 0 and 3
     Return:

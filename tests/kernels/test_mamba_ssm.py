@@ -406,6 +406,7 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 @pytest.mark.parametrize("varBC_groups", [1, 2])
 @pytest.mark.parametrize("is_variable_C", [True])
 @pytest.mark.parametrize("is_variable_B", [True])
+# tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [False, True])
 def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
                                varBC_groups, has_D, has_z, has_delta_bias,
@@ -426,11 +427,12 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
     seqlens = []
     batch_size = 4
     if seqlen < 10:
-        if with_padding:
-            pytest.skip()
         batch_size = 1
     padding = 3 if with_padding else 0
     padded_batch_size = batch_size + padding
+
+    if with_padding and seqlen < padded_batch_size:
+        pytest.skip()
 
     nsplits = padded_batch_size - 1
     eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
@@ -546,6 +548,7 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
 @pytest.mark.parametrize("has_z", [True])
 @pytest.mark.parametrize("dstate", [16, 32, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
+# tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [True, False])
 def test_selective_state_update_with_batch_indices(with_padding, dim, dstate,
                                                    has_z, itype):
