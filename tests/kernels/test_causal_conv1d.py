@@ -331,13 +331,14 @@ def test_causal_conv1d_update_with_batch_gather(with_padding, dim, width,
 @pytest.mark.parametrize("has_bias", [True])
 @pytest.mark.parametrize("width", [4])
 @pytest.mark.parametrize('seqlen',
-                         [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 4096])
+                         [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 2049, 4096])
 @pytest.mark.parametrize('dim', [64, 4096])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize('with_padding', [True, False])
 def test_causal_conv1d_varlen(with_padding, dim, seqlen, width, has_bias,
                               silu_activation, itype):
     device = "cuda"
+    torch.cuda.empty_cache()
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
@@ -385,16 +386,11 @@ def test_causal_conv1d_varlen(with_padding, dim, seqlen, width, has_bias,
     state_indices = torch.randperm(total_entries,
                                    dtype=torch.int32,
                                    device=x.device)[:batch_size]
-    unused_states_bool = torch.ones(total_entries,
-                                    dtype=torch.bool,
-                                    device=device)
-    unused_states_bool[state_indices] = False
     padded_state_indices = torch.concat([
         state_indices,
         torch.as_tensor(
             [PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
-    ],
-                                        dim=-1)
+    ], dim=-1)
 
     out = causal_conv1d_fn(x.squeeze(0), weight, bias, cumsum.cuda(),
                            padded_state_indices, has_initial_states,
