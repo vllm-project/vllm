@@ -12,16 +12,19 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
+
 class FatreluAndMul(CustomOp):
-    """An activation function for FatReLU.
+    """An activation function for FATReLU.
     
-    The function computes x -> FatReLU(x[:d]) * x[d:] where d = x.shape[-1] // 2.
+    The function computes x -> FATReLU(x[:d]) * x[d:] where
+    d = x.shape[-1] // 2.
     This is used in openbmb/MiniCPM-S-1B-sft.
 
     Shapes:
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
+
     def __init__(self, threshold: float = 0.):
         super().__init__()
         self.threshold = threshold

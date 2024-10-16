@@ -33,7 +33,7 @@ from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.activation import (FatreluAndMul, SiluAndMul)
+from vllm.model_executor.layers.activation import FatreluAndMul, SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -164,7 +164,7 @@ class MiniCPMMLP(nn.Module):
                                            hidden_size,
                                            bias=False,
                                            quant_config=quant_config)
-        if hidden_act == "silu": 
+        if hidden_act == "silu":
             self.act_fn = SiluAndMul()
         elif hidden_act == "fatrelu":
             self.act_fn = FatreluAndMul(threshold=hidden_act_param)
