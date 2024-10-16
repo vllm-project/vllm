@@ -384,16 +384,19 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
       // C=s_a * C_inter + bias.
       torch::Tensor tmp_fp32_out =
           torch::empty_like(c, ::at::ScalarType::Float);
+      // Compute C_inter=s_b * (A@B)
       DNNLPrimitiveHelper<true>::gemm_s8s8_jit<float, void>(
           a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
           tmp_fp32_out.data_ptr<float>(), nullptr, a.size(0), b.size(1),
           a.size(1), nullptr, b_scales.data_ptr<float>(), 0, b_scales.numel());
       if (bias.has_value()) {
+        // Compute C=s_a * C_inter + bias
         dynamic_quant_epilogue<false, true, true>(
             tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
             a_scales.data_ptr<float>(), nullptr, nullptr, nullptr,
             bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
       } else {
+        // Compute C=s_a * C_inter
         dynamic_quant_epilogue<false, true, false, scalar_t>(
             tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
             a_scales.data_ptr<float>(), nullptr, nullptr, nullptr, nullptr,
@@ -402,12 +405,14 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
     } else {
       // per-tensor
       if (bias.has_value()) {
+        // Compute C=s_a * s_b * (A@B) + bias
         DNNLPrimitiveHelper<false>::gemm_s8s8_jit(
             a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), c.data_ptr<scalar_t>(),
             bias->data_ptr<scalar_t>(), a.size(0), b.size(1), a.size(1),
             a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
             a_scales.numel(), b_scales.numel());
       } else {
+        // Compute C=s_a * s_b * (A@B)
         DNNLPrimitiveHelper<false>::gemm_s8s8_jit<scalar_t, void>(
             a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), c.data_ptr<scalar_t>(),
             nullptr, a.size(0), b.size(1), a.size(1),
@@ -463,11 +468,13 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
     if (a_scales.numel() != 1) {
       // per-token
       // Note: oneDNN doesn't support per-token activation quantization
+      // Compute C_inter=s_b * (A@B)
       DNNLPrimitiveHelper<true>::gemm_s8s8_jit<float, void>(
           a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
           tmp_fp32_out.data_ptr<float>(), nullptr, a.size(0), b.size(1),
           a.size(1), nullptr, b_scales.data_ptr<float>(), 0, b_scales.numel());
       if (bias.has_value()) {
+        // Compute C=s_a * C_inter - s_a * s_b * azp * azp_adj + bias
         if (b_scales.numel() != 1) {
           // Per-Channel
           dynamic_quant_epilogue<true, true, true>(
@@ -484,6 +491,7 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
               bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
         }
       } else {
+        // Compute C=s_a * C_inter - s_a * s_b * azp * azp_adj
         if (b_scales.numel() != 1) {
           // Per-Channel
           dynamic_quant_epilogue<true, true, false, scalar_t>(
@@ -503,12 +511,14 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
     } else {
       // per-tensor
       if (bias.has_value()) {
+        // Compute C_inter=s_a * s_b * (A@B) + bias
         DNNLPrimitiveHelper<false>::gemm_s8s8_jit(
             a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
             tmp_fp32_out.data_ptr<float>(), bias->data_ptr<scalar_t>(),
             a.size(0), b.size(1), a.size(1), a_scales.data_ptr<float>(),
             b_scales.data_ptr<float>(), a_scales.numel(), b_scales.numel());
       } else {
+        // Compute C_inter=s_a * s_b * (A@B)
         DNNLPrimitiveHelper<false>::gemm_s8s8_jit<float, void>(
             a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
             tmp_fp32_out.data_ptr<float>(), nullptr, a.size(0), b.size(1),
@@ -516,6 +526,7 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
             a_scales.numel(), b_scales.numel());
       }
 
+      // Compute C=C_inter - s_a * s_b * azp_adj
       if (b_scales.numel() != 1) {
         // Per-Channel
         static_quant_epilogue<true>(
