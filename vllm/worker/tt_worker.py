@@ -102,8 +102,8 @@ class TTCacheEngine:
                     mesh_mapper=ReplicateTensorToMesh(self.device_config.device),
                     layout=ttnn.TILE_LAYOUT,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    dtype=ttnn.bfloat8_b
-                    # TODO: Add caching to speed this up
+                    dtype=ttnn.bfloat8_b,
+                    cache_file_name = self.cache_config.tt_cache_path / f"empty_cache_paged_attention{kv_cache_shape}"
                 ) for lp in (cache_kv, cache_kv)]
                 
                 kv_cache.append(kv_tt)
@@ -233,10 +233,10 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
-        # TODO: Add proper implementation
-        # max_context_per_user = self.scheduler_config.max_model_len
-        max_context_per_user = 4096  # TODO: debugging
-        num_tt_blocks = math.ceil(max_context_per_user * self.scheduler_config.max_num_seqs / self.cache_config.block_size)
+        # TODO: Add proper implementation which runs profiling on TT devices
+        max_tokens_all_users = 131072
+        num_tt_blocks = math.ceil(max_tokens_all_users / self.cache_config.block_size)
+        num_tt_blocks = int(num_tt_blocks * 1.01)  # Add 1% to account for vLLM's watermark_blocks
         num_cpu_blocks = 0
         return num_tt_blocks, num_cpu_blocks
 
@@ -262,6 +262,10 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
+        
+        # Get cache path from TT model for caching kv blocks
+        self.cache_config.tt_cache_path = self.model_runner.model.cache_path
+        
         self.cache_engine = TTCacheEngine(
             self.cache_config, 
             self.model_config, 

@@ -22,5 +22,5 @@ class TTModelLoader(BaseModelLoader):
         arch_names[0] = "TT" + arch_names[0]
         
         model_class, _ = get_model_architecture(model_config)
-        model = model_class.initialize_vllm_model(model_config.hf_config, device_config.device)
+        model = model_class.initialize_vllm_model(model_config.hf_config, device_config.device, scheduler_config.max_num_seqs)
         return model
