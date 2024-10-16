@@ -141,12 +141,8 @@ class RequestOutput:
             top_n_seqs = seqs
         else:
             # Get the top-n sequences.
-            n = sampling_params.n
-            if sampling_params.use_beam_search:
-                sorting_key = lambda seq: seq.get_beam_search_score(
-                    sampling_params.length_penalty)
-            else:
-                sorting_key = lambda seq: seq.get_cumulative_logprob()
+            n = sampling_params._real_n or sampling_params.n
+            sorting_key = lambda seq: seq.get_cumulative_logprob()
             sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
             top_n_seqs = sorted_seqs[:n]
 

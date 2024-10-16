@@ -140,7 +140,7 @@ $ vllm serve SOME_MODEL --config config.yaml
 ```
 ---
 **NOTE**  
-In case an argument is supplied using command line and the config file, the value from the commandline will take precedence.
+In case an argument is supplied simultaneously using command line and the config file, the value from the commandline will take precedence.
 The order of priorities is `command line > config file values > defaults`.
 
 ---

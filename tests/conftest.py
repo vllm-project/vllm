@@ -35,6 +35,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
 
@@ -261,7 +262,7 @@ class HfRunner:
         dtype: str = "half",
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
-        is_embedding_model: bool = False,
+        is_sentence_transformer: bool = False,
         auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
@@ -270,13 +271,14 @@ class HfRunner:
 
         self.model_name = model_name
 
-        if is_embedding_model:
+        if is_sentence_transformer:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
             self.model = self.wrap_device(
                 SentenceTransformer(
                     model_name,
                     device="cpu",
+                    trust_remote_code=True,
                 ).to(dtype=torch_dtype))
         else:
             model_kwargs = model_kwargs if model_kwargs is not None else {}
@@ -305,17 +307,23 @@ class HfRunner:
 
         self.postprocess_inputs = postprocess_inputs
 
-    def generate(
+    def get_inputs(
         self,
         prompts: List[str],
         images: Optional[PromptImageInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
-        **kwargs: Any,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
-        if images:
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> List[BatchEncoding]:
+        if images is not None:
             assert len(prompts) == len(images)
 
-        outputs: List[Tuple[List[List[int]], List[str]]] = []
+        if videos is not None:
+            assert len(prompts) == len(videos)
+
+        if audios is not None:
+            assert len(prompts) == len(audios)
+
+        all_inputs: List[BatchEncoding] = []
         for i, prompt in enumerate(prompts):
             processor_kwargs: Dict[str, Any] = {
                 "text": prompt,
@@ -325,10 +333,33 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
             if videos is not None and videos[i] is not None:
                 processor_kwargs["videos"] = videos[i]
+            if audios is not None and audios[i] is not None:
+                audio, sr = audios[i]
+                processor_kwargs["audio"] = audio
+                processor_kwargs["sampling_rate"] = sr
 
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
 
+            all_inputs.append(inputs)
+
+        return all_inputs
+
+    def generate(
+        self,
+        prompts: List[str],
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
+        audios: Optional[PromptAudioInput] = None,
+        **kwargs: Any,
+    ) -> List[Tuple[List[List[int]], List[str]]]:
+        all_inputs = self.get_inputs(prompts,
+                                     images=images,
+                                     videos=videos,
+                                     audios=audios)
+
+        outputs: List[Tuple[List[List[int]], List[str]]] = []
+        for inputs in all_inputs:
             output_ids = self.model.generate(
                 **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
@@ -348,12 +379,16 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
+        audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[int], str]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
                                 images=images,
+                                videos=videos,
+                                audios=audios,
                                 **kwargs)
 
         return [(output_ids[0], output_str[0])
@@ -386,22 +421,16 @@ class HfRunner:
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[List[np.ndarray]] = None,
+        audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[List[torch.Tensor]]:
+        all_inputs = self.get_inputs(prompts,
+                                     images=images,
+                                     videos=videos,
+                                     audios=audios)
+
         all_logprobs: List[List[torch.Tensor]] = []
-        for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
-            if images is not None and images[i] is not None:
-                processor_kwargs["images"] = images[i]
-            if videos is not None and videos[i] is not None:
-                processor_kwargs["videos"] = videos[i]
-
-            inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs)
-
+        for inputs in all_inputs:
             output = self.model.generate(
                 **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
@@ -473,28 +502,16 @@ class HfRunner:
         videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
     ) -> List[TokensTextLogprobs]:
+        all_inputs = self.get_inputs(prompts,
+                                     images=images,
+                                     videos=videos,
+                                     audios=audios)
+
         all_logprobs: List[List[Dict[int, float]]] = []
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
 
-        for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
-            if images is not None and images[i] is not None:
-                processor_kwargs["images"] = images[i]
-
-            if audios is not None:
-                audio, sr = audios[i]
-                processor_kwargs["audio"] = audio
-                processor_kwargs["sampling_rate"] = sr
-
-            if videos is not None:
-                processor_kwargs["videos"] = videos[i]
-            inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs)
-
+        for inputs in all_inputs:
             output = self.model.generate(
                 **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
@@ -630,19 +647,49 @@ class VllmRunner:
             **kwargs,
         )
 
-    def generate(
+    def get_inputs(
         self,
         prompts: List[str],
-        sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> List[TextPrompt]:
         if images is not None:
             assert len(prompts) == len(images)
+
+        if videos is not None:
+            assert len(prompts) == len(videos)
+
+        if audios is not None:
+            assert len(prompts) == len(audios)
 
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
                 inputs[i]["multi_modal_data"] = {"image": image}
+
+        if videos is not None:
+            for i, video in enumerate(videos):
+                inputs[i]["multi_modal_data"] = {"video": video}
+
+        if audios is not None:
+            for i, audio in enumerate(audios):
+                inputs[i]["multi_modal_data"] = {"audio": audio}
+
+        return inputs
+
+    def generate(
+        self,
+        prompts: List[str],
+        sampling_params: SamplingParams,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> List[Tuple[List[List[int]], List[str]]]:
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -685,24 +732,10 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
-        if images is not None:
-            assert len(prompts) == len(images)
-
-        if videos is not None:
-            assert len(prompts) == len(videos)
-
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
-        if images is not None:
-            for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = {"image": image}
-
-        if audios is not None:
-            for i, audio in enumerate(audios):
-                inputs[i]["multi_modal_data"] = {"audio": audio}
-
-        if videos is not None:
-            for i, video in enumerate(videos):
-                inputs[i]["multi_modal_data"] = {"video": video}
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -739,9 +772,15 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        outputs = self.generate(prompts, greedy_params, images=images)
+        outputs = self.generate(prompts,
+                                greedy_params,
+                                images=images,
+                                videos=videos,
+                                audios=audios)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 
@@ -780,7 +819,6 @@ class VllmRunner:
                List[TokensTextLogprobsPromptLogprobs]]:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0,
-            use_beam_search=False,
             max_tokens=max_tokens,
             logprobs=num_logprobs,
             prompt_logprobs=(num_prompt_logprobs),
@@ -794,24 +832,13 @@ class VllmRunner:
 
     def generate_beam_search(
         self,
-        prompts: List[str],
-        beam_width: int,
-        max_tokens: int,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
-        beam_search_params = SamplingParams(n=beam_width,
-                                            use_beam_search=True,
-                                            temperature=0.0,
-                                            max_tokens=max_tokens)
-        outputs = self.generate(prompts, beam_search_params)
-        return outputs
-
-    def generate_beam_search_new(
-        self,
         prompts: Union[List[str], List[List[int]]],
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        outputs = self.model.beam_search(prompts, beam_width, max_tokens)
+        outputs = self.model.beam_search(
+            prompts,
+            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
         returned_outputs = []
         for output in outputs:
             token_ids = [x.tokens for x in output.sequences]
@@ -879,15 +906,17 @@ def num_gpus_available():
 
 
 temp_dir = tempfile.gettempdir()
-_dummy_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
+_dummy_llava_path = os.path.join(temp_dir, "dummy_llava")
+_dummy_gemma2_embedding_path = os.path.join(temp_dir, "dummy_gemma2_embedding")
 
 
 @pytest.fixture
 def dummy_opt_path():
-    json_path = os.path.join(_dummy_path, "config.json")
-    if not os.path.exists(_dummy_path):
+    json_path = os.path.join(_dummy_opt_path, "config.json")
+    if not os.path.exists(_dummy_opt_path):
         snapshot_download(repo_id="facebook/opt-125m",
-                          local_dir=_dummy_path,
+                          local_dir=_dummy_opt_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
                               "*.msgpack"
@@ -898,4 +927,42 @@ def dummy_opt_path():
         config["architectures"] = ["MyOPTForCausalLM"]
         with open(json_path, "w") as f:
             json.dump(config, f)
-    return _dummy_path
+    return _dummy_opt_path
+
+
+@pytest.fixture
+def dummy_llava_path():
+    json_path = os.path.join(_dummy_llava_path, "config.json")
+    if not os.path.exists(_dummy_llava_path):
+        snapshot_download(repo_id="llava-hf/llava-1.5-7b-hf",
+                          local_dir=_dummy_llava_path,
+                          ignore_patterns=[
+                              "*.bin", "*.bin.index.json", "*.pt", "*.h5",
+                              "*.msgpack"
+                          ])
+        assert os.path.exists(json_path)
+        with open(json_path, "r") as f:
+            config = json.load(f)
+        config["architectures"] = ["MyLlava"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_llava_path
+
+
+@pytest.fixture
+def dummy_gemma2_embedding_path():
+    json_path = os.path.join(_dummy_gemma2_embedding_path, "config.json")
+    if not os.path.exists(_dummy_gemma2_embedding_path):
+        snapshot_download(repo_id="BAAI/bge-multilingual-gemma2",
+                          local_dir=_dummy_gemma2_embedding_path,
+                          ignore_patterns=[
+                              "*.bin", "*.bin.index.json", "*.pt", "*.h5",
+                              "*.msgpack"
+                          ])
+        assert os.path.exists(json_path)
+        with open(json_path, "r") as f:
+            config = json.load(f)
+        config["architectures"] = ["MyGemma2Embedding"]
+        with open(json_path, "w") as f:
+            json.dump(config, f)
+    return _dummy_gemma2_embedding_path
