@@ -94,7 +94,7 @@ namespace vllm {
 template <typename scalar_t, typename scale_type>
 __global__ void static_scaled_int8_quant_kernel(
     scalar_t const* __restrict__ input, int8_t* __restrict__ out,
-    scale_type const* scale_ptr, const int64_t hidden_size) {
+    scale_type const* scale_ptr, const int hidden_size) {
   int const tid = threadIdx.x;
   int64_t const token_idx = blockIdx.x;
   scale_type const scale = *scale_ptr;
@@ -111,7 +111,7 @@ template <typename scalar_t, typename scale_type, typename azp_type>
 __global__ void static_scaled_int8_azp_quant_kernel(
     scalar_t const* __restrict__ input, int8_t* __restrict__ out,
     scale_type const* scale_ptr, azp_type const* azp_ptr,
-    const int64_t hidden_size) {
+    const int hidden_size) {
   int const tid = threadIdx.x;
   int64_t const token_idx = blockIdx.x;
   scale_type const scale = *scale_ptr;
@@ -130,7 +130,7 @@ __global__ void static_scaled_int8_azp_quant_kernel(
 template <typename scalar_t, typename scale_type>
 __global__ void dynamic_scaled_int8_quant_kernel(
     scalar_t const* __restrict__ input, int8_t* __restrict__ out,
-    scale_type* scale, const int64_t hidden_size) {
+    scale_type* scale, const int hidden_size) {
   int const tid = threadIdx.x;
   int64_t const token_idx = blockIdx.x;
   float absmax_val = 0.0f;
@@ -165,7 +165,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
 template <typename scalar_t, typename scale_type, typename azp_type>
 __global__ void dynamic_scaled_int8_azp_quant_kernel(
     scalar_t const* __restrict__ input, int8_t* __restrict__ out,
-    scale_type* scale, azp_type* azp, const int64_t hidden_size) {
+    scale_type* scale, azp_type* azp, const int hidden_size) {
   int64_t const token_idx = blockIdx.x;
 
   out += token_idx * hidden_size;
