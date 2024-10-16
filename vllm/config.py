@@ -174,7 +174,9 @@ class ModelConfig:
             self.enforce_eager = False
 
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
-        has_interleaved_attention = (sliding_window is not None) and (isinstance(sliding_window, list) or (self.hf_text_config.model_type in ["gemma2"]))
+        has_interleaved_attention = (sliding_window is not None) and (
+            isinstance(sliding_window, list) or
+            (self.hf_text_config.model_type in ["gemma2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
             sliding_window_len_min = get_min_sliding_window(
@@ -427,7 +429,7 @@ class ModelConfig:
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
-            self) -> Union[Optional[int], List[Optional[int]]]]:
+            self) -> Union[Optional[int], List[Optional[int]]]:
         """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
@@ -1815,7 +1817,7 @@ def get_min_sliding_window(
         sliding_window: Union[int, List[Optional[int]]]) -> int:
     if isinstance(sliding_window, list):
         return min(s for s in sliding_window if s is not None)
-    
+
     return sliding_window
 
 
