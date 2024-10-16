@@ -216,8 +216,8 @@ def main(args) -> None:
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for online inference with '
-        'multimodal language models with OpenAI client.')
+        description='Demo on using OpenAI client for online inference with '
+        'multimodal language models served with vLLM.')
     parser.add_argument('--chat-type',
                         '-c',
                         type=str,
