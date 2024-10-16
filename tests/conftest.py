@@ -262,7 +262,7 @@ class HfRunner:
         dtype: str = "half",
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
-        is_embedding_model: bool = False,
+        is_sentence_transformer: bool = False,
         auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
@@ -271,7 +271,7 @@ class HfRunner:
 
         self.model_name = model_name
 
-        if is_embedding_model:
+        if is_sentence_transformer:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
             self.model = self.wrap_device(
@@ -307,17 +307,23 @@ class HfRunner:
 
         self.postprocess_inputs = postprocess_inputs
 
-    def generate(
+    def get_inputs(
         self,
         prompts: List[str],
         images: Optional[PromptImageInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
-        **kwargs: Any,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
-        if images:
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> List[BatchEncoding]:
+        if images is not None:
             assert len(prompts) == len(images)
 
-        outputs: List[Tuple[List[List[int]], List[str]]] = []
+        if videos is not None:
+            assert len(prompts) == len(videos)
+
+        if audios is not None:
+            assert len(prompts) == len(audios)
+
+        all_inputs: List[BatchEncoding] = []
         for i, prompt in enumerate(prompts):
             processor_kwargs: Dict[str, Any] = {
                 "text": prompt,
@@ -327,10 +333,33 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
             if videos is not None and videos[i] is not None:
                 processor_kwargs["videos"] = videos[i]
+            if audios is not None and audios[i] is not None:
+                audio, sr = audios[i]
+                processor_kwargs["audio"] = audio
+                processor_kwargs["sampling_rate"] = sr
 
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
 
+            all_inputs.append(inputs)
+
+        return all_inputs
+
+    def generate(
+        self,
+        prompts: List[str],
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
+        audios: Optional[PromptAudioInput] = None,
+        **kwargs: Any,
+    ) -> List[Tuple[List[List[int]], List[str]]]:
+        all_inputs = self.get_inputs(prompts,
+                                     images=images,
+                                     videos=videos,
+                                     audios=audios)
+
+        outputs: List[Tuple[List[List[int]], List[str]]] = []
+        for inputs in all_inputs:
             output_ids = self.model.generate(
                 **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
@@ -350,12 +379,16 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
+        audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[int], str]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
                                 images=images,
+                                videos=videos,
+                                audios=audios,
                                 **kwargs)
 
         return [(output_ids[0], output_str[0])
@@ -388,22 +421,16 @@ class HfRunner:
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[List[np.ndarray]] = None,
+        audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[List[torch.Tensor]]:
+        all_inputs = self.get_inputs(prompts,
+                                     images=images,
+                                     videos=videos,
+                                     audios=audios)
+
         all_logprobs: List[List[torch.Tensor]] = []
-        for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
-            if images is not None and images[i] is not None:
-                processor_kwargs["images"] = images[i]
-            if videos is not None and videos[i] is not None:
-                processor_kwargs["videos"] = videos[i]
-
-            inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs)
-
+        for inputs in all_inputs:
             output = self.model.generate(
                 **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
@@ -475,28 +502,16 @@ class HfRunner:
         videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
     ) -> List[TokensTextLogprobs]:
+        all_inputs = self.get_inputs(prompts,
+                                     images=images,
+                                     videos=videos,
+                                     audios=audios)
+
         all_logprobs: List[List[Dict[int, float]]] = []
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
 
-        for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
-            if images is not None and images[i] is not None:
-                processor_kwargs["images"] = images[i]
-
-            if audios is not None:
-                audio, sr = audios[i]
-                processor_kwargs["audio"] = audio
-                processor_kwargs["sampling_rate"] = sr
-
-            if videos is not None:
-                processor_kwargs["videos"] = videos[i]
-            inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs)
-
+        for inputs in all_inputs:
             output = self.model.generate(
                 **self.wrap_device(inputs, device=self.model.device.type),
                 use_cache=True,
@@ -632,19 +647,49 @@ class VllmRunner:
             **kwargs,
         )
 
-    def generate(
+    def get_inputs(
         self,
         prompts: List[str],
-        sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> List[TextPrompt]:
         if images is not None:
             assert len(prompts) == len(images)
+
+        if videos is not None:
+            assert len(prompts) == len(videos)
+
+        if audios is not None:
+            assert len(prompts) == len(audios)
 
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
                 inputs[i]["multi_modal_data"] = {"image": image}
+
+        if videos is not None:
+            for i, video in enumerate(videos):
+                inputs[i]["multi_modal_data"] = {"video": video}
+
+        if audios is not None:
+            for i, audio in enumerate(audios):
+                inputs[i]["multi_modal_data"] = {"audio": audio}
+
+        return inputs
+
+    def generate(
+        self,
+        prompts: List[str],
+        sampling_params: SamplingParams,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> List[Tuple[List[List[int]], List[str]]]:
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -687,24 +732,10 @@ class VllmRunner:
         videos: Optional[PromptVideoInput] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
-        if images is not None:
-            assert len(prompts) == len(images)
-
-        if videos is not None:
-            assert len(prompts) == len(videos)
-
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
-        if images is not None:
-            for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = {"image": image}
-
-        if audios is not None:
-            for i, audio in enumerate(audios):
-                inputs[i]["multi_modal_data"] = {"audio": audio}
-
-        if videos is not None:
-            for i, video in enumerate(videos):
-                inputs[i]["multi_modal_data"] = {"video": video}
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -741,9 +772,15 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        outputs = self.generate(prompts, greedy_params, images=images)
+        outputs = self.generate(prompts,
+                                greedy_params,
+                                images=images,
+                                videos=videos,
+                                audios=audios)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 
