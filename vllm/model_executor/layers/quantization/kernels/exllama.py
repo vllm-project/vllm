@@ -30,6 +30,11 @@ class ExllamaLinearKernel(MPLinearKernel):
                           "when the input features are partitioned across "\
                           "devices"
 
+        if c.partition_weight_shape[1] % (32 // c.weight_type.size_bits) != 0:
+            return False, "Output features must be a multiple of the pack " \
+                            "factor (32 / num_bits) so that we can correctly " \
+                            "pack the zero points"
+
         if c.act_type != torch.float16:
             return False, "Exllama only supports float16 activations"
 
@@ -82,7 +87,7 @@ class ExllamaLinearKernel(MPLinearKernel):
 
             def transform_w_g_idx(x):
                 # Exllama wants the permutation array instead of the group
-                # incdices
+                # indices
                 return torch.argsort(x).to(torch.int)
 
             self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)
@@ -125,9 +130,7 @@ class ExllamaLinearKernel(MPLinearKernel):
 
         w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
 
-        #print(w_q.shape, w_s.shape, w_zp.shape, w_g_idx.shape)
-
-        assert w_zp is not None, "Zero points are not supported by Exllama"
+        assert w_zp is not None, "Zero points are required by Exllama"
         assert w_g_idx is not None, "Group index is required by Exllama"
         output = ops.gptq_gemm(x_2d, w_q, w_zp, w_s, w_g_idx, True,
                                c.weight_type.size_bits)
