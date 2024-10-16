@@ -124,7 +124,7 @@ class AutoWeightsLoader:
         base_prefix: str,
         param: nn.Parameter,
         weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> None:
+    ) -> Iterable[str]:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
 
@@ -143,12 +143,14 @@ class AutoWeightsLoader:
                                     default_weight_loader)
             weight_loader(param, weight_data)
 
+            yield weight_qualname
+
     def _load_module(
         self,
         base_prefix: str,
         module: nn.Module,
         weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> None:
+    ) -> Iterable[str]:
         if isinstance(module, PPMissingLayer):
             return
 
@@ -170,14 +172,16 @@ class AutoWeightsLoader:
                 continue
 
             if child_prefix in child_modules:
-                self._load_module(prefix, child_modules[child_prefix],
-                                  child_weights)
+                yield from self._load_module(prefix,
+                                             child_modules[child_prefix],
+                                             child_weights)
             elif child_prefix in child_params:
-                self._load_param(prefix, child_params[child_prefix],
-                                 child_weights)
+                yield from self._load_param(prefix, child_params[child_prefix],
+                                            child_weights)
             else:
                 if not self._can_ignore_unexpected(prefix):
-                    msg = f"There is no module or parameter named '{prefix}'"
+                    msg = (f"There is no module or parameter named '{prefix}' "
+                           f"in {type(self.module).__name__}")
                     raise ValueError(msg)
 
     def load_weights(
@@ -185,11 +189,12 @@ class AutoWeightsLoader:
         weights: Iterable[Tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-    ) -> None:
+    ) -> List[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
 
-        self._load_module("", self.module, weights)
+        autoloaded_weights = list(self._load_module("", self.module, weights))
+        return autoloaded_weights
 
 
 def init_vllm_registered_model(
