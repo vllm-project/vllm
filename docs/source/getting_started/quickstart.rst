@@ -56,7 +56,7 @@ The next section defines a list of input prompts and sampling parameters for tex
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-Then, :class:`~vllm.LLM` class initializes vLLM's engine and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_ for offline inference. The list of supported models can be found :ref:`here <supported_models>`.
+The :class:`~vllm.LLM` class initializes vLLM's engine and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_ for offline inference. The list of supported models can be found :ref:`here <supported_models>`.
 
 .. code-block:: python
 
