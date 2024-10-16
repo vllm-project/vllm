@@ -12,7 +12,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (consume_space,
                                                         find_common_prefix,
                                                         is_complete_json,
@@ -24,6 +24,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+@ToolParserManager.register_module("granite-20b-fc")
 class Granite20bFCToolParser(ToolParser):
     """
     Tool call parser for the granite-20b-functioncalling model intended
