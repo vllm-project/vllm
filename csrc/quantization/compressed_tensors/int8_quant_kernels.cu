@@ -259,10 +259,10 @@ void dynamic_scaled_int8_quant(
   TORCH_CHECK(scales.is_contiguous());
   TORCH_CHECK(!azp || azp->is_contiguous());
 
-  int64_t const hidden_size = input.size(-1);
+  int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
-  dim3 const block(std::min(hidden_size, 1024L));
+  dim3 const block(std::min(hidden_size, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_kernel", [&] {
