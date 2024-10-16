@@ -29,12 +29,15 @@ class FatreluAndMul(CustomOp):
         super().__init__()
         self.threshold = threshold
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
         x1 = x[..., :d]
         x2 = x[..., d:]
         x1 = F.threshold(x1, self.threshold, 0.0)
         return x1 * x2
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
 
 
 class SiluAndMul(CustomOp):
