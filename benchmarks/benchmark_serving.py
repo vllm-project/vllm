@@ -25,6 +25,7 @@ On the client side, run:
 import argparse
 import asyncio
 import base64
+import contextlib
 import io
 import json
 import os
@@ -450,15 +451,13 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = (asyncio.Semaphore(max_concurrency)
+                 if max_concurrency else contextlib.nullcontext())
 
     async def limited_request_func(request_func_input, pbar):
-        if semaphore:
-            async with semaphore:
-                return await request_func(
-                    request_func_input=request_func_input, pbar=pbar)
-        return await request_func(request_func_input=request_func_input,
-                                  pbar=pbar)
+        async with semaphore:
+            return await request_func(request_func_input=request_func_input,
+                                      pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
