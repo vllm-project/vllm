@@ -1046,7 +1046,6 @@ class SchedulerConfig:
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
 
-
     @property
     def is_multi_step(self) -> bool:
         return self.num_scheduler_steps > 1

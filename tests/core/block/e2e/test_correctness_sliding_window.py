@@ -12,7 +12,6 @@ MODEL = "bigcode/starcoder2-3b"
 BLOCK_SIZE = 16
 
 
-
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{

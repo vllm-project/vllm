@@ -19,7 +19,6 @@ SPEC_MODEL = "JackFram/llama-68m"
     [[
         # Skip cuda graph recording for fast test.
         "--enforce_eager",
-
         "--tensor-parallel-size",
         "4",
     ]])
@@ -69,7 +68,6 @@ def test_draft_model_tp_lt_target_model_tp4(common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "--enforce-eager",
-
         "--tensor-parallel-size",
         "4",
     ]])

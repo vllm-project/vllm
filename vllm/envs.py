@@ -424,7 +424,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # and trust the driver's peer-to-peer capability report.
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
-
 }
 
 # end-env-vars-definition

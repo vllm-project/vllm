@@ -1011,7 +1011,6 @@ class EngineArgs:
             if speculative_config is None \
             else speculative_config.num_lookahead_slots
 
-        
         if not self.use_v2_block_manager:
             logger.warning(
                 "BlockSpaceManagerV1 has been removed, and setting "

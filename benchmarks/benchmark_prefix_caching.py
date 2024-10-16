@@ -33,7 +33,6 @@ from typing import List, Optional, Tuple
 from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
-from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 try:

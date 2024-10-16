@@ -18,8 +18,6 @@ MODELS = [
 ]
 
 
-
-
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("num_blocks", [16])
 def test_block_allocator(

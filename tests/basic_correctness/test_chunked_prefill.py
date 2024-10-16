@@ -20,8 +20,6 @@ MODELS = [
 ]
 
 
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
