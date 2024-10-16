@@ -181,9 +181,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
   ops.def("machete_supported_schedules(int btype) -> str[]");
   ops.def(
-      "machete_gemm(Tensor A, Tensor B,"
-      "             int btype,"
-      "             Tensor? scales, Tensor? zeros, int? group_size,"
+      "machete_gemm(Tensor A, Tensor B, int btype, "
+      "             Tensor? scales, Tensor? zeros, int? group_size, "
       "             Tensor? C, float? alpha, float? beta, str? schedule)"
       "-> Tensor");
   ops.def("machete_prepack_B(Tensor B, int btype) -> Tensor");
