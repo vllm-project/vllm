@@ -454,11 +454,12 @@ class EngineArgs:
                             'None, we assume the model weights are not '
                             'quantized and use `dtype` to determine the data '
                             'type of the weights.')
-        parser.add_argument('--rope-scaling',
-                            default=None,
-                            type=json.loads,
-                            help='RoPE scaling configuration in JSON format. '
-                            'For example, {"type":"dynamic","factor":2.0}')
+        parser.add_argument(
+            '--rope-scaling',
+            default=None,
+            type=json.loads,
+            help='RoPE scaling configuration in JSON format. '
+            'For example, {"rope_type":"dynamic","factor":2.0}')
         parser.add_argument('--rope-theta',
                             default=None,
                             type=float,

@@ -179,7 +179,7 @@ class Phi3SmallSelfAttention(nn.Module):
                 rope_scaling["factor"] = self.rope_position_scale
         else:
             rope_scaling = {
-                "type": "linear",
+                "rope_type": "linear",
                 "factor": self.rope_position_scale,
             }
 
