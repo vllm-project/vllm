@@ -33,7 +33,6 @@ logger = init_logger(__name__)
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-
 Task = Literal["generate", "embed"]
 TaskOption = Literal["auto", Task]
 
@@ -264,22 +263,25 @@ class ModelConfig:
             "embed": ModelRegistry.is_embedding_model(architectures)
         }
         supported_tasks: Set[Task] = {
-            task for task, is_supported in task_support.items() if is_supported
+            task
+            for task, is_supported in task_support.items() if is_supported
         }
 
         if task_option == "auto":
             if len(supported_tasks) > 1:
-                msg = (f"This model supports multiple tasks: {supported_tasks}."
-                       " Please specify one explicitly via `--task`.")
+                msg = (
+                    f"This model supports multiple tasks: {supported_tasks}."
+                    " Please specify one explicitly via `--task`.")
                 raise ValueError(msg)
-            
+
             task = next(iter(supported_tasks))
         else:
             if task_option not in supported_tasks:
-                msg = (f"This model does not support the '{task_option}' task. "
-                       f"Supported tasks: {supported_tasks}")
+                msg = (
+                    f"This model does not support the '{task_option}' task. "
+                    f"Supported tasks: {supported_tasks}")
                 raise ValueError(msg)
-            
+
             task = task_option
 
         return task

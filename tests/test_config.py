@@ -35,7 +35,7 @@ def test_ambiguous_task(model_id):
             seed=0,
             dtype="float16",
         )
-    
+
 
 MODEL_IDS_EXPECTED = [
     ("Qwen/Qwen1.5-7B", 32768),
