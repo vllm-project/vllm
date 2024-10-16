@@ -40,7 +40,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -221,9 +221,13 @@ class GPTNeoXModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = self.embed_in(input_ids)
+            hidden_states = get_inputs_embeds(input_ids, self.embed_in,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
         for i in range(self.start_layer, self.end_layer):
@@ -271,9 +275,12 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.gpt_neox(input_ids, positions, kv_caches,
-                                      attn_metadata, intermediate_tensors)
+                                      attn_metadata, intermediate_tensors,
+                                      inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(

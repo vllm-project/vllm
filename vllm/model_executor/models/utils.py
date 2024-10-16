@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Tuple, Union, overload)
+from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
+                    Optional, Protocol, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -453,6 +453,31 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     return any(
         name.startswith(missing_layer_name)
         for missing_layer_name in get_pp_missing_layer_names(model))
+
+
+def get_inputs_embeds(
+    input_ids: Optional[torch.Tensor],
+    embeddings_module: Callable[[torch.Tensor], torch.Tensor],
+    inputs_embeds: Optional[torch.Tensor] = None,
+    inputs_embeds_masks: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Get the input embeddings from either `input_ids` and `inputs_embeds`."""
+    if inputs_embeds is not None:
+        if inputs_embeds_masks is None or inputs_embeds_masks.all().item():
+            hidden_states = inputs_embeds
+        else:
+            msg = "inputs_embeds should not be masked out for multimodal models"
+            assert input_ids is not None, msg
+
+            hidden_states = embeddings_module(input_ids)
+            hidden_states[inputs_embeds_masks] = inputs_embeds
+    else:
+        msg = "inputs_embeds should be set for multimodal models"
+        assert input_ids is not None, msg
+
+        hidden_states = embeddings_module(input_ids)
+
+    return hidden_states
 
 
 def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):

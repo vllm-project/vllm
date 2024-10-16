@@ -45,7 +45,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -252,6 +252,8 @@ class OlmoModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
@@ -259,7 +261,9 @@ class OlmoModel(nn.Module):
         if get_pp_group().is_first_rank:
             # Get embeddings of input.
             # shape: (batch_size, seq_len, d_model)
-            inputs_embeds = self.embed_tokens(input_ids)
+            hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
 
             # embed positions
             hidden_states = inputs_embeds
@@ -319,6 +323,8 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(
             input_ids=input_ids,
@@ -326,6 +332,8 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            inputs_embeds_masks=inputs_embeds_masks,
         )
         return hidden_states
 

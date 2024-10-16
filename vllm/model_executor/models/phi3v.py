@@ -660,6 +660,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                inputs_embeds_masks: Optional[torch.Tensor] = None,
                 **kwargs: object):
         if intermediate_tensors is not None:
             input_ids = None

@@ -23,7 +23,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -337,9 +337,13 @@ class Phi3SmallModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = self.embed_tokens(input_ids)
+            hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
             if (self.mup_embedding_multiplier is not None
                     and self.mup_embedding_multiplier > 0.0):
                 hidden_states = hidden_states * self.mup_embedding_multiplier
@@ -436,6 +440,8 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         output_hidden_states = self.model(
             input_ids=input_ids,
@@ -443,6 +449,8 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            inputs_embeds_masks=inputs_embeds_masks,
         )
         output_hidden_states = output_hidden_states
         return output_hidden_states

@@ -38,6 +38,7 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
                          EncoderDecoderInputs, InputContext)
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -89,20 +90,25 @@ def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
 def input_processor_for_mllama(ctx: InputContext,
                                inputs: Union[DecoderOnlyInputs,
                                              EncoderDecoderInputs]):
+    assert is_encoder_decoder_inputs(inputs)
+    enc_inputs = inputs["encoder"]
+    dec_inputs = inputs["decoder"]
+
     # move encoder_prompt to prompt
-    if inputs.get("prompt") is None:
-        inputs["prompt"] = inputs["encoder_prompt"]
-        inputs["prompt_token_ids"] = inputs["encoder_prompt_token_ids"]
+    if dec_inputs.get("prompt") is None:
+        dec_inputs["prompt"] = enc_inputs["prompt"]
+        dec_inputs["prompt_token_ids"] = enc_inputs["prompt_token_ids"]
 
     # process multi-modal data
-    multi_modal_data = inputs.get("encoder_multi_modal_data")
+    multi_modal_data = enc_inputs.get("multi_modal_data")
+    image_data = (None if multi_modal_data is None else
+                  multi_modal_data.get("image"))
 
-    if multi_modal_data is None or "image" not in multi_modal_data \
-        or multi_modal_data["image"] is None:
+    if image_data is None:
         # text-only
-        inputs["encoder_prompt"] = ""
-        inputs["encoder_prompt_token_ids"] = []
-        inputs["encoder_multi_modal_data"] = {}
+        enc_inputs["prompt"] = ""
+        enc_inputs["prompt_token_ids"] = []
+        enc_inputs["multi_modal_data"] = {}
         return inputs
 
     if isinstance(multi_modal_data['image'], Image.Image):
@@ -111,10 +117,10 @@ def input_processor_for_mllama(ctx: InputContext,
     # are attended by the decoded tokens, we only need to
     # get the number of tiles for those images.
     num_decode_images = _get_num_image_in_last_group(
-        inputs["prompt_token_ids"])
+        dec_inputs["prompt_token_ids"])
     hf_config = ctx.model_config.hf_config
     num_tiles = 0
-    for image in multi_modal_data["image"][::-1]:
+    for image in image_data[::-1]:
         width, height = image.size
         tile_size = hf_config.vision_config.image_size
         canvas_height, canvas_width = get_optimal_tiled_canvas(
@@ -137,8 +143,8 @@ def input_processor_for_mllama(ctx: InputContext,
         "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
     num_tokens = num_tiles * token_per_chunk
-    inputs["encoder_prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
-    inputs["encoder_prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID] * num_tokens
+    dec_inputs["prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
+    dec_inputs["prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID] * num_tokens
 
     return inputs
 
