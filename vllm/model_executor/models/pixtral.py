@@ -17,7 +17,7 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -673,17 +673,17 @@ def get_pixtral_hf_image_feature_size(hf_config: PixtralVisionConfig,
 def input_processor_for_pixtral_hf(
     model_config: ModelConfig,
     hf_config: PixtralVisionConfig,
-    llm_inputs: LLMInputs,
+    inputs: DecoderOnlyInputs,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[Union[int, List[int]]] = None,
-):
+) -> DecoderOnlyInputs:
     assert image_feature_size_override is None, (
         "image_feature_size_override is not supported for Pixtral")
 
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
     processor = cached_get_processor(model_config.model)
@@ -695,7 +695,7 @@ def input_processor_for_pixtral_hf(
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
     replace_strings = []
-    new_prompt = llm_inputs.get("prompt")
+    new_prompt = inputs.get("prompt")
     for image in image_data:
         w, h = image.size
 
@@ -720,14 +720,10 @@ def input_processor_for_pixtral_hf(
 
     new_token_ids = tokenizer(new_prompt)["input_ids"]
 
-    # print("new_token_ids", new_token_ids)
-    # print("new_token_ids", len(new_token_ids))
-    # print("new_prompt", new_prompt)
-
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
+                             prompt=new_prompt,
+                             multi_modal_data=multi_modal_data)
 
 
 class PixtralHFRotaryEmbedding(nn.Module):

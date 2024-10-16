@@ -62,8 +62,8 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.sequence import IntermediateTensors, SequenceData
-from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.config import uses_mrope
+from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (PPMissingLayer, get_vit_attn_backend,

@@ -192,7 +192,7 @@ def input_processor_for_llava(ctx: InputContext, inputs: DecoderOnlyInputs):
         return input_processor_for_pixtral_hf(
             model_config,
             vision_config,
-            llm_inputs,
+            inputs,
             image_token_id=hf_config.image_token_index,
         )
 
