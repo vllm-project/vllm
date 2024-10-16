@@ -506,8 +506,8 @@ def get_vit_attn_backend() -> _Backend:
                 selected_backend = _Backend.FLASH_ATTN
             else:
                 logger.warning(
-                    "Current `vllm-flash-attn` has a bug with inside vision "
-                    "module, so we use xformers backend instead. You can run "
+                    "Current `vllm-flash-attn` has a bug inside vision module, "
+                    "so we use xformers backend instead. You can run "
                     "`pip install flash-attn` to use flash-attention backend.")
                 selected_backend = _Backend.FLASH_ATTN
         elif is_cpu():
