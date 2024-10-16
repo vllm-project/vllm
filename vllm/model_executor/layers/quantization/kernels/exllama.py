@@ -45,9 +45,6 @@ class ExllamaLinearKernel(MPLinearKernel):
 
         return True, None
 
-    # note assumes that
-    #  `weight_packed` is: {input_dim = 0, output_dim = 1, packed_dim = 0}
-    #  `weight_scale`  is: {input_dim = 0, output_dim = 1}
     def process_weights_after_loading(self, layer: torch.nn.Module):
         c = self.config
 
