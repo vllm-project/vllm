@@ -100,7 +100,7 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
 
   #pragma omp parallel for
   for (int i = 0; i < num_tokens; ++i) {
-    cvt_vec_t max_value(std::numeric_limits<float>::min());
+    cvt_vec_t max_value(std::numeric_limits<float>::lowest());
     cvt_vec_t min_value(std::numeric_limits<float>::max());
     {
       int j = 0;
