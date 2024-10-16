@@ -82,6 +82,7 @@ class ExllamaLinearKernel(MPLinearKernel):
                     torch.nn.Parameter(zeros, requires_grad=False))
 
         if c.has_g_idx:
+
             def transform_w_g_idx(x):
                 # Exllama wants the permutation array instead of the group
                 # incdices
