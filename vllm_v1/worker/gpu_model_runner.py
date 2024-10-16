@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass
+from unittest.mock import patch
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Tuple, Type, TypeVar, Union)
 
@@ -23,6 +24,7 @@ from vllm_v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm_v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm_v1.outputs import SamplerOutput, ModelRunnerOutput
 from vllm_v1.sample.metadata import SamplingMetadata
+from vllm_v1.sample.sampler import Sampler
 
 if TYPE_CHECKING:
     from vllm_v1.core.scheduler import SchedulerOutput
@@ -374,37 +376,27 @@ class GPUModelRunner:
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
-        from unittest.mock import patch
-        from vllm_v1.sample.logits_processor import LogitsProcessor
-        from vllm_v1.sample.sampler import Sampler
         with DeviceMemoryProfiler() as m:
-            with patch(
-                    "vllm.model_executor.layers.logits_processor.LogitsProcessor",
-                    LogitsProcessor):
-                with patch("vllm.model_executor.layers.sampler.Sampler",
-                           Sampler):
-                    self.model = get_model(
-                        model_config=self.model_config,
-                        device_config=self.device_config,
-                        load_config=self.load_config,
-                        lora_config=self.lora_config,
-                        parallel_config=self.parallel_config,
-                        scheduler_config=self.scheduler_config,
-                        cache_config=self.cache_config)
+            with patch("vllm.model_executor.layers.sampler.Sampler", Sampler):
+                self.model = get_model(model_config=self.model_config,
+                                       device_config=self.device_config,
+                                       load_config=self.load_config,
+                                       lora_config=self.lora_config,
+                                       parallel_config=self.parallel_config,
+                                       scheduler_config=self.scheduler_config,
+                                       cache_config=self.cache_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
     def _dummy_run(self, model: nn.Module, num_tokens: int) -> None:
-        input_ids = torch.randint(0,
-                                  1000, (num_tokens, ),
-                                  dtype=torch.int32,
-                                  device=self.device)
-        positions = torch.randint(0,
-                                  1000, (num_tokens, ),
-                                  dtype=torch.long,
-                                  device=self.device)
+        input_ids = torch.zeros(num_tokens,
+                                dtype=torch.int32,
+                                device=self.device)
+        positions = torch.zeros(num_tokens,
+                                dtype=torch.long,
+                                device=self.device)
         kv_caches = [None for _ in range(self.num_attn_layers)]
         model(input_ids, positions, kv_caches, attn_metadata=None)
         return
