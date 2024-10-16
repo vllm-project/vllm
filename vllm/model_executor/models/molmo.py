@@ -946,9 +946,12 @@ def pad_images(
 
 
 def input_processor_for_molmo(ctx: InputContext, llm_inputs: LLMInputs):
-    prompt = llm_inputs["prompt"]
-    multi_modal_data = llm_inputs.get("multi_modal_data")
-    image = multi_modal_data.get("image")
+    prompt = llm_inputs.get("prompt", None)
+    multi_modal_data = llm_inputs.get("multi_modal_data", None)
+    if multi_modal_data is not None:
+        image = multi_modal_data.get("image", None)
+    else:
+        image = None
     processor = cached_get_processor(ctx.model_config.model,
                                      trust_remote_code=True,
                                      revision=ctx.model_config.code_revision)
