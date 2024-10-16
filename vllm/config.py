@@ -429,7 +429,7 @@ class ModelConfig:
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
-            self) -> Optional[Union[int, List[Optional[int]]]]:
+            self) -> Union[Optional[int], List[Optional[int]]]]:
         """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
@@ -1816,9 +1816,9 @@ def _get_and_verify_max_len(
 def get_min_sliding_window(
         sliding_window: Union[int, List[Optional[int]]]) -> int:
     if isinstance(sliding_window, list):
-        return min([s for s in sliding_window if s is not None])
-    else:
-        return sliding_window
+        return min(s for s in sliding_window if s is not None)
+    
+    return sliding_window
 
 
 def get_served_model_name(model: str,
