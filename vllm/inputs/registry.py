@@ -1,14 +1,15 @@
 import functools
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
-                    Optional, Protocol, Tuple, Type, cast)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
+                    Protocol, Tuple, Type, overload)
 
 from torch import nn
 from transformers import PretrainedConfig
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, assert_never
 
-from vllm.inputs import SingletonInputs
+from vllm.inputs import (EmbedInputs, EmptyInputs, EncoderDecoderInputs,
+                         SingletonInputs, TokenInputs)
 from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.logger import init_logger
 from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
@@ -280,11 +281,52 @@ class InputRegistry:
         return self._input_processors_by_model_type \
             .get(model_cls, self._default_input_processor)
 
-    def process_input(
-        self,
-        model_config: "ModelConfig",
-        inputs: ProcessorInputs,
-    ) -> ProcessorInputs:
+    @overload
+    def _process_singleton_input(self, model_config: "ModelConfig",
+                                 inputs: TokenInputs) -> TokenInputs:
+        ...
+
+    @overload
+    def _process_singleton_input(self, model_config: "ModelConfig",
+                                 inputs: EmbedInputs) -> EmbedInputs:
+        ...
+
+    @overload
+    def _process_singleton_input(self, model_config: "ModelConfig",
+                                 inputs: EmptyInputs) -> EmptyInputs:
+        ...
+
+    def _process_singleton_input(self, model_config: "ModelConfig",
+                                 inputs: SingletonInputs) -> SingletonInputs:
+        if inputs["type"] == "empty":
+            return inputs
+
+        if inputs["type"] == "embed":
+            return inputs
+
+        if inputs["type"] == "token":
+            # Avoid circular import
+            from vllm.model_executor.model_loader import get_model_architecture
+
+            model_cls, _ = get_model_architecture(model_config)
+            processor = self._get_model_input_processor(model_cls)
+
+            # Handle multimodal processor kwargs with priority:
+            #     Inference kwargs -> Init kwargs -> {}
+            # If it's empty, it'll fall back to the default kwarg values
+            mm_processor_kwargs = resolve_mm_processor_kwargs(
+                model_config.mm_processor_kwargs,
+                inputs.pop("mm_processor_kwargs"),
+                processor,
+            )
+
+            return processor(InputContext(model_config), inputs,
+                             **mm_processor_kwargs)
+
+        assert_never(inputs)
+
+    def process_input(self, model_config: "ModelConfig",
+                      inputs: ProcessorInputs) -> ProcessorInputs:
         """
         Apply an input processor to an instance of model inputs.
 
@@ -293,35 +335,15 @@ class InputRegistry:
         See also:
             :ref:`input_processing_pipeline`
         """
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
+        if is_encoder_decoder_inputs(inputs):
+            return EncoderDecoderInputs(
+                encoder=self._process_singleton_input(model_config,
+                                                      inputs["encoder"]),
+                decoder=self._process_singleton_input(model_config,
+                                                      inputs["decoder"]),
+            )
 
-        model_cls, _ = get_model_architecture(model_config)
-        processor = self._get_model_input_processor(model_cls)
-
-        inputs_mm_processor_kwargs: Dict[str, Any] = {}
-        singleton_inputs = cast(
-            List[SingletonInputs],
-            ([inputs["encoder"], inputs["decoder"]]
-             if is_encoder_decoder_inputs(inputs) else [inputs]),
-        )
-        for singleton_input in singleton_inputs:
-            if singleton_input["type"] == "token":
-                kw = singleton_input.pop("mm_processor_kwargs")
-                if kw is not None:
-                    inputs_mm_processor_kwargs.update(kw)
-
-        # Handle multimodal processor kwargs with priority:
-        #     Inference kwargs -> Init kwargs -> {}
-        # If it's empty, it'll fall back to the default kwarg values
-        inputs_mm_processor_kwargs = resolve_mm_processor_kwargs(
-            model_config.mm_processor_kwargs,
-            inputs_mm_processor_kwargs,
-            processor,
-        )
-
-        return processor(InputContext(model_config), inputs,
-                         **inputs_mm_processor_kwargs)
+        return self._process_singleton_input(model_config, inputs)
 
     def create_input_processor(self, model_config: "ModelConfig"):
         """
