@@ -509,8 +509,10 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+    # torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+    # torch.ops._rocm_C.hip_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
+    # out = torch.zeros((m, n), dtype=out_dtype, device=a.device)
     return out
 
 
@@ -740,13 +742,21 @@ def scaled_int8_quant(
     Returns:
       Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
     """
-    output = torch.empty_like(input, dtype=torch.int8)
+    # output = torch.empty_like(input, dtype=torch.int8)
+    output = torch.zeros_like(input, dtype=torch.int8)
+    input_scales = torch.zeros((input.numel() // input.shape[-1], 1),
+                               device=input.device,
+                               dtype=torch.float32)
+    input_azp = None if symmetric else torch.zeros_like(input_scales,
+                                                        dtype=torch.int32)
     if scale is not None:
+        print(f"call static_scaled_fp8_quant")
         # static-per-tensor quantization.
         assert symmetric == (
             azp is
             None), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
+        print(f"done with static_scaled_fp8_quant")
         return output, scale, None
 
     # dynamic-per-token quantization.
@@ -755,6 +765,9 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     input_azp = None if symmetric else torch.empty_like(input_scales,
                                                         dtype=torch.int32)
+    print(f"call dynamic_scaled_int8_quant output = {output.shape}, "
+          f"input = {input.shape}, input_scales = {input_scales.shape},"
+          f"input_azp = {'None' if input_azp is None else  input_azp.shape}")
     torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
                                            input_azp)
     return output, input_scales, input_azp

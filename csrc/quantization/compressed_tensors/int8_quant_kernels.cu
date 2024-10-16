@@ -96,9 +96,10 @@ __global__ void static_scaled_int8_quant_kernel(
     scalar_t const* __restrict__ input, int8_t* __restrict__ out,
     scale_type const* scale_ptr, const int hidden_size) {
   int const tid = threadIdx.x;
-  int64_t const token_idx = blockIdx.x;
+  int64_t const token_idx = blockIdx.x; 
   scale_type const scale = *scale_ptr;
 
+  // Must be performed using 64-bit math to avoid integer overflow.
   out += token_idx * hidden_size;
   input += token_idx * hidden_size;
 
@@ -117,6 +118,7 @@ __global__ void static_scaled_int8_azp_quant_kernel(
   scale_type const scale = *scale_ptr;
   azp_type const azp = *azp_ptr;
 
+  // Must be performed using 64-bit math to avoid integer overflow.
   out += token_idx * hidden_size;
   input += token_idx * hidden_size;
 
@@ -136,6 +138,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   float absmax_val = 0.0f;
   float const zero = 0.0f;
 
+  // Must be performed using 64-bit math to avoid integer overflow.
   out += token_idx * hidden_size;
   input += token_idx * hidden_size;
 
@@ -168,6 +171,7 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
     scale_type* scale, azp_type* azp, const int hidden_size) {
   int64_t const token_idx = blockIdx.x;
 
+  // Must be performed using 64-bit math to avoid integer overflow.
   out += token_idx * hidden_size;
   input += token_idx * hidden_size;
 
