@@ -270,10 +270,10 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
         sequence group (not missing or extra blocks).
     """
     block_manager = SelfAttnBlockSpaceManager(block_size,
-                                          num_cpu_blocks,
-                                          num_gpu_blocks,
-                                          watermark=0,
-                                          enable_caching=enable_caching)
+                                              num_cpu_blocks,
+                                              num_gpu_blocks,
+                                              watermark=0,
+                                              enable_caching=enable_caching)
     prompt, seq_group = create_dummy_prompt("1", prompt_length=block_size - 1)
     prompt.status = SequenceStatus.WAITING
     block_manager.allocate(seq_group)
@@ -323,10 +323,10 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
     """
     num_cpu_blocks = num_gpu_blocks
     block_manager = SelfAttnBlockSpaceManager(block_size,
-                                          num_cpu_blocks,
-                                          num_gpu_blocks,
-                                          watermark=0,
-                                          enable_caching=enable_caching)
+                                              num_cpu_blocks,
+                                              num_gpu_blocks,
+                                              watermark=0,
+                                              enable_caching=enable_caching)
     prompt, seq_group = create_dummy_prompt(
         "1", prompt_length=(num_gpu_blocks - 1) * block_size - 1)
     prompt.status = SequenceStatus.WAITING
@@ -384,10 +384,10 @@ def test_swap_in_infeasible(num_lookahead_slots, enable_caching):
     num_cpu_blocks = 1
     num_gpu_blocks = 1
     block_manager = SelfAttnBlockSpaceManager(block_size,
-                                          num_cpu_blocks,
-                                          num_gpu_blocks,
-                                          watermark=0,
-                                          enable_caching=enable_caching)
+                                              num_cpu_blocks,
+                                              num_gpu_blocks,
+                                              watermark=0,
+                                              enable_caching=enable_caching)
     prompt_length = block_size - 3
     assert prompt_length > 0
     prompt, seq_group = create_dummy_prompt("1", prompt_length=prompt_length)
