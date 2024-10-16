@@ -141,7 +141,7 @@ async def test_failed_abort(tmp_socket):
         client = await engine.make_client()
         assert client.is_running
 
-        # Firsh check health should work.
+        # First check health should work.
         await client.check_health()
 
         # Trigger an abort on the client side.
@@ -162,6 +162,44 @@ async def test_failed_abort(tmp_socket):
         # This should raise the original error.
         with pytest.raises(RAISED_ERROR):
             await client.check_health()
+
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_error(tmp_socket):
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
+                           ipc_path=tmp_socket,
+                           run_fn=run_with_evil_abort) as engine:
+
+        client = await engine.make_client()
+        assert client.is_running
+
+        # First check health should work.
+        await client.check_health()
+
+        # Batch of requests
+        async def do_generate(client):
+            # min_tokens=2048 to keep busy the engine busy
+            # to get enough time to get process a request
+            # that will crash the engine
+            params = SamplingParams(min_tokens=2048, max_tokens=2048)
+            async for _ in client.generate(prompt="Hello my name is",
+                                           sampling_params=params,
+                                           request_id=uuid.uuid4()):
+                pass
+
+        tasks = [asyncio.create_task(do_generate(client)) for _ in range(10)]
+
+        # This request will force a processing batch to raise
+        # an exception and next the engine get errored
+        await client.abort(request_id="foo")
+
+        # The batch of those request failed, then they
+        # should get the same exception as a MQEngineDeadError.
+        errors = await asyncio.gather(*tasks, return_exceptions=True)
+        for e in errors:
+            assert "KeyError" in repr(e)
 
         client.close()
 
