@@ -90,7 +90,30 @@ def replace_gemm_rs_ag_gemm(arg7_1, getitem_24, arg8_1, getitem_1, arg9_1):
     return getitem_35, getitem_31
 
 
+def match_final(arg227_1, getitem_1022, getitem_1020, arg228_1):
+    permute_128 = torch.ops.aten.permute.default(arg227_1, [1, 0])
+    mm_127 = torch.ops.aten.mm.default(getitem_1022, permute_128)
+    auto_functionalized_224 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_127, group_name = 'tp:0')
+    getitem_1024 = auto_functionalized_224[1]
+    auto_functionalized_225 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = getitem_1024, residual = getitem_1020, weight = arg228_1, epsilon = 1e-05)
+    getitem_1026 = auto_functionalized_225[1]
+    return getitem_1026
+
+
+def replace_final(arg227_1, getitem_1215, getitem_1209, arg228_1):
+    permute_254 = torch.ops.aten.permute.default(arg227_1, [1, 0])
+    mm_1 = torch.ops.aten.mm.default(getitem_1215, permute_254)
+    auto_functionalized_161 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = 'tp:0')
+    getitem_1217 = auto_functionalized_161[1]
+    all_gather_into_tensor = torch.ops._c10d_functional.all_gather_into_tensor.default(getitem_1209, 2, '0')
+    wait_tensor = torch.ops._c10d_functional.wait_tensor.default(all_gather_into_tensor)
+    auto_functionalized_162 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = getitem_1217, residual = wait_tensor, weight = arg228_1, epsilon = 1e-05)
+    getitem_1219 = auto_functionalized_162[1]
+    return getitem_1219
+
+
 my_patterns = PatternMatcherPass()
+my_patterns2 = PatternMatcherPass()
 x = torch.empty([4,4], device='cuda')
 w = torch.empty([4,4], device='cuda')
 resid = torch.empty([4,4], device='cuda')
@@ -99,15 +122,25 @@ x2 = torch.empty([4,4], device='cuda')
 inputs = [x, w, resid, resid_w, x2]
 inputs_small = inputs[0:2]
 inputs_med = inputs[0:4]
+
 register_replacement(match_gemm_rs_ag_gemm,
                      replace_gemm_rs_ag_gemm,
                      inputs,
                      fwd_only,
                      [my_patterns])
 
+final_inputs = [x, w, resid, resid_w]
+register_replacement(match_final,
+                     replace_final,
+                     final_inputs,
+                     fwd_only,
+                     [my_patterns2])
+
 def async_rewrite(graph: fx.Graph):
     count = my_patterns.apply(graph)
-    print(f"match count = {count}")
+    print(f"fused gemm match count = {count}")
+    count = my_patterns2.apply(graph)
+    print(f"final match count = {count}")
     return graph
 
 
