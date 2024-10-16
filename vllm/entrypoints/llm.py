@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import EngineArgs, TaskOption
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
@@ -120,6 +120,7 @@ class LLM:
     def __init__(
         self,
         model: str,
+        task: TaskOption = "auto",
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
         skip_tokenizer_init: bool = False,
@@ -153,6 +154,7 @@ class LLM:
 
         engine_args = EngineArgs(
             model=model,
+            task=task,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
