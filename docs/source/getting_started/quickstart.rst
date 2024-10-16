@@ -35,13 +35,16 @@ Offline Batched Inference
 
 With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). The example script for this section can be found `here <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`__.
 
-The first line of this example imports both the :class:`~vllm.LLM` class, the main class for running offline inference with vLLM engine and the :class:`~vllm.SamplingParams` class which specifies the parameters for the sampling process.
+The first line of this example imports the classes :class:`~vllm.LLM` class and :class:`~vllm.SamplingParams`:
+
+- :class:`~vllm.LLM` is the main class for running offline inference with vLLM engine.
+- :class:`~vllm.SamplingParams` specifies the parameters for the sampling process.
 
 .. code-block:: python
 
     from vllm import LLM, SamplingParams
 
-The next portion defines a list of input prompts and sampling parameters for generation. The `sampling temperature <https://arxiv.org/html/2402.05201v1>`_ is set to ``0.8`` and the `nucleus sampling probability <https://en.wikipedia.org/wiki/Top-p_sampling>`_ is set to 0.95. You can find more information about the sampling parameters `here <https://docs.vllm.ai/en/stable/dev/sampling_params.html>`__.
+The next section defines a list of input prompts and sampling parameters for text generation. The `sampling temperature <https://arxiv.org/html/2402.05201v1>`_ is set to ``0.8`` and the `nucleus sampling probability <https://en.wikipedia.org/wiki/Top-p_sampling>`_ is set to ``0.95``. You can find more information about the sampling parameters `here <https://docs.vllm.ai/en/stable/dev/sampling_params.html>`__.
 
 .. code-block:: python
 
@@ -53,7 +56,7 @@ The next portion defines a list of input prompts and sampling parameters for gen
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-vLLM's engine is then initialized for offline inference with the :class:`~vllm.LLM` class and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_. The list of supported models can be found :ref:`here <supported_models>`.
+Then, :class:`~vllm.LLM` class initializes vLLM's engine and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_ for offline inference. The list of supported models can be found :ref:`here <supported_models>`.
 
 .. code-block:: python
 
@@ -61,11 +64,7 @@ vLLM's engine is then initialized for offline inference with the :class:`~vllm.L
 
 .. note::
 
-    By default, vLLM downloads model from `HuggingFace <https://huggingface.co/>`_. If you would like to use models from `ModelScope <https://www.modelscope.cn>`_, set the environment variable:
-
-    .. code-block:: console
-
-        export VLLM_USE_MODELSCOPE=True
+    By default, vLLM downloads models from `HuggingFace <https://huggingface.co/>`_. If you would like to use models from `ModelScope <https://www.modelscope.cn>`_, set the environment variable ``VLLM_USE_MODELSCOPE`` before initializing the engine.
 
 Now, the fun part! The outputs are generated using ``llm.generate``. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of ``RequestOutput`` objects, which include all of the output tokens.
 
@@ -81,12 +80,12 @@ Now, the fun part! The outputs are generated using ``llm.generate``. It adds the
 .. _openai_compatible_server:
 
 OpenAI-Compatible Server
--------------------------
+------------------------
 
 vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
-By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time and implements such as `list models <https://platform.openai.com/docs/api-reference/models/list>`_, `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_, and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. 
+By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (e.g. ``facebook/opt-125m``) and implements endpoints such as `list models <https://platform.openai.com/docs/api-reference/models/list>`_, `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_, and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. 
 
-To start the server, simply use:
+Run the following command to start the vLLM server with Facebook's `OPT-125M <https://huggingface.co/facebook/opt-125m>`_ model:
 
 .. code-block:: console
 
@@ -105,7 +104,7 @@ This server can be queried in the same format as OpenAI API. For example, to lis
 You can pass in the argument ``--api-key`` or environment variable ``VLLM_API_KEY`` to enable the server to check for API key in the header.
 
 OpenAI Completions API with vLLM
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Once your server is started, you can query the model with input prompts:
 
