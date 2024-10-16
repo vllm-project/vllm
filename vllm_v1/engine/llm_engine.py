@@ -623,15 +623,7 @@ class LLMEngine:
 def _get_executor_cls(engine_config: EngineConfig) -> Type[ExecutorBase]:
     distributed_executor_backend = (
         engine_config.parallel_config.distributed_executor_backend)
-    # Initialize the cluster and specify the executor class.
-    if isinstance(distributed_executor_backend, type):
-        if not issubclass(distributed_executor_backend, ExecutorBase):
-            raise TypeError(
-                "distributed_executor_backend must be a subclass of "
-                f"ExecutorBase. Got {distributed_executor_backend}.")
-        if distributed_executor_backend.uses_ray:  # type: ignore
-            initialize_ray_cluster(engine_config.parallel_config)
-        executor_class = distributed_executor_backend
+    assert distributed_executor_backend is None
 
     from vllm_v1.executor.gpu_executor import GPUExecutor
     executor_class = GPUExecutor
