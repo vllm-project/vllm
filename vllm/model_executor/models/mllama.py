@@ -14,7 +14,6 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from array import array
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -37,7 +36,8 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
+                         EncoderDecoderInputs, InputContext)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -51,7 +51,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.sequence import SequenceData
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal
@@ -86,24 +86,24 @@ def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
     return num_images
 
 
-def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_mllama(ctx: InputContext,
+                               inputs: Union[DecoderOnlyInputs,
+                                             EncoderDecoderInputs]):
     # move encoder_prompt to prompt
-    if llm_inputs.get("prompt") is None:
-        llm_inputs["prompt"] = llm_inputs["encoder_prompt"]
-        llm_inputs["prompt_token_ids"] = llm_inputs["encoder_prompt_token_ids"]
+    if inputs.get("prompt") is None:
+        inputs["prompt"] = inputs["encoder_prompt"]
+        inputs["prompt_token_ids"] = inputs["encoder_prompt_token_ids"]
 
     # process multi-modal data
-    assert "decoder_multi_modal_data" not in llm_inputs, \
-        "multi-modal data should be put in encoder message of mllama"
-    multi_modal_data = llm_inputs.get("encoder_multi_modal_data")
+    multi_modal_data = inputs.get("encoder_multi_modal_data")
 
     if multi_modal_data is None or "image" not in multi_modal_data \
         or multi_modal_data["image"] is None:
         # text-only
-        llm_inputs["encoder_prompt"] = ""
-        llm_inputs["encoder_prompt_token_ids"] = []
-        llm_inputs["encoder_multi_modal_data"] = {}
-        return llm_inputs
+        inputs["encoder_prompt"] = ""
+        inputs["encoder_prompt_token_ids"] = []
+        inputs["encoder_multi_modal_data"] = {}
+        return inputs
 
     if isinstance(multi_modal_data['image'], Image.Image):
         multi_modal_data['image'] = [multi_modal_data['image']]
@@ -111,7 +111,7 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
     # are attended by the decoded tokens, we only need to
     # get the number of tiles for those images.
     num_decode_images = _get_num_image_in_last_group(
-        llm_inputs["prompt_token_ids"])
+        inputs["prompt_token_ids"])
     hf_config = ctx.model_config.hf_config
     num_tiles = 0
     for image in multi_modal_data["image"][::-1]:
@@ -137,11 +137,10 @@ def input_processor_for_mllama(ctx: InputContext, llm_inputs: LLMInputs):
         "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
     num_tokens = num_tiles * token_per_chunk
-    llm_inputs["encoder_prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
-    llm_inputs["encoder_prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID
-                                              ] * num_tokens
+    inputs["encoder_prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
+    inputs["encoder_prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID] * num_tokens
 
-    return llm_inputs
+    return inputs
 
 
 def get_max_mllama_image_tokens(ctx: InputContext) -> int:
@@ -154,17 +153,18 @@ def dummy_decoder_seq_data(seq_len: int, num_images: int):
     # <|image|> * num_images + 0 * (seq_len - num_images)
     assert seq_len >= num_images, \
         "seq_len should be greater than or equal to num_images"
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [MLLAMA_IMAGE_TOKEN_ID]) * num_images
-    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * (seq_len - num_images)
-    return SequenceData(token_ids)
+
+    return SequenceData.from_prompt_token_counts(
+        (MLLAMA_IMAGE_TOKEN_ID, num_images),
+        (0, seq_len - num_images),
+    )
 
 
 def dummy_encoder_seq_data(ctx: InputContext, num_images: int):
     num_tokens = get_max_mllama_image_tokens(ctx) * num_images
-    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                      [MLLAMA_IMAGE_TOKEN_ID]) * num_tokens
-    return SequenceData(token_ids)
+
+    return SequenceData.from_prompt_token_counts(
+        (MLLAMA_IMAGE_TOKEN_ID, num_tokens))
 
 
 def dummy_image(num_images: int, ):
