@@ -14,10 +14,8 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.selector import (_Backend, backend_name_to_enum,
-                                     get_global_forced_attn_backend)
+from vllm.attention.selector import _Backend
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -42,11 +40,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.utils import make_layers
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
-from vllm.platforms import current_platform
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.processor import get_processor
-from vllm.utils import is_cpu
+
+from .utils import get_vit_attn_backend
 
 log = logging.getLogger(__name__)
 
@@ -190,35 +188,17 @@ class MultiHeadDotProductAttention(nn.Module):
         )
 
         # Detect attention implementation.
-        selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
-        if selected_backend is None:
-            backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
-            if backend_by_env_var is not None:
-                selected_backend = backend_name_to_enum(backend_by_env_var)
-        if selected_backend is None:
-            # For Volta and Turing GPUs, use xformers instead.
-            device_available = current_platform.has_device_capability(80)
-            if device_available:
-                from transformers.utils import is_flash_attn_2_available
-                if is_flash_attn_2_available():
-                    self._use_flash_attn = True
-                else:
-                    log.warning(
-                        "Current Molmo implementation has a bug with "
-                        "`vllm-flash-attn` inside vision module, so we use "
-                        "xformers backend instead. You can run `pip install "
-                        "flash-attn to use flash-attention backend.")
-                    self._use_flash_attn = False
-            else:
-                self._use_flash_attn = False
+        self._use_flash_attn = self._use_sdpa = self._use_xformers = False
+        selected_backend: _Backend = get_vit_attn_backend()
+        if selected_backend == _Backend.FLASH_ATTN:
+            self._use_flash_attn = True
+        elif selected_backend == _Backend.XFORMERS:
+            self._use_xformers = True
+        elif selected_backend == _Backend.TORCH_SDPA:
+            self._use_sdpa = True
         else:
-            if selected_backend == _Backend.FLASH_ATTN:
-                self._use_flash_attn = True
-            elif selected_backend in [_Backend.XFORMERS, _Backend.TORCH_SDPA]:
-                self._use_flash_attn = False
-            else:
-                raise RuntimeError(
-                    f"Molmo does not support {selected_backend} backend now.")
+            raise RuntimeError(
+                f"Molmo does not support {selected_backend} backend now.")
 
     def forward(self,
                 inputs_q: torch.Tensor,
@@ -243,11 +223,12 @@ class MultiHeadDotProductAttention(nn.Module):
         if self._use_flash_attn:
             from flash_attn import flash_attn_func
             output = flash_attn_func(xq, xk, xv, dropout_p=0.0, causal=False)
-        elif is_cpu():
-            xq, xk, xv = (rearrange(x, "b s h d -> b h s d") for x in (xq, xk, xv))
+        elif self._use_sdpa:
+            xq, xk, xv = (rearrange(x, "b s h d -> b h s d")
+                          for x in (xq, xk, xv))
             output = F.scaled_dot_product_attention(xq, xk, xv)
             output = rearrange(output, "b h s d -> b s h d ")
-        else:
+        elif self._use_xformers:
             from xformers import ops as xops
             output = xops.memory_efficient_attention_forward(xq, xk, xv, p=0)
 
