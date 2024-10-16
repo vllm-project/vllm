@@ -25,7 +25,7 @@ def test_incorrect_task(model_id, bad_task):
     "TIGER-Lab/VLM2Vec-Full",
 ])
 def test_ambiguous_task(model_id):
-    with pytest.raises(ValueError, match="supports multiple tasks"):
+    with pytest.warns(UserWarning, match="supports multiple tasks"):
         ModelConfig(
             model_id,
             task="auto",

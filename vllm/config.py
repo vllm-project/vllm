@@ -1,5 +1,6 @@
 import enum
 import json
+import warnings
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
@@ -259,6 +260,8 @@ class ModelConfig:
         architectures = getattr(hf_config, "architectures", [])
 
         task_support: Dict[Task, bool] = {
+            # NOTE: They are listed from highest to lowest priority, in case
+            # the model supports multiple of them
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "embed": ModelRegistry.is_embedding_model(architectures)
         }
@@ -268,13 +271,15 @@ class ModelConfig:
         }
 
         if task_option == "auto":
+            task = next(iter(supported_tasks))
+
             if len(supported_tasks) > 1:
                 msg = (
-                    f"This model supports multiple tasks: {supported_tasks}."
-                    " Please specify one explicitly via `--task`.")
-                raise ValueError(msg)
+                    f"This model supports multiple tasks: {supported_tasks}. "
+                    f"Defaulting to '{task}'. As this behavior may change in "
+                    "the future, please specify one explicitly via `--task`.")
 
-            task = next(iter(supported_tasks))
+                warnings.warn(msg, stacklevel=2)
         else:
             if task_option not in supported_tasks:
                 msg = (
