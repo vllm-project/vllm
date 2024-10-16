@@ -594,10 +594,7 @@ class LLMEngine:
 
     def _validate_model_inputs(self, inputs: Union[LLMInputs,
                                                    EncoderDecoderLLMInputs]):
-        # if self.is_encoder_decoder_model():
-        #     prompt_ids = inputs.get("encoder_prompt_token_ids")
-        # else:
-        #     prompt_ids = inputs.get("prompt_token_ids")
+        assert isinstance(inputs, LLMInputs)
         prompt_ids = inputs.get("prompt_token_ids")
 
         if prompt_ids is None or len(prompt_ids) == 0:
