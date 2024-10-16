@@ -1,5 +1,5 @@
-"""An example showing how to use vLLM to serve and run online inference 
-with multimodal models with OpenAI client.
+"""An example showing how to use vLLM to serve multimodal models 
+and run online inference with OpenAI client.
 
 Launch the vLLM server with the following command:
 
