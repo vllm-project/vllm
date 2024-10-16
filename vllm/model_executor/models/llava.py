@@ -245,7 +245,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # HACK: Special cases for pixtral
+        # NOTE: These are special cases for Pixtral-12B in the HF-format
+        # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
         if (config.text_config.architectures is None
                 and config.text_config.model_type == "mistral"):
             config.text_config.architectures = ["MistralForCausalLM"]
