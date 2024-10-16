@@ -12,11 +12,6 @@ MODEL = "bigcode/starcoder2-3b"
 BLOCK_SIZE = 16
 
 
-@pytest.fixture(scope="module", autouse=True)
-def check_deprecated_block_manager():
-    check_deprecated_block_manager_usage(
-        'tests/core/block/e2e/test_correctness_sliding_window.py')
-
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
