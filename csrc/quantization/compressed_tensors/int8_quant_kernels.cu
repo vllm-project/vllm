@@ -96,7 +96,7 @@ __global__ void static_scaled_int8_quant_kernel(
     scalar_t const* __restrict__ input, int8_t* __restrict__ out,
     scale_type const* scale_ptr, const int hidden_size) {
   int const tid = threadIdx.x;
-  int64_t const token_idx = blockIdx.x; 
+  int64_t const token_idx = blockIdx.x;
   scale_type const scale = *scale_ptr;
 
   // Must be performed using 64-bit math to avoid integer overflow.
