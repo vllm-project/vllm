@@ -5,6 +5,7 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
                     Union, cast, overload)
 
 from tqdm import tqdm
+from typing_extensions import Never
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
@@ -120,6 +121,7 @@ class LLM:
     def __init__(
         self,
         model: str,
+        *args: Never,
         task: TaskOption = "auto",
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
@@ -148,6 +150,39 @@ class LLM:
         Note: if enforce_eager is unset (enforce_eager is None)
         it defaults to False.
         '''
+        if args:
+            for i, arg in enumerate(args):  # type: ignore
+                # We intentionally skip "task" because it is newly introduced.
+                # Those who used positional args before should see no difference
+                if i == 0:
+                    tokenizer = arg
+                elif i == 1:
+                    tokenizer_mode = arg
+                elif i == 2:
+                    skip_tokenizer_init = arg
+                elif i == 3:
+                    trust_remote_code = arg
+                elif i == 4:
+                    tensor_parallel_size = arg
+                elif i == 5:
+                    dtype = arg
+                elif i == 6:
+                    quantization = arg
+                elif i == 7:
+                    revision = arg
+                elif i == 8:
+                    tokenizer_revision = arg
+                elif i == 9:
+                    seed = arg
+                else:
+                    raise ValueError(
+                        "You passed too many positional args. "
+                        "Please replace them with keyword arguments.")
+
+            msg = ("Passing positional arguments other than `model` is "
+                   "deprecated and will be replaced with keyword arguments "
+                   "in an upcoming version.")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
