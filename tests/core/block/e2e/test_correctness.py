@@ -7,12 +7,6 @@ from vllm import SamplingParams
 from .conftest import get_token_ids_from_llm_generator
 
 
-@pytest.fixture(scope="module", autouse=True)
-def check_deprecated_block_manager():
-    check_deprecated_block_manager_usage(
-        'tests/core/block/e2e/test_correctness.py')
-
-
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
