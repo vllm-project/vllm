@@ -2,13 +2,9 @@
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
-from typing import List
-
 import pytest
 
 from tests.kernels.utils import override_backend_env_variable
-from vllm.block import PhysicalTokenBlock
-from vllm.utils import Device
 
 from ..models.utils import check_outputs_equal
 
