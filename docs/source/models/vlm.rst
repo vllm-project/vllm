@@ -241,7 +241,7 @@ To consume the server, you can use the OpenAI client like in the example below:
     print("Chat completion output:", chat_response.choices[0].message.content)
 
 
-A full code example can be found in `examples/openai_vision_api_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_vision_api_client.py>`_.
+A full code example can be found in `examples/openai_api_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_api_client_for_multimodal.py>`_.
 
 .. note::
 
