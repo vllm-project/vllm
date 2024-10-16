@@ -6,8 +6,8 @@ Quickstart
 
 This guide will help you quickly get started with vLLM to:
 
-* :ref: `Run offline batched inference <offline_batched_inference>` 
-* :ref: `Run OpenAI-compatible inference <openai_compatible_server>`
+* :ref:`Run offline batched inference <offline_batched_inference>` 
+* :ref:`Run OpenAI-compatible inference <openai_compatible_server>`
 
 Prerequisites
 --------------
@@ -35,7 +35,7 @@ Offline Batched Inference
 
 With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). The example script for this section can be found `here <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`__.
 
-The first line of this example imports the classes :class:`~vllm.LLM` class and :class:`~vllm.SamplingParams`:
+The first line of this example imports the classes :class:`~vllm.LLM` and :class:`~vllm.SamplingParams`:
 
 - :class:`~vllm.LLM` is the main class for running offline inference with vLLM engine.
 - :class:`~vllm.SamplingParams` specifies the parameters for the sampling process.
