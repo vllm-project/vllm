@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from functools import wraps
 from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
-                    Optional, Type, TypeVar, Union, get_args, get_origin)
+                    Optional, Type, TypeVar)
 
 import torch
 from torch import is_tensor
@@ -46,14 +46,14 @@ def _init_attn_metadata_from_tensor_dict(
     # Extract the fields used to create AttentionMetadata.
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-        val = tensor_dict.pop(field.name, None)
-        # NOTE(kzawora): None is a valid value if type is optional. If
+        # NOTE(kzawora): We use sentinel here, as None
+        # may be a valid value if type is optional. If
         # we don't check against it, we will crash by not assigning
         # Optional types without default value, even if they are
         # broadcasted properly.
-        is_field_optional = get_origin(field.type) is Union and \
-            type(None) in get_args(field.type)
-        if val is not None or (val is None and is_field_optional):
+        sentinel = object()
+        val = tensor_dict.pop(field.name, sentinel)
+        if val == sentinel:
             valid_attn_kwargs[field.name] = val
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
     tensor_dict["attn_metadata"] = attn_metadata
