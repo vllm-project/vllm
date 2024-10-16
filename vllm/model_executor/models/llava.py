@@ -276,10 +276,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
-        # HACK due to:
-        # expected shape of pixel values is ('batch_size', '3', '1024', '1024')
-        # You supplied (2, 1, 3, 1024, 1024).
-        # data = data.reshape(-1, *data.shape[-3:])
         actual_dims = tuple(data.shape[1:])
 
         if actual_dims != expected_dims:
@@ -305,6 +301,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                                  f"Got type: {type(pixel_values)}")
 
             # Case for models like PixtralHF that have dynamic image sizes
+            # so we need to produce a list of tensors
             if image_sizes is not None:
                 images = pixel_values
                 if isinstance(images, torch.Tensor):
@@ -314,13 +311,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                     images = [images[i] for i in range(images.size(0))]
                 elif isinstance(images, list):
                     # if passed as list flatten lists of tensors
-                    def flatten(lst):
-                        while isinstance(lst, list) and len(lst) == 1:
-                            lst = lst[0]
-                        return lst
-
-                    images = flatten(images)
-                    # print("flattened", [img.shape for img in images])
+                    while isinstance(images, list) and len(images) == 1:
+                        images = images[0]
 
                 # TODO: Add validation based on image_sizes
                 return LlavaImagePixelInputs(
