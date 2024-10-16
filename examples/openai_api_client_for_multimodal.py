@@ -145,7 +145,7 @@ def run_multi_image() -> None:
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output:", result)
 
-
+# Audio input inference
 def run_audio() -> None:
     # Any format supported by librosa is supported
     audio_url = AudioAsset("winning_call").url
