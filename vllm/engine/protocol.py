@@ -84,7 +84,8 @@ class EngineClient(ABC):
                 multi_modal_data = prompt.get("multi_modal_data")
                 mm_processor_kwargs = prompt.get("mm_processor_kwargs")
             else:
-                raise TypeError("Inputs in Dictionary type must be a TextPrompt or TokensPrompt")
+                raise TypeError(
+                    "Dictionary input must be a TextPrompt or TokensPrompt")
         else:
             tokenized_prompt = prompt if isinstance(
                 prompt, list) else tokenizer.encode(prompt)
@@ -101,16 +102,18 @@ class EngineClient(ABC):
             max_tokens=1,
             temperature=temperature,
         )
-        all_beams = [BeamSearchSequence(tokens=tokenized_prompt, cum_logprob=0)]
+        all_beams = [
+            BeamSearchSequence(tokens=tokenized_prompt, cum_logprob=0)
+        ]
         completed = []
 
         for _ in range(max_tokens):
             prompts_batch = [
                 TokensPrompt(
                     prompt_token_ids=beam.tokens,
-                    multi_modal_data=deepcopy(multi_modal_data), # always the values from inputs
-                    mm_processor_kwargs=deepcopy(mm_processor_kwargs)
-                )
+                    multi_modal_data=deepcopy(
+                        multi_modal_data),  # always the values from inputs
+                    mm_processor_kwargs=deepcopy(mm_processor_kwargs))
                 for beam in all_beams
             ]
 
@@ -140,21 +143,19 @@ class EngineClient(ABC):
                             not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(
-                                    tokens=current_beam.tokens + [token_id] 
-                                    if include_stop_str_in_output else current_beam.tokens, #
+                                    tokens=current_beam.tokens +
+                                    [token_id] if include_stop_str_in_output
+                                    else current_beam.tokens,  #
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
-                                    finish_reason="stop"
-                                )
-                            )
+                                    finish_reason="stop"))
                         else:
                             new_beams.append(
                                 BeamSearchSequence(
-                                    tokens=current_beam.tokens + [token_id], #
+                                    tokens=current_beam.tokens + [token_id],  #
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
-                                )
-                            )
+                                ))
 
             sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
             all_beams = sorted_beams[:beam_width]
@@ -181,7 +182,7 @@ class EngineClient(ABC):
             finished=True,
             prompt_token_ids=tokenized_prompt,
             prompt_logprobs=None)
-        
+
         yield beam_search_output
 
     @abstractmethod

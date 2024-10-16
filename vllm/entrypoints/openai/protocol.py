@@ -302,8 +302,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-            include_stop_str_in_output=self.include_stop_str_in_output
-        )
+            include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
@@ -403,7 +402,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 )
         if data.get("logprobs") and data.get("use_beam_search"):
             raise ValueError(
-                "Only the `cumulative_logprob` of each selected sequence will be returned."
+                "Only the `cumulative_logprob` of each output will be returned."
             )
 
         return data
@@ -599,8 +598,7 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-            include_stop_str_in_output=self.include_stop_str_in_output
-        )
+            include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
