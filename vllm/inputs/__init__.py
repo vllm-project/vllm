@@ -1,7 +1,8 @@
-from .data import (EncoderDecoderLLMInputs, ExplicitEncoderDecoderPrompt,
-                   LLMInputs, PromptType, SingletonPrompt, TextPrompt,
-                   TokensPrompt, build_explicit_enc_dec_prompt,
-                   to_enc_dec_tuple_list, zip_enc_dec_prompts)
+from .data import (DecoderOnlyInputs, EncoderDecoderInputs,
+                   ExplicitEncoderDecoderPrompt, PromptType, SingletonInputs,
+                   SingletonPrompt, TextPrompt, TokenInputs, TokensPrompt,
+                   build_explicit_enc_dec_prompt, to_enc_dec_tuple_list,
+                   token_inputs, zip_enc_dec_prompts)
 from .registry import InputContext, InputRegistry
 
 INPUT_REGISTRY = InputRegistry()
@@ -19,8 +20,11 @@ __all__ = [
     "PromptType",
     "SingletonPrompt",
     "ExplicitEncoderDecoderPrompt",
-    "LLMInputs",
-    "EncoderDecoderLLMInputs",
+    "TokenInputs",
+    "token_inputs",
+    "SingletonInputs",
+    "DecoderOnlyInputs",
+    "EncoderDecoderInputs",
     "build_explicit_enc_dec_prompt",
     "to_enc_dec_tuple_list",
     "zip_enc_dec_prompts",
@@ -31,14 +35,31 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name == "PromptInput":
-        import warnings
+    import warnings
 
+    if name == "PromptInput":
         msg = ("PromptInput has been renamed to PromptType. "
                "The original name will be removed in an upcoming version.")
 
         warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         return PromptType
+
+    if name == "LLMInputs":
+        msg = ("LLMInputs has been renamed to DecoderOnlyInputs. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return DecoderOnlyInputs
+
+    if name == "EncoderDecoderLLMInputs":
+        msg = (
+            "EncoderDecoderLLMInputs has been renamed to EncoderDecoderInputs. "
+            "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return EncoderDecoderInputs
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

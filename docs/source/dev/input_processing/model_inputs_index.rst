@@ -25,7 +25,7 @@ Module Contents
 LLM Engine Inputs
 -----------------
 
-.. autoclass:: vllm.inputs.LLMInputs
+.. autoclass:: vllm.inputs.DecoderOnlyInputs
     :members:
     :show-inheritance:
 

@@ -23,7 +23,8 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather)
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -945,9 +946,9 @@ def pad_images(
     return images, image_input_idx, image_masks
 
 
-def input_processor_for_molmo(ctx: InputContext, llm_inputs: LLMInputs):
-    prompt = llm_inputs.get("prompt", None)
-    multi_modal_data = llm_inputs.get("multi_modal_data", None)
+def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
+    prompt = inputs.get("prompt", None)
+    multi_modal_data = inputs.get("multi_modal_data", None)
     if multi_modal_data is not None:
         image = multi_modal_data.get("image", None)
     else:
@@ -965,9 +966,7 @@ def input_processor_for_molmo(ctx: InputContext, llm_inputs: LLMInputs):
     elif prompt is not None:
         out = processor.process(prompt, image)
     else:
-        out = processor.process(None,
-                                image,
-                                tokens=llm_inputs["prompt_token_ids"])
+        out = processor.process(None, image, tokens=inputs["prompt_token_ids"])
 
     image_processor = processor.image_processor
     max_total_crops = 1 + image_processor.max_crops
@@ -1020,9 +1019,9 @@ def input_processor_for_molmo(ctx: InputContext, llm_inputs: LLMInputs):
 
     multi_modal_data = dict(image=image_data)
 
-    return LLMInputs(
+    return token_inputs(
         prompt_token_ids=out["input_ids"],
-        prompt=llm_inputs["prompt"],
+        prompt=inputs["prompt"],
         multi_modal_data=multi_modal_data,
     )
 

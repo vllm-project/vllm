@@ -12,7 +12,7 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -201,10 +201,11 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
     raise NotImplementedError(msg)
 
 
-def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+def input_processor_for_llava_next(ctx: InputContext,
+                                   inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config(LlavaNextConfig)
@@ -239,7 +240,7 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
         return input_processor_for_clip(
             model_config,
             vision_config,
-            llm_inputs,
+            inputs,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
@@ -247,7 +248,7 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
         return input_processor_for_siglip(
             model_config,
             vision_config,
-            llm_inputs,
+            inputs,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
