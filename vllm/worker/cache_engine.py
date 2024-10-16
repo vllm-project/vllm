@@ -75,26 +75,14 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_attention_layers):
-            if device == 'hpu':
-                key_cache = torch.zeros(kv_cache_shape,
-                                        dtype=self.dtype,
-                                        device=device)
-                value_cache = torch.zeros(kv_cache_shape,
-                                          dtype=self.dtype,
-                                          device=device)
-                kv_layer = (key_cache, value_cache)
-                kv_cache.append(kv_layer)
-            else:
-                # null block in CpuGpuBlockAllocator requires at least that
-                # block to be zeroed-out.
-                # We zero-out everything for simplicity.
-                dtype = torch.uint8 if self.dtype == torch.float8_e4m3fn else \
-                        self.dtype
-                kv_cache.append(
-                    torch.zeros(kv_cache_shape,
-                                dtype=dtype,
-                                pin_memory=pin_memory,
-                                device=device))
+            # null block in CpuGpuBlockAllocator requires at least that
+            # block to be zeroed-out.
+            # We zero-out everything for simplicity.
+            kv_cache.append(
+                torch.zeros(kv_cache_shape,
+                            dtype=self.dtype,
+                            pin_memory=pin_memory,
+                            device=device))
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:

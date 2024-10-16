@@ -92,7 +92,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             observability_config=observability_config)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
+        self.cache_engine: List[HPUCacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.hpu_cache: Optional[List[List[torch.tensor]]] = None
         # Torch profiler. Enabled and configured through env vars:
@@ -235,8 +235,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
-            CacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
+            HPUCacheEngine(self.cache_config, self.model_config,
+                           self.parallel_config, self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.hpu_cache = [
@@ -351,9 +351,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(self.cache_config,
-                                                self.model_config,
-                                                self.parallel_config)
+        return HPUCacheEngine.get_cache_block_size(self.cache_config,
+                                                   self.model_config,
+                                                   self.parallel_config)
 
 
 def init_worker_distributed_environment(
@@ -413,3 +413,26 @@ def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
             f"stored in KV cache ({max_seq_len}). Try increasing "
             "`gpu_memory_utilization` or decreasing `max_model_len` when "
             "initializing the engine.")
+
+
+class HPUCacheEngine(CacheEngine):
+
+    def _allocate_kv_cache(
+        self,
+        num_blocks: int,
+        device: str,
+    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """Allocates KV cache on the specified device."""
+        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
+        kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        for _ in range(self.num_attention_layers):
+            key_cache = torch.zeros(kv_cache_shape,
+                                    dtype=self.dtype,
+                                    device=device)
+            value_cache = torch.zeros(kv_cache_shape,
+                                      dtype=self.dtype,
+                                      device=device)
+            kv_layer = (key_cache, value_cache)
+            kv_cache.append(kv_layer)
+        return kv_cache
