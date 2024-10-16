@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Union
 import openai
 import pytest
 import requests
+from openai._types import NOT_GIVEN, NotGiven
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec, assert_never
 
@@ -615,10 +616,10 @@ async def completions_with_server_args(
     num_logprobs: Optional[int],
     max_wait_seconds: int = 240,
     max_tokens: Union[int, list] = 5,
-    best_of: Optional[int] = None,
-    n: Optional[int] = None,
-    temperature: float = 0,
-    seed: Optional[int] = None,
+    best_of: Union[int, NotGiven] = NOT_GIVEN,
+    n: Union[int, NotGiven] = NOT_GIVEN,
+    temperature: Union[float, NotGiven] = NOT_GIVEN,
+    seed: Union[int, NotGiven] = NOT_GIVEN,
 ) -> List[Completion]:
     '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
