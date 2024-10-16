@@ -431,10 +431,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1":
     lambda: os.environ.get("VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1", "0"
                            ) == "1",
-    
+
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
-    # selection 
+    # selection
     # (kernels: MacheteLinearKernel, MarlinLinearKernel, ExllamaLinearKernel)
     "VLLM_DISABLED_KERNELS":
     lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
