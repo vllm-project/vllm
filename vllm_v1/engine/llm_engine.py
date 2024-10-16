@@ -451,7 +451,7 @@ class LLMEngine:
                              "not enabled!")
         if arrival_time is None:
             arrival_time = time.time()
-        assert priority == 0
+        assert priority == 0, "vLLM V1 does not support priority at the moment."
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
