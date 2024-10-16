@@ -404,21 +404,21 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
       // C=s_a * C_inter + bias.
       torch::Tensor tmp_fp32_out =
           torch::empty_like(c, ::at::ScalarType::Float);
-      DNNLPrimitiveHelper<true>::gemm_s8s8_jit(
+      DNNLPrimitiveHelper<true>::gemm_s8s8_jit<float, void>(
           a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
-          tmp_fp32_out.data_ptr<float>(), (void*)(0), a.size(0), b.size(1),
-          a.size(1), (float*)(0), b_scales.data_ptr<float>(), 0,
+          tmp_fp32_out.data_ptr<float>(), nullptr, a.size(0), b.size(1),
+          a.size(1), nullptr, b_scales.data_ptr<float>(), 0,
           b_scales.numel());
       if (bias.has_value()) {
         dynamic_quant_epilogue<false, true, true>(
             tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-            a_scales.data_ptr<float>(), (float*)0, (int32_t*)0, (int32_t*)0,
+            a_scales.data_ptr<float>(), nullptr, nullptr, nullptr,
             bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
       } else {
-        dynamic_quant_epilogue<false, true, false>(
+        dynamic_quant_epilogue<false, true, false, scalar_t>(
             tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-            a_scales.data_ptr<float>(), (float*)0, (int32_t*)0, (int32_t*)0,
-            (scalar_t*)(0), c.size(0), c.size(1));
+            a_scales.data_ptr<float>(), nullptr, nullptr, nullptr,
+            nullptr, c.size(0), c.size(1));
       }
     } else {
       // per-tensor
@@ -429,9 +429,9 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
             a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
             a_scales.numel(), b_scales.numel());
       } else {
-        DNNLPrimitiveHelper<false>::gemm_s8s8_jit(
+        DNNLPrimitiveHelper<false>::gemm_s8s8_jit<scalar_t, void>(
             a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), c.data_ptr<scalar_t>(),
-            (void*)(0), a.size(0), b.size(1), a.size(1),
+            nullptr, a.size(0), b.size(1), a.size(1),
             a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
             a_scales.numel(), b_scales.numel());
       }
@@ -484,10 +484,10 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
     if (a_scales.numel() != 1) {
       // per-token
       // Note: oneDNN doesn't support per-token activation quantization
-      DNNLPrimitiveHelper<true>::gemm_s8s8_jit(
+      DNNLPrimitiveHelper<true>::gemm_s8s8_jit<float, void>(
           a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
-          tmp_fp32_out.data_ptr<float>(), (void*)(0), a.size(0), b.size(1),
-          a.size(1), (float*)(0), b_scales.data_ptr<float>(), 0,
+          tmp_fp32_out.data_ptr<float>(), nullptr, a.size(0), b.size(1),
+          a.size(1), nullptr, b_scales.data_ptr<float>(), 0,
           b_scales.numel());
       if (bias.has_value()) {
         if (b_scales.numel() != 1) {
@@ -508,18 +508,18 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
       } else {
         if (b_scales.numel() != 1) {
           // Per-Channel
-          dynamic_quant_epilogue<true, true, false>(
+          dynamic_quant_epilogue<true, true, false, scalar_t>(
               tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
               a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
               azp->data_ptr<int32_t>(), azp_adj.data_ptr<int32_t>(),
-              (scalar_t*)(0), c.size(0), c.size(1));
+              nullptr, c.size(0), c.size(1));
         } else {
           // Per-Tensor
-          dynamic_quant_epilogue<true, false, false>(
+          dynamic_quant_epilogue<true, false, false, scalar_t>(
               tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
               a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
               azp->data_ptr<int32_t>(), azp_adj.data_ptr<int32_t>(),
-              (scalar_t*)(0), c.size(0), c.size(1));
+              nullptr, c.size(0), c.size(1));
         }
       }
     } else {
@@ -531,9 +531,9 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
             a.size(0), b.size(1), a.size(1), a_scales.data_ptr<float>(),
             b_scales.data_ptr<float>(), a_scales.numel(), b_scales.numel());
       } else {
-        DNNLPrimitiveHelper<false>::gemm_s8s8_jit(
+        DNNLPrimitiveHelper<false>::gemm_s8s8_jit<float, void>(
             a.data_ptr<int8_t>(), b.data_ptr<int8_t>(),
-            tmp_fp32_out.data_ptr<float>(), (void*)(0), a.size(0), b.size(1),
+            tmp_fp32_out.data_ptr<float>(), nullptr, a.size(0), b.size(1),
             a.size(1), a_scales.data_ptr<float>(), b_scales.data_ptr<float>(),
             a_scales.numel(), b_scales.numel());
       }
@@ -578,7 +578,7 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
         } else {
           static_scaled_int8_quant_impl<false>(
               input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-              scale.data_ptr<float>(), (int32_t*)0, num_tokens, hidden_size);
+              scale.data_ptr<float>(), nullptr, num_tokens, hidden_size);
         }
       });
 }
@@ -605,7 +605,7 @@ void dynamic_scaled_int8_quant(
         } else {
           dynamic_scaled_int8_quant_impl<false>(
               input.data_ptr<scalar_t>(), out.data_ptr<int8_t>(),
-              scale.data_ptr<float>(), (int32_t*)(0), num_tokens, hidden_size);
+              scale.data_ptr<float>(), nullptr, num_tokens, hidden_size);
         }
       });
 }
