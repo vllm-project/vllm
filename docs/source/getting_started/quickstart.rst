@@ -6,8 +6,8 @@ Quickstart
 
 This guide will help you quickly get started with vLLM to:
 
-* `Run offline batched inference <#offline_batched_inference>`_ 
-* `Run OpenAI-compatible inference <#openai_compatible_server>`_
+* :ref: `Run offline batched inference <offline_batched_inference>` 
+* :ref: `Run OpenAI-compatible inference <openai_compatible_server>`
 
 Prerequisites
 --------------
@@ -18,7 +18,7 @@ Prerequisites
 Installation
 --------------
 
-You can install vLLM using pip. It's recommended to use `conda <https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html>`_ to create a manage Python environments.
+You can install vLLM using pip. It's recommended to use `conda <https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html>`_ to create and manage Python environments.
 
 .. code-block:: shell
 
@@ -28,10 +28,12 @@ You can install vLLM using pip. It's recommended to use `conda <https://docs.con
 
 Please refer to the :ref:`installation documentation <installation>` for more details on installing vLLM.
 
+.. _offline_batched_inference:
+
 Offline Batched Inference
 -------------------------
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). The example script for this section can be found  `here <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`__.
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). The example script for this section can be found `here <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference.py>`__.
 
 The first line of this example imports both the :class:`~vllm.LLM` class, the main class for running offline inference with vLLM engine and the :class:`~vllm.SamplingParams` class which specifies the parameters for the sampling process.
 
@@ -61,7 +63,7 @@ vLLM's engine is then initialized for offline inference with the :class:`~vllm.L
 
     By default, vLLM downloads model from `HuggingFace <https://huggingface.co/>`_. If you would like to use models from `ModelScope <https://www.modelscope.cn>`_, set the environment variable:
 
-    .. code-block:: shell
+    .. code-block:: console
 
         export VLLM_USE_MODELSCOPE=True
 
@@ -76,6 +78,8 @@ Now, the fun part! The outputs are generated using ``llm.generate``. It adds the
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
+.. _openai_compatible_server:
+
 OpenAI-Compatible Server
 -------------------------
 
@@ -84,17 +88,17 @@ By default, it starts the server at ``http://localhost:8000``. You can specify t
 
 To start the server, simply use:
 
-.. code-block:: shell
+.. code-block:: console
 
     $ vllm serve facebook/opt-125m
 
 .. note::
 
-    By default, the server uses a predefined chat template stored in the tokenizer. You can learn about overriding it `here <https://github.com/vllm-project/vllm/blob/main/docs/source/serving/openai_compatible_server.md#chat-template>`_.
+    By default, the server uses a predefined chat template stored in the tokenizer. You can learn about overriding it `here <https://github.com/vllm-project/vllm/blob/main/docs/source/serving/openai_compatible_server.md#chat-template>`__.
 
 This server can be queried in the same format as OpenAI API. For example, to list the models:
 
-.. code-block:: shell
+.. code-block:: console
 
     $ curl http://localhost:8000/v1/models
 
@@ -105,7 +109,7 @@ OpenAI Completions API with vLLM
 
 Once your server is started, you can query the model with input prompts:
 
-.. code-block:: shell
+.. code-block:: console
 
     $ curl http://localhost:8000/v1/completions \
     $     -H "Content-Type: application/json" \
@@ -136,13 +140,13 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
 A more detailed client example can be found `here <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>`__.
 
 OpenAI Chat API with vLLM
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-vLLM is also designed to support the OpenAI Chat API. The chat interface is a more dynamic, interactive way to communicate with the model, allowing back-and-forth exchanges that can be stored in the chat history. This is useful for tasks that require context or more detailed explanations.
+vLLM is designed to also support the OpenAI Chat API. The chat interface is a more dynamic, interactive way to communicate with the model, allowing back-and-forth exchanges that can be stored in the chat history. This is useful for tasks that require context or more detailed explanations.
 
-You can use the `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_ endpoint:
+You can use the `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_ endpoint to interact with the model:
 
-.. code-block:: shell
+.. code-block:: console
 
     $ curl http://localhost:8000/v1/chat/completions \
     $     -H "Content-Type: application/json" \
