@@ -330,8 +330,8 @@ def test_causal_conv1d_update_with_batch_gather(with_padding, dim, width,
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize('seqlen',
-                         [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 2049, 4096])
+@pytest.mark.parametrize(
+    'seqlen', [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 2049, 4096])
 @pytest.mark.parametrize('dim', [64, 4096])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize('with_padding', [True, False])
@@ -390,7 +390,8 @@ def test_causal_conv1d_varlen(with_padding, dim, seqlen, width, has_bias,
         state_indices,
         torch.as_tensor(
             [PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
-    ], dim=-1)
+    ],
+                                        dim=-1)
 
     out = causal_conv1d_fn(x.squeeze(0), weight, bias, cumsum.cuda(),
                            padded_state_indices, has_initial_states,
