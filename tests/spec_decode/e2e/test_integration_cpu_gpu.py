@@ -6,7 +6,7 @@ import pytest
 
 from .conftest import run_equality_correctness_test
 
-MAIN_MODEL = "JackFram/llama-68m"
+MAIN_MODEL = "facebook/opt-125m"
 
 
 @pytest.mark.parametrize(
@@ -17,14 +17,14 @@ MAIN_MODEL = "JackFram/llama-68m"
 
         # Verify equality when cuda graphs allowed.
         "enforce_eager": False,
-        "model_name": "JackFram/llama-68m",
+        "model_name": "facebook/opt-125m",
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
         {
             # Identical models.
-            "speculative_model": "JackFram/llama-68m",
+            "speculative_model": "facebook/opt-125m",
             "num_speculative_tokens": 5,
             "cpu_draft_worker": True,
         },
