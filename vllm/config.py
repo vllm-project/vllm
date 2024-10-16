@@ -173,10 +173,14 @@ class ModelConfig:
         if self.enforce_eager is None:
             self.enforce_eager = False
 
-        has_interleaved_attention = isinstance(self.hf_text_config.sliding_window, list) or (self.hf_text_config.model_type in ["gemma2"] and self.hf_text_config.sliding_window is not None)
+        has_interleaved_attention = isinstance(
+            self.hf_text_config.sliding_window,
+            list) or (self.hf_text_config.model_type in ["gemma2"]
+                      and self.hf_text_config.sliding_window is not None)
 
         if (not self.disable_sliding_window and has_interleaved_attention):
-            sliding_window_len_min = get_min_sliding_window(self.hf_text_config.sliding_window)
+            sliding_window_len_min = get_min_sliding_window(
+                self.hf_text_config.sliding_window)
 
             print_warning_once(
                 f"{self.hf_text_config.model_type} has interleaved attention, "
@@ -424,7 +428,8 @@ class ModelConfig:
                                "pipeline parallelism currently. Disabling it.")
                 self.use_async_output_proc = False
 
-    def get_hf_config_sliding_window(self) -> Optional[Union[int, List[int]]]:
+    def get_hf_config_sliding_window(
+            self) -> Optional[Union[int, List[Optional[int]]]]:
         """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
@@ -435,7 +440,7 @@ class ModelConfig:
             return None
         return getattr(self.hf_text_config, "sliding_window", None)
 
-    def get_sliding_window(self) -> Optional[int]:
+    def get_sliding_window(self) -> Optional[Union[int, List[Optional[int]]]]:
         """Get the sliding window size, or None if disabled.
         """
         # If user disables sliding window, return None.
@@ -1719,7 +1724,8 @@ def _get_and_verify_max_len(
         sliding_window_len_min = get_min_sliding_window(sliding_window_len)
         max_len_key = "sliding_window" \
             if sliding_window_len_min < derived_max_model_len else max_len_key
-        derived_max_model_len = min(derived_max_model_len, sliding_window_len_min)
+        derived_max_model_len = min(derived_max_model_len,
+                                    sliding_window_len_min)
 
     # If none of the keys were found in the config, use a default and
     # log a warning.
@@ -1807,7 +1813,8 @@ def _get_and_verify_max_len(
     return int(max_model_len)
 
 
-def get_min_sliding_window(sliding_window: Union[int, List[Optional[int]]]) -> int:
+def get_min_sliding_window(
+        sliding_window: Union[int, List[Optional[int]]]) -> int:
     if isinstance(sliding_window, list):
         return min([s for s in sliding_window if s is not None])
     else:
