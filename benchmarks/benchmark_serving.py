@@ -176,9 +176,9 @@ def sample_sonnet_requests(
     # Sample the rest of lines per request.
     sampled_requests: List[Tuple[str, int, int]] = []
     for _ in range(num_requests):
-        sampled_lines = "".join(
-            prefix_lines +
-            random.sample(poem_lines, num_input_lines - num_prefix_lines))
+        num_lines_needed = num_input_lines - num_prefix_lines
+        sampled_lines = "".join(prefix_lines +
+                                random.choices(poem_lines, k=num_lines_needed))
 
         prompt = f"{base_prompt}{sampled_lines}"
         message = [
@@ -391,7 +391,6 @@ async def benchmark(
     input_requests: List[Tuple[str, int, int]],
     logprobs: Optional[int],
     best_of: int,
-    use_beam_search: bool,
     request_rate: float,
     disable_tqdm: bool,
     profile: bool,
@@ -419,7 +418,6 @@ async def benchmark(
         output_len=test_output_len,
         logprobs=logprobs,
         best_of=best_of,
-        use_beam_search=use_beam_search,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
     )
@@ -433,17 +431,15 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            best_of=best_of,
-            use_beam_search=use_beam_search,
-            multi_modal_content=test_mm_content,
-        )
+        profile_input = RequestFuncInput(model=model_id,
+                                         prompt=test_prompt,
+                                         api_url=base_url + "/start_profile",
+                                         prompt_len=test_prompt_len,
+                                         output_len=test_output_len,
+                                         logprobs=logprobs,
+                                         best_of=best_of,
+                                         multi_modal_content=test_mm_content,
+                                         ignore_eos=ignore_eos)
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
@@ -456,17 +452,15 @@ async def benchmark(
     tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len, mm_content = request
-        request_func_input = RequestFuncInput(
-            model=model_id,
-            prompt=prompt,
-            api_url=api_url,
-            prompt_len=prompt_len,
-            output_len=output_len,
-            logprobs=logprobs,
-            best_of=best_of,
-            use_beam_search=use_beam_search,
-            multi_modal_content=mm_content,
-        )
+        request_func_input = RequestFuncInput(model=model_id,
+                                              prompt=prompt,
+                                              api_url=api_url,
+                                              prompt_len=prompt_len,
+                                              output_len=output_len,
+                                              logprobs=logprobs,
+                                              best_of=best_of,
+                                              multi_modal_content=mm_content,
+                                              ignore_eos=ignore_eos)
         tasks.append(
             asyncio.create_task(
                 request_func(request_func_input=request_func_input,
@@ -483,7 +477,6 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
             best_of=best_of,
-            use_beam_search=use_beam_search,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -541,7 +534,7 @@ async def benchmark(
         # E.g., "Time to First Token"
         metric_header: str,
     ):
-        # This function print and add statistics of the specified
+        # This function prints and adds statistics of the specified
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
@@ -679,7 +672,6 @@ def main(args: argparse.Namespace):
             input_requests=input_requests,
             logprobs=args.logprobs,
             best_of=args.best_of,
-            use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
@@ -701,7 +693,6 @@ def main(args: argparse.Namespace):
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
-        result_json["use_beam_search"] = args.use_beam_search
         result_json["num_prompts"] = args.num_prompts
 
         # Metadata

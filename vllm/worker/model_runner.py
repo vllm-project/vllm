@@ -18,6 +18,8 @@ import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.compilation.compile_context import set_compile_context
+from vllm.compilation.levels import CompilationLevel
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -45,6 +47,7 @@ from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available,
                         supports_dynamo)
@@ -640,7 +643,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if not mm_data:
             return
 
-        mm_kwargs = self.multi_modal_input_mapper(mm_data)
+        mm_kwargs = self.multi_modal_input_mapper(
+            mm_data,
+            mm_processor_kwargs=seq_group_metadata.mm_processor_kwargs)
         inter_data.multi_modal_inputs = mm_kwargs
 
         # special processing for mrope position deltas.
@@ -987,8 +992,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
 
-        self.has_seqlen_agnostic = model_config.contains_seqlen_agnostic_layers(
-            parallel_config)
+        self.has_inner_state = model_config.has_inner_state
 
         # When using CUDA graph, the input block tables must be padded to
         # max_seq_len_to_capture. However, creating the block table in
@@ -999,17 +1003,25 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_block_tables = np.zeros(
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
+
+        # Attention-free but stateful models like Mamba need a placeholder attn
+        # backend, as the attention metadata is needed to manage internal state.
+        # However we must bypass attention selection altogether for some models
+        # used for speculative decoding to avoid a divide-by-zero in
+        # model_config.get_head_size()
         num_attn_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
+        needs_attn_backend = (num_attn_heads != 0
+                              or self.model_config.is_attention_free)
+
         self.attn_backend = get_attn_backend(
-            num_attn_heads,
             self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
-        ) if num_attn_heads else None
+            self.model_config.is_attention_free,
+        ) if needs_attn_backend else None
         if self.attn_backend:
             self.attn_state = self.attn_backend.get_state_cls()(
                 weakref.proxy(self))
@@ -1124,10 +1136,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
-            from vllm.compilation.backends import vllm_backend
+        if envs.VLLM_TORCH_COMPILE_LEVEL == CompilationLevel.DYNAMO_AS_IS \
+            and supports_dynamo():
             from vllm.plugins import get_torch_compile_backend
-            backend = get_torch_compile_backend() or vllm_backend
+            backend = get_torch_compile_backend() or "eager"
             self.model = torch.compile(
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
@@ -1287,7 +1299,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 batch_size=batch_size,
                 dtype=self.model_config.dtype,
                 device=self.device)
-        self.execute_model(model_input, kv_caches, intermediate_tensors)
+
+        graph_batch_size = self.max_batchsize_to_capture
+        batch_size_capture_list = [
+            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
+        ]
+        if self.model_config.enforce_eager:
+            batch_size_capture_list = []
+        with set_compile_context(batch_size_capture_list):
+            self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
         return
 
@@ -1360,10 +1380,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def model_is_mrope(self) -> bool:
         """Detect if the model has "mrope" rope_scaling type.
         mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
-        if rope_scaling is None:
-            return False
-        return rope_scaling.get("type", None) == "mrope"
+        return uses_mrope(self.model_config.hf_config)
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
@@ -1486,7 +1503,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             "previous_hidden_states"] = previous_hidden_states[:
                                                                                batch_size]
 
-                    if self.has_seqlen_agnostic:
+                    if self.has_inner_state:
                         # Only used by Mamba-based models CUDA graph atm (Jamba)
                         capture_inputs.update({
                             "seqlen_agnostic_capture_inputs":
@@ -1635,7 +1652,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
-        } if self.has_seqlen_agnostic else {}
+        } if self.has_inner_state else {}
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch.cuda.Event(enable_timing=True)
@@ -1840,10 +1857,14 @@ class CUDAGraphRunner:
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
-        self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
-                                                 non_blocking=True)
+
+        if self.backend_name != "placeholder-attn":
+            self.input_buffers["slot_mapping"].copy_(
+                attn_metadata.slot_mapping, non_blocking=True)
+
         self.attn_state.prepare_graph_input_buffers(
             self.input_buffers, attn_metadata, self._is_encoder_decoder_model)
+
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)

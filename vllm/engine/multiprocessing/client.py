@@ -2,8 +2,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
-                    Union, overload)
+from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
+                    Optional, Union, overload)
 
 import cloudpickle
 import zmq
@@ -13,6 +13,7 @@ from zmq.asyncio import Socket
 
 from vllm import PoolingParams
 from vllm.config import DecodingConfig, EngineConfig, ModelConfig
+from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -25,11 +26,13 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCError, RPCProcessRequest,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
+from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -50,7 +53,7 @@ class MQClientClosedError(Exception):
     """
 
 
-class MQLLMEngineClient:
+class MQLLMEngineClient(EngineClient):
     """A client wrapper for MQLLMEngine that conforms to the
     EngineClient protocol.
 
@@ -313,7 +316,7 @@ class MQLLMEngineClient:
               or response != VLLM_RPC_SUCCESS_STR):
             raise ValueError(error_message)
 
-    async def get_tokenizer(self, lora_request: LoRARequest):
+    async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
     async def get_decoding_config(self) -> DecodingConfig:
@@ -341,8 +344,14 @@ class MQLLMEngineClient:
             await self._send_one_way_rpc_request(
                 request=RPCAbortRequest(request_id), socket=self.input_socket)
 
-    async def do_log_stats(self):
-        """Ignore do_log_stats (handled on MQLLMEngine polling)"""
+    async def do_log_stats(
+        self,
+        scheduler_outputs: Optional[SchedulerOutputs] = None,
+        model_output: Optional[List[SamplerOutput]] = None,
+    ) -> None:
+        """
+        Ignore do_log_stats (handled on MQLLMEngine polling)
+        """
         pass
 
     async def check_health(self):
@@ -505,7 +514,8 @@ class MQLLMEngineClient:
                 and request_id is not None)
 
         return self._process_request(prompt, pooling_params, request_id,
-                                     lora_request, trace_headers, priority)
+                                     lora_request, trace_headers, None,
+                                     priority)
 
     async def _process_request(
         self,
