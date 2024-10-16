@@ -217,7 +217,7 @@ class RequestOutput:
                 output.finish_reason = SequenceStatus.get_finished_reason(
                     seq.status)
                 output.stop_reason = seq.stop_reason
-                hidden_states = seq.hidden_states
+                output.hidden_states = seq.hidden_states
 
             else:
                 output = CompletionOutput(
@@ -250,7 +250,7 @@ class RequestOutput:
         init_args = (seq_group.request_id, prompt, prompt_token_ids,
                      prompt_logprobs, outputs, finished, seq_group.metrics,
                      seq_group.lora_request, encoder_prompt,
-                     encoder_prompt_token_ids, prompt_hidden_states)
+                     encoder_prompt_token_ids, seq_group.prompt_hidden_states)
 
         if use_cache:
             request_output = seq_group.cached_request_output
