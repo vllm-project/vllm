@@ -529,13 +529,13 @@ class LLMEngine:
                 scheduler_output, output)
 
             if finished_reqs:
-                for req in finished_reqs:
-                    self.detokenizer_reqs[req.request_id] = req
                 self.send_to_detokenizer(finished_reqs)
         detokenized_reqs = self.recv_from_detokenizer()
         return detokenized_reqs, self.scheduler.running
 
     def send_to_detokenizer(self, requests: List[Request]) -> None:
+        for req in requests:
+            self.detokenizer_reqs[req.request_id] = req
         data = RequestData(
             request_ids=[req.request_id for req in requests],
             prompt_token_ids=[req.prompt_token_ids for req in requests],
