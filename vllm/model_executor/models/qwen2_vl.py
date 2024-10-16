@@ -210,17 +210,12 @@ class Qwen2VisionAttention(nn.Module):
                                       quant_config=quant_config)
 
         # Detect attention implementation.
-        self._use_flash_attn = self._use_sdpa = self._use_xformers = False
-        selected_backend: _Backend = get_vit_attn_backend()
-        if selected_backend == _Backend.FLASH_ATTN:
-            self._use_flash_attn = True
-        elif selected_backend == _Backend.XFORMERS:
-            self._use_xformers = True
-        elif selected_backend == _Backend.TORCH_SDPA:
-            self._use_sdpa = True
-        else:
+        self.attn_backend: _Backend = get_vit_attn_backend()
+        if self.attn_backend not in {
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+        }:
             raise RuntimeError(
-                f"Qwen2-VL does not support {selected_backend} backend now.")
+                f"Qwen2-VL does not support {self.attn_backend} backend now.")
 
     def forward(
         self,
@@ -249,7 +244,7 @@ class Qwen2VisionAttention(nn.Module):
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
-        if self._use_flash_attn:
+        if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
             from flash_attn import flash_attn_varlen_func
@@ -270,7 +265,7 @@ class Qwen2VisionAttention(nn.Module):
             context_layer = rearrange(output,
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
-        elif self._use_sdpa:
+        elif self.attn_backend == _Backend.TORCH_SDPA:
             seq_length = q.size(1)
             q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
             attention_mask = torch.zeros([1, seq_length, seq_length],
@@ -285,7 +280,7 @@ class Qwen2VisionAttention(nn.Module):
                                                     attention_mask,
                                                     dropout_p=0.0)
             context_layer = rearrange(output, "b h s d -> b s h d ")
-        elif self._use_xformers:
+        elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 

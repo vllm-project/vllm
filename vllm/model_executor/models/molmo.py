@@ -188,17 +188,12 @@ class MultiHeadDotProductAttention(nn.Module):
         )
 
         # Detect attention implementation.
-        self._use_flash_attn = self._use_sdpa = self._use_xformers = False
-        selected_backend: _Backend = get_vit_attn_backend()
-        if selected_backend == _Backend.FLASH_ATTN:
-            self._use_flash_attn = True
-        elif selected_backend == _Backend.XFORMERS:
-            self._use_xformers = True
-        elif selected_backend == _Backend.TORCH_SDPA:
-            self._use_sdpa = True
-        else:
+        self.attn_backend: _Backend = get_vit_attn_backend()
+        if self.attn_backend not in {
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+        }:
             raise RuntimeError(
-                f"Molmo does not support {selected_backend} backend now.")
+                f"Molmo does not support {self.attn_backend} backend now.")
 
     def forward(self,
                 inputs_q: torch.Tensor,
@@ -220,15 +215,15 @@ class MultiHeadDotProductAttention(nn.Module):
         xk = xk.view(*kv_shape)
         xv = xv.view(*kv_shape)
 
-        if self._use_flash_attn:
+        if self.attn_backend == _Backend.FLASH_ATTN:
             from flash_attn import flash_attn_func
             output = flash_attn_func(xq, xk, xv, dropout_p=0.0, causal=False)
-        elif self._use_sdpa:
+        elif self.attn_backend == _Backend.TORCH_SDPA:
             xq, xk, xv = (rearrange(x, "b s h d -> b h s d")
                           for x in (xq, xk, xv))
             output = F.scaled_dot_product_attention(xq, xk, xv)
             output = rearrange(output, "b h s d -> b s h d ")
-        elif self._use_xformers:
+        elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             output = xops.memory_efficient_attention_forward(xq, xk, xv, p=0)
 
