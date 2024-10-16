@@ -11,7 +11,7 @@ vllm serve microsoft/Phi-3.5-vision-instruct --max-model-len 4096 \
     --trust-remote-code --limit-mm-per-prompt image=2
 
 (audio inference with Ultravox)
-vllm serve fixie-ai/ultravox-v0_3
+vllm serve fixie-ai/ultravox-v0_3 --max-model-len 4096
 """
 import base64
 
@@ -90,7 +90,7 @@ def run_single_image() -> None:
     print("Chat completion output from image url:", result)
 
     ## Use base64 encoded image in the payload
-    image_base64 = encode_base64_content_from_url(image_url=image_url)
+    image_base64 = encode_base64_content_from_url(image_url)
     chat_completion_from_base64 = client.chat.completions.create(
         messages=[{
             "role":
@@ -181,7 +181,7 @@ def run_audio() -> None:
     result = chat_completion_from_url.choices[0].message.content
     print("Chat completion output from audio url:", result)
 
-    audio_base64 = encode_base64_content_from_url(audio_url=audio_url)
+    audio_base64 = encode_base64_content_from_url(audio_url)
     chat_completion_from_base64 = client.chat.completions.create(
         messages=[{
             "role":
