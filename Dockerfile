@@ -206,10 +206,6 @@ FROM vllm-base AS vllm-openai
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer 'modelscope!=1.15.0' bitsandbytes>=0.44.0 timm==0.9.10
 
-# install ipex for speculative decoding with cpu draft model
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install intel_extension_for_pytorch==2.4.0
-
 ENV VLLM_USAGE_SOURCE production-docker-image
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
