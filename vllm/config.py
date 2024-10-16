@@ -173,10 +173,8 @@ class ModelConfig:
         if self.enforce_eager is None:
             self.enforce_eager = False
 
-        has_interleaved_attention = isinstance(
-            self.hf_text_config.sliding_window,
-            list) or (self.hf_text_config.model_type in ["gemma2"]
-                      and self.hf_text_config.sliding_window is not None)
+        sliding_window = getattr(self.hf_text_config, "sliding_window", None)
+        has_interleaved_attention = (sliding_window is not None) and (isinstance(sliding_window, list) or (self.hf_text_config.model_type in ["gemma2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
             sliding_window_len_min = get_min_sliding_window(
