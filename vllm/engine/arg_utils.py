@@ -1013,7 +1013,7 @@ class EngineArgs:
 
         
         if not self.use_v2_block_manager:
-            raise ValueError(
+            logger.warning(
                 "BlockSpaceManagerV1 has been removed, and setting "
                 "--use-v2-block-manager=False has no effect on vLLM "
                 "behavior. Please set --use-v2-block-manager=True. "
