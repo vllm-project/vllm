@@ -7,7 +7,6 @@ from typing import List
 import pytest
 
 from tests.kernels.utils import override_backend_env_variable
-from tests.utils import check_deprecated_block_manager_usage
 from vllm.block import PhysicalTokenBlock
 from vllm.core.block_manager_v1 import CachedBlockAllocator
 from vllm.utils import Device
@@ -19,10 +18,6 @@ MODELS = [
 ]
 
 
-@pytest.fixture(scope="module", autouse=True)
-def check_deprecated_block_manager():
-    check_deprecated_block_manager_usage(
-        'tests/prefix_caching/test_prefix_caching.py')
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -113,7 +108,6 @@ def test_mixed_requests(
     dtype: str,
     max_tokens: int,
     cached_position: int,
-    use_v2_block_manager: bool,
     monkeypatch,
 ) -> None:
     """
