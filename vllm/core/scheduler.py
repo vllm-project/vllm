@@ -311,7 +311,7 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        version = "main"
+        version = "selfattn"
         if (self.scheduler_config.embedding_mode
                 or self.cache_config.is_attention_free):
             version = "placeholder"

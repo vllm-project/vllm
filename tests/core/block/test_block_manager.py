@@ -2,7 +2,7 @@ import pytest
 
 from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
                                    STR_NOT_IMPL_ENC_DEC_SWA)
-from vllm.core.block_manager import MainBlockSpaceManager
+from vllm.core.block_manager import SelfAttnBlockSpaceManager
 from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, SequenceStatus
 from vllm.utils import chunk_list
@@ -17,7 +17,7 @@ from ..utils import (create_dummy_prompt, create_seq_group,
 @pytest.mark.parametrize("watermark", [0.0, 0.5])
 def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
                                 num_gpu_blocks: int, watermark: float):
-    block_manager = MainBlockSpaceManager(
+    block_manager = SelfAttnBlockSpaceManager(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=1024,
@@ -63,7 +63,7 @@ def test_can_allocate_seq_group_encoder_decoder(block_size: int,
                                                 num_seqs_per_group: int,
                                                 num_gpu_blocks: int,
                                                 watermark: float):
-    block_manager = MainBlockSpaceManager(
+    block_manager = SelfAttnBlockSpaceManager(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=1024,
@@ -135,7 +135,7 @@ def test_can_allocate_encoder_decoder_fails_with_swa(block_size: int,
     '''
 
     with pytest.raises((NotImplementedError, AssertionError)) as exc_info:
-        block_manager = MainBlockSpaceManager(
+        block_manager = SelfAttnBlockSpaceManager(
             block_size=block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=1024,
@@ -177,7 +177,7 @@ def test_can_allocate_encoder_decoder_fails_with_prefix_cache(
         block_size: int, num_seqs_per_group: int, num_gpu_blocks: int,
         watermark: float):
 
-    block_manager = MainBlockSpaceManager(
+    block_manager = SelfAttnBlockSpaceManager(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=1024,
@@ -217,7 +217,7 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append,
 
     num_gpu_blocks = 1024
     watermark = 0.1
-    block_manager = MainBlockSpaceManager(
+    block_manager = SelfAttnBlockSpaceManager(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=0,
@@ -269,7 +269,7 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
     """Verify blocks number on src/desc device is correct after swapping in/out
         sequence group (not missing or extra blocks).
     """
-    block_manager = MainBlockSpaceManager(block_size,
+    block_manager = SelfAttnBlockSpaceManager(block_size,
                                           num_cpu_blocks,
                                           num_gpu_blocks,
                                           watermark=0,
@@ -322,7 +322,7 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
         can be swapped in/out.
     """
     num_cpu_blocks = num_gpu_blocks
-    block_manager = MainBlockSpaceManager(block_size,
+    block_manager = SelfAttnBlockSpaceManager(block_size,
                                           num_cpu_blocks,
                                           num_gpu_blocks,
                                           watermark=0,
@@ -383,7 +383,7 @@ def test_swap_in_infeasible(num_lookahead_slots, enable_caching):
     block_size = 8
     num_cpu_blocks = 1
     num_gpu_blocks = 1
-    block_manager = MainBlockSpaceManager(block_size,
+    block_manager = SelfAttnBlockSpaceManager(block_size,
                                           num_cpu_blocks,
                                           num_gpu_blocks,
                                           watermark=0,
@@ -435,7 +435,7 @@ def test_sliding_window(block_size, prompt_len, num_slots_to_append,
 
     num_gpu_blocks = 1024
     watermark = 0.1
-    block_manager = MainBlockSpaceManager(
+    block_manager = SelfAttnBlockSpaceManager(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=0,
@@ -475,7 +475,7 @@ def test_sliding_window(block_size, prompt_len, num_slots_to_append,
     seq.data.update_num_computed_tokens(prompt_len)
     check_used(num_blocks(prompt_len))
 
-    # this is how we compute it in MainBlockSpaceManager.__init__
+    # this is how we compute it in SelfAttnBlockSpaceManager.__init__
     sliding_blocks = (sliding_window // block_size) + 2
     # plus one block for null block
     sliding_blocks += 1

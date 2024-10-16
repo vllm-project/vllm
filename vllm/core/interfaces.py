@@ -28,9 +28,9 @@ class BlockSpaceManager(ABC):
     def get_block_space_manager_class(version: str):
         version = version.lower()
 
-        if version == "main":
-            from vllm.core.block_manager import MainBlockSpaceManager
-            return MainBlockSpaceManager
+        if version == "selfattn":
+            from vllm.core.block_manager import SelfAttnBlockSpaceManager
+            return SelfAttnBlockSpaceManager
 
         if version == "placeholder":
             from vllm.core.placeholder_block_space_manager import (
