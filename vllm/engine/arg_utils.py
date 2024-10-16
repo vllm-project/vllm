@@ -1011,6 +1011,15 @@ class EngineArgs:
             if speculative_config is None \
             else speculative_config.num_lookahead_slots
 
+        
+        if not self.use_v2_block_manager:
+            raise ValueError(
+                "BlockSpaceManagerV1 has been removed, and setting "
+                "--use-v2-block-manager=False has no effect on vLLM "
+                "behavior. Please set --use-v2-block-manager=True. "
+                "If your use case is not supported, please "
+                "file an issue with detailed information.")
+
         scheduler_config = SchedulerConfig(
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
