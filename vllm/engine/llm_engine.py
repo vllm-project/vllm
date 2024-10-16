@@ -1047,7 +1047,7 @@ class LLMEngine:
             # We have outputs for multiple steps submitted in a single burst,
             # so invalidate is_first_step_output.
             is_first_step_output = None
-            
+
         # Organize outputs by [sequence group][step] instead of
         # [step][sequence group].
         outputs_by_sequence_group = create_output_by_sequence_group(

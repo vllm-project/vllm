@@ -689,7 +689,7 @@ class SequenceGroup:
         self.trace_headers = trace_headers
         self.prompt_hidden_states = prompt_hidden_states
         self.priority = priority
-        
+
         self.cached_request_output = None
 
     @property

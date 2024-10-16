@@ -107,6 +107,7 @@ class ModelConfig:
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
     """
+
     def __init__(self,
                  model: str,
                  tokenizer: str,
