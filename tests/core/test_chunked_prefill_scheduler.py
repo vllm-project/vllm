@@ -341,12 +341,11 @@ def test_prompt_limit_exceed(use_v2_block_manager: bool):
     max_seqs = 64
     max_model_len = 32
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(
-        "generate",
-        max_num_batched_tokens,
-        max_seqs,
-        max_model_len,
-        enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig("generate",
+                                       max_num_batched_tokens,
+                                       max_seqs,
+                                       max_model_len,
+                                       enable_chunked_prefill=True)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
