@@ -159,7 +159,7 @@ Text Generation
     -
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
-    - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
+    - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, :code: `openbmb/MiniCPM-S-1B-sft`, etc.
     - ✅︎
     - ✅︎
   * - :code:`MiniCPM3ForCausalLM`
