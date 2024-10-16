@@ -73,12 +73,7 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
 
     elems_fp32 = elems_fp32.clamp(i8_min_vec, i8_max_vec);
     vec_op::INT8Vec16 elems_int8(elems_fp32);
-
-    if (j + vec_elem_num == hidden_size) {
-      elems_int8.save(output + i * hidden_size + j);
-    } else {
-      elems_int8.save(output + i * hidden_size + j, hidden_size - j);
-    }
+    elems_int8.save(output + i * hidden_size + j, hidden_size - j);
   }
 }
 
@@ -175,12 +170,7 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
       }
       elems_fp32 = elems_fp32.clamp(i8_min_vec, i8_max_vec);
       vec_op::INT8Vec16 elems_int8(elems_fp32);
-
-      if (j + vec_elem_num == hidden_size) {
-        elems_int8.save(output + i * hidden_size + j);
-      } else {
-        elems_int8.save(output + i * hidden_size + j, hidden_size - j);
-      }
+      elems_int8.save(output + i * hidden_size + j, hidden_size - j);
     }
   }
 }
@@ -232,12 +222,7 @@ void static_quant_epilogue(const float* input, scalar_t* output,
     elems_fp32 = elems_fp32 - scale_vec * azp_adj_fp32;
 
     load_vec_t elems_out(elems_fp32);
-
-    if (j + vec_elem_num == hidden_size) {
-      elems_out.save(output + i * hidden_size + j);
-    } else {
-      elems_out.save(output + i * hidden_size + j, hidden_size - j);
-    }
+    elems_out.save(output + i * hidden_size + j, hidden_size - j);
   }
 }
 
@@ -272,8 +257,8 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
       elems_fp32 = elems_fp32 * token_scale_vec;
 
       if constexpr (AZP) {
-        azp_adj_load_vec_t azp_adj(azp_adj + j);
-        cvt_vec_t azp_adj_fp32(azp_adj);
+        azp_adj_load_vec_t azp_adj_vec(azp_adj + j);
+        cvt_vec_t azp_adj_fp32(azp_adj_vec);
         azp_adj_fp32 = azp_adj_fp32 * token_zp_scale_vec;
 
         if constexpr (PerChannel) {
@@ -298,8 +283,8 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
     elems_fp32 = elems_fp32 * token_scale_vec;
 
     if constexpr (AZP) {
-      azp_adj_load_vec_t azp_adj(azp_adj + j);
-      cvt_vec_t azp_adj_fp32(azp_adj);
+      azp_adj_load_vec_t azp_adj_vec(azp_adj + j);
+      cvt_vec_t azp_adj_fp32(azp_adj_vec);
       azp_adj_fp32 = azp_adj_fp32 * token_zp_scale_vec;
 
       if constexpr (PerChannel) {
@@ -317,12 +302,7 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
     }
 
     load_vec_t elems_out(elems_fp32);
-
-    if (j + vec_elem_num == hidden_size) {
-      elems_out.save(output + i * hidden_size + j);
-    } else {
-      elems_out.save(output + i * hidden_size + j, hidden_size - j);
-    }
+    elems_out.save(output + i * hidden_size + j, hidden_size - j);
   }
 }
 #else
