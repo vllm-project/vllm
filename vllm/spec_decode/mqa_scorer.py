@@ -21,6 +21,12 @@ class MQAScorer(SpeculativeScorer):
         all_proposal_lengths = proposals.proposal_lens.tolist()
         for i, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
+            if all_proposal_lengths[i] == 0:
+                # no need to create a new seq for prompts, just like batch expansion, 
+                # keep these seqs untouched and create new ones for the decodes, 
+                # so similar it should just work..but instead it doesnt lol
+                target_seq_group_metadata_list.append(seq_group_metadata)
+                continue
             seq_data_dict = seq_group_metadata.seq_data
             assert len(seq_data_dict) == 1
             seq_id = next(iter(seq_data_dict.keys()))
@@ -37,6 +43,13 @@ class MQAScorer(SpeculativeScorer):
                 prompt_token_ids=prompt_token_ids,
                 output_token_ids=new_output_token_ids,
             )
+            # if seq_group_metadata.is_prompt:
+            # # if not seq_group_metadata.do_sample:
+            #     # keep num computed tokens
+            #     new_seq_data.update_num_computed_tokens(seq_data._num_computed_tokens)
+            # else:
+            #     new_seq_data.update_num_computed_tokens(
+            #         len(prompt_token_ids) + len(output_token_ids) - 1)
             new_seq_data.update_num_computed_tokens(
                 len(prompt_token_ids) + len(output_token_ids) - 1)
 
@@ -54,7 +67,9 @@ class MQAScorer(SpeculativeScorer):
                     target_seq_id: seq_group_metadata.block_tables[seq_id],
                 },
                 lora_request=None,
-                token_chunk_size=1,
+                # this could be a chunk so we need to propagate this info
+                # token_chunk_size=seq_group_metadata.token_chunk_size,
+                # do_sample=seq_group_metadata.do_sample,
             )
             target_seq_group_metadata_list.append(new_seq_group_metadata)
 
@@ -85,16 +100,18 @@ class MQAScorer(SpeculativeScorer):
                                                     fill_value=-float("inf"))
             target_token_ids = target_token_ids.flatten()
             start_loc = 0
-            for i, proposed_len in enumerate(all_proposal_lengths):
-                output_len = proposed_len + 1
-                end_loc = start_loc + output_len
-                all_tokens[
-                    i, :output_len] = target_token_ids[start_loc:end_loc]
-                all_probs[i, :output_len] = target_probs[start_loc:end_loc]
-                all_logprobs[
-                    i, :output_len] = target_logprobs[start_loc:end_loc]
-                start_loc = end_loc
-
+            for i, (proposed_len, seq_meta) in enumerate(zip(all_proposal_lengths, target_seq_group_metadata_list)):
+                # Skip chunks with no output tokens.
+                if seq_meta.do_sample:
+                    output_len = proposed_len + 1
+                    end_loc = start_loc + output_len
+                    all_tokens[
+                        i, :output_len] = target_token_ids[start_loc:end_loc]
+                    all_probs[i, :output_len] = target_probs[start_loc:end_loc]
+                    all_logprobs[
+                        i, :output_len] = target_logprobs[start_loc:end_loc]
+                    start_loc = end_loc
+        # TODO Likely want to return hidden states anyways even if no output token is present
         hidden_states = None
         if target_sampler_output.hidden_states is not None:
             hidden_states = target_sampler_output.hidden_states.reshape(

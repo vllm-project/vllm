@@ -1222,13 +1222,6 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
-        # If the feature combo become valid
-        if enable_chunked_prefill:
-            raise ValueError(
-                "Speculative decoding and chunked prefill are "
-                f"currently mutually exclusive ({enable_chunked_prefill=}).")
-
         if not use_v2_block_manager:
             raise ValueError(
                 "Speculative decoding requires usage of the V2 "
@@ -1296,6 +1289,13 @@ class SpeculativeConfig:
                         "This speculative model supports a maximum of "
                         f"num_speculative_tokens={n_predict}, but "
                         f"{num_speculative_tokens=} was provided.")
+
+            if enable_chunked_prefill and draft_hf_config.model_type in [
+                    "medusa", "mlp_speculator", "eagle"
+            ]:
+                raise ValueError(
+                    "Chunked prefill and hidden-state based draft models are "
+                    "not yet compatible.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(

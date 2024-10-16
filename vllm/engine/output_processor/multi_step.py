@@ -99,9 +99,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
-        seq_id = seq.seq_id
-        assert all(
-            [seq_id == output.samples[0].parent_seq_id for output in outputs])
 
         if is_async:
             # Async case: We process tokens one by one. Here, we know the token
@@ -121,10 +118,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 sample for sample in samples
                 if sample.output_token != VLLM_INVALID_TOKEN_ID
             ]
-            assert valid_samples
 
-            self._process_seq_outputs(seq, valid_samples,
-                                      sequence_group.sampling_params)
+            # When both spec-decode and pre-fill chunking are enabled, we
+            # don't have guaranteed samples here (e.g. all -1s).
+            if valid_samples:
+                self._process_seq_outputs(seq, valid_samples,
+                                          sequence_group.sampling_params)
 
     def _process_decode_and_stop(self, seq: Sequence,
                                  sampling_params: SamplingParams) -> None:
