@@ -169,7 +169,7 @@ EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(tp_base=4, trust_remote_code=True),  # noqa: E501
 }
 
-MULTIMODAL_MODEL = {
+MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Salesforce/blip2-opt-2.7b": PPTestSettings.fast(),
     "facebook/chameleon-7b": PPTestSettings.fast(),
@@ -353,7 +353,7 @@ def test_tp_language_embedding(
     ("model_name", "parallel_setup", "distributed_backend",
      "trust_remote_code", "tokenizer_mode"),
     [
-        params for model_name, settings in MULTIMODAL_MODEL.items()
+        params for model_name, settings in MULTIMODAL_MODELS.items()
         for params in settings.iter_params(model_name)
         if model_name in TEST_MODELS
     ],
