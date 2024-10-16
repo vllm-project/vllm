@@ -3,7 +3,6 @@ from typing import List
 
 import pytest
 
-from tests.utils import check_deprecated_block_manager_usage
 from vllm import LLM, SamplingParams
 
 from .conftest import get_text_from_llm_generator
