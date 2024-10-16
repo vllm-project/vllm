@@ -3,7 +3,7 @@ import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
-                    Optional, Union, overload)
+                    Optional, Union, cast, overload)
 
 import cloudpickle
 import zmq
@@ -513,9 +513,14 @@ class MQLLMEngineClient(EngineClient):
         assert (prompt is not None and pooling_params is not None
                 and request_id is not None)
 
-        return self._process_request(prompt, pooling_params, request_id,
-                                     lora_request, trace_headers, None,
-                                     priority)
+        return cast(
+            AsyncGenerator[EmbeddingRequestOutput, None],
+            self._process_request(prompt,
+                                  pooling_params,
+                                  request_id,
+                                  lora_request,
+                                  trace_headers,
+                                  priority=priority))
 
     async def _process_request(
         self,
@@ -543,7 +548,9 @@ class MQLLMEngineClient(EngineClient):
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,
                     tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=self.decoding_config.guided_decoding_backend
+                    default_guided_backend=(self.decoding_config.guided_decoding_backend
+                        if self.decoding_config
+                        else DecodingConfig.guided_decoding_backend),
                 )
 
         # 1) Create output queue for this requests.
