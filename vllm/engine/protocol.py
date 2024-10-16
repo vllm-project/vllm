@@ -80,10 +80,11 @@ class EngineClient(ABC):
                 multi_modal_data = prompt.get("multi_modal_data")
                 mm_processor_kwargs = prompt.get("mm_processor_kwargs")
             elif "prompt_token_ids" in prompt:
-                tokenized_prompt = tokenizer.encode(prompt.get("prompt"))
+                tokenized_prompt = prompt.get("prompt_token_ids")
                 multi_modal_data = prompt.get("multi_modal_data")
                 mm_processor_kwargs = prompt.get("mm_processor_kwargs")
-            raise TypeError("Inputs in Dictionary type must be a TextPrompt or TokensPrompt")
+            else:
+                raise TypeError("Inputs in Dictionary type must be a TextPrompt or TokensPrompt")
         else:
             tokenized_prompt = prompt if isinstance(
                 prompt, list) else tokenizer.encode(prompt)
@@ -143,7 +144,6 @@ class EngineClient(ABC):
                                     if include_stop_str_in_output else current_beam.tokens, #
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
-                                    finish_reason="stop"
                                 )
                             )
                         else:
@@ -175,13 +175,12 @@ class EngineClient(ABC):
                     token_ids=beam.tokens,
                     index=i,
                     logprobs=beam.cum_logprob,
-                    finish_reason=beam.finish_reason if beam.finish_reason is not None else "length"
                 ) for (i, beam) in enumerate(best_beams)
             ],
             finished=True,
             prompt_token_ids=tokenized_prompt,
             prompt_logprobs=None)
-
+        
         yield beam_search_output
 
     @abstractmethod
