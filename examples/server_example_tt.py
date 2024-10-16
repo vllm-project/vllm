@@ -14,7 +14,8 @@ def main():
         "--model", "meta-llama/Meta-Llama-3.1-70B",
         "--block_size", "64",
         "--max_num_seqs", "32",
-        "--max_model_len", "4096",
+        "--max_model_len", "131072",
+        "--max_num_batched_tokens", "131072",
     ])
     runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
 

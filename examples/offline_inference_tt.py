@@ -31,7 +31,7 @@ def run_inference(
 
     # Create an LLM.
     ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-70B", block_size=64, max_num_seqs=max_seqs_in_batch, max_model_len=4096, disable_log_stats=False)
+    llm = LLM(model="meta-llama/Meta-Llama-3.1-70B", block_size=64, max_num_seqs=max_seqs_in_batch, max_model_len=131072, disable_log_stats=False, max_num_batched_tokens=131072)
 
     if not measure_perf:
         # Load prompts from a JSON file
@@ -68,6 +68,9 @@ def run_inference_perf(
     # Set an arbitrary max_tokens to simulate generating multiple tokens consecutively
     sampling_params.max_tokens = 33  # 1 prefill output token + 32 decode output tokens
     
+    assert_str = f"prompt length ({input_prompt_len}) + num generated tokens ({sampling_params.max_tokens}) will exceed max_model_len ({llm.llm_engine.model_config.max_model_len})"
+    assert input_prompt_len + sampling_params.max_tokens <= llm.llm_engine.model_config.max_model_len, assert_str
+
     # Compile run
     print("Starting compile run")
     generate_tokens(llm, prompts, sampling_params, prompt_token_ids, print_output=False)
@@ -109,11 +112,13 @@ if __name__ == "__main__":
     parser.add_argument("--measure_perf", action="store_true", help="Measure performance")
     parser.add_argument("--perf_prompt_len", type=int, default=128, help="Length of dummy prompts for performance measurement")
     parser.add_argument("--greedy_sampling", action="store_true", help="Use greedy decoding instead of top-k/p")
+    parser.add_argument("--max_seqs_in_batch", type=int, default=32, help="Maximum batch size for inference")
     args = parser.parse_args()
 
     run_inference(
         args.prompts_json,
         measure_perf=args.measure_perf,
         perf_prompt_len=args.perf_prompt_len,
-        greedy_sampling=args.greedy_sampling
+        greedy_sampling=args.greedy_sampling,
+        max_seqs_in_batch=args.max_seqs_in_batch
     )
