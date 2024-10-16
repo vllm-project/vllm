@@ -401,6 +401,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
+        if data.get("logprobs") and data.get("use_beam_search"):
+            raise ValueError(
+                "Only the `cumulative_logprob` of each selected sequence will be returned."
+            )
 
         return data
 

@@ -144,6 +144,7 @@ class EngineClient(ABC):
                                     if include_stop_str_in_output else current_beam.tokens, #
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
+                                    finish_reason="stop"
                                 )
                             )
                         else:
@@ -172,7 +173,7 @@ class EngineClient(ABC):
                 CompletionOutput(
                     text=beam.text,
                     cumulative_logprob=beam.cum_logprob,
-                    token_ids=beam.tokens,
+                    token_ids=beam.tokens[tokenized_length:],
                     index=i,
                     logprobs=beam.cum_logprob,
                 ) for (i, beam) in enumerate(best_beams)
