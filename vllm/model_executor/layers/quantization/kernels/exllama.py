@@ -55,7 +55,7 @@ class ExllamaLinearKernel(MPLinearKernel):
         if not c.zero_points:
             self.w_zp_name = "qzeros"
             device = getattr(layer, self.w_q_name).device
-            groups = c.full_weight_shape[0] // c.group_size
+            groups = c.partition_weight_shape[0] // c.group_size
             out_features = c.partition_weight_shape[1]
 
             if c.weight_type.has_bias():
@@ -75,16 +75,13 @@ class ExllamaLinearKernel(MPLinearKernel):
                     "a bug in the original GPTQ checkpoint format leading to "
                     "exllama kernel adding 1 to the zero points during "
                     "inference")
-            print("zeros", zeros.shape)
             zeros = pack_quantized_values_into_int32(zeros,
                                                      c.weight_type,
                                                      packed_dim=1)
-            print("zeros_packed", zeros.shape)
             setattr(layer, self.w_zp_name,
                     torch.nn.Parameter(zeros, requires_grad=False))
 
         if c.has_g_idx:
-
             def transform_w_g_idx(x):
                 # Exllama wants the permutation array instead of the group
                 # incdices
