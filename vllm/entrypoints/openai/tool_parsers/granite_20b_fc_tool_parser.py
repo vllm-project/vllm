@@ -49,52 +49,51 @@ class Granite20bFCToolParser(ToolParser):
                                                 tool_calls=[],
                                                 content=model_output)
 
-        else:
-            dec = JSONDecoder()
-            try:
-                matches = list(self.tool_call_regex.finditer(model_output))
-                logger.debug("Found %d tool call matches", len(matches))
+        dec = JSONDecoder()
+        try:
+            matches = list(self.tool_call_regex.finditer(model_output))
+            logger.debug("Found %d tool call matches", len(matches))
 
-                raw_function_calls = []
+            raw_function_calls = []
 
-                for i, match in enumerate(matches):
-                    # position after the <function_call> tag
-                    start_of_json = match.end()
-                    # end_index == the start of the next function call
-                    # (if exists)
-                    next_function_call_start = (matches[i + 1].start() if
-                                                i + 1 < len(matches) else None)
+            for i, match in enumerate(matches):
+                # position after the <function_call> tag
+                start_of_json = match.end()
+                # end_index == the start of the next function call
+                # (if exists)
+                next_function_call_start = (matches[i + 1].start() if
+                                            i + 1 < len(matches) else None)
 
-                    raw_function_calls.append(
-                        dec.raw_decode(model_output[
-                            start_of_json:next_function_call_start])[0])
+                raw_function_calls.append(
+                    dec.raw_decode(model_output[
+                        start_of_json:next_function_call_start])[0])
 
-                logger.debug("Extracted %d tool calls",
-                             len(raw_function_calls))
-                tool_calls = [
-                    ToolCall(
-                        type="function",
-                        function=FunctionCall(
-                            name=function_call["name"],
-                            # function call args are JSON but as a string
-                            arguments=json.dumps(function_call["arguments"]),
-                        ),
-                    ) for function_call in raw_function_calls
-                ]
+            logger.debug("Extracted %d tool calls",
+                            len(raw_function_calls))
+            tool_calls = [
+                ToolCall(
+                    type="function",
+                    function=FunctionCall(
+                        name=function_call["name"],
+                        # function call args are JSON but as a string
+                        arguments=json.dumps(function_call["arguments"]),
+                    ),
+                ) for function_call in raw_function_calls
+            ]
 
-                content = model_output[:model_output.find(self.bot_token)]
-                return ExtractedToolCallInformation(
-                    tools_called=True,
-                    tool_calls=tool_calls,
-                    content=content if content else None,
-                )
+            content = model_output[:model_output.find(self.bot_token)]
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=content if content else None,
+            )
 
-            except Exception as e:
-                logger.error("Error in extracting tool call from response %s",
-                             e)
-                return ExtractedToolCallInformation(tools_called=False,
-                                                    tool_calls=[],
-                                                    content=model_output)
+        except Exception as e:
+            logger.error("Error in extracting tool call from response %s",
+                            e)
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
     def extract_tool_calls_streaming(
         self,

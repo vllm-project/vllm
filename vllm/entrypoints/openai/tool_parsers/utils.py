@@ -1,7 +1,9 @@
 import json
 from json import JSONDecodeError, JSONDecoder
+from typing import Any
 
 import partial_json_parser
+from partial_json_parser.core.options import Allow
 
 
 def find_common_prefix(s1: str, s2: str) -> str:
@@ -78,7 +80,7 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
     return diff
 
 
-def find_all_indices(string, substring):
+def find_all_indices(string: str, substring: str) -> list[int]:
     """
     Find all (starting) indices of a substring in a given string. Useful for
     tool call extraction
@@ -95,18 +97,17 @@ def find_all_indices(string, substring):
 
 # partial_json_parser doesn't support extra data and
 # JSONDecorder.raw_decode doesn't support partial JSON
-def partial_json_loads(input_str, flags):
+def partial_json_loads(input_str: str, flags: Allow) -> tuple[Any, int]:
     try:
         return (partial_json_parser.loads(input_str, flags), len(input_str))
     except JSONDecodeError as e:
         if "Extra data" in e.msg:
             dec = JSONDecoder()
             return dec.raw_decode(input_str)
-        else:
-            raise
+        raise
 
 
-def is_complete_json(input_str):
+def is_complete_json(input_str: str) -> bool:
     try:
         json.loads(input_str)
         return True
@@ -114,7 +115,7 @@ def is_complete_json(input_str):
         return False
 
 
-def consume_space(i, s):
+def consume_space(i: int, s: str) -> int:
     while i < len(s) and s[i].isspace():
         i += 1
     return i
