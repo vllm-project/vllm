@@ -1,3 +1,4 @@
+"""Types for writing multimodal model tests."""
 from enum import Enum
 from pathlib import PosixPath
 from typing import (Any, Callable, Dict, Iterable, List, NamedTuple, Optional,
@@ -11,8 +12,8 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm.sequence import SampleLogprobs
 from vllm.utils import identity
 
-from ....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, _ImageAssets
-from ...utils import check_logprobs_close
+from .....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, _ImageAssets
+from ....utils import check_logprobs_close
 
 # meta image tag; will be replaced by the appropriate tag for the model
 TEST_IMG_PLACEHOLDER = "<vlm_image>"
