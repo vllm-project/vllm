@@ -44,7 +44,7 @@ COMMON_BROADCAST_SETTINGS = {
 # yapf: disable
 VLM_TEST_SETTINGS = {
     "blip2": VLMTestInfo(
-        models="Salesforce/blip2-opt-2.7b",
+        models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
         img_idx_to_prompt=lambda idx: "",
@@ -52,7 +52,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=vlm_utils.blip2_vllm_to_hf_output,
     ),
     "chameleon": VLMTestInfo(
-        models="facebook/chameleon-7b",
+        models=["facebook/chameleon-7b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
@@ -69,7 +69,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
     ),
     "fuyu": VLMTestInfo(
-        models="adept/fuyu-8b",
+        models=["adept/fuyu-8b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"{img_prompt}\n",
         img_idx_to_prompt=lambda idx: "",
@@ -82,7 +82,7 @@ VLM_TEST_SETTINGS = {
         image_size_factors=((), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)),
     ),
     "glm4": VLMTestInfo(
-        models="THUDM/glm-4v-9b",
+        models=["THUDM/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
         fork_new_process_for_each_test=True,
@@ -95,7 +95,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=vlm_utils.glm_patch_hf_runner,
     ),
     "intern-vl": VLMTestInfo(
-        models=("OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"),
+        models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts({
@@ -108,7 +108,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=vlm_utils.internvl_patch_hf_runner,
     ),
     "llava": VLMTestInfo(
-        models="llava-hf/llava-1.5-7b-hf",
+        models=["llava-hf/llava-1.5-7b-hf"],
         test_type=(
             VLMTestType.EMBEDDING,
             VLMTestType.IMAGE,
@@ -127,7 +127,7 @@ VLM_TEST_SETTINGS = {
         )],
     ),
     "llava-next": VLMTestInfo(
-        models="llava-hf/llava-v1.6-mistral-7b-hf",
+        models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
         max_model_len=10240,
@@ -143,7 +143,7 @@ VLM_TEST_SETTINGS = {
         image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
     ),
     "llava-one-vision": VLMTestInfo(
-        models="llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        models=["llava-hf/llava-onevision-qwen2-7b-ov-hf"],
         test_type=VLMTestType.VIDEO,
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
         fork_new_process_for_each_test=True,
@@ -162,7 +162,7 @@ VLM_TEST_SETTINGS = {
         skip=(get_memory_gb() < 48), # Large GPU test
     ),
     "llava-next-video": VLMTestInfo(
-        models="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        models=["llava-hf/LLaVA-NeXT-Video-7B-hf"],
         test_type=VLMTestType.VIDEO,
         prompt_formatter=lambda vid_prompt: f"USER: {vid_prompt} ASSISTANT:",
         num_video_frames=16,
@@ -174,7 +174,7 @@ VLM_TEST_SETTINGS = {
         runner_mm_key="videos",
     ),
     "minicpmv": VLMTestInfo(
-        models="openbmb/MiniCPM-Llama3-V-2_5",
+        models=["openbmb/MiniCPM-Llama3-V-2_5"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
@@ -185,7 +185,7 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=vlm_utils.minicmpv_trunc_hf_output,
     ),
     "paligemma": VLMTestInfo(
-        models="google/paligemma-3b-mix-224",
+        models=["google/paligemma-3b-mix-224"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
         img_idx_to_prompt = lambda idx: "",
@@ -199,7 +199,7 @@ VLM_TEST_SETTINGS = {
         dtype="half" if is_hip() else ("half", "float"),
     ),
     "phi3v": VLMTestInfo(
-        models="microsoft/Phi-3.5-vision-instruct",
+        models=["microsoft/Phi-3.5-vision-instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
         img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
@@ -212,7 +212,7 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
     ),
     "qwen": VLMTestInfo(
-        models="Qwen/Qwen-VL",
+        models=["Qwen/Qwen-VL"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=identity,
         img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
@@ -223,7 +223,7 @@ VLM_TEST_SETTINGS = {
     ),
     ### Tensor parallel / multi-gpu broadcast tests
     "broadcast-chameleon": VLMTestInfo(
-        models="facebook/chameleon-7b",
+        models=["facebook/chameleon-7b"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
@@ -236,7 +236,7 @@ VLM_TEST_SETTINGS = {
         **COMMON_BROADCAST_SETTINGS,
     ),
     "broadcast-llava": VLMTestInfo(
-        models="llava-hf/llava-1.5-7b-hf",
+        models=["llava-hf/llava-1.5-7b-hf"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
@@ -244,7 +244,7 @@ VLM_TEST_SETTINGS = {
         **COMMON_BROADCAST_SETTINGS,
     ),
     "broadcast-llava-next": VLMTestInfo(
-        models="llava-hf/llava-v1.6-mistral-7b-hf",
+        models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
         max_model_len=10240,
         auto_cls=AutoModelForVision2Seq,
@@ -253,7 +253,7 @@ VLM_TEST_SETTINGS = {
     ),
     ### Custom input edge-cases for specific models
     "intern-vl_diff-patches": VLMTestInfo(
-        models="OpenGVLab/InternVL2-2B",
+        models=["OpenGVLab/InternVL2-2B"],
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
@@ -268,7 +268,7 @@ VLM_TEST_SETTINGS = {
         ],
     ),
     "llava-one-vision_multiple-images": VLMTestInfo(
-        models="llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        models=["llava-hf/llava-onevision-qwen2-7b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         fork_new_process_for_each_test=True,
         max_model_len=16384,
