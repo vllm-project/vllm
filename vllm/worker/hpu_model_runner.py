@@ -549,9 +549,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.device = self.device_config.device
         self.enforce_eager = self.model_config.enforce_eager
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        self.max_num_prefill_seqs = self.scheduler_config.max_num_prefill_seqs \
-            if self.scheduler_config.max_num_prefill_seqs is not None \
-                else self.max_num_seqs
+        # NOTE(kzawora): Change that to scheduler_config.max_num_prefill_seqs
+        # once padding-aware scheduling gets merged
+        self.max_num_prefill_seqs = 64
         self.max_model_len = self.scheduler_config.max_model_len
         self.max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
