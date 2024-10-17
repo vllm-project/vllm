@@ -3,7 +3,7 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
-                    Tuple, Type, Union)
+                    Tuple, Type, Union, cast)
 
 import torch
 
@@ -89,7 +89,7 @@ class EngineArgs:
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
-    config_format: str = 'auto'
+    config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
     quantization_param_path: Optional[str] = None
@@ -181,7 +181,7 @@ class EngineArgs:
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
 
     def __post_init__(self):
-        if self.tokenizer is None:
+        if not self.tokenizer:
             self.tokenizer = self.model
 
         # Setup plugins
@@ -455,11 +455,12 @@ class EngineArgs:
                             'None, we assume the model weights are not '
                             'quantized and use `dtype` to determine the data '
                             'type of the weights.')
-        parser.add_argument('--rope-scaling',
-                            default=None,
-                            type=json.loads,
-                            help='RoPE scaling configuration in JSON format. '
-                            'For example, {"type":"dynamic","factor":2.0}')
+        parser.add_argument(
+            '--rope-scaling',
+            default=None,
+            type=json.loads,
+            help='RoPE scaling configuration in JSON format. '
+            'For example, {"rope_type":"dynamic","factor":2.0}')
         parser.add_argument('--rope-theta',
                             default=None,
                             type=float,
@@ -837,7 +838,8 @@ class EngineArgs:
     def create_model_config(self) -> ModelConfig:
         return ModelConfig(
             model=self.model,
-            tokenizer=self.tokenizer,
+            # We know this is not None because we set it in __post_init__
+            tokenizer=cast(str, self.tokenizer),
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             dtype=self.dtype,
@@ -908,8 +910,9 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
         cache_config = CacheConfig(
+            # neuron needs block_size = max_model_len
             block_size=self.block_size if self.device != "neuron" else
-            self.max_model_len,  # neuron needs block_size = max_model_len
+            (self.max_model_len if self.max_model_len is not None else 0),
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
