@@ -940,6 +940,9 @@ class SchedulerConfig:
             a single iteration.
         max_num_seqs: Maximum number of sequences to be processed in a single
             iteration.
+        max_num_prefill_seqs: Maximum number of prefill sequences to be
+             processed in a single iteration. Used only with padding-aware 
+             scheduling.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
@@ -963,11 +966,14 @@ class SchedulerConfig:
             when SPMD worker architecture is enabled. I.e.,
             VLLM_USE_RAY_SPMD_WORKER=1
         policy: The scheduling policy to use. "fcfs" (default) or "priority".
+        use_padding_aware_scheduling: If True, scheduler will consider padded
+            tokens in prefill.
     """
 
     def __init__(self,
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
+                 max_num_prefill_seqs: Optional[int],
                  max_model_len: int,
                  use_v2_block_manager: bool = True,
                  num_lookahead_slots: int = 0,
@@ -979,7 +985,8 @@ class SchedulerConfig:
                  num_scheduler_steps: int = 1,
                  multi_step_stream_outputs: bool = False,
                  send_delta_data: bool = False,
-                 policy: str = "fcfs") -> None:
+                 policy: str = "fcfs",
+                 use_padding_aware_scheduling=False) -> None:
         if max_num_batched_tokens is None:
             if enable_chunked_prefill:
                 if num_scheduler_steps > 1:
@@ -1018,6 +1025,7 @@ class SchedulerConfig:
                 self.max_num_batched_tokens)
 
         self.max_num_seqs = max_num_seqs
+        self.max_num_prefill_seqs = max_num_prefill_seqs
         self.max_model_len = max_model_len
         self.use_v2_block_manager = use_v2_block_manager
         self.num_lookahead_slots = num_lookahead_slots
@@ -1029,6 +1037,7 @@ class SchedulerConfig:
         self.multi_step_stream_outputs = multi_step_stream_outputs
         self.send_delta_data = send_delta_data
         self.policy = policy
+        self.use_padding_aware_scheduling = use_padding_aware_scheduling
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1059,6 +1068,13 @@ class SchedulerConfig:
                 "num_scheduler_steps "
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
+        if self.max_num_prefill_seqs is not None \
+            and not self.use_padding_aware_scheduling:
+            raise ValueError("max_num_prefill_seqs can be only "
+                             "used with padding-aware-scheduling. ")
+        if self.use_padding_aware_scheduling and self.chunked_prefill_enabled:
+            raise ValueError("Padding-aware scheduling currently "
+                             "does not work with chunked prefill ")
 
         if (not self.use_v2_block_manager \
             and not envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1):
