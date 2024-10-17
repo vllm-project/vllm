@@ -1,9 +1,21 @@
+import torch
 import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.levels import CompilationLevel
 from vllm.platforms import current_platform
 from vllm.utils import is_cpu, is_hip, is_xpu
+
+
+def contain_cpu_tensor(data):
+    if isinstance(data, torch.Tensor):
+        return data.device.type == "cpu"
+    elif isinstance(data, (list, tuple)):
+        return any(contain_cpu_tensor(item) for item in data)
+    elif isinstance(data, dict):
+        return any(contain_cpu_tensor(item) for item in data.values())
+
+    return False
 
 
 class CustomOp(nn.Module):
@@ -52,12 +64,23 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): This is a placeholder for future extensions.
         return self.forward_native(*args, **kwargs)
 
+    def forward_dynamic(self, *args, **kwargs):
+        # Dynamic patch forward by input tensor device
+        cpu_device = contain_cpu_tensor(args) or contain_cpu_tensor(kwargs)
+        if cpu_device:
+            return self.forward_native(*args, **kwargs)
+        else:
+            return self.forward_cuda(*args, **kwargs)
+
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
 
         if envs.VLLM_TORCH_COMPILE_LEVEL >= CompilationLevel.INDUCTOR:
             return self.forward_native
+
+        if envs.VLLM_DYNAMIC_FORWARD:
+            return self.forward_dynamic
 
         if is_hip():
             return self.forward_hip

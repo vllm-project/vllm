@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import json
+import os
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
                     Tuple, Type, Union, cast)
@@ -176,6 +177,7 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
+    cpu_draft_worker: Optional[bool] = False
     override_neuron_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
@@ -742,6 +744,13 @@ class EngineArgs:
             'calculation in proposal sampling, target sampling, and after '
             'accepted tokens are determined.')
 
+        parser.add_argument('--cpu-draft-worker',
+                            action=StoreBoolean,
+                            default=EngineArgs.cpu_draft_worker,
+                            nargs="?",
+                            const="False",
+                            help='Use CPU to run draft model.')
+
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
                             default=EngineArgs.model_loader_extra_config,
@@ -975,6 +984,22 @@ class EngineArgs:
                 "Enabled BlockSpaceManagerV2 because it is "
                 "required for multi-step (--num-scheduler-steps > 1)")
 
+        # Use dynamic forward patch if draft worker is on CPU
+        if self.cpu_draft_worker:
+            try:
+                import intel_extension_for_pytorch as ipex
+                assert hasattr(ipex.llm, "modules")
+                os.environ['VLLM_DYNAMIC_FORWARD'] = "1"
+            except ImportError:
+                logger.warning(
+                    "No ipex found, disable cpu_draft_worker, "
+                    "please pip install intel_extension_for_pytorch "
+                    "for cpu draft worker")
+                self.cpu_draft_worker = False
+                os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
+        else:
+            os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
+
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -1001,6 +1026,7 @@ class EngineArgs:
             typical_acceptance_sampler_posterior_alpha=self.
             typical_acceptance_sampler_posterior_alpha,
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
+            cpu_draft_worker=self.cpu_draft_worker,
         )
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst

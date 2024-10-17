@@ -12,10 +12,11 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
+from vllm.worker.cpu_worker import CPUWorker
 from vllm.worker.worker import Worker
 
 
-class MultiStepWorker(Worker, ProposerWorkerBase):
+class MultiStepWorker(Worker, ProposerWorkerBase, CPUWorker):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
     allocated enough space to store the additional KV. This reduces overhead
@@ -28,13 +29,19 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        if "device_config" in kwargs and getattr(kwargs["device_config"],
+                                                 "device_type", None) == "cpu":
+            super_class = CPUWorker
+        else:
+            super_class = Worker
+        super_class.__init__(self, *args, **kwargs)
+        self.super_class = super_class
 
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
     def init_device(self) -> None:
-        super().init_device()
+        self.super_class.init_device(self)
 
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
@@ -42,6 +49,10 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             self.vocab_size,
             max_proposal_len=self.max_model_len,
         )
+
+    def determine_num_available_blocks(self, *args, **kwargs):
+        return self.super_class.determine_num_available_blocks(
+            self, *args, **kwargs)
 
     def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for MultiStepWorker
@@ -90,8 +101,9 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
             for _ in range(sample_len):
-                model_output: List[SamplerOutput] = super().execute_model(
-                    execute_model_req=expanded_request)
+                model_output: List[
+                    SamplerOutput] = self.super_class.execute_model(
+                        self, execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]
