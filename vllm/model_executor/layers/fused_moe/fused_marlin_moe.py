@@ -116,7 +116,7 @@ def single_marlin_moe(
 
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        w_zeros, g_idx, sort_indices, workspace, scalar_type, M, N, K,
+        w_zeros, g_idx, sort_indices, workspace, scalar_type.id, M, N, K,
         is_k_full, E, topk, block_size_m, True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
@@ -272,7 +272,7 @@ def fused_marlin_moe(
         g_idx1,
         sort_indices1,
         workspace,
-        scalar_type1,
+        scalar_type1.id,
         M,
         2 * N,
         K,
@@ -297,7 +297,7 @@ def fused_marlin_moe(
         g_idx2,
         sort_indices2,
         workspace,
-        scalar_type2,
+        scalar_type2.id,
         M,
         K,
         N,

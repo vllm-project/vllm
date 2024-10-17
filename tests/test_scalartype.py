@@ -32,5 +32,5 @@ def test_scalar_type_min_max(type_tuple):
             max = torch.iinfo(torch_type).max
 
     print(t, min, max, t.min(), t.max())
-    assert min == t.min()
-    assert max == t.max()
+    assert min == t.min(), f"min: {min} != {t.min()}"
+    assert max == t.max(), f"max: {max} != {t.max()}"

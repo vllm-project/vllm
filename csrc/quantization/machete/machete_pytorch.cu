@@ -38,9 +38,10 @@ static auto scalar_type_dispatch(ScalarType const& type, Fn fn) {
 //  Interface
 //
 
-std::vector<std::string> supported_schedules(ScalarTypeTorchPtr const& btype) {
+std::vector<std::string> supported_schedules(ScalarTypeId const btype_id) {
 #if defined(__CUDACC_VER_MAJOR__) && __CUDACC_VER_MAJOR__ >= 12
-  return scalar_type_dispatch(*btype, [&](auto BType) {
+  vllm::ScalarType b_type = ScalarType::from_id(btype_id);
+  return scalar_type_dispatch(b_type, [&](auto BType) {
     return GemmDispatcher<half_t, decltype(BType)>::supported_schedules();
   });
 #else
@@ -49,7 +50,7 @@ std::vector<std::string> supported_schedules(ScalarTypeTorchPtr const& btype) {
 }
 
 torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
-                   ScalarTypeTorchPtr const& btype,
+                   ScalarTypeId const btype_id,
                    c10::optional<torch::Tensor> const& scales,
                    c10::optional<torch::Tensor> const& zeros,
                    c10::optional<int64_t> group_size,
@@ -57,6 +58,7 @@ torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
                    c10::optional<double> alpha, c10::optional<double> beta,
                    c10::optional<std::string> schedule) {
 #if defined(__CUDACC_VER_MAJOR__) && __CUDACC_VER_MAJOR__ >= 12
+  ScalarType const btype = ScalarType::from_id(btype_id);
   auto args = PyTorchArguments{.A = A,
                                .B = B,
                                .scales = scales,
@@ -67,7 +69,7 @@ torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
                                .beta = beta,
                                .schedule = schedule};
 
-  return scalar_type_dispatch(*btype, [&](auto BType) {
+  return scalar_type_dispatch(btype, [&](auto BType) {
     return AT_DISPATCH_SUPPORTED_COMPUTE_TYPES(
         A.scalar_type(), "machete_gemm", [&] {
           using ComputeType = equivalent_cutlass_type_t<scalar_t>;
@@ -79,9 +81,9 @@ torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
 #endif
 }
 
-torch::Tensor prepack_B(torch::Tensor const& B,
-                        vllm::ScalarTypeTorchPtr const& btype) {
-  return scalar_type_dispatch(*btype, [&](auto BType) {
+torch::Tensor prepack_B(torch::Tensor const& B, ScalarTypeId const btype_id) {
+  ScalarType const btype = ScalarType::from_id(btype_id);
+  return scalar_type_dispatch(btype, [&](auto BType) {
     return PrepackBDispatcher<half_t, decltype(BType), half_t>::dispatch(B);
   });
 }

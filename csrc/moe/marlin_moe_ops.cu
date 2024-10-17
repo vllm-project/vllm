@@ -484,21 +484,22 @@ torch::Tensor marlin_gemm_moe(
     const torch::Tensor& topk_ids, const torch::Tensor& b_scales,
     torch::Tensor& b_zeros, const torch::Tensor& g_idx,
     const torch::Tensor& perm, torch::Tensor& workspace,
-    vllm::ScalarTypeTorchPtr const& b_q_type, int64_t size_m, int64_t size_n,
+    vllm::ScalarTypeId const b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, int64_t num_experts, int64_t topk,
     int64_t moe_block_size, bool replicate_input, bool apply_weights) {
+  vllm::ScalarType const b_q_type = vllm::ScalarType::from_id(b_q_type_id);
   bool has_zp = b_zeros.size(1) != 0;
   if (has_zp) {
     TORCH_CHECK(
-        *b_q_type == vllm::kU4,
-        "b_q_type must be u4 when has_zp = True. Got = ", b_q_type->str());
+        b_q_type == vllm::kU4,
+        "b_q_type must be u4 when has_zp = True. Got = ", b_q_type.str());
   } else {
     TORCH_CHECK(
-        *b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,
-        "b_q_type must be uint4b8 or uint8b128. Got = ", b_q_type->str());
+        b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128,
+        "b_q_type must be uint4b8 or uint8b128. Got = ", b_q_type.str());
   }
 
-  int pack_factor = 32 / b_q_type->size_bits();
+  int pack_factor = 32 / b_q_type.size_bits();
 
   int max_par = 4;
 
@@ -575,7 +576,7 @@ torch::Tensor marlin_gemm_moe(
       topk_weights.data_ptr(), topk_ids.data_ptr(), b_scales.data_ptr(),
       b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr(),
       expert_offsets.data_ptr(), size_m, size_n, size_k, workspace.data_ptr(),
-      *b_q_type, has_act_order, is_k_full, has_zp, num_groups, group_size,
+      b_q_type, has_act_order, is_k_full, has_zp, num_groups, group_size,
       num_experts, topk, moe_block_size, dev,
       at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms, max_par,
       replicate_input, apply_weights);
