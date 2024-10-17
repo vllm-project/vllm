@@ -950,10 +950,10 @@ class SchedulerConfig:
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
-        num_lookahead_slots: The number of slots to allocate per sequence per
-            step, beyond the known token ids. This is used in speculative
-            decoding to store KV activations of tokens which may or may not be
-            accepted.
+        num_lookahead_slots: The number of slots to allocate per
+            sequence per step, beyond the known token ids. This is used in
+            speculative decoding to store KV activations of tokens which may or
+            may not be accepted. 
         delay_factor: Apply a delay (of delay factor multiplied by previous
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
@@ -1036,6 +1036,13 @@ class SchedulerConfig:
         self.multi_step_stream_outputs = multi_step_stream_outputs
         self.send_delta_data = send_delta_data
         self.policy = policy
+
+        # `engine_permits_multi_step_scheduling` reflects the user-specified
+        # multi-step config. `current_step_is_multi_step` may be modified to
+        # override `engine_permits_multi_step_scheduling` in any given call to
+        # `schedule()`
+        self.current_step_is_multi_step = (
+            self.engine_permits_multi_step_scheduling)
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1080,7 +1087,12 @@ class SchedulerConfig:
                 "file an issue with detailed information.")
 
     @property
-    def is_multi_step(self) -> bool:
+    def engine_permits_multi_step_scheduling(self) -> bool:
+        """Base multi-step setting, configured by user.
+
+        Can be overridden by scheduler if multi-step scheduling is not supported
+        in the given request.
+        """
         return self.num_scheduler_steps > 1
 
 

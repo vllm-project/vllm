@@ -62,7 +62,7 @@ class TPUExecutor(ExecutorBase):
         rank: int = 0,
         distributed_init_method: Optional[str] = None,
     ):
-        if self.scheduler_config.is_multi_step:
+        if self.scheduler_config.engine_permits_multi_step_scheduling:
             from vllm.worker.multi_step_tpu_worker import MultiStepTPUWorker
             worker = MultiStepTPUWorker(**self._get_worker_kwargs(
                 local_rank, rank, distributed_init_method))

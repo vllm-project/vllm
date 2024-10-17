@@ -461,9 +461,20 @@ class LLMEngine:
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
+
         self.output_processor = (
-            SequenceGroupOutputProcessor.create_output_processor(
+            SequenceGroupOutputProcessor.create_single_step_output_processor(
                 self.scheduler_config,
+                self.detokenizer,
+                self.scheduler,
+                self.seq_counter,
+                stop_checker=StopChecker(
+                    self.scheduler_config.max_model_len,
+                    get_tokenizer_for_seq,
+                ),
+            )
+        ) if self.scheduler_config.num_lookahead_slots == 0 else (
+            SequenceGroupOutputProcessor.create_multi_step_output_processor(
                 self.detokenizer,
                 self.scheduler,
                 self.seq_counter,
@@ -473,6 +484,23 @@ class LLMEngine:
                     get_tokenizer_for_seq,
                 ),
             ))
+
+        if self.scheduler_config.engine_permits_multi_step_scheduling:
+            # Multi-step only: construct a fallback single-step output
+            # processor for scenarios where a request utilizes a feature
+            # unsupported by multi-step
+            self.fallback_single_step_output_processor = (
+                SequenceGroupOutputProcessor.
+                create_single_step_output_processor(
+                    self.scheduler_config,
+                    self.detokenizer,
+                    self.scheduler,
+                    self.seq_counter,
+                    stop_checker=StopChecker(
+                        self.scheduler_config.max_model_len,
+                        get_tokenizer_for_seq,
+                    ),
+                ))
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -986,7 +1014,7 @@ class LLMEngine:
             in multi-step are submitted in a single burst.
         """
 
-        assert self.scheduler_config.is_multi_step
+        assert self.scheduler_config.current_step_is_multi_step
 
         if not seq_group_meta.is_prompt:
             # num_computed_token updates for multi-step decodes happen after
@@ -1041,7 +1069,7 @@ class LLMEngine:
         has_multiple_outputs: bool = len(outputs) > 1
         outputs_by_sequence_group: List[List[SequenceGroupOutput]]
         if has_multiple_outputs:
-            assert self.scheduler_config.is_multi_step or \
+            assert self.scheduler_config.current_step_is_multi_step or \
                      self.speculative_config
             # Organize outputs by [step][sequence group] instead of
             # [sequence group][step].
@@ -1092,7 +1120,7 @@ class LLMEngine:
                 output = [outputs_by_sequence_group[0][i]]
 
             if not is_async:
-                if self.scheduler_config.is_multi_step:
+                if self.scheduler_config.current_step_is_multi_step:
                     # Updates happen only if the sequence is prefill
                     self._update_num_computed_tokens_for_multi_step_prefill(
                         seq_group, seq_group_meta, is_first_step_output)
@@ -1120,9 +1148,14 @@ class LLMEngine:
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
             else:
-                self.output_processor.process_prompt_logprob(seq_group, output)
+                selected_output_processor = (
+                    self.fallback_single_step_output_processor
+                    if self._should_force_single_step() else
+                    self.output_processor)
+                selected_output_processor.process_prompt_logprob(
+                    seq_group, output)
                 if seq_group_meta.do_sample:
-                    self.output_processor.process_outputs(
+                    selected_output_processor.process_outputs(
                         seq_group, output, is_async)
 
             if seq_group.is_finished():
@@ -1232,7 +1265,7 @@ class LLMEngine:
             if seq_group.is_finished():
                 continue
 
-            if self.scheduler_config.is_multi_step:
+            if self.scheduler_config.current_step_is_multi_step:
                 # Updates happen only if the sequence is prefill
                 self._update_num_computed_tokens_for_multi_step_prefill(
                     seq_group, seq_group_metadata,
@@ -1252,7 +1285,7 @@ class LLMEngine:
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
 
-                if self.scheduler_config.is_multi_step:
+                if self.scheduler_config.current_step_is_multi_step:
                     is_prefill_append = seq.data.get_num_uncomputed_tokens(
                     ) == 0
                     seq.append_token_id(sample.output_token, sample.logprobs)
@@ -1260,6 +1293,11 @@ class LLMEngine:
                         seq_group.update_num_computed_tokens(1)
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs)
+
+    def _should_force_single_step(self) -> bool:
+        """True if user configured multi-step but there is a best_of > 1 req"""
+        return (self.scheduler_config.engine_permits_multi_step_scheduling
+                and (not self.scheduler_config.current_step_is_multi_step))
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1349,7 +1387,7 @@ class LLMEngine:
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
 
-            if (self.scheduler_config.is_multi_step
+            if (self.scheduler_config.current_step_is_multi_step
                     and scheduler_outputs.num_lookahead_slots > 0):
                 # cache the scheduler outputs for the next iteration if we have
                 # lookahead slots
@@ -1381,7 +1419,8 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                force_single_step=self._should_force_single_step())
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
@@ -1392,7 +1431,7 @@ class LLMEngine:
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
-            if self.scheduler_config.is_multi_step:
+            if self.scheduler_config.current_step_is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
             # Nothing scheduled => If there is pending async postprocessor,
@@ -1403,13 +1442,13 @@ class LLMEngine:
             outputs = []
 
         # Finish the current step for all the sequence groups.
-        if self.scheduler_config.is_multi_step:
+        if self.scheduler_config.current_step_is_multi_step:
             for seq_group in seq_group_metadata_list:
                 seq_group.finish_step()
 
         if not self._has_remaining_steps(seq_group_metadata_list):
             # clear the cache if we have finished all the steps.
-            if self.scheduler_config.is_multi_step:
+            if self.scheduler_config.current_step_is_multi_step:
                 self.cached_scheduler_outputs[0] = SchedulerOutputState()
 
             # is_first_step_output is True only when the num_steps of all
@@ -1466,7 +1505,7 @@ class LLMEngine:
     def _has_remaining_steps(
         self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
     ) -> bool:
-        if (not self.scheduler_config.is_multi_step
+        if (not self.scheduler_config.current_step_is_multi_step
                 or not seq_group_metadata_list):
             return False
 
@@ -1512,7 +1551,7 @@ class LLMEngine:
             self, virtual_engine: int) -> Optional[torch.Tensor]:
         cached_last_output = self.cached_scheduler_outputs[
             virtual_engine].last_output
-        if (self.scheduler_config.is_multi_step
+        if (self.scheduler_config.current_step_is_multi_step
                 and self.parallel_config.pipeline_parallel_size > 1
                 and cached_last_output is not None
                 and cached_last_output.sampled_token_ids_cpu is not None):

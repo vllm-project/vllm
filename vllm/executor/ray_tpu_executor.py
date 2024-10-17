@@ -70,7 +70,7 @@ class RayTPUExecutor(TPUExecutor):
             )
 
             assert self.speculative_config is None
-            if self.scheduler_config.is_multi_step:
+            if self.scheduler_config.engine_permits_multi_step_scheduling:
                 worker_module_name = "vllm.worker.multi_step_tpu_worker"
                 worker_class_name = "MultiStepTPUWorker"
             else:
