@@ -270,7 +270,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8"
+            "compressed-tensors", "experts_int8", "phimoe_fp8"
         ]
         tpu_supported_quantization = ["tpu_int8"]
         neuron_supported_quantization = ["neuron_quant"]
