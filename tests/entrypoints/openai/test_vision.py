@@ -108,6 +108,53 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
+                                                    model_name: str,
+                                                    image_url: str):
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
+            },
+        ],
+    }]
+
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        n=2,
+        max_tokens=10,
+        extra_body=dict(use_beam_search=True))
+    assert len(chat_completion.choices) == 2
+    assert chat_completion.choices[
+        0].message.content != chat_completion.choices[1].message.content
+
+    with pytest.raises(openai.BadRequestError) as exc_info:
+        await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            n=2,
+            max_tokens=10,
+            logprobs=True,
+            top_logprobs=5,
+            extra_body=dict(use_beam_search=True))
+
+    # Assert that the exception message is correct
+    assert "Only the `cumulative_logprob` " in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
         base64_encoded_image: Dict[str, str]):
@@ -158,6 +205,41 @@ async def test_single_chat_session_image_base64encoded(
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+async def test_single_chat_session_image_base64encoded_beamsearch(
+        client: openai.AsyncOpenAI, model_name: str, image_url: str,
+        base64_encoded_image: Dict[str, str]):
+
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url":
+                    f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
+            },
+        ],
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        n=2,
+        max_tokens=10,
+        extra_body=dict(use_beam_search=True))
+    assert len(chat_completion.choices) == 2
+    assert chat_completion.choices[
+        0].message.content != chat_completion.choices[1].message.content
 
 
 @pytest.mark.asyncio
