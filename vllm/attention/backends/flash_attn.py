@@ -2,6 +2,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from itertools import accumulate
 
 import torch
 
@@ -503,6 +504,7 @@ class FlashAttentionMetadataBuilder(
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
+        query_start_loc = accumulate(query_lens, initial=0)
 
         num_seqs = len(seq_lens)
         if use_captured_graph:
@@ -525,13 +527,10 @@ class FlashAttentionMetadataBuilder(
                                                device, self.runner.pin_memory)
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
                                            self.runner.pin_memory)
-        query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
-                                             self.runner.pin_memory)
         slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
                                                device, self.runner.pin_memory)
-        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=device)
+        query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32,
+                                                  device, self.runner.pin_memory)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
@@ -544,10 +543,6 @@ class FlashAttentionMetadataBuilder(
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
 
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
@@ -561,7 +556,7 @@ class FlashAttentionMetadataBuilder(
             max_decode_query_len=max_decode_query_len,
             max_prefill_seq_len=max_prefill_seq_len,
             max_decode_seq_len=max_decode_seq_len,
-            query_start_loc=query_start_loc,
+            query_start_loc=query_start_loc_tensor,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
