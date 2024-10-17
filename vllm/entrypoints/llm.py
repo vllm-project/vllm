@@ -5,7 +5,6 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
                     Union, cast, overload)
 
 from tqdm import tqdm
-from typing_extensions import Never
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
@@ -30,7 +29,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_kwargs, is_list_of
+from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
 
@@ -109,6 +108,12 @@ class LLM:
     DEPRECATE_LEGACY: ClassVar[bool] = False
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
+    DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
+    """
+    A flag to toggle whether to deprecate positional arguments in
+    :meth:`LLM.__init__`.
+    """
+
     @classmethod
     @contextmanager
     def deprecate_legacy_api(cls):
@@ -118,11 +123,16 @@ class LLM:
 
         cls.DEPRECATE_LEGACY = False
 
+    @deprecate_args(
+        start_index=2,  # Ignore self and model
+        is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
+        additional_message=(
+            "All positional arguments other than `model` will be "
+            "replaced with keyword arguments in an upcoming version."),
+    )
     def __init__(
         self,
         model: str,
-        *args: Never,
-        task: TaskOption = "auto",
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
         skip_tokenizer_init: bool = False,
@@ -142,6 +152,8 @@ class LLM:
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        # After positional args are removed, move this right below `model`
+        task: TaskOption = "auto",
         **kwargs,
     ) -> None:
         '''
@@ -150,39 +162,6 @@ class LLM:
         Note: if enforce_eager is unset (enforce_eager is None)
         it defaults to False.
         '''
-        if args:
-            for i, arg in enumerate(args):  # type: ignore
-                # We intentionally skip "task" because it is newly introduced.
-                # Those who used positional args before should see no difference
-                if i == 0:
-                    tokenizer = arg
-                elif i == 1:
-                    tokenizer_mode = arg
-                elif i == 2:
-                    skip_tokenizer_init = arg
-                elif i == 3:
-                    trust_remote_code = arg
-                elif i == 4:
-                    tensor_parallel_size = arg
-                elif i == 5:
-                    dtype = arg
-                elif i == 6:
-                    quantization = arg
-                elif i == 7:
-                    revision = arg
-                elif i == 8:
-                    tokenizer_revision = arg
-                elif i == 9:
-                    seed = arg
-                else:
-                    raise ValueError(
-                        "You passed too many positional args. "
-                        "Please replace them with keyword arguments.")
-
-            msg = ("Passing positional arguments other than `model` is "
-                   "deprecated and will be replaced with keyword arguments "
-                   "in an upcoming version.")
-            warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
