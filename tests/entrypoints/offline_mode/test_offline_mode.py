@@ -15,6 +15,7 @@ MODEL_CONFIGS = [
     },
     {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
+        "max_model_len": 2048,
         "tokenizer_mode": "mistral",
     },
 ]
@@ -25,7 +26,6 @@ def llm(model_config: dict):
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(**model_config,
-              max_model_len=4096,
               max_num_batched_tokens=4096,
               tensor_parallel_size=1,
               gpu_memory_utilization=0.10,
@@ -52,7 +52,6 @@ def test_offline_mode(model_config: dict, llm: LLM, monkeypatch):
         _re_import_modules()
         # Cached model files should be used in offline mode
         LLM(**model_config,
-            max_model_len=4096,
             max_num_batched_tokens=4096,
             tensor_parallel_size=1,
             gpu_memory_utilization=0.10,
