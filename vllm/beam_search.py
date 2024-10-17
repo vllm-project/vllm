@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from sequence import Logprob
+from vllm.sequence import Logprob
 
 
 @dataclass
