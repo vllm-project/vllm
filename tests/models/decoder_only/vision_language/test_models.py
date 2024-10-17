@@ -14,7 +14,6 @@ from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
                           _VideoAssets)
 from ....utils import fork_new_process_for_each_test, get_memory_gb
 from ...utils import check_outputs_equal
-#from . import utils as vlm_utils
 from .vlm_utils import custom_inputs, model_utils
 from .vlm_utils.case_filtering import get_parametrized_options
 from .vlm_utils.core_utils import (run_custom_inputs_test, run_embedding_test,
