@@ -22,8 +22,9 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 if current_platform.is_hpu():
-    import habana_frameworks.torch as htorch 
+    import habana_frameworks.torch as htorch
     CUDA_DEVICES = ['hpu']
+
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
@@ -125,6 +126,8 @@ def test_batched_rotary_embedding(
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
     ref_query, ref_key = rope.forward_native(positions, query, key)
+    if current_platform.is_hpu():
+        htorch.core.mark_step()
     out_query, out_key = rope.forward(positions,
                                       query,
                                       key,
