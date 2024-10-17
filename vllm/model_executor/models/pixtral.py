@@ -12,12 +12,17 @@ from PIL import Image
 from transformers import PixtralVisionConfig, PretrainedConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens)
+from transformers.models.pixtral.modeling_pixtral import (
+    apply_rotary_pos_emb, generate_block_attention_mask,
+    position_ids_in_meshgrid)
 from xformers.ops.fmha import memory_efficient_attention
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -721,9 +726,9 @@ def input_processor_for_pixtral_hf(
     new_token_ids = tokenizer(new_prompt)["input_ids"]
 
     # NOTE: Create a defensive copy of the original inputs
-    return DecoderOnlyInputs(prompt_token_ids=new_token_ids,
-                             prompt=new_prompt,
-                             multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 class PixtralHFRotaryEmbedding(nn.Module):
@@ -787,23 +792,6 @@ class PixtralHFRotaryEmbedding(nn.Module):
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
-# Copied from transformers.models.llama.modeling_llama.rotate_half
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., :x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-# Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
-def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
 class PixtralHFMLP(nn.Module):
 
     def __init__(self, config: PixtralVisionConfig):
@@ -818,9 +806,10 @@ class PixtralHFMLP(nn.Module):
         self.down_proj = nn.Linear(config.intermediate_size,
                                    config.hidden_size,
                                    bias=False)
+        self.act = get_act_fn(config.hidden_act)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act(self.gate_proj(x)) * self.up_proj(x))
 
 
 class PixtralHFAttention(nn.Module):
@@ -937,43 +926,7 @@ class PixtralHFTransformer(nn.Module):
         return x
 
 
-def position_ids_in_meshgrid(patch_embeds_list, max_width):
-    positions = []
-    for patch in patch_embeds_list:
-        height, width = patch.shape[-2:]
-        mesh = torch.meshgrid(torch.arange(height),
-                              torch.arange(width),
-                              indexing="ij")
-        h_grid, v_grid = torch.stack(mesh, dim=-1).reshape(-1, 2).chunk(2, -1)
-        ids = h_grid * max_width + v_grid
-        positions.append(ids[:, 0])
-    return torch.cat(positions)
-
-
-def generate_block_attention_mask(patch_embeds_list, tensor):
-    dtype = tensor.dtype
-    device = tensor.device
-    seq_len = tensor.shape[1]
-    d_min = torch.finfo(dtype).min
-    causal_mask = torch.full((seq_len, seq_len),
-                             fill_value=d_min,
-                             dtype=dtype,
-                             device=device)
-
-    block_end_idx = torch.tensor(patch_embeds_list).cumsum(-1)
-    block_start_idx = torch.tensor([0] + patch_embeds_list[:-1]).cumsum(-1)
-    for start, end in zip(block_start_idx, block_end_idx):
-        causal_mask[start:end, start:end] = 0
-
-    causal_mask = causal_mask[None, None, :, :].expand(tensor.shape[0], 1, -1,
-                                                       -1)
-    return causal_mask
-
-
 class PixtralHFVisionModel(nn.Module):
-
-    config_class = PixtralVisionConfig
-    main_input_name = "pixel_values"
 
     def __init__(self, config: PixtralVisionConfig):
         super().__init__()
@@ -990,14 +943,6 @@ class PixtralHFVisionModel(nn.Module):
         self.transformer = PixtralHFTransformer(config)
         self.patch_positional_embedding = PixtralHFRotaryEmbedding(config)
 
-    @property
-    def device(self) -> torch.device:
-        return next(self.parameters()).device
-
-    @property
-    def dtype(self) -> torch.device:
-        return next(self.parameters()).dtype
-
     def forward(
         self,
         pixel_values: List[torch.Tensor],
@@ -1011,9 +956,9 @@ class PixtralHFVisionModel(nn.Module):
                 all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
+        dtype = next(self.parameters()).dtype
         patch_embeds_list = [
-            self.patch_conv(img.unsqueeze(0).to(self.dtype))
-            for img in pixel_values
+            self.patch_conv(img.unsqueeze(0).to(dtype)) for img in pixel_values
         ]
 
         # flatten to a single sequence
@@ -1025,7 +970,7 @@ class PixtralHFVisionModel(nn.Module):
         position_ids = position_ids_in_meshgrid(
             patch_embeds_list,
             max_width=self.config.image_size // self.config.patch_size).to(
-                self.device)
+                patch_embeds.device)
 
         position_embedding = self.patch_positional_embedding(
             patch_embeds, position_ids)
