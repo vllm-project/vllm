@@ -981,6 +981,22 @@ class EngineArgs:
                 "Enabled BlockSpaceManagerV2 because it is "
                 "required for multi-step (--num-scheduler-steps > 1)")
 
+        # Use dynamic forward patch if draft worker is on CPU
+        if self.cpu_draft_worker:
+            try:
+                import intel_extension_for_pytorch as ipex
+                assert hasattr(ipex.llm, "modules")
+                os.environ['VLLM_DYNAMIC_FORWARD'] = "1"
+            except ImportError:
+                logger.warning(
+                    "No ipex found, disable cpu_draft_worker, "
+                    "please pip install intel_extension_for_pytorch "
+                    "for cpu draft worker")
+                self.cpu_draft_worker = False
+                os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
+        else:
+            os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
+
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -1009,22 +1025,6 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
             cpu_draft_worker=self.cpu_draft_worker,
         )
-
-        # Use dynamic forward patch if draft worker is on CPU
-        if self.cpu_draft_worker:
-            try:
-                import intel_extension_for_pytorch as ipex
-                assert hasattr(ipex.llm, "modules")
-                os.environ['VLLM_DYNAMIC_FORWARD'] = "1"
-            except ImportError:
-                logger.warning(
-                    "No ipex found, disable cpu_draft_worker, "
-                    "please pip install intel_extension_for_pytorch "
-                    "for cpu draft worker")
-                self.cpu_draft_worker = False
-                os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
-        else:
-            os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst
         # If the feature combo become valid
