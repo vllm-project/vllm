@@ -37,13 +37,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
+@CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                     2 * intermediate_size,
@@ -74,7 +74,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Callable] = None
     ) -> torch.Tensor:
-
         return self.forward(x=x,
                             layer=layer,
                             router_logits=router_logits,
@@ -97,7 +96,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Callable] = None
     ) -> torch.Tensor:
-
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)
 
@@ -134,7 +132,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Callable] = None
     ) -> torch.Tensor:
-
         from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe
         assert not use_grouped_topk
         assert num_expert_group is None
