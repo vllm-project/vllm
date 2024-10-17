@@ -7,7 +7,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
-
+from collections import Counter as collectionsCounter
 import torch
 from typing_extensions import TypeVar
 
@@ -1616,7 +1616,21 @@ class LLMEngine:
         num_generation_tokens_requests: List[int] = []
         n_requests: List[int] = []
         finished_reason_requests: List[str] = []
-
+        running_adapters = dict(collectionsCounter([
+            running_request.lora_request.lora_name
+            for scheduler in self.scheduler
+            for running_request in scheduler.running
+            ]))
+        waiting_adapters = dict(collectionsCounter([
+            waiting_request.lora_request.lora_name
+            for scheduler in self.scheduler
+            for waiting_request in scheduler.waiting
+            ]))
+        max_lora_stat = "0"
+        if self.lora_config:
+            max_lora_stat = str(self.lora_config.max_loras)
+        logger.info("Running Adapters %s, Waiting Adapters %s, max-lora %s", waiting_adapters, running_adapters, max_lora_stat)
+        
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
@@ -1738,6 +1752,9 @@ class LLMEngine:
             num_generation_tokens_requests=num_generation_tokens_requests,
             n_requests=n_requests,
             finished_reason_requests=finished_reason_requests,
+            max_lora=str(max_lora_stat),
+            waiting_adapters=list(waiting_adapters.keys()),
+            running_adapters=list(running_adapters.keys())
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
