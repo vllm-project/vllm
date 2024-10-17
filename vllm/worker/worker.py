@@ -219,50 +219,35 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
+        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
-
-        # Calculate the number of blocks that can be allocated with the
-        # profiled peak memory.
         torch.cuda.synchronize()
-        free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        assert self.init_gpu_memory - free_gpu_memory > 0, (
-            "Error in memory profiling. "
-            f"Initial free memory {self.init_gpu_memory}, current free memory"
-            f" {free_gpu_memory}. This happens when the GPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
+
+        self.assert_no_other_gpu_processes()
 
         # Get the peak memory allocation recorded by torch
         peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
 
-        # Edge case: Check for any memory left around that may have been
-        # allocated on the gpu outside of `torch`
+        # Check for any memory left around that may have been allocated on the
+        # gpu outside of `torch`. NCCL operations, for example, can use a few
+        # GB during a forward pass
         torch.cuda.empty_cache()
-        leftover_allocations = torch.cuda.mem_get_info(
-        )[0] - self.init_gpu_memory
-        if leftover_allocations > 0:
-            logger.info(
-                "Found %.2f GB of allocated memory leftover after clearing "
-                "torch cache. Adding to peak memory usage.",
-                leftover_allocations / (1024**3))
-            peak_memory += leftover_allocations
+        # After emptying the torch cache, any other increase in gpu ram should
+        # be from non-torch allocations.
+        non_torch_allocations = free_memory_pre_profile - \
+            torch.cuda.mem_get_info()[0]
+        if non_torch_allocations > 0:
+            peak_memory += non_torch_allocations
 
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
 
-        logger.info("Initial memory usage before profile: %.2f GB",
-                    (total_gpu_memory - self.init_gpu_memory) / (1024**3))
-        logger.info("Peak memory usage during profile: %.2f GB",
-                    peak_memory / (1024**3))
-        logger.info(
-            "Available memory for KV cache with %.2f gpu utilization: %.2f GB",
-            self.cache_config.gpu_memory_utilization,
-            available_kv_cache_memory / (1024**3))
-
+        # Calculate the number of blocks that can be allocated with the
+        # profiled peak memory.
         cache_block_size = self.get_cache_block_size_bytes()
         if cache_block_size == 0:
             num_gpu_blocks = 0
@@ -273,10 +258,34 @@ class Worker(LocalOrDistributedWorkerBase):
                                  cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+
+        logger.info(
+            "Memory profiling results: total_gpu_memory=%.2fGiB"
+            " initial_memory_usage=%.2fGiB peak_torch_memory=%.2fGiB"
+            " non_torch_memory=%.2fGiB kv_cache_size=%.2fGiB"
+            " gpu_memory_utilization=%.2f", total_gpu_memory / (1024**3),
+            (total_gpu_memory - free_memory_pre_profile) / (1024**3),
+            (peak_memory - non_torch_allocations) / (1024**3),
+            non_torch_allocations / (1024**3),
+            available_kv_cache_memory / (1024**3),
+            self.cache_config.gpu_memory_utilization)
+
+        # Final cleanup
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
         gc.collect()
+
         return num_gpu_blocks, num_cpu_blocks
+
+    def assert_no_other_gpu_processes(self):
+        # NOTE(woosuk): Here we assume that the other processes using the same
+        # GPU did not change their memory usage during the profiling.
+        free_gpu_memory, _ = torch.cuda.mem_get_info()
+        assert self.init_gpu_memory - free_gpu_memory > 0, (
+            "Error in memory profiling. "
+            f"Initial free memory {self.init_gpu_memory}, current free memory"
+            f" {free_gpu_memory}. This happens when the GPU memory was "
+            "not properly cleaned up before initializing the vLLM instance.")
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
