@@ -399,6 +399,9 @@ def seed_everything(seed: int) -> None:
     if is_xpu():
         torch.xpu.manual_seed_all(seed)
 
+    if current_platform.is_hpu():
+        torch.hpu.manual_seed_all(seed)
+
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
@@ -778,6 +781,9 @@ def is_pin_memory_available() -> bool:
         return False
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
+        return False
+    elif current_platform.is_hpu():
+        print_warning_once("Pin memory is not supported on HPU.")
         return False
     elif is_cpu() or is_openvino():
         return False

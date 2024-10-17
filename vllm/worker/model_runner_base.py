@@ -46,10 +46,15 @@ def _init_attn_metadata_from_tensor_dict(
     # Extract the fields used to create AttentionMetadata.
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-        val = tensor_dict.pop(field.name, None)
-        if val is not None:
+        # NOTE(kzawora): We use sentinel here, as None
+        # may be a valid value if type is optional. If
+        # we don't check against it, we will crash by not assigning
+        # Optional types without default value, even if they are
+        # broadcasted properly.
+        sentinel = object()
+        val = tensor_dict.pop(field.name, sentinel)
+        if val != sentinel:
             valid_attn_kwargs[field.name] = val
-
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
     tensor_dict["attn_metadata"] = attn_metadata
     return tensor_dict
