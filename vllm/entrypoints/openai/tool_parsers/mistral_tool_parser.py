@@ -111,8 +111,8 @@ class MistralToolParser(ToolParser):
                 tool_calls=tool_calls,
                 content=content if len(content) > 0 else None)
 
-        except Exception as e:
-            logger.error("Error in extracting tool call from response: %s", e)
+        except Exception:
+            logger.exception("Error in extracting tool call from response.")
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -298,8 +298,8 @@ class MistralToolParser(ToolParser):
             self.prev_tool_call_arr = tool_call_arr
             return delta
 
-        except Exception as e:
-            logger.error("Error trying to handle streaming tool call: %s", e)
+        except Exception:
+            logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")
