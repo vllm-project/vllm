@@ -24,3 +24,7 @@ class TTModelLoader(BaseModelLoader):
         model_class, _ = get_model_architecture(model_config)
         model = model_class.initialize_vllm_model(model_config.hf_config, device_config.device, scheduler_config.max_num_seqs)
         return model
+    
+    def download_model(self, model_config: ModelConfig) -> None:
+        """Download a model so that it can be immediately loaded."""
+        raise NotImplementedError

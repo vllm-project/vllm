@@ -328,8 +328,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
     
     def _validate_sampling_params(self, sampling_params):
         assert sampling_params.n == 1, "Currently only supporting n=1"
-        assert sampling_params.best_of == 1, "Currently only supporting best_of=1"
-        assert not sampling_params.use_beam_search, "Currently not supporting beam search"
+        assert sampling_params.best_of is None, "Currently not supporting best_of"
         assert sampling_params.logprobs is None, "Currently not supporting logprobs"
         assert sampling_params.prompt_logprobs is None, "Currently not supporting prompt_logprobs"
 
