@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.platforms import current_platform
 from vllm.utils import seed_everything
 
 from .allclose_default import get_default_atol, get_default_rtol
@@ -20,7 +21,9 @@ SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
-
+if current_platform.is_hpu():
+    import habana_frameworks.torch as htorch 
+    CUDA_DEVICES = ['hpu']
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
@@ -65,6 +68,8 @@ def test_rotary_embedding(
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
     ref_query, ref_key = rope.forward_native(positions, query, key)
+    if current_platform.is_hpu():
+        htorch.core.mark_step()
     out_query, out_key = rope.forward(positions, query, key)
     # Compare the results.
     torch.testing.assert_close(out_query,
@@ -193,6 +198,8 @@ def test_batched_rotary_embedding_multi_lora(
     # because the custom kernel is in-place.
     ref_query, ref_key = rope.forward_native(positions, query, key,
                                              query_offsets)
+    if current_platform.is_hpu():
+        htorch.core.mark_step()
     out_query, out_key = rope.forward(positions, query, key,
                                       query_offsets.flatten())
     # Compare the results.
