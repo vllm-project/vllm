@@ -1,48 +1,75 @@
-import logging
 import operator
 
 import torch
-from torch._inductor.pattern_matcher import PatternMatcherPass, register_replacement, fwd_only, Match
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
+from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
+                                             fwd_only, register_replacement)
 
 from vllm import envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-def rms_pattern_static(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
+
+def rms_pattern_static(result: torch.Tensor, result_rms: torch.Tensor,
+                       input: torch.Tensor, weight: torch.Tensor,
                        scale: torch.Tensor):
-    at1 = auto_functionalized(torch.ops._C.rms_norm.default, result=result_rms, input=input, weight=weight,
+    at1 = auto_functionalized(torch.ops._C.rms_norm.default,
+                              result=result_rms,
+                              input=input,
+                              weight=weight,
                               epsilon=1e-5)
-    at2 = auto_functionalized(torch.ops._C.static_scaled_fp8_quant.default, result=result, input=at1[1], scale=scale)
+    at2 = auto_functionalized(torch.ops._C.static_scaled_fp8_quant.default,
+                              result=result,
+                              input=at1[1],
+                              scale=scale)
 
     # result
     return at2[1]
 
 
-def rms_replacement_static(result: torch.Tensor, result_rms: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
+def rms_replacement_static(result: torch.Tensor, result_rms: torch.Tensor,
+                           input: torch.Tensor, weight: torch.Tensor,
                            scale: torch.Tensor):
-    at = auto_functionalized(torch.ops._C.rms_norm_static_fp8_quant.default, result=result, input=input,
-                             weight=weight, scale=scale, epsilon=1e-5)
+    at = auto_functionalized(torch.ops._C.rms_norm_static_fp8_quant.default,
+                             result=result,
+                             input=input,
+                             weight=weight,
+                             scale=scale,
+                             epsilon=1e-5)
 
     # result
     return at[1]
 
 
-def rms_pattern_residual_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+def rms_pattern_residual_static(result: torch.Tensor, input: torch.Tensor,
+                                residual: torch.Tensor, weight: torch.Tensor,
                                 scale: torch.Tensor):
-    at = auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=input, residual=residual, weight=weight,
+    at = auto_functionalized(torch.ops._C.fused_add_rms_norm.default,
+                             input=input,
+                             residual=residual,
+                             weight=weight,
                              epsilon=1e-5)
-    at1 = auto_functionalized(torch.ops._C.static_scaled_fp8_quant.default, result=result, input=at[1], scale=scale)
+    at1 = auto_functionalized(torch.ops._C.static_scaled_fp8_quant.default,
+                              result=result,
+                              input=at[1],
+                              scale=scale)
 
     # result, residual
     return at1[1], at[2]
 
 
-def rms_replacement_residual_static(result: torch.Tensor, input: torch.Tensor, residual: torch.Tensor,
+def rms_replacement_residual_static(result: torch.Tensor, input: torch.Tensor,
+                                    residual: torch.Tensor,
                                     weight: torch.Tensor, scale: torch.Tensor):
-    at = auto_functionalized(torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, result=result, input=input,
-                             residual=residual, weight=weight, scale=scale, epsilon=1e-5)
+    at = auto_functionalized(
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,
+        result=result,
+        input=input,
+        residual=residual,
+        weight=weight,
+        scale=scale,
+        epsilon=1e-5)
     # result, residual
     return at[1], at[2]
 
@@ -55,14 +82,24 @@ def empty_bf16(*args, **kwargs):
 
 
 def empty_fp8(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.float8_e4m3fn, device="cuda")
+    return torch.empty(*args,
+                       **kwargs,
+                       dtype=torch.float8_e4m3fn,
+                       device="cuda")
 
 
 def get_patterns():
     my_patterns = PatternMatcherPass(pass_name="fusion_pass")
 
-    inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda", dtype=torch.float32)]
-    register_replacement(rms_pattern_static, rms_replacement_static, inputs, fwd_only, my_patterns)
+    inputs = [
+        empty_fp8(5, 4),
+        empty_bf16(5, 4),
+        empty_bf16(5, 4),
+        empty_bf16(1, 5),
+        torch.empty(1, 1, device="cuda", dtype=torch.float32)
+    ]
+    register_replacement(rms_pattern_static, rms_replacement_static, inputs,
+                         fwd_only, my_patterns)
 
     matches = []
 
@@ -71,8 +108,18 @@ def get_patterns():
         return False
 
     # with residual
-    inputs = [empty_fp8(5, 4), empty_bf16(5, 4), empty_bf16(5, 4), empty_bf16(1, 5), torch.empty(1, 1, device="cuda", dtype=torch.float32)]
-    register_replacement(rms_pattern_residual_static, rms_replacement_residual_static, inputs, fwd_only, my_patterns,
+    inputs = [
+        empty_fp8(5, 4),
+        empty_bf16(5, 4),
+        empty_bf16(5, 4),
+        empty_bf16(1, 5),
+        torch.empty(1, 1, device="cuda", dtype=torch.float32)
+    ]
+    register_replacement(rms_pattern_residual_static,
+                         rms_replacement_residual_static,
+                         inputs,
+                         fwd_only,
+                         my_patterns,
                          extra_check=record_match_fn)
 
     return my_patterns, matches
@@ -84,30 +131,38 @@ def process_matches(matches, graph: torch.fx.Graph):
         # TODO this is an expensive check
         if not all(node in nodes for node in match.nodes):
             raise ValueError(
-                f"Broken match: not all nodes in graph: {[node for node in match.nodes if node not in nodes]}")
+                f"Broken match: not all nodes in graph: "
+                f"{[node for node in match.nodes if node not in nodes]}")
         last_node_in_match = max(match.nodes, key=lambda x: nodes.index(x))
         with graph.inserting_after(last_node_in_match):
             kwargs = match.kwargs
             kwargs["epsilon"] = 1e-5
 
-            fused_node = graph.call_function(auto_functionalized,
-                                             (torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,),
-                                             kwargs=kwargs)
+            fused_node = graph.call_function(
+                auto_functionalized,
+                (torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, ),
+                kwargs=kwargs)
 
             graph.inserting_after(fused_node)
-            result_node_new = graph.call_function(operator.getitem, (fused_node, 1))
-            residual_node_new = graph.call_function(operator.getitem, (fused_node, 2))
+            result_node_new = graph.call_function(operator.getitem,
+                                                  (fused_node, 1))
+            residual_node_new = graph.call_function(operator.getitem,
+                                                    (fused_node, 2))
+
+        def is_func(node, target):
+            return node.op == "call_function" and node.target == target
 
         # find the output and the residual
-        def find_auto_fn(op):
+        def find_auto_fn(op,
+                         match=match):  # need to bind match to silence lint
             for node in match.nodes:
-                if node.op == "call_function" and node.target == auto_functionalized and node.args[0] == op:
+                if is_func(node, auto_functionalized) and node.args[0] == op:
                     return node
             return None
 
         def find_getitem(node, idx):
             for user in node.users:
-                if user.op == "call_function" and user.target == operator.getitem and user.args[1] == idx:
+                if is_func(node, operator.getitem) and user.args[1] == idx:
                     return user
             return None
 
@@ -129,7 +184,8 @@ def process_matches(matches, graph: torch.fx.Graph):
 
     # Finally, remove matched nodes
     graph.eliminate_dead_code()
-    assert all(node not in graph.nodes for match in matches for node in match.nodes)
+    assert all(node not in graph.nodes for match in matches
+               for node in match.nodes)
 
 
 def noop_pass(graph: torch.fx.Graph):
@@ -146,7 +202,8 @@ def get_fusion_pass():
         if stage in envs.VLLM_TORCH_COMPILE_FUSION_DUMP:
             logger.info("Printing graph to %s", f"{stage}.py")
             with open(f"{stage}.py", "w") as f:
-                print(graph.python_code(root_module="self", verbose=True).src, file=f)
+                print(graph.python_code(root_module="self", verbose=True).src,
+                      file=f)
 
     def fusion_pass(graph: torch.fx.Graph):
         """
@@ -156,12 +213,12 @@ def get_fusion_pass():
         dump_graph(graph, "before_fusion")
 
         count = patterns.apply(graph)
-        logger.info(f"Replaced {count} patterns")
+        logger.info("Replaced %s patterns", count)
         dump_graph(graph, "after_pattern_match")
 
         # Manually process multi-output matches (and run DCE)
         process_matches(matches, graph)
-        logger.info(f"Post-processed {len(matches)} matches")
+        logger.info("Post-processed %s matches", len(matches))
         dump_graph(graph, "after_fusion")
 
     return fusion_pass

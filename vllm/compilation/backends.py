@@ -5,6 +5,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.fx as fx
 
+from vllm.compilation.fusion import get_fusion_pass
 from vllm.logger import init_logger
 
 from .compile_context import get_compile_context
@@ -93,7 +94,8 @@ def fix_functionalization(graph: fx.Graph):
                         user.replace_all_uses_with(replace_node)
                         nodes_to_remove.append(user)
                 nodes_to_remove.append(node)
-            elif node.args[0] == torch.ops._C.fused_add_rms_norm_static_fp8_quant.default:
+            elif (node.args[0] ==
+                  torch.ops._C.fused_add_rms_norm_static_fp8_quant.default):
                 # manual replace for fused_add_rms_norm_static_fp8_quant
                 # this is the most effective optimization for llama
                 # failing to do this will result in many unnecessary copies
@@ -109,7 +111,9 @@ def fix_functionalization(graph: fx.Graph):
                     # NOTE: don't run dead code elimination,
                     # otherwise this op will be removed
                     graph.call_function(
-                        torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, kwargs=kwargs)
+                        torch.ops._C.fused_add_rms_norm_static_fp8_quant.
+                        default,
+                        kwargs=kwargs)
 
                 for user in list(node.users):
                     if user.op == 'call_function' and user.target == operator.getitem:  # noqa
@@ -134,8 +138,8 @@ def fix_functionalization(graph: fx.Graph):
                     # just insert the call to the custom op
                     # NOTE: don't run dead code elimination,
                     # otherwise this op will be removed
-                    graph.call_function(
-                        torch.ops._C.rms_norm.default, kwargs=kwargs)
+                    graph.call_function(torch.ops._C.rms_norm.default,
+                                        kwargs=kwargs)
 
                 for user in list(node.users):
                     if user.op == 'call_function' and user.target == operator.getitem:  # noqa
@@ -143,7 +147,8 @@ def fix_functionalization(graph: fx.Graph):
                         nodes_to_remove.append(user)
                 nodes_to_remove.append(node)
 
-            elif node.args[0] == torch.ops._C.rms_norm_static_fp8_quant.default:
+            elif node.args[
+                    0] == torch.ops._C.rms_norm_static_fp8_quant.default:
                 # manual replace for rms_norm
 
                 kwargs = node.kwargs
@@ -156,7 +161,8 @@ def fix_functionalization(graph: fx.Graph):
                     # NOTE: don't run dead code elimination,
                     # otherwise this op will be removed
                     graph.call_function(
-                        torch.ops._C.rms_norm_static_fp8_quant.default, kwargs=kwargs)
+                        torch.ops._C.rms_norm_static_fp8_quant.default,
+                        kwargs=kwargs)
 
                 for user in list(node.users):
                     if user.op == 'call_function' and user.target == operator.getitem:  # noqa
@@ -199,8 +205,6 @@ def fix_functionalization(graph: fx.Graph):
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
 
-from vllm.compilation.fusion import get_fusion_pass
-
 fusion_pass = get_fusion_pass()
 
 
@@ -219,7 +223,7 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
     if current_config['post_grad_custom_post_pass'] is not None:
         logger.warning(
             "post_grad_custom_post_pass is already set in the config. "
-            "Overwriting it with the post_grad_post_passes") # TODO combine
+            "Overwriting it with the post_grad_post_passes")  # TODO combine
     current_config['post_grad_custom_post_pass'] = post_grad_post_passes
     return compile_fx(graph, example_inputs, config_patches=current_config)
 

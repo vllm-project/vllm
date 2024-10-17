@@ -221,14 +221,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
 
     # Internal flag to enable fusion in torch.compile
-    "VLLM_TORCH_COMPILE_FUSION": lambda: bool(
-        os.environ.get("VLLM_TORCH_COMPILE_FUSION", "1") != "0"),
+    "VLLM_TORCH_COMPILE_FUSION":
+    lambda: bool(os.environ.get("VLLM_TORCH_COMPILE_FUSION", "1") != "0"),
 
     # Internal flag for dumping the model graph before and after fusion
     "VLLM_TORCH_COMPILE_FUSION_DUMP":
-        lambda: list(
-            os.environ.get("VLLM_TORCH_COMPILE_FUSION_DUMP", "").split(",")),
-
+    lambda: list(
+        os.environ.get("VLLM_TORCH_COMPILE_FUSION_DUMP", "").split(",")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id

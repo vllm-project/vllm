@@ -182,4 +182,4 @@ __device__ void scaled_fp8_conversion_vec(FP8_TYPE* __restrict__ out,
   }
 }
 
-} // namespace vllm
+}  // namespace vllm
