@@ -1,3 +1,4 @@
+import os
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -12,7 +13,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.pooler import Pooler, pooling_type_from_str
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -390,7 +391,9 @@ class BertEmbeddingModel(nn.Module):
     ) -> None:
         super().__init__()
         self.model = BertModel(config, cache_config, quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.CLS, normalize=True)
+        self._pooler = Pooler(pooling_type=pooling_type_from_str(
+            os.getenv("POOLING_TYPE", "CLS")),
+                              normalize=True)
 
     def forward(
         self,
