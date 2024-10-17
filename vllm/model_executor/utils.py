@@ -30,11 +30,14 @@ def set_weight_attrs(
         assert not hasattr(
             weight, key), (f"Overwriting existing tensor attribute: {key}")
 
-        # NOTE(woosuk): For TPU, param.data.copy_(weight) happens lazily,
-        # which means that the param and weight tensors co-exist until the param
-        # tensor is used by other operations. This causes excessive memory usage
-        # during model loading. To avoid this, we sync the param tensor after
-        # its weight loader is called.
+        # NOTE(woosuk): During weight loading, we often do something like:
+        # narrowed_tensor = param.data.narrow(0, offset, len)
+        # narrowed_tensor.copy_(real_weight)
+        # expecting narrowed_tensor and param.data to share the same storage.
+        # However, on TPUs, narrowed_tensor will lazily propagate to the base
+        # tensor, which is param.data, leading to the redundant memory usage.
+        # This sometimes causes OOM errors during model loading. To avoid this,
+        # we sync the param tensor after its weight loader is called.
         # TODO(woosuk): Remove this hack once we have a better solution.
         if current_platform.is_tpu() and key == "weight_loader":
             value = _make_synced_weight_loader(value)
