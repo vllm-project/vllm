@@ -1407,6 +1407,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "You can also reduce the `max_num_seqs` as needed "
                     "to decrease memory usage.")
         start_time = time.perf_counter()
+        start_free_memory = torch.cuda.mem_get_info()[0]
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = self.max_batchsize_to_capture
@@ -1524,8 +1525,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
+        end_free_memory = torch.cuda.mem_get_info()[0]
+        consumed_memory = (start_free_memory - end_free_memory) / float(2**30)
         # This usually takes < 10 seconds.
-        logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
+        logger.info("Graph capturing finished in %.0f secs, and took %.4f GB",
+                    elapsed_time, consumed_memory)
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
