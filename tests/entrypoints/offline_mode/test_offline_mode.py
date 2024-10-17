@@ -11,7 +11,7 @@ from ...conftest import cleanup
 
 MODEL_CONFIGS = [
     {
-        "model": "facebook/opt-125m"
+        "model": "facebook/opt-125m",
     },
     {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
