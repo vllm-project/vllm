@@ -1616,6 +1616,8 @@ class LLMEngine:
         num_generation_tokens_requests: List[int] = []
         n_requests: List[int] = []
         finished_reason_requests: List[str] = []
+        
+        # Lora requests
         running_adapters = dict(collectionsCounter([
             running_request.lora_request.lora_name
             for scheduler in self.scheduler
@@ -1631,7 +1633,6 @@ class LLMEngine:
         max_lora_stat = "0"
         if self.lora_config:
             max_lora_stat = str(self.lora_config.max_loras)
-        logger.info("Running Adapters %s, Waiting Adapters %s, max-lora %s", waiting_adapters, running_adapters, max_lora_stat)
         
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
