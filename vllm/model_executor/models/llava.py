@@ -216,13 +216,31 @@ def init_vision_tower_for_llava(
 ):
     vision_config = hf_config.vision_config
 
-    # Initialize the vision tower only up to the required feature layer
     vision_feature_layer = hf_config.vision_feature_layer
-    if vision_feature_layer < 0:
-        num_hidden_layers = hf_config.vision_config.num_hidden_layers \
-            + vision_feature_layer + 1
+
+    # Initialize the vision tower only up to the required feature layer
+    if isinstance(vision_feature_layer, int):
+        if vision_feature_layer < 0:
+            num_hidden_layers = hf_config.vision_config.num_hidden_layers \
+                + vision_feature_layer + 1
+        else:
+            num_hidden_layers = vision_feature_layer + 1
+        feature_sample_layers = None
+    elif isinstance(vision_feature_layer, (list, tuple)):
+        # If we have multiple feature layers, take the hidden layer count as is
+        # and convert the feature sample layers to unsigned ints for use in the
+        # encoder implementations
+        num_hidden_layers = hf_config.vision_config.num_hidden_layers
+        feature_sample_layers = [
+            layer_idx
+            if layer_idx >= 0
+            else hf_config.vision_config.num_hidden_layers + layer_idx - 1
+            for layer_idx in vision_feature_layer
+        ]
     else:
-        num_hidden_layers = vision_feature_layer + 1
+        raise TypeError(
+            f"vision_layer_feature type: {type(vision_feature_layer)}"
+            " is not supported")
 
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPVisionModel(
@@ -231,6 +249,7 @@ def init_vision_tower_for_llava(
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
+            feature_sample_layers=feature_sample_layers,
         )
     elif isinstance(vision_config, SiglipVisionConfig):
         return SiglipVisionModel(
@@ -239,6 +258,7 @@ def init_vision_tower_for_llava(
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
+            feature_sample_layers=feature_sample_layers,
         )
     elif isinstance(vision_config, PixtralVisionConfig):
         return PixtralHFVisionModel(
@@ -247,6 +267,7 @@ def init_vision_tower_for_llava(
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
+            feature_sample_layers=feature_sample_layers,
         )
 
     msg = f"Unsupported vision config: {type(vision_config)}"

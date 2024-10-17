@@ -950,8 +950,13 @@ class PixtralHFTransformer(nn.Module):
         *,
         num_hidden_layers_override: Optional[int] = None,
         prefix: str = "",
+        feature_sample_layers: Optional[list] = None,
     ) -> None:
         super().__init__()
+
+        # Feature sample layers need to be indices from 0 ->  # encoder layers
+        self.feature_sample_layers = (
+            feature_sample_layers if feature_sample_layers is not None else [])
 
         if num_hidden_layers_override is None:
             num_hidden_layers = config.num_hidden_layers
@@ -971,9 +976,19 @@ class PixtralHFTransformer(nn.Module):
         attention_mask: torch.Tensor,
         position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        for layer in self.layers:
+        hidden_states_pool = []
+        # Initialize the hidden states to pool with the inputs if needed
+        if 0 in self.feature_sample_layers:
+            hidden_states_pool.append(x)
+
+        # Process the encoder layers, and save hidden states that are
+        # feature_sample_layers; post-norm will by applied later if it's
+        # enabled for the last block.
+        for layer_idx, layer in enumerate(self.layers, start=1):
             x = layer(x, attention_mask, position_embeddings)
-        return x
+            if layer_idx in self.feature_sample_layers:
+                hidden_states_pool.append(x)
+        return x, hidden_states_pool
 
 
 class PixtralHFVisionModel(nn.Module):
@@ -986,10 +1001,14 @@ class PixtralHFVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
         require_post_norm: Optional[bool] = None,
         prefix: str = "",
+        feature_sample_layers: Optional[list] = None,
     ) -> None:
         super().__init__()
 
         self.config = config
+        self.feature_sample_layers = (
+            feature_sample_layers if feature_sample_layers is not None else [])
+
         self.patch_conv = nn.Conv2d(
             in_channels=config.num_channels,
             out_channels=config.hidden_size,
@@ -1003,6 +1022,7 @@ class PixtralHFVisionModel(nn.Module):
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.transformer",
+            feature_sample_layers=feature_sample_layers,
         )
 
         num_hidden_layers = config.num_hidden_layers
@@ -1065,8 +1085,11 @@ class PixtralHFVisionModel(nn.Module):
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
                 patch_embeds)
 
-        out = self.transformer(patch_embeds, attention_mask,
-                               position_embedding)
+        out, hs_pool = self.transformer(patch_embeds, attention_mask,
+                                        position_embedding)
+
+        if self.feature_sample_layers:
+            out = torch.cat(hs_pool, dim=-1)
 
         return out
 

@@ -288,6 +288,19 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         pooler_config = vllm_config.model_config.pooler_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
+        vision_feature_layer = config.vision_feature_layer
+        # Determine the layer up to which we will initialize the vision tower
+        if isinstance(vision_feature_layer, int):
+            vision_hidden_size = config.vision_config.hidden_size
+        # Used for multimodal granite models to control encoder outputs
+        elif isinstance(vision_feature_layer, (list, tuple)):
+            vision_hidden_size = config.vision_config.hidden_size * len(
+                vision_feature_layer)
+        else:
+            raise TypeError(
+                f"vision_layer_feature type: {type(vision_feature_layer)}"
+                " is not supported")
+
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -300,7 +313,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
         self.multi_modal_projector = LlavaMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
+            vision_hidden_size=vision_hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
 
