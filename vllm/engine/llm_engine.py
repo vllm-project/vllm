@@ -1620,11 +1620,13 @@ class LLMEngine:
             running_request.lora_request.lora_name
             for scheduler in self.scheduler
             for running_request in scheduler.running
+            if running_request.lora_request
             ]))
         waiting_adapters = dict(collectionsCounter([
             waiting_request.lora_request.lora_name
             for scheduler in self.scheduler
             for waiting_request in scheduler.waiting
+            if waiting_request.lora_request
             ]))
         max_lora_stat = "0"
         if self.lora_config:
