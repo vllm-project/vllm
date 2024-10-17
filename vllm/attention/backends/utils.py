@@ -38,18 +38,12 @@ def is_block_tables_empty(block_tables: Union[None, Dict]):
 
 
 def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
-                                   context_len: int, sliding_window: int,
-                                   use_v2_block_manager: bool):
+                                   context_len: int, sliding_window: int):
     """
     Compute the start index of slot mapping.
     """
     start_idx = 0
     if is_prompt and sliding_window is not None:
-        assert use_v2_block_manager or context_len == 0, (
-            "Prefix caching is currently not supported with "
-            "sliding window attention in V1 block manager")
-        # When prefill, we use it to not write slots to kv cache
-        # to save memory.
         start_idx = max(0, query_len - sliding_window)
     return start_idx
 
@@ -138,8 +132,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
-        self.use_v2_block_manager = (
-            input_builder.scheduler_config.use_v2_block_manager)
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -180,9 +172,9 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
-            start_idx = compute_slot_mapping_start_idx(
-                is_prompt, query_len, context_len, self.sliding_window,
-                self.use_v2_block_manager)
+            start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
+                                                       context_len,
+                                                       self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
@@ -313,7 +305,7 @@ class CommonAttentionState(AttentionState):
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
             max_query_len=1,
-            decode_query_len=1,
+            max_decode_query_len=1,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.runner.max_seq_len_to_capture,
             query_start_loc=None,

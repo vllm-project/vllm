@@ -4,8 +4,9 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import (Callable, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from typing import Callable, Deque, Dict, Iterable, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
@@ -115,7 +116,7 @@ class ScheduledSequenceGroup:
 class SchedulerOutputs:
     """The scheduling decision made from a scheduler."""
     # Scheduled sequence groups.
-    scheduled_seq_groups: Iterable[ScheduledSequenceGroup]
+    scheduled_seq_groups: GenericSequence[ScheduledSequenceGroup]
     # Number of prefill groups scheduled.
     num_prefill_groups: int
     # Total number of batched tokens.
@@ -311,11 +312,10 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        version = "v1"
-        if self.scheduler_config.use_v2_block_manager:
-            version = "v2"
-        if self.scheduler_config.embedding_mode:
-            version = "embedding"
+        version = "selfattn"
+        if (self.scheduler_config.embedding_mode
+                or self.cache_config.is_attention_free):
+            version = "placeholder"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
@@ -1205,7 +1205,7 @@ class Scheduler:
         # async_output_proc is allowed only when we have a single sequence
         # in the sequence group
         no_single_seq = seq_group.sampling_params is None or (
-            seq_group.sampling_params.best_of == 1)
+            seq_group.sampling_params.n == 1)
         return no_single_seq
 
     def schedule(

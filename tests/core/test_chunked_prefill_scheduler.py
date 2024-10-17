@@ -27,19 +27,16 @@ def schedule_and_update_computed_tokens(scheduler):
     return metas, out
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_simple(use_v2_block_manager: bool):
+def test_simple():
     """Verify basic scheduling works."""
     block_size = 4
     num_seq_group = 4
     max_model_len = 16
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(
-        max_num_batched_tokens,
-        num_seq_group,
-        max_model_len,
-        enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    scheduler_config = SchedulerConfig(max_num_batched_tokens,
+                                       num_seq_group,
+                                       max_model_len,
+                                       enable_chunked_prefill=True)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -74,8 +71,7 @@ def test_simple(use_v2_block_manager: bool):
     assert len(seq_group_meta) == num_seq_group
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_chunk(use_v2_block_manager: bool):
+def test_chunk():
     """Verify prefills are chunked properly."""
     block_size = 4
     max_seqs = 60
@@ -86,7 +82,7 @@ def test_chunk(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 32
     cache_config.num_gpu_blocks = 32
@@ -124,8 +120,7 @@ def test_chunk(use_v2_block_manager: bool):
     assert out.num_batched_tokens == 57
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_complex(use_v2_block_manager: bool):
+def test_complex():
     block_size = 4
     max_seqs = 60
     max_model_len = 80
@@ -135,7 +130,7 @@ def test_complex(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 64
     cache_config.num_gpu_blocks = 64
@@ -194,8 +189,7 @@ def test_complex(use_v2_block_manager: bool):
     assert running[2].is_prefill()
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_maximal_decoding(use_v2_block_manager: bool):
+def test_maximal_decoding():
     """Verify decoding requests are prioritized."""
     block_size = 4
     max_seqs = 2
@@ -206,7 +200,7 @@ def test_maximal_decoding(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -288,8 +282,7 @@ def test_maximal_decoding(use_v2_block_manager: bool):
     assert out.num_batched_tokens == 2
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_prompt_limit(use_v2_block_manager: bool):
+def test_prompt_limit():
     """Verify max_num_batched_tokens < max_model_len is possible."""
     block_size = 4
     max_seqs = 32
@@ -300,7 +293,7 @@ def test_prompt_limit(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
@@ -323,8 +316,7 @@ def test_prompt_limit(use_v2_block_manager: bool):
     assert out.num_batched_tokens == 32
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_prompt_limit_exceed(use_v2_block_manager: bool):
+def test_prompt_limit_exceed():
     block_size = 4
     max_seqs = 64
     max_model_len = 32
@@ -349,8 +341,7 @@ def test_prompt_limit_exceed(use_v2_block_manager: bool):
     assert out.ignored_seq_groups[0] == seq_group
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_swap(use_v2_block_manager: bool):
+def test_swap():
     """Verify swapping works with chunked prefill requests"""
     block_size = 4
     max_seqs = 30
@@ -361,7 +352,7 @@ def test_swap(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
@@ -407,8 +398,7 @@ def test_swap(use_v2_block_manager: bool):
     assert out.blocks_to_swap_out == []
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_running_prefill_prioritized_over_swap(use_v2_block_manager: bool):
+def test_running_prefill_prioritized_over_swap():
     block_size = 4
     max_seqs = 30
     max_model_len = 200
@@ -418,7 +408,7 @@ def test_running_prefill_prioritized_over_swap(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 32
     cache_config.num_gpu_blocks = 32
@@ -501,8 +491,7 @@ def test_running_prefill_prioritized_over_swap(use_v2_block_manager: bool):
     assert out.blocks_to_swap_out == []
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_chunked_prefill_preempt(use_v2_block_manager: bool):
+def test_chunked_prefill_preempt():
     """Verify preempt works with chunked prefill requests"""
     block_size = 4
     max_seqs = 30
@@ -513,7 +502,7 @@ def test_chunked_prefill_preempt(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
@@ -568,8 +557,7 @@ def test_chunked_prefill_preempt(use_v2_block_manager: bool):
     assert out.num_batched_tokens == max_num_batched_tokens
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_chunked_prefill_max_seqs(use_v2_block_manager: bool):
+def test_chunked_prefill_max_seqs():
     block_size = 4
     max_seqs = 2
     max_model_len = 80
@@ -579,7 +567,7 @@ def test_chunked_prefill_max_seqs(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 128
     cache_config.num_gpu_blocks = 128
@@ -622,8 +610,7 @@ def test_chunked_prefill_max_seqs(use_v2_block_manager: bool):
     assert not running[1].is_prefill()
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_perfix_caching(use_v2_block_manager: bool):
+def test_perfix_caching():
     """Verify allocating full blocks when prefix caching is enabled."""
     block_size = 4
     max_seqs = 10
@@ -634,7 +621,7 @@ def test_perfix_caching(use_v2_block_manager: bool):
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size,
                                1.0,
                                1,

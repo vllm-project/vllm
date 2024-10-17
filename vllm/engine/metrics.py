@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Type, Union, cast
 
 import numpy as np
 import prometheus_client
@@ -134,12 +134,6 @@ class Metrics:
                 labelnames=labelnames,
                 buckets=build_1_2_5_buckets(max_model_len),
             )
-        self.histogram_best_of_request = self._histogram_cls(
-            name="vllm:request_params_best_of",
-            documentation="Histogram of the best_of request parameter.",
-            labelnames=labelnames,
-            buckets=[1, 2, 5, 10, 20],
-        )
         self.histogram_n_request = self._histogram_cls(
             name="vllm:request_params_n",
             documentation="Histogram of the n request parameter.",
@@ -255,10 +249,11 @@ class _RayHistogramWrapper:
                  labelnames: Optional[List[str]] = None,
                  buckets: Optional[List[float]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
+        boundaries = buckets if buckets else []
         self._histogram = ray_metrics.Histogram(name=name,
                                                 description=documentation,
                                                 tag_keys=labelnames_tuple,
-                                                boundaries=buckets)
+                                                boundaries=boundaries)
 
     def labels(self, **labels):
         self._histogram.set_default_tags(labels)
@@ -273,9 +268,12 @@ class RayMetrics(Metrics):
     RayMetrics is used by RayPrometheusStatLogger to log to Ray metrics.
     Provides the same metrics as Metrics but uses Ray's util.metrics library.
     """
-    _gauge_cls = _RayGaugeWrapper
-    _counter_cls = _RayCounterWrapper
-    _histogram_cls = _RayHistogramWrapper
+    _gauge_cls: Type[prometheus_client.Gauge] = cast(
+        Type[prometheus_client.Gauge], _RayGaugeWrapper)
+    _counter_cls: Type[prometheus_client.Counter] = cast(
+        Type[prometheus_client.Counter], _RayCounterWrapper)
+    _histogram_cls: Type[prometheus_client.Histogram] = cast(
+        Type[prometheus_client.Histogram], _RayHistogramWrapper)
 
     def __init__(self, labelnames: List[str], max_model_len: int):
         if ray_metrics is None:
@@ -473,8 +471,6 @@ class PrometheusStatLogger(StatLoggerBase):
             self.metrics.histogram_num_generation_tokens_request,
             stats.num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
-        self._log_histogram(self.metrics.histogram_best_of_request,
-                            stats.best_of_requests)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:

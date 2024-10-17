@@ -3,7 +3,7 @@ from collections import deque
 from typing import List, Set, Tuple
 from unittest.mock import MagicMock
 
-import pytest
+import pytest  # noqa
 from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
@@ -17,11 +17,13 @@ from .utils import (append_new_token, append_new_token_seq_group,
                     schedule_and_update_computed_tokens)
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_scheduler_add_seq_group(use_v2_block_manager: bool):
+def test_scheduler_add_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(
-        100, 64, 1, use_v2_block_manager=use_v2_block_manager)
+        100,
+        64,
+        1,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, cache_dtype="auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -37,11 +39,13 @@ def test_scheduler_add_seq_group(use_v2_block_manager: bool):
         assert scheduler.get_num_unfinished_seq_groups() == i + 1
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_scheduler_abort_seq_group(use_v2_block_manager: bool):
+def test_scheduler_abort_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(
-        100, 64, 1, use_v2_block_manager=use_v2_block_manager)
+        100,
+        64,
+        1,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -61,8 +65,7 @@ def test_scheduler_abort_seq_group(use_v2_block_manager: bool):
     assert scheduler.get_num_unfinished_seq_groups() == 0
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_scheduler_schedule_simple(use_v2_block_manager: bool):
+def test_scheduler_schedule_simple():
     block_size = 4
     num_seq_group = 4
     max_model_len = 16
@@ -70,7 +73,7 @@ def test_scheduler_schedule_simple(use_v2_block_manager: bool):
         64,
         num_seq_group,
         max_model_len,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -105,8 +108,7 @@ def test_scheduler_schedule_simple(use_v2_block_manager: bool):
     append_new_token(out, 1)
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_scheduler_prefill_prioritized(use_v2_block_manager: bool):
+def test_scheduler_prefill_prioritized():
     """Verify running batched tokens are not applied to prefill requests."""
     block_size = 4
     max_model_len = 30
@@ -115,7 +117,7 @@ def test_scheduler_prefill_prioritized(use_v2_block_manager: bool):
         max_batched_num_tokens,
         2,
         max_model_len,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
     cache_config.num_gpu_blocks = 16
@@ -139,12 +141,14 @@ def test_scheduler_prefill_prioritized(use_v2_block_manager: bool):
     assert get_sequence_groups(out) == [seq_group_b]
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_scheduler_schedule_preempt_abort(use_v2_block_manager: bool):
+def test_scheduler_schedule_preempt_abort():
     block_size = 4
     max_model_len = 16
     scheduler_config = SchedulerConfig(
-        64, 2, max_model_len, use_v2_block_manager=use_v2_block_manager)
+        64,
+        2,
+        max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 2
     cache_config.num_gpu_blocks = 2
@@ -194,8 +198,7 @@ def test_scheduler_schedule_preempt_abort(use_v2_block_manager: bool):
     assert scheduler.get_num_unfinished_seq_groups() == 1
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_scheduler_max_seqs(use_v2_block_manager: bool):
+def test_scheduler_max_seqs():
     block_size = 4
     num_seq_group = 4
     max_seq_group = 2
@@ -204,7 +207,7 @@ def test_scheduler_max_seqs(use_v2_block_manager: bool):
         64,
         max_seq_group,
         max_model_len,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -242,15 +245,14 @@ def test_scheduler_max_seqs(use_v2_block_manager: bool):
     assert set(get_sequence_groups(out)) == set([all_seq_groups[1]])
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_scheduler_delay_factor(use_v2_block_manager: bool):
+def test_scheduler_delay_factor():
     block_size = 4
     scheduler_config = SchedulerConfig(
         100,
         64,
         16,
         delay_factor=0.5,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -287,12 +289,10 @@ def test_scheduler_delay_factor(use_v2_block_manager: bool):
     append_new_token(out, 1)
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_swapped_out_prioritized(use_v2_block_manager: bool):
+def test_swapped_out_prioritized():
     block_size = 4
     scheduler = initialize_scheduler(max_num_seqs=6,
                                      block_size=block_size,
-                                     use_v2_block_manager=use_v2_block_manager,
                                      num_cpu_blocks=64,
                                      num_gpu_blocks=64)
     # best_of=2 * 3 == 6 sequences.
@@ -344,7 +344,6 @@ def initialize_scheduler(
     max_token_budget=1000,
     max_model_len=1000,
     lora_config=None,
-    use_v2_block_manager=False,
     block_size=4,
     num_cpu_blocks=8,
     num_gpu_blocks=8,
@@ -354,7 +353,7 @@ def initialize_scheduler(
         max_token_budget,
         max_num_seqs,
         max_model_len,
-        use_v2_block_manager=use_v2_block_manager)
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = num_cpu_blocks
     cache_config.num_gpu_blocks = num_gpu_blocks
@@ -379,15 +378,12 @@ def add_token_budget(budget: SchedulingBudget,
     budget.add_num_seqs(mock_seq_group.request_id, num_curr_seqs)
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_prefill_schedule_max_prompt_len(use_v2_block_manager: bool):
+def test_prefill_schedule_max_prompt_len():
     """
     Test prompt longer than max_prompt_len is aborted.
     """
     block_size = 4
-    scheduler = initialize_scheduler(max_model_len=30,
-                                     use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size)
+    scheduler = initialize_scheduler(max_model_len=30, block_size=block_size)
     _, seq_group = create_dummy_prompt("0",
                                        prompt_length=60,
                                        block_size=block_size)
@@ -402,14 +398,12 @@ def test_prefill_schedule_max_prompt_len(use_v2_block_manager: bool):
     assert len(remaining_waiting) == 0
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_prefill_schedule_token_budget(use_v2_block_manager: bool):
+def test_prefill_schedule_token_budget():
     """
     Test token budget respected.
     """
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=64,
                                      num_gpu_blocks=64)
     budget = create_token_budget(token_budget=0)
@@ -439,8 +433,7 @@ def test_prefill_schedule_token_budget(use_v2_block_manager: bool):
     assert len(remaining_waiting) == 1
 
     # Test when current_batched_tokens respected.
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=16,
                                      num_gpu_blocks=16)
     budget = create_token_budget(token_budget=60)
@@ -467,14 +460,12 @@ def test_prefill_schedule_token_budget(use_v2_block_manager: bool):
     assert len(remaining_waiting) == 0
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_prefill_schedule_max_seqs(use_v2_block_manager: bool):
+def test_prefill_schedule_max_seqs():
     """
     Test max seq respected.
     """
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=64,
                                      num_gpu_blocks=64)
     budget = create_token_budget(max_num_seqs=2)
@@ -508,15 +499,13 @@ def test_prefill_schedule_max_seqs(use_v2_block_manager: bool):
     assert len(remaining_waiting) == 1
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_prefill_schedule_max_lora(use_v2_block_manager: bool):
+def test_prefill_schedule_max_lora():
     """
     Test max lora is respected and prioritized.
     """
     block_size = 4
     lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
     scheduler = initialize_scheduler(lora_config=lora_config,
-                                     use_v2_block_manager=use_v2_block_manager,
                                      block_size=block_size,
                                      num_cpu_blocks=64,
                                      num_gpu_blocks=64)
@@ -563,14 +552,12 @@ def test_prefill_schedule_max_lora(use_v2_block_manager: bool):
     assert budget.num_batched_tokens == 60
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_prefill_schedule_no_block_manager_capacity(use_v2_block_manager):
+def test_prefill_schedule_no_block_manager_capacity():
     """
     Test sequence cannot be scheduled due to block manager has no capacity.
     """
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_gpu_blocks=128,
                                      num_cpu_blocks=128)
     budget = create_token_budget()
@@ -607,14 +594,12 @@ def test_prefill_schedule_no_block_manager_capacity(use_v2_block_manager):
     assert len(remaining_waiting) == 0
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_decode_schedule_preempted(use_v2_block_manager: bool):
+def test_decode_schedule_preempted():
     """
     Test decodes cannot be scheduled and preempted.
     """
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=64,
                                      num_gpu_blocks=64)
     curr_loras = None
@@ -653,14 +638,12 @@ def test_decode_schedule_preempted(use_v2_block_manager: bool):
     assert output.blocks_to_copy == []
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_decode_swap_beam_search(use_v2_block_manager: bool):
+def test_decode_swap_beam_search():
     """
     Test best_of > 1 swap out blocks
     """
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_gpu_blocks=64,
                                      num_cpu_blocks=64)
     curr_loras = None
@@ -709,14 +692,12 @@ def test_decode_swap_beam_search(use_v2_block_manager: bool):
     assert output.blocks_to_copy == []
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_schedule_decode_blocks_to_copy_update(use_v2_block_manager: bool):
+def test_schedule_decode_blocks_to_copy_update():
     """
     Verify blocks_to_copy is updated.
     """
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=4,
+    scheduler = initialize_scheduler(block_size=4,
                                      num_cpu_blocks=16,
                                      num_gpu_blocks=16)
     _, seq_group = create_dummy_prompt("1",
@@ -747,11 +728,9 @@ def test_schedule_decode_blocks_to_copy_update(use_v2_block_manager: bool):
     assert output.blocks_to_copy == [(2, 3)]
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_schedule_swapped_simple(use_v2_block_manager: bool):
+def test_schedule_swapped_simple():
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size)
+    scheduler = initialize_scheduler(block_size=block_size)
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
     _, seq_group = create_dummy_prompt("1",
@@ -778,11 +757,9 @@ def test_schedule_swapped_simple(use_v2_block_manager: bool):
     assert blocks_to_swap_out == blocks_to_swap_in_reverse
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_schedule_swapped_max_token_budget(use_v2_block_manager: bool):
+def test_schedule_swapped_max_token_budget():
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
@@ -815,11 +792,9 @@ def test_schedule_swapped_max_token_budget(use_v2_block_manager: bool):
     assert len(output.prefill_seq_groups) == 0
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_schedule_swapped_max_seqs(use_v2_block_manager: bool):
+def test_schedule_swapped_max_seqs():
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=64,
                                      num_gpu_blocks=64)
     curr_loras = None
@@ -852,12 +827,10 @@ def test_schedule_swapped_max_seqs(use_v2_block_manager: bool):
     assert len(output.prefill_seq_groups) == 0
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_schedule_swapped_max_loras(use_v2_block_manager: bool):
+def test_schedule_swapped_max_loras():
     block_size = 4
     lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
     scheduler = initialize_scheduler(lora_config=lora_config,
-                                     use_v2_block_manager=use_v2_block_manager,
                                      block_size=block_size,
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
@@ -887,11 +860,9 @@ def test_schedule_swapped_max_loras(use_v2_block_manager: bool):
     assert len(curr_loras) == 1
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_schedule_swapped_cannot_swap_in(use_v2_block_manager: bool):
+def test_schedule_swapped_cannot_swap_in():
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
@@ -920,11 +891,9 @@ def test_schedule_swapped_cannot_swap_in(use_v2_block_manager: bool):
     assert len(output.prefill_seq_groups) == 0
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_infeasible_swap(use_v2_block_manager: bool):
+def test_infeasible_swap():
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
@@ -954,11 +923,9 @@ def test_infeasible_swap(use_v2_block_manager: bool):
     assert len(output.prefill_seq_groups) == 0
 
 
-@pytest.mark.parametrize('use_v2_block_manager', [True, False])
-def test_schedule_swapped_blocks_to_copy(use_v2_block_manager: bool):
+def test_schedule_swapped_blocks_to_copy():
     block_size = 4
-    scheduler = initialize_scheduler(use_v2_block_manager=use_v2_block_manager,
-                                     block_size=block_size,
+    scheduler = initialize_scheduler(block_size=block_size,
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
