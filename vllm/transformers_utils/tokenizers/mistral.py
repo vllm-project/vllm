@@ -166,6 +166,10 @@ class MistralTokenizer:
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
 
+        last_message = messages[len(messages) - 1]
+        if last_message["role"] == "assistant":
+            last_message["prefix"] = True
+
         request = ChatCompletionRequest(messages=messages,
                                         tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
