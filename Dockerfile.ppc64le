@@ -11,8 +11,17 @@ RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsnd
 # Currently these may not be available for venv or pip directly
 RUN micromamba install -y -n base -c https://ftp.osuosl.org/pub/open-ce/1.11.0-p10/ -c defaults python=3.10 torchvision-cpu=0.16.2 rust && micromamba clean --all --yes
 
+<<<<<<< HEAD
 COPY ./ /workspace/
 WORKDIR /workspace/
+=======
+COPY ./ /workspace/vllm
+
+WORKDIR /workspace/vllm
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
+>>>>>>> a2c71c54... [CI/Build] remove .github from .dockerignore, add dirty repo check (#9375)
 
 # These packages will be in rocketce eventually
 <<<<<<< HEAD
