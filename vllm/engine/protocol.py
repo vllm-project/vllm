@@ -74,11 +74,11 @@ class EngineClient(ABC):
         include_stop_str_in_output = params.include_stop_str_in_output
 
         tokenizer = await self.get_tokenizer()
-        self.input_preprocessor = InputPreprocessor(model_config,
-                                                    self.tokenizer)
+        input_preprocessor = InputPreprocessor(model_config,
+                                                    tokenizer)
 
         (prompt_text, prompt_token_ids, multi_modal_data, mm_processor_kwargs
-         ) = self.input_preprocessor._extract_prompt_components(
+         ) = input_preprocessor._extract_prompt_components(
              prompt,
              request_id=request_id,
          )
