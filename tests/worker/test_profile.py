@@ -61,4 +61,9 @@ def test_gpu_memory_profiling():
         engine_config.cache_config, engine_config.model_config,
         engine_config.parallel_config)
 
-    assert gpu_blocks == (8.2843 * 1024**3) // block_size
+    expected_blocks = (8.2843 * 1024**3) // block_size
+
+    # Check within a small tolerance for portability
+    # Hardware, kernel, or dependency changes could all affect memory
+    # utilization
+    assert abs(gpu_blocks - expected_blocks) < 5

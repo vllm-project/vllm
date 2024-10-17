@@ -26,6 +26,8 @@ def test_lazy_outlines(sample_regex):
     # make sure outlines is not imported
     assert 'outlines' not in sys.modules
 
+    # The second LLM needs to request a higher gpu_memory_utilization because
+    # the first LLM has already allocated a full 30% of the gpu memory.
     llm = LLM(model="facebook/opt-125m",
               enforce_eager=True,
               guided_decoding_backend="lm-format-enforcer",
