@@ -226,19 +226,16 @@ class Top1Proposer(SpeculativeProposer):
         if maybe_sampler_output is None:
             # If no speculative tokens, the sampler output will be None.
             # In this case we return empty proposals.
-            proposal_tokens = torch.tensor(-1,
-                                           dtype=torch.long,
-                                           device=self._device).expand(
-                                               batch_size, proposal_len)
-            proposal_probs = torch.tensor(0,
-                                          dtype=torch.float32,
-                                          device=self._device).expand(
-                                              batch_size, proposal_len,
-                                              self._vocab_size)
-            proposal_lens_tensor = torch.tensor(0,
-                                                dtype=torch.long,
-                                                device=self._device).expand(
-                                                    len(proposal_lens))
+            proposal_tokens = torch.full((batch_size, proposal_len),
+                                         -1,
+                                        dtype=torch.long,
+                                        device=self._device)
+            proposal_probs = torch.zeros((batch_size, proposal_len, self._vocab_size),
+                                        dtype=torch.float32,
+                                        device=self._device)
+            proposal_lens_tensor = torch.zeros(len(proposal_lens),
+                                            dtype=torch.long,
+                                            device=self._device)
             return proposal_tokens, proposal_probs, proposal_lens_tensor
 
         sampler_output = maybe_sampler_output
@@ -259,14 +256,9 @@ class Top1Proposer(SpeculativeProposer):
         )
         entire_proposal_probs[nonzero_proposal_len_indices] = proposal_probs
 
-        proposal_tokens, proposal_probs = (
-            entire_proposal_tokens,
-            entire_proposal_probs,
-        )
-
         proposal_lens_tensor = torch.zeros(batch_size,
                                            dtype=torch.long,
                                            device=self._device)
         proposal_lens_tensor[nonzero_proposal_len_indices] = proposal_len
 
-        return proposal_tokens, proposal_probs, proposal_lens_tensor
+        return entire_proposal_tokens, entire_proposal_probs, proposal_lens_tensor
