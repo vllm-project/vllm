@@ -53,7 +53,7 @@ def _init_attn_metadata_from_tensor_dict(
         # broadcasted properly.
         sentinel = object()
         val = tensor_dict.pop(field.name, sentinel)
-        if val == sentinel:
+        if val != sentinel:
             valid_attn_kwargs[field.name] = val
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
     tensor_dict["attn_metadata"] = attn_metadata
