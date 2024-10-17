@@ -60,7 +60,7 @@ class ImageSizeWrapper(NamedTuple):
 
 
 class VLMTestInfo(NamedTuple):
-    models: Union[Iterable[str], str]
+    models: Union[List[str]]
     test_type: Union[VLMTestType, Iterable[VLMTestType]]
 
     # Should be None only if this is a CUSTOM_INPUTS test
