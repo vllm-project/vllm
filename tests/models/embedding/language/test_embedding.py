@@ -8,6 +8,7 @@ import pytest
 
 from ..utils import check_embeddings_close
 
+
 @pytest.fixture
 def encoder_env_var_guard():
     prior_attn_backend_env = os.getenv("VLLM_ATTENTION_BACKEND", None)
@@ -17,6 +18,7 @@ def encoder_env_var_guard():
         del os.environ["VLLM_ATTENTION_BACKEND"]
     else:
         os.environ["VLLM_ATTENTION_BACKEND"] = prior_attn_backend_env
+
 
 # Model, Guard
 MODELS = [
@@ -28,6 +30,7 @@ MODELS = [
 ENCODER_ONLY = [
     "BAAI/bge-base-en-v1.5",
 ]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -51,7 +54,7 @@ def test_models(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     with hf_runner(model, dtype=dtype,
-                is_sentence_transformer=True) as hf_model:
+                   is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model, dtype=dtype, max_model_len=None) as vllm_model:
@@ -64,4 +67,3 @@ def test_models(
         name_1="vllm",
         tol=1e-2,
     )
-
