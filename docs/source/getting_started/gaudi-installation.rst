@@ -1,5 +1,5 @@
-vLLM with Intel® Gaudi® AI Accelerators
-=========================================
+Installation with Intel® Gaudi® AI Accelerators
+===============================================
 
 This README provides instructions on running vLLM with Intel Gaudi devices.
 
@@ -22,7 +22,7 @@ Requirements
 
 
 Quick start using Dockerfile
-============================
+----------------------------
 .. code:: console
 
    $ docker build -f Dockerfile.hpu -t vllm-hpu-env  .
@@ -30,14 +30,14 @@ Quick start using Dockerfile
 
 
 .. tip::
-   If you're observing the following error: ``docker: Error response from daemon: Unknown runtime specified habana.``, please refer to "Install Using Containers" section of `Intel Gaudi Software Stack and Driver Installation <https://docs.habana.ai/en/v1.18.0/Installation_Guide/Bare_Metal_Fresh_OS.html`__. Make sure you have ``habana-container-runtime`` package installed and that ```habana`` container runtime is registered.
+   If you're observing the following error: ``docker: Error response from daemon: Unknown runtime specified habana.``, please refer to "Install Using Containers" section of `Intel Gaudi Software Stack and Driver Installation <https://docs.habana.ai/en/v1.18.0/Installation_Guide/Bare_Metal_Fresh_OS.html>`__. Make sure you have ``habana-container-runtime`` package installed and that ``habana`` container runtime is registered.
 
 
 Build from source
-=================
+-----------------
 
 Environment verification
-------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 To verify that the Intel Gaudi software was correctly installed, run:
 
@@ -53,7 +53,7 @@ Verification <https://docs.habana.ai/en/latest/Installation_Guide/SW_Verificatio
 for more details.
 
 Run Docker Image
-----------------
+~~~~~~~~~~~~~~~~
 
 It is highly recommended to use the latest Docker image from Intel Gaudi
 vault. Refer to the `Intel Gaudi
@@ -68,7 +68,7 @@ Use the following commands to run a Docker image:
    $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 
 Build and Install vLLM
----------------------------
+~~~~~~~~~~~~~~~~~~~~~~
 
 To build and install vLLM from source, run:
 
@@ -105,14 +105,13 @@ Supported Features
 -  Inference with `HPU Graphs <https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html>`__
    for accelerating low-batch latency and throughput
 -  Attention with Linear Biases (ALiBi)
--  INC quantization
 
 Unsupported Features
 ====================
 
 -  Beam search
 -  LoRA adapters
--  AWQ quantization
+-  Quantization
 -  Prefill chunking (mixed-batch inferencing)
 
 Supported Configurations
@@ -151,10 +150,6 @@ Gaudi2 devices. Configurations that are not listed may or may not work.
    with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
 -  `meta-llama/Meta-Llama-3.1-70B-Instruct <https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct>`__
    with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
--  `mistralai/Mistral-7B-Instruct-v0.3 <https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3>`__
-   on single HPU or with tensor parallelism on 2x HPU, BF16 datatype with random or greedy sampling
--  `mistralai/Mixtral-8x7B-Instruct-v0.1 <https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1>`__
-   with tensor parallelism on 2x HPU, BF16 datatype with random or greedy sampling
 
 Performance Tuning
 ==================
