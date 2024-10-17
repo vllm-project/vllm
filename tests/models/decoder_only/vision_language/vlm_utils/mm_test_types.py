@@ -66,10 +66,6 @@ class VLMTestInfo(NamedTuple):
 
     # Should be None only if this is a CUSTOM_INPUTS test
     prompt_formatter: Optional[Callable[[str], str]] = None
-
-    # Indicates whether or not we need to run every case in a new process
-    fork_new_process_for_each_test: bool = False
-
     img_idx_to_prompt: Callable[[int], str] = lambda idx: "<image>\n"
     video_idx_to_prompt: Callable[[int], str] = lambda idx: "<video>\n"
 

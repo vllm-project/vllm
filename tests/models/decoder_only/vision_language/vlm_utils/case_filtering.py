@@ -41,7 +41,7 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
                 assert test_info.prompt_formatter is not None
 
             # Everything looks okay; keep if this is has correct proc handling
-            if test_info.fork_new_process_for_each_test == fork_per_test:
+            if (test_info.distributed_executor_backend is not None) == fork_per_test:
                 filtered_test_settings[test_name] = test_info
 
     return filtered_test_settings

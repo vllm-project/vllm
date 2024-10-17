@@ -32,7 +32,6 @@ if is_hip():
 
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
-    "fork_new_process_for_each_test": True,
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
@@ -90,7 +89,6 @@ VLM_TEST_SETTINGS = {
         models=["THUDM/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
-        fork_new_process_for_each_test=True,
         img_idx_to_prompt=lambda idx: "",
         max_model_len=2048,
         max_num_seqs=2,
@@ -151,7 +149,6 @@ VLM_TEST_SETTINGS = {
         models=["llava-hf/llava-onevision-qwen2-7b-ov-hf"],
         test_type=VLMTestType.VIDEO,
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
-        fork_new_process_for_each_test=True,
         dtype="half",
         num_video_frames=16,
         max_model_len=4096,
@@ -275,7 +272,6 @@ VLM_TEST_SETTINGS = {
     "llava-one-vision_multiple-images": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-7b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
-        fork_new_process_for_each_test=True,
         max_model_len=16384,
         max_num_seqs=2,
         dtype="half",
@@ -303,10 +299,8 @@ VLM_TEST_SETTINGS = {
 # - multi-image
 # - image embeddings
 # - video
-# All wrappers (except single image) have a filter for dropping
-# models that don't have applicable tests, and expanding the
-# relevant VLMTestInfo object into a combination that can be
-# consumed by parametrize()
+# - custom inputs
+
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
     get_parametrized_options(
