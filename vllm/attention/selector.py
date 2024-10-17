@@ -17,6 +17,7 @@ logger = init_logger(__name__)
 
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
+    FLASH_ATTN_NEW = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
@@ -111,6 +112,9 @@ def get_attn_backend(
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
         return FlashAttentionBackend
+    if backend == _Backend.FLASH_ATTN_NEW:
+        from vllm_v1.attention.backends.flash_attn import FlashAttentionBackend as FlashAttentionBackendNew  # noqa: F401
+        return FlashAttentionBackendNew
     if backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
