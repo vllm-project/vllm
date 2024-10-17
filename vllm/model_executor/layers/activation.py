@@ -11,6 +11,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import LazyDict
 
 
 @CustomOp.register("fatrelu_and_mul")
@@ -250,15 +251,22 @@ class ScaledActivation(nn.Module):
         param_data.copy_(loaded_weight)
 
 
-_ACTIVATION_REGISTRY = {
-    "gelu": nn.GELU(),
-    "gelu_fast": FastGELU(),
-    "gelu_new": NewGELU(),
-    "gelu_pytorch_tanh": nn.GELU(approximate="tanh"),
-    "relu": nn.ReLU(),
-    "relu2": ReLUSquaredActivation(),
-    "quick_gelu": QuickGELU(),
-}
+_ACTIVATION_REGISTRY = LazyDict({
+    "gelu":
+    lambda: nn.GELU(),
+    "gelu_fast":
+    lambda: FastGELU(),
+    "gelu_new":
+    lambda: NewGELU(),
+    "gelu_pytorch_tanh":
+    lambda: nn.GELU(approximate="tanh"),
+    "relu":
+    lambda: nn.ReLU(),
+    "relu2":
+    lambda: ReLUSquaredActivation(),
+    "quick_gelu":
+    lambda: QuickGELU(),
+})
 
 
 def get_act_fn(
