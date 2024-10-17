@@ -86,9 +86,12 @@ _TEXT_GENERATION_MODELS = {
 }
 
 _EMBEDDING_MODELS = {
-    "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
+    # [Text-only]
+    "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
-    "Gemma2Model": ("gemma2_embedding", "Gemma2EmbeddingModel"),
+    # [Multimodal]
+    "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
 }
 
 _MULTIMODAL_MODELS = {
@@ -104,6 +107,7 @@ _MULTIMODAL_MODELS = {
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
+    "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "PaliGemmaForConditionalGeneration": ("paligemma", "PaliGemmaForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
