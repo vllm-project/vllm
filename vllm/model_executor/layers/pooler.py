@@ -12,6 +12,17 @@ class PoolingType(IntEnum):
     """Enumeration for different types of pooling methods."""
     LAST = 0
     ALL = 1
+    CLS = 2
+    MEAN = 3
+
+
+def pooling_type_from_str(pool_str: str) -> PoolingType:
+    pool_str = pool_str.strip().upper()
+    mapping = {i.name: i for i in PoolingType}
+    pt = mapping.get(pool_str)
+    if not pt:
+        raise ValueError(f"Invalid pooling type: {pool_str}")
+    return pt
 
 
 class Pooler(nn.Module):
@@ -23,12 +34,13 @@ class Pooler(nn.Module):
     3. Returns structured results as `PoolerOutput`.
 
     Attributes:
-        pooling_type: The type of pooling to use (LAST, AVERAGE, MAX).
+        pooling_type: The type of pooling to use (LAST, ALL, CLS).
         normalize: Whether to normalize the pooled data.
     """
 
     def __init__(self, pooling_type: PoolingType, normalize: bool):
         super().__init__()
+
         self.pooling_type = pooling_type
         self.normalize = normalize
 
@@ -38,10 +50,16 @@ class Pooler(nn.Module):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         """Pools specific information from hidden states based on metadata."""
+
         prompt_lens = PoolingTensors.from_pooling_metadata(
             pooling_metadata, hidden_states.device).prompt_lens
 
-        if self.pooling_type == PoolingType.LAST:
+        if self.pooling_type is PoolingType.CLS:
+            first_token_flat_indices = torch.zeros_like(prompt_lens)
+            first_token_flat_indices[1:] += torch.cumsum(prompt_lens,
+                                                         dim=0)[:-1]
+            pooled_data = hidden_states[first_token_flat_indices]
+        elif self.pooling_type == PoolingType.LAST:
             last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
             pooled_data = hidden_states[last_token_flat_indices]
         elif self.pooling_type == PoolingType.ALL:
@@ -50,6 +68,17 @@ class Pooler(nn.Module):
             for prompt_len in prompt_lens:
                 pooled_data.append(hidden_states[offset:offset + prompt_len])
                 offset += prompt_len
+        elif self.pooling_type == PoolingType.MEAN:
+            # Calculate mean pooling
+            cumsum = torch.cumsum(hidden_states, dim=0)
+            start_indices = torch.cat([
+                torch.tensor([0], device=hidden_states.device),
+                torch.cumsum(prompt_lens[:-1], dim=0)
+            ])
+            end_indices = torch.cumsum(prompt_lens, dim=0)
+            pooled_data = (
+                cumsum[end_indices - 1] - cumsum[start_indices] +
+                hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
         else:
             raise ValueError(f"Invalid pooling type: {self.pooling_type}")
 
