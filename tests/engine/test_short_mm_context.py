@@ -1,6 +1,6 @@
 import pytest
 
-from ....conftest import IMAGE_ASSETS
+from ..conftest import IMAGE_ASSETS
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
