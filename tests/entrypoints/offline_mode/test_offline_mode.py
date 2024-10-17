@@ -9,18 +9,31 @@ from vllm import LLM
 
 from ...conftest import cleanup
 
-MODEL_NAME = "facebook/opt-125m"
+MODEL_CONFIGS = [
+    {
+        "model": "facebook/opt-125m",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.10,
+        "max_num_batched_tokens": 4096,
+        "tensor_parallel_size": 1,
+    },
+    {
+        "model": "mistralai/Mistral-7B-Instruct-v0.1",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.50,
+        "max_model_len": 2048,
+        "max_num_batched_tokens": 4096,
+        "tensor_parallel_size": 1,
+        "tokenizer_mode": "mistral",
+    },
+]
 
 
-@pytest.fixture(scope="module")
-def llm():
+@pytest.fixture(scope="function")
+def llm(model_config: dict):
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME,
-              max_num_batched_tokens=4096,
-              tensor_parallel_size=1,
-              gpu_memory_utilization=0.10,
-              enforce_eager=True)
+    llm = LLM(**model_config)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -31,7 +44,8 @@ def llm():
 
 
 @pytest.mark.skip_global_cleanup
-def test_offline_mode(llm: LLM, monkeypatch):
+@pytest.mark.parametrize("model_config", MODEL_CONFIGS)
+def test_offline_mode(model_config: dict, llm: LLM, monkeypatch):
     # we use the llm fixture to ensure the model files are in-cache
     del llm
 
@@ -41,11 +55,7 @@ def test_offline_mode(llm: LLM, monkeypatch):
         # Need to re-import huggingface_hub and friends to setup offline mode
         _re_import_modules()
         # Cached model files should be used in offline mode
-        LLM(model=MODEL_NAME,
-            max_num_batched_tokens=4096,
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.10,
-            enforce_eager=True)
+        LLM(**model_config)
     finally:
         # Reset the environment after the test
         # NB: Assuming tests are run in online mode
