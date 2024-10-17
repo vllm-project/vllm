@@ -38,7 +38,6 @@ def main(args: argparse.Namespace):
         quantization_param_path=args.quantization_param_path,
         device=args.device,
         ray_workers_use_nsight=args.ray_workers_use_nsight,
-        use_v2_block_manager=args.use_v2_block_manager,
         enable_chunked_prefill=args.enable_chunked_prefill,
         download_dir=args.download_dir,
         block_size=args.block_size,
@@ -221,9 +220,6 @@ if __name__ == '__main__':
     parser.add_argument("--enable-prefix-caching",
                         action='store_true',
                         help="Enable automatic prefix caching")
-    parser.add_argument('--use-v2-block-manager',
-                        action='store_true',
-                        default=EngineArgs.use_v2_block_manager)
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

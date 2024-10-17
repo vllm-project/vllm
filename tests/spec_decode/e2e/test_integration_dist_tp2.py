@@ -17,9 +17,6 @@ from .conftest import run_equality_correctness_test_tp
     [[
         # Skip cuda graph recording for fast test.
         "--enforce-eager",
-
-        # Required for spec decode.
-        "--use-v2-block-manager",
         "--tensor-parallel-size",
         "2"
     ]])
@@ -74,9 +71,6 @@ def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
     [[
         # Skip cuda graph recording for fast test.
         "--enforce-eager",
-
-        # Required for spec decode.
-        "--use_v2_block_manager",
         "--tensor_parallel_size",
         "2",
 

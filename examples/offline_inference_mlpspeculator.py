@@ -50,8 +50,6 @@ if __name__ == "__main__":
     llm = LLM(
         model="meta-llama/Llama-2-13b-chat-hf",
         speculative_model="ibm-fms/llama-13b-accelerator",
-        # These are currently required for MLPSpeculator decoding
-        use_v2_block_manager=True,
     )
 
     print("With speculation")

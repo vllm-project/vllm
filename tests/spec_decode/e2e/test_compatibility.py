@@ -1,27 +1,15 @@
 import pytest
 
-from tests.utils import check_deprecated_block_manager_usage
 from vllm import SamplingParams
 
 from .conftest import get_output_from_llm_generator
 
 
-@pytest.fixture(scope="module", autouse=True)
-def check_deprecated_block_manager():
-    check_deprecated_block_manager_usage(
-        'tests/spec_decode/e2e/test_compatibility.py')
-
-
-@pytest.mark.parametrize(
-    "common_llm_kwargs",
-    [{
-        "model": "JackFram/llama-68m",
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
-    }])
+@pytest.mark.parametrize("common_llm_kwargs", [{
+    "model": "JackFram/llama-68m",
+    "speculative_model": "JackFram/llama-68m",
+    "num_speculative_tokens": 5,
+}])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
         "enable_chunked_prefill": True,
@@ -51,16 +39,11 @@ def test_spec_decode_xfail_chunked_prefill(test_llm_generator):
                                       sampling_params)
 
 
-@pytest.mark.parametrize(
-    "common_llm_kwargs",
-    [{
-        "model": "meta-llama/Llama-2-7b-chat-hf",
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
-    }])
+@pytest.mark.parametrize("common_llm_kwargs", [{
+    "model": "meta-llama/Llama-2-7b-chat-hf",
+    "speculative_model": "JackFram/llama-68m",
+    "num_speculative_tokens": 5,
+}])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
@@ -99,36 +82,5 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
     )
 
     with pytest.raises(ValueError, match="cannot be larger than"):
-        get_output_from_llm_generator(test_llm_generator, prompts,
-                                      sampling_params)
-
-
-@pytest.mark.parametrize("common_llm_kwargs", [{
-    "model": "JackFram/llama-68m",
-    "speculative_model": "JackFram/llama-68m",
-    "num_speculative_tokens": 5,
-    "use_v2_block_manager": False,
-}])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("seed", [1])
-def test_spec_decode_xfail_block_manager_v1(test_llm_generator):
-    """Verify that speculative decoding with block manager v1 fails.
-    """
-    output_len = 128
-    temperature = 0.0
-
-    prompts = [
-        "Hello, my name is",
-    ]
-
-    sampling_params = SamplingParams(
-        max_tokens=output_len,
-        ignore_eos=True,
-        temperature=temperature,
-    )
-
-    with pytest.raises(ValueError,
-                       match="Speculative decoding requires usage of the V2"):
         get_output_from_llm_generator(test_llm_generator, prompts,
                                       sampling_params)
