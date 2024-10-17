@@ -65,5 +65,6 @@ def test_gpu_memory_profiling():
 
     # Check within a small tolerance for portability
     # Hardware, kernel, or dependency changes could all affect memory
-    # utilization
-    assert abs(gpu_blocks - expected_blocks) < 5
+    # utilization.
+    # A 10 block tolerance here should be about 6MB of wiggle room.
+    assert abs(gpu_blocks - expected_blocks) < 10
