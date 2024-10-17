@@ -17,7 +17,8 @@ from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.models.intern_vit import InternVisionModel
@@ -276,13 +277,13 @@ class InternVLInputPipeline:
     def input_processor(
         self,
         ctx: InputContext,
-        llm_inputs: LLMInputs,
+        inputs: DecoderOnlyInputs,
         *,
         max_dynamic_patch: Optional[int] = None,
-    ) -> LLMInputs:
-        multi_modal_data = llm_inputs.get("multi_modal_data")
+    ) -> DecoderOnlyInputs:
+        multi_modal_data = inputs.get("multi_modal_data")
         if multi_modal_data is None or "image" not in multi_modal_data:
-            return llm_inputs
+            return inputs
 
         model_config = ctx.model_config
         hf_config = ctx.get_hf_config()
@@ -311,8 +312,8 @@ class InternVLInputPipeline:
             model_config.tokenizer,
             trust_remote_code=model_config.trust_remote_code)
 
-        prompt = llm_inputs.get("prompt")
-        prompt_token_ids = llm_inputs["prompt_token_ids"]
+        prompt = inputs.get("prompt")
+        prompt_token_ids = inputs["prompt_token_ids"]
         if prompt is None:
             prompt = tokenizer.decode(prompt_token_ids)
 
@@ -320,9 +321,9 @@ class InternVLInputPipeline:
                                                num_patches)
         new_prompt_token_ids = tokenizer.encode(new_prompt)
 
-        return LLMInputs(prompt=prompt,
-                         prompt_token_ids=new_prompt_token_ids,
-                         multi_modal_data=multi_modal_data)
+        return token_inputs(prompt=prompt,
+                            prompt_token_ids=new_prompt_token_ids,
+                            multi_modal_data=multi_modal_data)
 
     def input_mapper(
         self,
@@ -342,6 +343,8 @@ class InternVLInputPipeline:
         elif is_list_of(data, Image.Image):
             # we can't stack here because images may have different num_patches
             data = [image_pixel_values_mapper(img) for img in data]
+        else:
+            return MultiModalInputs({"image_embeds": data})
         model_config = ctx.model_config
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,

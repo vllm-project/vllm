@@ -6,8 +6,9 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
-from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
-                           SequenceOutput, SequenceStatus)
+from vllm.sequence import (CompletionSequenceGroupOutput, Sequence,
+                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
@@ -16,7 +17,7 @@ logger = init_logger(__name__)
 
 def single_step_process_prompt_logprob(
         sg_output_proc: SequenceGroupOutputProcessor, seq_group: SequenceGroup,
-        output: SequenceGroupOutput) -> None:
+        output: CompletionSequenceGroupOutput) -> None:
     """Process prompt logprobs associated with the :class:`SequenceGroupOutput`
     for a given step.
 
@@ -106,13 +107,14 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         """
         assert len(outputs) == 1, ("Single step should only has 1 output.")
         output = outputs[0]
+        assert isinstance(output, CompletionSequenceGroupOutput)
         single_step_process_prompt_logprob(self, seq_group, output)
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput,
                                         is_async: bool) -> None:
         sampling_params = seq_group.sampling_params
-        if sampling_params.best_of == 1:
+        if sampling_params.n == 1:
             # only have one output sample
             sample = outputs.samples[0]
             # only have one sequence

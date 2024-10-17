@@ -41,6 +41,9 @@ logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
+# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# If the feature combo become valid
+
 STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
                     "is not currently supported."

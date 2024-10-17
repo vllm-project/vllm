@@ -12,6 +12,9 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools_scm]
+# version_file = "vllm/_version.py" # currently handled by `setup.py:get_version()`
+
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80

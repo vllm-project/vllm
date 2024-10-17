@@ -23,6 +23,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica import PunicaWrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
+                             is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -233,6 +234,8 @@ class LoRAModel(AdapterModel):
             # modules.
             unexpected_modules = []
             target_modules = config["target_modules"]
+            if not isinstance(target_modules, list):
+                target_modules = [target_modules]
             for module in target_modules:
                 # Compatible with more modules,
                 # such as:layers.11.self_attn.k_proj
@@ -243,8 +246,8 @@ class LoRAModel(AdapterModel):
             # expected_lora_modules. It is not reliable. See
             # https://github.com/vllm-project/vllm/pull/5909. But there's no
             # other better mechanism.
-            if unexpected_modules:
-                print(unexpected_modules, "modules")
+            if unexpected_modules and not is_regex_target_modules(
+                    config["target_modules"], expected_lora_modules):
                 raise ValueError(
                     f"While loading {lora_dir}, expected"
                     f" target modules in {expected_lora_modules}"
@@ -334,7 +337,11 @@ class LoRAModelManager(AdapterModelManager):
             self.packed_modules_mapping = copy.deepcopy(
                 self.model.packed_modules_mapping)
         # Used to indicate whether the model is a multimodal model
-        self.supports_mm: bool = supports_multimodal(self.model)
+        self.supports_mm: bool = (
+            supports_multimodal(self.model)
+            # In case the model only supports LoRA for
+            # text modules (e.g. ChatGLM)
+            and hasattr(self.model, "get_mm_mapping"))
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
         # Dict instead of a Set for compatibility with LRUCache.

@@ -42,6 +42,10 @@ class MPLinearKernel(ABC):
         self.config = c
         self.w_q_name = w_q_param_name
         self.w_s_name = w_s_param_name
+        if c.zero_points:
+            assert w_zp_param_name is not None
+        if c.has_g_idx:
+            assert w_gidx_param_name is not None
         self.w_zp_name = w_zp_param_name
         self.w_gidx_name = w_gidx_param_name
 

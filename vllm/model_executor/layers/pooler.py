@@ -34,7 +34,7 @@ class Pooler(nn.Module):
     3. Returns structured results as `PoolerOutput`.
 
     Attributes:
-        pooling_type: The type of pooling to use (LAST, MAX, CLS).
+        pooling_type: The type of pooling to use (LAST, ALL, CLS).
         normalize: Whether to normalize the pooled data.
     """
 
