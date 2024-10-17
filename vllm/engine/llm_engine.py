@@ -6,7 +6,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union, overload
+from typing import Set, Type, Union, cast, overload
 
 import torch
 from typing_extensions import TypeVar
@@ -29,8 +29,8 @@ from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
-                         InputRegistry, LLMInputs, PromptType)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
+                         EncoderDecoderInputs, InputRegistry, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -44,7 +44,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            Sequence, SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
+                           SequenceGroupOutput, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -188,7 +188,7 @@ class LLMEngine:
             raise TypeError(f"Expected output of type {output_type}, "
                             f"but found type {type(output)}")
 
-        return output
+        return cast(_O, output)
 
     @classmethod
     def validate_outputs(
@@ -635,7 +635,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
+        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -767,7 +767,7 @@ class LLMEngine:
         Details:
             - Set arrival_time to the current time if it is None.
             - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `best_of` number of :class:`~vllm.Sequence` objects.
+            - Create `n` number of :class:`~vllm.Sequence` objects.
             - Create a :class:`~vllm.SequenceGroup` object
               from the list of :class:`~vllm.Sequence`.
             - Add the :class:`~vllm.SequenceGroup` object to the scheduler.
@@ -1039,6 +1039,7 @@ class LLMEngine:
             scheduler_outputs.scheduled_seq_groups)
 
         has_multiple_outputs: bool = len(outputs) > 1
+        outputs_by_sequence_group: List[List[SequenceGroupOutput]]
         if has_multiple_outputs:
             assert self.scheduler_config.is_multi_step or \
                      self.speculative_config
@@ -1084,6 +1085,7 @@ class LLMEngine:
                 finished_before.append(i)
                 continue
 
+            output: List[SequenceGroupOutput]
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
             else:
@@ -1096,7 +1098,7 @@ class LLMEngine:
                         seq_group, seq_group_meta, is_first_step_output)
                 else:
                     seq_group.update_num_computed_tokens(
-                        seq_group_meta.token_chunk_size)
+                        seq_group_meta.token_chunk_size or 0)
 
             if outputs:
                 for o in outputs:
@@ -1104,13 +1106,13 @@ class LLMEngine:
                             and seq_group.metrics is not None):
                         if seq_group.metrics.model_forward_time is not None:
                             seq_group.metrics.model_forward_time += (
-                                o.model_forward_time)
+                                o.model_forward_time or 0)
                         else:
                             seq_group.metrics.model_forward_time = (
                                 o.model_forward_time)
                         if seq_group.metrics.model_execute_time is not None:
                             seq_group.metrics.model_execute_time += (
-                                o.model_execute_time)
+                                o.model_execute_time or 0)
                         else:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
@@ -1236,14 +1238,15 @@ class LLMEngine:
                     seq_group, seq_group_metadata,
                     seq_group.state.num_steps == 1)
             else:
-                seq_group.update_num_computed_tokens(
-                    seq_group_metadata.token_chunk_size)
+                token_chunk_size = (seq_group_metadata.token_chunk_size
+                                    if seq_group_metadata.token_chunk_size
+                                    is not None else 0)
+                seq_group.update_num_computed_tokens(token_chunk_size)
 
             if seq_group_metadata.do_sample:
                 assert len(sequence_group_outputs.samples) == 1, (
                     "Async output processor expects a single sample"
-                    " (i.e sampling_params.n == 1 and no "
-                    "sampling_params.best_of > 1)")
+                    " (i.e sampling_params.n == 1)")
                 sample = sequence_group_outputs.samples[0]
 
                 assert len(seq_group.seqs) == 1
@@ -1612,7 +1615,6 @@ class LLMEngine:
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
-        best_of_requests: List[int] = []
         n_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
@@ -1683,8 +1685,6 @@ class LLMEngine:
                         for seq in seq_group.get_finished_seqs()
                     ])
                     if seq_group.sampling_params is not None:
-                        best_of_requests.append(
-                            seq_group.sampling_params.best_of)
                         n_requests.append(seq_group.sampling_params.n)
                     finished_reason_requests.extend([
                         SequenceStatus.get_finished_reason(seq.status)
@@ -1737,7 +1737,6 @@ class LLMEngine:
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
-            best_of_requests=best_of_requests,
             n_requests=n_requests,
             finished_reason_requests=finished_reason_requests,
         )
@@ -1824,8 +1823,6 @@ class LLMEngine:
                                    seq_group.sampling_params.top_p)
             seq_span.set_attribute(SpanAttributes.LLM_REQUEST_MAX_TOKENS,
                                    seq_group.sampling_params.max_tokens)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_BEST_OF,
-                                   seq_group.sampling_params.best_of)
             seq_span.set_attribute(SpanAttributes.LLM_REQUEST_N,
                                    seq_group.sampling_params.n)
             seq_span.set_attribute(SpanAttributes.LLM_USAGE_NUM_SEQUENCES,
@@ -1862,8 +1859,8 @@ class LLMEngine:
     def is_embedding_model(self):
         return self.model_config.is_embedding_model
 
-    def _validate_model_inputs(self, inputs: Union[LLMInputs,
-                                                   EncoderDecoderLLMInputs]):
+    def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
+                                                   EncoderDecoderInputs]):
         if self.model_config.is_multimodal_model:
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
