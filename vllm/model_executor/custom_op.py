@@ -111,9 +111,11 @@ class CustomOp(nn.Module):
         return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR and \
             not count_none > 0 or count_all > 0
 
-    # Dictionary of all custom ops.
+    # Dictionary of all custom ops (classes, indexed by registered name).
     # To check if an op with a name is enabled, call .enabled() on the class.
-    # Example: op_registry["my_op"].enabled()
+    # Examples:
+    # - MyOp.enabled()
+    # - op_registry["my_op"].enabled()
     op_registry: Dict[str, Type['CustomOp']] = {}
 
     # Decorator to register custom ops.
