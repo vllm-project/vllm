@@ -138,3 +138,11 @@ Once neuronx-cc and transformers-neuronx packages are installed, we will be able
     $ VLLM_TARGET_DEVICE="neuron" pip install .
 
 If neuron packages are detected correctly in the installation process, ``vllm-0.3.0+neuron212`` will be installed.
+
+Multi node inference setup
+--------------------------
+
+Follow the detailed instructions `here <https://awsdocs-neuron.readthedocs-hosted.com/en/latest/frameworks/torch/torch-neuronx/setup-trn1-multi-node-execution.html>`_ to setup a cluster for multi node inference support with neuron.
+Next follow :ref:`Step 1 <install_drivers>`, :ref:`Step 2 <install_tnx>` and :ref:`Step 3 <install_vllm>` on each node in the cluster.
+
+Refer ``examples/neuron_multi_node/multinode_inference_neuron.sh`` to get started with an online 2 node inference example with Neuron.

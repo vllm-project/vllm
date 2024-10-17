@@ -1,4 +1,5 @@
 """A Neuron worker class."""
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -45,7 +46,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
             model_config, parallel_config, scheduler_config, device_config)
-        self.is_driver_worker = True
+        self.is_driver_worker = rank == 0
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -87,7 +88,15 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     @property
     def do_metadata_broadcast(self) -> bool:
-        return False
+        """
+        Enable metadata broadcast only if multi node
+        inference is enabled.
+        """
+        if os.getenv('NEURON_LOCAL_TP') is None:
+            return False
+        neuron_local_tp = int(os.getenv('NEURON_LOCAL_TP') or '')
+        tp = self.parallel_config.tensor_parallel_size
+        return neuron_local_tp < tp
 
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
@@ -111,11 +120,21 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def init_distributed_environment(self):
         """Neuron uses transformers-neuronx for tensor parallelism.
+        For multinode inference, we need to initialize a process group
+        to broadcast Neuron forward() api call params to all the nodes
+        in the cluster from the driver worker.
 
         vLLM still needs the environment inited when TP/PP > 1
         """
+        neuron_pg_world_size = 1
+        if self.do_metadata_broadcast:
+            neuron_local_tp = int(os.getenv('NEURON_LOCAL_TP') or '')
+            tp = self.parallel_config.tensor_parallel_size
+            neuron_pg_world_size = tp // neuron_local_tp
+            if neuron_pg_world_size * neuron_local_tp < tp:
+                neuron_pg_world_size = neuron_pg_world_size + 1
         init_distributed_environment(
-            world_size=1,
+            world_size=neuron_pg_world_size,
             rank=self.rank,
             local_rank=self.local_rank,
             distributed_init_method=self.distributed_init_method,

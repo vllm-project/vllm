@@ -36,7 +36,7 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import supports_custom_op
+from vllm.utils import is_neuron, supports_custom_op
 
 
 @dataclass
@@ -992,8 +992,8 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+    if (world_size != tensor_model_parallel_size *
+            pipeline_model_parallel_size) and not is_neuron():
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
