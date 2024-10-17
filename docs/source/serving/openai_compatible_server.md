@@ -157,7 +157,7 @@ vLLM will use guided decoding to ensure the response matches the tool parameter 
 To enable this feature, you should set the following flags:
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
 deems appropriate.
-* `--tool-call-parser` -- select the tool parser to use - currently either `hermes` or `mistral` or `llama3_json` or `internlm`. Additional tool parsers 
+* `--tool-call-parser` -- select the tool parser to use - currently either `hermes`, `mistral`, `llama3_json`, `internlm` or `granite-20b-fc`. Additional tool parsers 
 will continue to be added in the future, and also can register your own tool parsers in the `--tool-parser-plugin`.
 * `--tool-parser-plugin` -- **optional** tool parser plugin used to register user defined tool parsers into vllm, the registered tool parser name can be specified in `--tool-call-parser`.
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
@@ -168,7 +168,9 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template! 
 
-#### Hermes Models
+### Supported Models
+
+#### Hermes
 All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
 * `NousResearch/Hermes-2-Pro-*`
 * `NousResearch/Hermes-2-Theta-*`
@@ -180,7 +182,7 @@ step in their creation_.
 
 Flags: `--tool-call-parser hermes`
 
-#### Mistral Models
+#### Mistral
 Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
 * Additional mistral function-calling models are compatible as well.
@@ -198,6 +200,7 @@ when tools are provided, that results in much better reliability when working wi
 
 
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+
 
 #### Llama Models
 Supported models:
@@ -219,6 +222,20 @@ it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
 
+#### IBM Granite
+
+Supported models:
+* `ibm-granite/granite-20b-functioncalling`
+
+Flags: `--tool-call-parser granite-20b-fc`
+`examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+
+* `ibm-granite/granite-8b-instruct`
+
+Flags: `--tool-call-parser granite`
+`examples/tool_chat_template_granite.jinja`: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
+
+
 #### Internlm Models
 Supported models:
 * `internlm/internlm2_5-7b-chat` (confirmed)
@@ -228,6 +245,15 @@ Known issues:
 * Although this implementation also supports Internlm2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
+
+
+#### IBM Granite
+
+Supported models:
+* `ibm-granite/granite-20b-functioncalling`
+
+Flags: `--tool-call-parser granite-20b-fc`
+`examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 
 ### How to write a tool parser plugin
@@ -287,5 +313,5 @@ Then you can use this plugin in the command line like this.
     --tool-parser-plugin <absolute path of the plugin file>
     --tool-call-parser example \
     --chat-template <your chat template> \
-``` 
+```
 

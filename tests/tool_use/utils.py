@@ -88,6 +88,24 @@ CONFIGS: Dict[str, ServerConfig] = {
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally."
     },
+    "granite20b": {
+        "model":
+        "ibm-granite/granite-20b-functioncalling",
+        "arguments": [
+            "--tool-call-parser", "granite-20b-fc", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_granite_20b_fc.jinja")
+        ],
+        "supports_parallel":
+        False,
+    },
+    "granite8b": {
+        "model":
+        "ibm-granite/granite-8b-instruct",
+        "arguments": [
+            "--tool-call-parser", "granite", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
+        ],
+    },
     "internlm": {
         "model":
         "internlm/internlm2_5-7b-chat",
