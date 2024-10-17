@@ -340,10 +340,12 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/embedding/language
+  - tests/models/embedding/vision_language
   - tests/models/encoder_decoder/language
   - tests/models/encoder_decoder/vision_language
   commands:
     - pytest -v -s models/embedding/language
+    - pytest -v -s models/embedding/vision_language
     - pytest -v -s models/encoder_decoder/language
     - pytest -v -s models/encoder_decoder/vision_language
 
