@@ -231,7 +231,6 @@ class StackAudioFrames(nn.Module):
 
 class FlippedSiluAndMul(SiluAndMul):
     """Ultravox is trained with SwiGLU with flipped halves."""
-    name = "flipped_silu_and_mul"
 
     def forward(self, x: torch.Tensor):
         a, b = x.chunk(2, dim=-1)

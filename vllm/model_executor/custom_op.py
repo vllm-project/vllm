@@ -5,8 +5,11 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.levels import CompilationLevel
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_cpu, is_hip, is_xpu
+from vllm.utils import is_cpu, is_hip, is_xpu, print_warning_once
+
+logger = init_logger(__name__)
 
 
 class CustomOp(nn.Module):
@@ -62,7 +65,11 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
 
-        if not self.enabled():
+        enabled = self.enabled()
+        logger.debug("custom op %s %s", self.__class__.name,
+                     "enabled" if enabled else "disabled")
+
+        if not enabled:
             return self.forward_native
 
         if is_hip():
@@ -78,6 +85,14 @@ class CustomOp(nn.Module):
 
     @classmethod
     def enabled(cls) -> bool:
+        # if no name, then it was not registered
+        if not hasattr(cls, "name"):
+            print_warning_once(
+                f"Custom op {cls.__name__} was not registered, "
+                f"which means it won't appear in the op registry. "
+                f"It will be enabled/disabled based on the global settings.")
+            return CustomOp.default_on()
+
         enabled = f"+{cls.name}" in envs.VLLM_CUSTOM_OPS
         disabled = f"-{cls.name}" in envs.VLLM_CUSTOM_OPS
         assert not (enabled

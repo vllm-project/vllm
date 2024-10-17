@@ -10,6 +10,12 @@ from vllm.model_executor.layers.activation import (GeluAndMul,
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 
+# Registered subclass for test
+@CustomOp.register("relu3")
+class Relu3(ReLUSquaredActivation):
+    pass
+
+
 @pytest.mark.parametrize(
     "env, torch_level, ops_enabled, default_on",
     [
@@ -25,21 +31,21 @@ from vllm.model_executor.layers.layernorm import RMSNorm
         #
         # All but SiluAndMul
         ("+rms_norm,-silu_and_mul", 0, [1, 0, 1, 1], True),
-        # Only ReLUSquaredActivation
-        ("none,-rms_norm,+relu2", 0, [0, 0, 0, 1], False),
+        # Only ReLU3
+        ("none,-rms_norm,+relu3", 0, [0, 0, 0, 1], False),
         # All but SiluAndMul
         ("all,-silu_and_mul", 1, [1, 0, 1, 1], True),
-        # All but ReLUSquaredActivation
-        ("-relu2", 1, [1, 1, 1, 0], True),
+        # All but ReLU3 (even if ReLU2 is on)
+        ("-relu3,relu2", 1, [1, 1, 1, 0], True),
         # GeluAndMul and SiluAndMul
-        ("none,-relu2,+gelu_and_mul,+silu_and_mul", 2, [0, 1, 1, 0], False),
+        ("none,-relu3,+gelu_and_mul,+silu_and_mul", 2, [0, 1, 1, 0], False),
         # All but RMSNorm
         ("-rms_norm", 2, [0, 1, 1, 1], True),
         #
         # Default: none
         #
-        # Only ReLUSquaredActivation
-        ("-silu_and_mul,+relu2", 3, [0, 0, 0, 1], False),
+        # Only ReLU3
+        ("-silu_and_mul,+relu3", 3, [0, 0, 0, 1], False),
         # All but RMSNorm
         ("all,-rms_norm", 4, [0, 1, 1, 1], True),
     ])
@@ -64,8 +70,16 @@ def test_enabled_ops(env: str, torch_level: int, ops_enabled: List[int],
     assert GeluAndMul().enabled() == ops_enabled[2]
     assert CustomOp.op_registry["gelu_and_mul"].enabled() == ops_enabled[2]
 
-    assert ReLUSquaredActivation().enabled() == ops_enabled[3]
-    assert CustomOp.op_registry["relu2"].enabled() == ops_enabled[3]
+    # If registered, subclasses should follow their own name
+    assert Relu3().enabled() == ops_enabled[3]
+    assert CustomOp.op_registry["relu3"].enabled() == ops_enabled[3]
+
+    # Unregistered subclass
+    class SiluAndMul2(SiluAndMul):
+        pass
+
+    # Subclasses should not require registration
+    assert SiluAndMul2().enabled() == SiluAndMul().enabled()
 
 
 @pytest.mark.parametrize(
