@@ -1,5 +1,6 @@
 from pathlib import PosixPath
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Type, Union
+from typing import (Any, Callable, Dict, Iterable, List, Optional, Tuple, Type,
+                    Union)
 
 import torch
 from PIL.Image import Image
@@ -9,13 +10,12 @@ from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
                                    resize_video, sample_frames_from_video)
 
-
-from .....conftest import (HfRunner, VllmRunner, _ImageAssets, _VideoAssets)
+from .....conftest import HfRunner, VllmRunner, _ImageAssets, _VideoAssets
 from .mm_test_types import (MULTI_IMAGE_BASE_PROMPT, SINGLE_IMAGE_BASE_PROMPTS,
-                             VIDEO_BASE_PROMPT, CustomTestOptions,
-                             ImageSizeWrapper, RunnerOutput,
-                             SizeType, VLMTestInfo, TEST_IMG_PLACEHOLDER,
-                             TEST_VIDEO_PLACEHOLDER)
+                            TEST_IMG_PLACEHOLDER, TEST_VIDEO_PLACEHOLDER,
+                            VIDEO_BASE_PROMPT, CustomTestOptions,
+                            ImageSizeWrapper, RunnerOutput, SizeType,
+                            VLMTestInfo)
 
 
 ####### Helpers for building the inputs to different test types

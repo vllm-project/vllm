@@ -5,8 +5,8 @@ handling multimodal placeholder substitution, and so on.
 import itertools
 from typing import Dict, Iterable, Tuple
 
-from .mm_test_types import (EMBEDDING_SIZE_FACTORS, ImageSizeWrapper,
-                             SizeType, VLMTestInfo, VLMTestType)
+from .mm_test_types import (EMBEDDING_SIZE_FACTORS, ImageSizeWrapper, SizeType,
+                            VLMTestInfo, VLMTestType)
 
 
 def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
@@ -41,7 +41,8 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
                 assert test_info.prompt_formatter is not None
 
             # Everything looks okay; keep if this is has correct proc handling
-            if (test_info.distributed_executor_backend is not None) == fork_per_test:
+            if (test_info.distributed_executor_backend
+                    is not None) == fork_per_test:
                 filtered_test_settings[test_name] = test_info
 
     return filtered_test_settings
