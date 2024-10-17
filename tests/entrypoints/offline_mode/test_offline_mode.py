@@ -20,7 +20,7 @@ MODEL_CONFIGS = [
 ]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def llm(model_config: dict):
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
