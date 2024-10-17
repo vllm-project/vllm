@@ -1,12 +1,12 @@
 import asyncio
 from abc import ABC, abstractmethod
-from copy import deepcopy
 from typing import AsyncGenerator, List, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -61,6 +61,7 @@ class EngineClient(ABC):
     async def beam_search(
         self,
         prompt: Union[PromptType, List[int]],
+        model_config: ModelConfig,
         request_id: str,
         params: BeamSearchParams,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -72,27 +73,16 @@ class EngineClient(ABC):
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
 
-        tokenizer = await self.get_tokenizer(lora_request=None)
+        tokenizer = await self.get_tokenizer()
+        self.input_preprocessor = InputPreprocessor(model_config,
+                                                    self.tokenizer)
 
-        if isinstance(prompt, dict):
-            if "prompt" in prompt:
-                tokenized_prompt = tokenizer.encode(prompt.get("prompt"))
-                multi_modal_data = prompt.get("multi_modal_data")
-                mm_processor_kwargs = prompt.get("mm_processor_kwargs")
-            elif "prompt_token_ids" in prompt:
-                tokenized_prompt = prompt.get("prompt_token_ids")
-                multi_modal_data = prompt.get("multi_modal_data")
-                mm_processor_kwargs = prompt.get("mm_processor_kwargs")
-            else:
-                raise TypeError(
-                    "Dictionary input must be a TextPrompt or TokensPrompt")
-        else:
-            tokenized_prompt = prompt if isinstance(
-                prompt, list) else tokenizer.encode(prompt)
-            multi_modal_data = None
-            mm_processor_kwargs = None
-
-        tokenized_length = len(tokenized_prompt)
+        (prompt_text, prompt_token_ids, multi_modal_data, mm_processor_kwargs
+         ) = self.input_preprocessor._extract_prompt_components(
+             prompt,
+             request_id=request_id,
+         )
+        tokenized_length = len(prompt_token_ids)
 
         sort_beams_key = create_sort_beams_key_function(
             tokenizer.eos_token_id, length_penalty)
@@ -103,17 +93,18 @@ class EngineClient(ABC):
             temperature=temperature,
         )
         all_beams = [
-            BeamSearchSequence(tokens=tokenized_prompt, cum_logprob=0)
+            BeamSearchSequence(tokens=prompt_token_ids,
+                               cum_logprob=0,
+                               multi_modal_data=multi_modal_data,
+                               mm_processor_kwargs=mm_processor_kwargs)
         ]
         completed = []
 
         for _ in range(max_tokens):
             prompts_batch = [
-                TokensPrompt(
-                    prompt_token_ids=beam.tokens,
-                    multi_modal_data=deepcopy(
-                        multi_modal_data),  # always the values from inputs
-                    mm_processor_kwargs=deepcopy(mm_processor_kwargs))
+                TokensPrompt(prompt_token_ids=beam.tokens,
+                             multi_modal_data=beam.multi_modal_data,
+                             mm_processor_kwargs=beam.mm_processor_kwargs)
                 for beam in all_beams
             ]
 
@@ -148,14 +139,18 @@ class EngineClient(ABC):
                                     else current_beam.tokens,  #
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
-                                    finish_reason="stop"))
+                                    finish_reason="stop",
+                                    stop_reason=tokenizer.eos_token_id))
                         else:
                             new_beams.append(
                                 BeamSearchSequence(
-                                    tokens=current_beam.tokens + [token_id],  #
+                                    tokens=current_beam.tokens + [token_id],
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
-                                ))
+                                    multi_modal_data=current_beam.
+                                    multi_modal_data,
+                                    mm_processor_kwargs=current_beam.
+                                    mm_processor_kwargs))
 
             sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
             all_beams = sorted_beams[:beam_width]
@@ -169,18 +164,20 @@ class EngineClient(ABC):
 
         beam_search_output = RequestOutput(
             request_id=request_id,
-            prompt=tokenizer.decode(tokenized_prompt),
+            prompt=prompt_text,
             outputs=[
-                CompletionOutput(
-                    text=beam.text,
-                    cumulative_logprob=beam.cum_logprob,
-                    token_ids=beam.tokens[tokenized_length:],
-                    index=i,
-                    logprobs=beam.cum_logprob,
-                ) for (i, beam) in enumerate(best_beams)
+                CompletionOutput(text=beam.text,
+                                 cumulative_logprob=beam.cum_logprob,
+                                 token_ids=beam.tokens[tokenized_length:],
+                                 index=i,
+                                 logprobs=beam.cum_logprob,
+                                 finish_reason=beam.finish_reason if
+                                 beam.finish_reason is not None else "length",
+                                 stop_reason=beam.stop_reason)
+                for (i, beam) in enumerate(best_beams)
             ],
             finished=True,
-            prompt_token_ids=tokenized_prompt,
+            prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None)
 
         yield beam_search_output

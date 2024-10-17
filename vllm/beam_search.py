@@ -1,5 +1,8 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+
+if TYPE_CHECKING:
+    from vllm.multimodal import MultiModalDataDict
 
 
 @dataclass
@@ -14,6 +17,9 @@ class BeamSearchSequence:
     cum_logprob: float = 0.0
     text: Optional[str] = None
     finish_reason: Optional[str] = None
+    stop_reason: Union[int, str, None] = None
+    multi_modal_data: Optional["MultiModalDataDict"] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
 
 
 @dataclass
