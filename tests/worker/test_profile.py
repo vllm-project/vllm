@@ -6,7 +6,12 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
 
 
-def test_profile():
+def test_gpu_memory_profiling():
+    # Tests the gpu profiling that happens in order to determine the number of
+    # KV cache blocks that we can allocate on the GPU.
+    # This test mocks the maximum available gpu memory so that it can run on
+    # any gpu setup.
+
     # Set up engine args to build a worker.
     engine_args = EngineArgs(model="facebook/opt-125m",
                              dtype="half",
@@ -35,7 +40,7 @@ def test_profile():
     worker.init_device()
     worker.load_model()
 
-    # Set 10GiB as the mock total gpu ram so this test can be device-agnostic
+    # Set 10GiB as the total gpu ram to be device-agnostic
     def mock_mem_info():
         current_usage = torch.cuda.memory_stats(
         )["allocated_bytes.all.current"]
