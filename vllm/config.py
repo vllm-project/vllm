@@ -76,6 +76,8 @@ class ModelConfig:
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
             If None, the user did not specify, so default to False.
+        lazy_capture_cuda_graph: If true, CUDA graph will only be captured when
+            needed during inference time.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
@@ -123,6 +125,7 @@ class ModelConfig:
                  quantization: Optional[str] = None,
                  quantization_param_path: Optional[str] = None,
                  enforce_eager: Optional[bool] = None,
+                 lazy_capture_cuda_graph: Optional[bool] = None,
                  max_context_len_to_capture: Optional[int] = None,
                  max_seq_len_to_capture: Optional[int] = None,
                  max_logprobs: int = 20,
@@ -151,6 +154,7 @@ class ModelConfig:
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
+        self.lazy_capture_cuda_graph = lazy_capture_cuda_graph
         if max_context_len_to_capture is not None:
             raise ValueError("`max_context_len_to_capture` is deprecated. "
                              "Use `max_seq_len_to_capture` instead.")
