@@ -25,12 +25,13 @@ from ....conftest import (IMAGE_ASSETS, HfRunner, ImageAsset, VllmRunner,
 from .vlm_test_types import (EMBEDDING_SIZE_FACTORS, MULTI_IMAGE_BASE_PROMPT,
                              SINGLE_IMAGE_BASE_PROMPTS, TEST_IMG_PLACEHOLDER,
                              TEST_VIDEO_PLACEHOLDER, VIDEO_BASE_PROMPT,
-                             CustomTestOptions, ImageSizeWrapper, SizeType,
-                             VllmOutput, VLMTestInfo, VLMTestType)
+                             CustomTestOptions, ImageSizeWrapper, RunnerOutput,
+                             SizeType, VLMTestInfo, VLMTestType)
 
 
 ####### vLLM output processors functions
-def blip2_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def blip2_vllm_to_hf_output(vllm_output: RunnerOutput,
+                            model: str) -> RunnerOutput:
     """Sanitize vllm output [blip2 models] to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
 
@@ -44,7 +45,8 @@ def blip2_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def fuyu_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def fuyu_vllm_to_hf_output(vllm_output: RunnerOutput,
+                           model: str) -> RunnerOutput:
     """Sanitize vllm output [fuyu models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -53,7 +55,9 @@ def fuyu_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     return output_ids, hf_output_str, out_logprobs
 
 
-def qwen_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def qwen_vllm_to_hf_output(
+        vllm_output: RunnerOutput,
+        model: str) -> Tuple[List[int], str, Optional[SampleLogprobs]]:
     """Sanitize vllm output [qwen models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -62,20 +66,23 @@ def qwen_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     return output_ids, hf_output_str, out_logprobs
 
 
-def llava_image_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def llava_image_vllm_to_hf_output(vllm_output: RunnerOutput,
+                                  model: str) -> RunnerOutput:
     config = AutoConfig.from_pretrained(model)
     mm_token_id = config.image_token_index
     return _llava_vllm_to_hf_output(vllm_output, model, mm_token_id)
 
 
-def llava_video_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def llava_video_vllm_to_hf_output(
+        vllm_output: RunnerOutput,
+        model: str) -> Tuple[List[int], str, Optional[SampleLogprobs]]:
     config = AutoConfig.from_pretrained(model)
     mm_token_id = config.video_token_index
     return _llava_vllm_to_hf_output(vllm_output, model, mm_token_id)
 
 
-def _llava_vllm_to_hf_output(vllm_output: VllmOutput, model: str,
-                             mm_token_id: int):
+def _llava_vllm_to_hf_output(vllm_output: RunnerOutput, model: str,
+                             mm_token_id: int) -> RunnerOutput:
     """Sanitize vllm output [Llava models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -95,7 +102,8 @@ def _llava_vllm_to_hf_output(vllm_output: VllmOutput, model: str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def llava_onevision_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def llava_onevision_vllm_to_hf_output(vllm_output: RunnerOutput,
+                                      model: str) -> RunnerOutput:
     """Sanitize vllm output [llava-onevision] to compare with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -117,7 +125,8 @@ def llava_onevision_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def phi3v_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def phi3v_vllm_to_hf_output(vllm_output: RunnerOutput,
+                            model: str) -> RunnerOutput:
     """Sanitize vllm output [phi3v] to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
 
@@ -135,7 +144,8 @@ def phi3v_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def paligemma_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
+def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput,
+                                model: str) -> RunnerOutput:
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -159,9 +169,8 @@ def paligemma_vllm_to_hf_output(vllm_output: VllmOutput, model: str):
 
 
 ####### Post-processors for HF outputs
-def minicmpv_trunc_hf_output(hf_output: Tuple[List[int], str,
-                                              Optional[SampleLogprobs]],
-                             model: str):
+def minicmpv_trunc_hf_output(hf_output: RunnerOutput,
+                             model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<|eot_id|>"):
         output_str = output_str.split("<|eot_id|>")[0]
@@ -352,7 +361,7 @@ def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
 def get_model_prompts(base_prompts: Iterable[str],
                       img_idx_to_prompt: Optional[Callable[[int], str]],
                       video_idx_to_prompt: Optional[Callable[[int], str]],
-                      prompt_formatter: Callable) -> List[str]:
+                      prompt_formatter: Callable[[str], str]) -> List[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
     to be tested, update the media placeholders and apply the prompt formatting
     to get the test prompt string for this model.
@@ -885,13 +894,13 @@ def run_test(
     enforce_eager: bool,
     max_model_len: int,
     max_num_seqs: int,
-    hf_output_post_proc: Optional[Callable],
-    vllm_output_post_proc: Optional[Callable],
+    hf_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
+    vllm_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]],
     auto_cls: Type[_BaseAutoModelClass],
     use_tokenizer_eos: bool,
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
-    comparator: Callable,
-    get_stop_token_ids: Optional[Callable],
+    comparator: Callable[..., None],
+    get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]],
     limit_mm_per_prompt: Dict[str, int],
     model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],

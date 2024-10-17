@@ -5,7 +5,7 @@ from typing import (Any, Callable, Dict, Iterable, List, NamedTuple, Optional,
 
 import torch
 from PIL.Image import Image
-from transformers import AutoModelForCausalLM, BatchEncoding
+from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.sequence import SampleLogprobs
@@ -30,7 +30,7 @@ VIDEO_BASE_PROMPT = f"{TEST_VIDEO_PLACEHOLDER}Why is this video funny?"
 
 IMAGE_SIZE_FACTORS = ((), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0))
 EMBEDDING_SIZE_FACTORS = ((), (1.0, ), (1.0, 1.0, 1.0))
-VllmOutput = Tuple[List[int], str, Optional[SampleLogprobs]]
+RunnerOutput = Tuple[List[int], str, Optional[SampleLogprobs]]
 # yapf: enable
 
 
@@ -93,7 +93,7 @@ class VLMTestInfo(NamedTuple):
     tensor_parallel_size: int = 1
 
     # Optional callable which gets a list of token IDs from the model tokenizer
-    get_stop_token_ids: Optional[Callable] = None
+    get_stop_token_ids: Optional[Callable[[AutoTokenizer], List[int]]] = None
 
     # Exposed options for HF runner
     model_kwargs: Optional[Dict[str, Any]] = None
@@ -106,9 +106,12 @@ class VLMTestInfo(NamedTuple):
 
     # Post processors that if defined, will run oun the outputs of the
     # vLLM and HF runner, respectively (useful for sanitization, etc).
-    vllm_output_post_proc: Optional[Callable] = None
-    hf_output_post_proc: Optional[Callable] = None
-    comparator: Callable = check_logprobs_close
+    vllm_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]] = None
+    hf_output_post_proc: Optional[Callable[[RunnerOutput, str], Any]] = None
+
+    # Consumes the output of the callables above and checks if they're equal
+    comparator: Callable[..., None] = check_logprobs_close
+
     # Default expandable params per test; these defaults can be overridden in
     # instances of this object; the complete set of test cases for the model
     # is all combinations of .models + all fields below
