@@ -4,14 +4,14 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import (Callable, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from typing import Callable, Deque, Dict, Iterable, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
@@ -103,94 +103,6 @@ class SchedulingBudget:
 
 
 @dataclass
-class PaddingAwareSchedulingBudget(SchedulingBudget):
-    max_num_prefill_seqs: Optional[int] = None
-    _prefill_request_ids_max_seq_lens: Dict[str,
-                                            int] = field(default_factory=dict)
-    _max_seq_len: int = 0
-    _num_curr_prefill_seqs: int = 0
-
-    def _generic_padding_fn(self, batch_size, max_seq_len) -> int:
-        return batch_size * max_seq_len
-
-    def _hpu_padding_fn(self, batch_size, max_seq_len):
-        from vllm.worker.hpu_model_runner import (HPUBucketingGlobalState,
-                                                  find_bucket)
-        padded_bs = batch_size
-        padded_seq = max_seq_len
-
-        hpu_bucketing_global_state = HPUBucketingGlobalState()
-
-        bs_cfg = hpu_bucketing_global_state.prompt_bs_bucket_cfg
-        if bs_cfg is not None:
-            padded_bs = find_bucket(batch_size, bs_cfg)
-        else:
-            logger.warning(
-                "prompt_bs_bucket_cfg was not set! Using unpadded batch size.")
-        seq_cfg = hpu_bucketing_global_state.prompt_seq_bucket_cfg
-        if seq_cfg is not None:
-            padded_seq = find_bucket(max_seq_len, seq_cfg)
-        else:
-            logger.warning("prompt_seq_bucket_cfg was not set! "
-                           "Using unpadded sequence length.")
-        return padded_bs * padded_seq
-
-    def _padding_fn_selector(self):
-        if current_platform.is_hpu():
-            return self._hpu_padding_fn
-        return self._generic_padding_fn
-
-    def _maybe_update_max_seq_len(self,
-                                  new_seq_max_seq_len: Optional[int] = None):
-        if new_seq_max_seq_len is not None \
-            and new_seq_max_seq_len > self._max_seq_len:
-            self._max_seq_len = new_seq_max_seq_len
-            return
-        self._max_seq_len = max(
-            self._prefill_request_ids_max_seq_lens.values())
-
-    def add_prefill_seqs(self, req_id, num_curr_prefill_seqs, max_seq_len):
-        self._prefill_request_ids_max_seq_lens[req_id] = max_seq_len
-        self._num_curr_prefill_seqs += num_curr_prefill_seqs
-        self._maybe_update_max_seq_len(max_seq_len)
-
-    def subtract_prefill_seqs(self, req_id, num_curr_prefill_seqs):
-        if req_id in self._prefill_request_ids_max_seq_lens:
-            popped_seq_len = self._prefill_request_ids_max_seq_lens.pop(req_id)
-            self._num_curr_prefill_seqs -= num_curr_prefill_seqs
-            if popped_seq_len == self._max_seq_len:
-                self._maybe_update_max_seq_len()
-
-    def can_schedule(self,
-                     *args,
-                     num_new_tokens: int,
-                     num_new_seqs: int,
-                     is_prefill: bool = False,
-                     max_seq_len: int = 0):
-        can_parent_schedule = super().can_schedule(
-            *args, num_new_tokens=num_new_tokens, num_new_seqs=num_new_seqs)
-        if not can_parent_schedule or not is_prefill:
-            return can_parent_schedule
-        new_batch_size = self._num_curr_prefill_seqs + num_new_seqs
-        new_max_seq_len = max(max(self._max_seq_len, max_seq_len), 1)
-        padding_fn = self._padding_fn_selector()
-        num_new_padded_tokens = padding_fn(new_batch_size, new_max_seq_len)
-        result = num_new_padded_tokens <= self.token_budget
-        if self.max_num_prefill_seqs is not None and result:
-            result = self._num_curr_prefill_seqs + num_new_seqs \
-                <= self.max_num_prefill_seqs
-        return result
-
-    @property
-    def max_seq_len(self):
-        return self._max_seq_len
-
-    @property
-    def num_curr_prefill_seqs(self):
-        return self._num_curr_prefill_seqs
-
-
-@dataclass
 class ScheduledSequenceGroup:
     # A sequence group that's scheduled.
     seq_group: SequenceGroup
@@ -204,7 +116,7 @@ class ScheduledSequenceGroup:
 class SchedulerOutputs:
     """The scheduling decision made from a scheduler."""
     # Scheduled sequence groups.
-    scheduled_seq_groups: Iterable[ScheduledSequenceGroup]
+    scheduled_seq_groups: GenericSequence[ScheduledSequenceGroup]
     # Number of prefill groups scheduled.
     num_prefill_groups: int
     # Total number of batched tokens.
@@ -1027,18 +939,9 @@ class Scheduler:
                     continue
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
-            max_prefill_seq_len = None
-            can_schedule_kwargs = {
-                'num_new_tokens': num_new_tokens,
-                'num_new_seqs': num_new_seqs
-            }
-            if self.scheduler_config.use_padding_aware_scheduling:
-                max_prefill_seq_len = max(
-                    [seq.get_num_new_tokens() for seq in seq_group.get_seqs()])
-                can_schedule_kwargs['is_prefill'] = True
-                can_schedule_kwargs['max_seq_len'] = max_prefill_seq_len
             if (num_new_tokens == 0
-                    or not budget.can_schedule(**can_schedule_kwargs)):
+                    or not budget.can_schedule(num_new_tokens=num_new_tokens,
+                                               num_new_seqs=num_new_seqs)):
                 break
 
             # Can schedule this request.
@@ -1069,10 +972,6 @@ class Scheduler:
                                        token_chunk_size=num_new_tokens))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
-            if self.scheduler_config.use_padding_aware_scheduling:
-                assert isinstance(budget, PaddingAwareSchedulingBudget)
-                budget.add_prefill_seqs(seq_group.request_id, num_new_seqs,
-                                        max_prefill_seq_len)
 
         # Queue requests that couldn't be scheduled.
         waiting_queue.extendleft(leftover_waiting_sequences)
@@ -1094,18 +993,10 @@ class Scheduler:
         be swapped or preempted.
         """
         # Include running requests to the budget.
-        budget: SchedulingBudget
-        if self.scheduler_config.use_padding_aware_scheduling:
-            budget = PaddingAwareSchedulingBudget(
-                token_budget=self.scheduler_config.max_num_batched_tokens,
-                max_num_seqs=self.scheduler_config.max_num_seqs,
-                max_num_prefill_seqs=self.scheduler_config.max_num_prefill_seqs
-            )
-        else:
-            budget = SchedulingBudget(
-                token_budget=self.scheduler_config.max_num_batched_tokens,
-                max_num_seqs=self.scheduler_config.max_num_seqs,
-            )
+        budget = SchedulingBudget(
+            token_budget=self.scheduler_config.max_num_batched_tokens,
+            max_num_seqs=self.scheduler_config.max_num_seqs,
+        )
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:

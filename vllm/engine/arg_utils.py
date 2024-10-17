@@ -112,13 +112,11 @@ class EngineArgs:
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
-    use_padding_aware_scheduling: bool = False
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
-    max_num_prefill_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
     revision: Optional[str] = None
@@ -386,13 +384,6 @@ class EngineArgs:
             help='Use BlockSpaceMangerV2. By default this is set to True. '
             'Set to False to use BlockSpaceManagerV1')
         parser.add_argument(
-            '--use-padding-aware-scheduling',
-            default=EngineArgs.use_padding_aware_scheduling,
-            action='store_true',
-            help=('Use padding-aware scheduling. If True, the scheduler '
-                  'will consider padded tokens in prefill. '
-                  'By default this is set to False. '))
-        parser.add_argument(
             '--num-lookahead-slots',
             type=int,
             default=EngineArgs.num_lookahead_slots,
@@ -446,13 +437,6 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_num_seqs,
                             help='Maximum number of sequences per iteration.')
-        parser.add_argument(
-            '--max-num-prefill-seqs',
-            type=int,
-            default=EngineArgs.max_num_prefill_seqs,
-            help=('Maximum number of prefill sequences per '
-                  'iteration. Can be used only with padding-aware '
-                  'scheduling. Must be <= max_num_seqs.'))
         parser.add_argument(
             '--max-logprobs',
             type=int,
@@ -1042,7 +1026,6 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
-            max_num_prefill_seqs=self.max_num_prefill_seqs,
             max_model_len=model_config.max_model_len,
             use_v2_block_manager=self.use_v2_block_manager,
             num_lookahead_slots=num_lookahead_slots,
@@ -1055,8 +1038,7 @@ class EngineArgs:
             multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
-            policy=self.scheduling_policy,
-            use_padding_aware_scheduling=self.use_padding_aware_scheduling)
+            policy=self.scheduling_policy)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
