@@ -1,12 +1,12 @@
-"""Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
+"""Compare the embedding outputs of HF and vLLM models.
 
 Run `pytest tests/models/embedding/language/test_embedding.py`.
 """
 import os
 
 import pytest
-import torch
-import torch.nn.functional as F
+
+from ..utils import check_embeddings_close
 
 MODELS = [
     "BAAI/bge-base-en-v1.5",
@@ -15,14 +15,6 @@ MODELS = [
 ]
 
 ENCODER_MODELS = ["BAAI/bge-base-en-v1.5"]
-
-
-def compare_embeddings(embeddings1, embeddings2):
-    similarities = [
-        F.cosine_similarity(torch.tensor(e1), torch.tensor(e2), dim=0)
-        for e1, e2 in zip(embeddings1, embeddings2)
-    ]
-    return similarities
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -47,18 +39,20 @@ def test_models(
     # So we need to strip the input texts to avoid test failing.
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    with hf_runner(model, dtype=dtype, is_embedding_model=True) as hf_model:
+    with hf_runner(model, dtype=dtype,
+                   is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model, dtype=dtype, max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
 
-    similarities = compare_embeddings(hf_outputs, vllm_outputs)
-    all_similarities = torch.stack(similarities)
-    tolerance = 1e-2
-    assert torch.all((all_similarities <= 1.0 + tolerance)
-                     & (all_similarities >= 1.0 - tolerance)
-                     ), f"Not all values are within {tolerance} of 1.0"
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
 
     if "VLLM_ATTENTION_BACKEND" in os.environ:
         if prior_attn_backend_env is None:
