@@ -1327,7 +1327,7 @@ def supports_kw(
         # Get the last param; type is ignored here because params is a proxy
         # mapping, but it wraps an ordered dict, and they appear in order.
         # Ref: https://docs.python.org/3/library/inspect.html#inspect.Signature.parameters
-        last_param = params[next(reversed(params))]  # type: ignore
+        last_param = params[next(reversed(list(params)))]  # type: ignore
         return (last_param.kind == inspect.Parameter.VAR_KEYWORD
                 and last_param.name != kw_name)
     return False
