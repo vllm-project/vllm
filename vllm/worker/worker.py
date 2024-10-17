@@ -226,7 +226,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self.model_runner.profile_run()
         torch.cuda.synchronize()
 
-        self.assert_no_other_gpu_processes()
+        self._assert_memory_footprint_increased_during_profiling()
 
         # Get the peak memory allocation recorded by torch
         peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
@@ -277,7 +277,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def assert_no_other_gpu_processes(self):
+    def _assert_memory_footprint_increased_during_profiling(self):
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         free_gpu_memory, _ = torch.cuda.mem_get_info()
