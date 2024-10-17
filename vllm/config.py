@@ -1,6 +1,5 @@
 import enum
 import json
-import warnings
 from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
@@ -274,12 +273,9 @@ class ModelConfig:
             task = next(iter(supported_tasks))
 
             if len(supported_tasks) > 1:
-                msg = (
-                    f"This model supports multiple tasks: {supported_tasks}. "
-                    f"Defaulting to '{task}'. As this behavior may change in "
-                    "the future, please specify one explicitly via `--task`.")
-
-                warnings.warn(msg, stacklevel=2)
+                logger.info(
+                    "This model supports multiple tasks: %s. "
+                    "Defaulting to '%s'.", supported_tasks, task)
         else:
             if task_option not in supported_tasks:
                 msg = (

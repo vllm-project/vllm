@@ -294,6 +294,10 @@ Text Embedding
     - 
     - ✅︎
 
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embed` to run the model in embedding mode.
+
 Reward Modeling
 ---------------
 
@@ -424,7 +428,7 @@ Text Generation
     - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
     - 
     - ✅︎
-  * - :code:`Phi3VForCausalLM` (see note)
+  * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision, Phi-3.5-Vision
     - T + I\ :sup:`E+`
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
@@ -462,10 +466,6 @@ Text Generation
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
-.. note::
-  The :code:`Phi3VForCausalLM` architecture supports both generation and embedding tasks.
-  For text generation, please pass (:code:`--task generate`) to run the model in generation mode.
-
 Multimodal Embedding
 --------------------
 
@@ -479,16 +479,16 @@ Multimodal Embedding
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
-  * - :code:`Phi3VForCausalLM` (see note)
+  * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision-based
     - T + I
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
 
-.. note::
-  The :code:`Phi3VForCausalLM` architecture supports both generation and embedding tasks.
-  For text generation, please pass (:code:`--task embed`) to run the model in embedding mode.
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embed` to run the model in embedding mode.
 
 ----
 

@@ -20,23 +20,6 @@ def test_incorrect_task(model_id, bad_task):
         )
 
 
-@pytest.mark.parametrize("model_id", [
-    "microsoft/Phi-3.5-vision-instruct",
-    "TIGER-Lab/VLM2Vec-Full",
-])
-def test_ambiguous_task(model_id):
-    with pytest.warns(UserWarning, match="supports multiple tasks"):
-        ModelConfig(
-            model_id,
-            task="auto",
-            tokenizer=model_id,
-            tokenizer_mode="auto",
-            trust_remote_code=True,
-            seed=0,
-            dtype="float16",
-        )
-
-
 MODEL_IDS_EXPECTED = [
     ("Qwen/Qwen1.5-7B", 32768),
     ("mistralai/Mistral-7B-v0.1", 4096),
