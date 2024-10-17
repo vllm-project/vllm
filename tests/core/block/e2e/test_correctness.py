@@ -30,9 +30,8 @@ from .conftest import get_token_ids_from_llm_generator
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_block_manager_with_preemption(baseline_llm_generator,
-                                               test_llm_generator, batch_size):
-    """Verify SelfAttnBlockManager produces same outputs ,even
-    when there is preemption.
+                                       test_llm_generator, batch_size):
+    """Verify block manager produces same outputs even when there is preemption.
 
     This constructs two LLM, each with limited number of GPU blocks. The limit
     is decided such that as the sequences in the batch grow, sequences must be
@@ -46,8 +45,8 @@ def test_block_manager_with_preemption(baseline_llm_generator,
 
     NOTE(Kuntai): Though we have removed block manager v1, this test is still
     useful as it asserts the behavior of block manager v2 (now it is called 
-    SelfAttnBlockManager) is the same when swapping / preemption, so we keep 
-    this test.
+    SelfAttnBlockSpaceManager) is the same when swapping / preemption, so we  
+    keep this test.
     """
     output_len = 1024
     temperature = 0.0
@@ -220,8 +219,8 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
 def test_chunked_prefill_block_manager(baseline_llm_generator,
-                                          test_llm_generator, batch_size):
-    """Verify that chunked prefill works with SelfAttnBlockManager, 
+                                       test_llm_generator, batch_size):
+    """Verify that chunked prefill works with SelfAttnBlockSpaceManager, 
     with and without lookahead scheduling.
     """
     output_len = 32
@@ -285,8 +284,7 @@ def test_chunked_prefill_block_manager(baseline_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 def test_block_manager_prefix_caching_enabled_with_preemption(
         baseline_llm_generator, test_llm_generator, batch_size):
-    """Verify SelfAttnBlockManager produces same outputs, even
-    when there is preemption.
+    """Verify block manager produces same outputs even when there is preemption.
 
     This constructs two LLM, each with limited number of GPU blocks. The limit
     is decided such that as the sequences in the batch grow, sequences must be
@@ -300,8 +298,8 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
 
     NOTE(Kuntai): Though we have removed block manager v1, this test is still
     useful as it asserts the behavior of block manager v2 (now it is called 
-    SelfAttnBlockManager) is the same when swapping / preemption, so we keep 
-    this test.
+    SelfAttnBlockSpaceManager) is the same when swapping / preemption, so we  
+    keep this test.
     """
     output_len = 1024
     temperature = 0.0
@@ -325,11 +323,11 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
         temperature=temperature,
     )
 
-    print('Getting token ids from block manager v1')
+    print('Getting token ids from block manager')
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids from block manager v2')
+    print('Getting token ids from block manager, with preemption')
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 

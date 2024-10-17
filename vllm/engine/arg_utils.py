@@ -376,8 +376,9 @@ class EngineArgs:
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             help='[DEPRECATED] block manager v1 has been '
-                            'removed and block manager v2 is now the default '
-                            'block manager. Setting this flag to True or False'
+                            'removed and SelfAttnBlockSpaceManager (i.e. '
+                            'block manager v2) is now the default. '
+                            'Setting this flag to True or False'
                             ' has no effect on vLLM behavior.')
         parser.add_argument(
             '--num-lookahead-slots',
@@ -1015,8 +1016,10 @@ class EngineArgs:
             logger.warning(
                 "BlockSpaceManagerV1 has been removed, and setting "
                 "--use-v2-block-manager=False has no effect on vLLM "
-                "behavior. Please set --use-v2-block-manager=True. "
-                "If your use case is not supported, please "
+                "behavior. Please remove --use-v2-block-manager in "
+                "your engine argument. "
+                "If your use case is not supported by BlockSpaceManagerV2"
+                " (we now call it SelfAttnBlockManager), please "
                 "file an issue with detailed information.")
 
         scheduler_config = SchedulerConfig(
