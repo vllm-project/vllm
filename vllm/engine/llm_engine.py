@@ -247,7 +247,7 @@ class LLMEngine:
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
+            "seed=%d, served_model_name=%s, "
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
@@ -280,7 +280,6 @@ class LLMEngine:
             observability_config,
             model_config.seed,
             model_config.served_model_name,
-            scheduler_config.use_v2_block_manager,
             scheduler_config.num_scheduler_steps,
             scheduler_config.chunked_prefill_enabled,
             scheduler_config.multi_step_stream_outputs,

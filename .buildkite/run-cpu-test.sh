@@ -32,10 +32,10 @@ docker exec cpu-test bash -c "
     --ignore=tests/models/decoder_only/language/test_danube3_4b.py" # Mamba and Danube3-4B on CPU is not supported
 
 # Run compressed-tensor test
-# docker exec cpu-test bash -c "
-#   pytest -s -v \
-#   tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
-#   tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynanmic_per_token"
+docker exec cpu-test bash -c "
+  pytest -s -v \
+  tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
+  tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynamic_per_token"
 
 # Run AWQ test
 docker exec cpu-test bash -c "
