@@ -29,9 +29,9 @@ from .conftest import get_token_ids_from_llm_generator
 }])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
-def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
+def test_block_manager_with_preemption(baseline_llm_generator,
                                                test_llm_generator, batch_size):
-    """Verify block manager v2 produces same outputs as block manager v1, even
+    """Verify SelfAttnBlockManager produces same outputs ,even
     when there is preemption.
 
     This constructs two LLM, each with limited number of GPU blocks. The limit
@@ -39,7 +39,7 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
     preempted and removed from cache.
 
     If the output token ids are equivalent, then we have confidence that the KV
-    cache is not corrupted in the v2 block manager.
+    cache is not corrupted.
 
     NOTE: We want a significant number of generated tokens so that any incorrect
     KV mapping has time to build up error.
@@ -283,9 +283,9 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
 }])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
-def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
+def test_block_manager_prefix_caching_enabled_with_preemption(
         baseline_llm_generator, test_llm_generator, batch_size):
-    """Verify block manager v2 produces same outputs as block manager v1, even
+    """Verify SelfAttnBlockManager produces same outputs, even
     when there is preemption.
 
     This constructs two LLM, each with limited number of GPU blocks. The limit
@@ -293,7 +293,7 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
     preempted and removed from cache.
 
     If the output token ids are equivalent, then we have confidence that the KV
-    cache is not corrupted in the v2 block manager.
+    cache is not corrupted.
 
     NOTE: We want a significant number of generated tokens so that any incorrect
     KV mapping has time to build up error.
