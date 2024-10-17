@@ -42,7 +42,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
-        watermark: float = 0.05,
+        watermark: float = 0.01,
         sliding_window: Optional[int] = None, # Not supported
         enable_caching: bool = False, # Not supported
         num_caches: int = 0,
@@ -71,6 +71,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.free_kv_caches: Dict[int, int] = {}
         self.cached_free_blocks: int = 0
         self.to_allocate_blocks: Dict[int, int] = {} # Temporary for each step
+        self.step_index = 0
         
     def _predict_gen_blocks(self, seq: Sequence) -> int:
         # this function is used to predict the generated content length,
@@ -115,8 +116,10 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             if self.gpu_allocator.get_total_caches() > 0 or len(self.free_kv_caches) > 0:
                 return AllocStatus.OK
             else:
+                #print(f"req:{seq.seq_id}, AllocStatus.LATER1111", file=sys.stderr)
                 return AllocStatus.LATER
         else:
+            #print(f"step-{self.step_index}, req:{seq.seq_id}, self.num_free_gpu_blocks-{self.num_free_gpu_blocks}, self.cached_free_blocks-{self.cached_free_blocks}, self AllocStatus.LATER2222. num_free_gpu_blocks-{num_free_gpu_blocks},num_required_blocks-{num_required_blocks}, self.watermark_blocks-{self.watermark_blocks} ", file=sys.stderr)
             return AllocStatus.LATER
 
     # This function is only invoked by _allocate_and_set_running (invoked by _schedule_prefills)
@@ -144,7 +147,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # We prefer to reuse the free_kv_caches at first. 
         if self.cached_free_blocks > 0:
-            block_diff = need_blocks
+            # Make it block_diff a big number for the better comparison
+            block_diff = need_blocks*1000
              
             # find one kv_cache with the smallest difference on the number of blocks
             for id, num_blocks in self.free_kv_caches.items():
@@ -168,6 +172,12 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             else:
                 to_allocate_num = 0 
 
+            if cache_id == -1: 
+                print(f"self.free_kv_caches:{len(self.free_kv_caches)}")
+                for id, num_blocks in self.free_kv_caches.items():
+                    diff = abs(num_blocks - need_blocks)
+
+                    print(f"id-{id}, diff-{diff}, num_blocks:{num_blocks}, need_blocks:{need_blocks}") 
             # Remove this item from the free_kv_caches
             del self.free_kv_caches[cache_id]
         else:
@@ -295,6 +305,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         return self.allocated_blocks[seq_id]
 
     def step(self) -> Tuple[Dict[int, int], List[int]]:
+        self.step_index += 1
 
         to_allocate_blocks = self.to_allocate_blocks
 
@@ -304,6 +315,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # Check whether there is a need to free kv caches
         if self.free_kv_caches != None:
+            """
             if self.cached_free_blocks > self.start_free_blocks or self.cached_free_blocks > self.num_free_gpu_blocks or self.num_free_gpu_blocks < self.watermark_blocks: 
                 to_free_blocks = max(self.start_free_blocks, self.cached_free_blocks-self.num_free_gpu_blocks) 
                 if self.num_free_gpu_blocks < self.watermark_blocks:
@@ -314,6 +326,10 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
                     to_free_blocks -= num_blocks 
                     if to_free_blocks < 0:
                         break
+            """
+            for cache_id, num_blocks in self.free_kv_caches.items():
+                to_free_kv_caches.append(cache_id)
+
 
         to_free_blocks = 0
         # Removing all to_free_kv_caches from self.free_kv_caches
