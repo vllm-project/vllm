@@ -248,8 +248,10 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                            self.runner.pin_memory)
         slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
                                                device, self.runner.pin_memory)
-        query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32,
-                                                  device, self.runner.pin_memory)
+        query_start_loc_tensor = async_tensor_h2d(query_start_loc,
+                                                  torch.int32,
+                                                  device,
+                                                  self.runner.pin_memory)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
