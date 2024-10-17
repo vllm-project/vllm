@@ -69,11 +69,11 @@ def check_full_graph_support(model,
     os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(optimization_level)
     os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
 
-    # Inductor doesn't support fp8/gptq_marlin_24 yet.
+    # Inductor doesn't support fp8 and the base meta llama uses too
+    # much memory.
     quantization = model_kwargs.get("quantization")
-    if (quantization == "fp8" or quantization == "gptq_marlin"
-            or quantization == "gptq_marlin_24"
-        ) and optimization_level >= CompilationLevel.INDUCTOR:
+    if ((quantization == "fp8" or model == "meta-llama/Meta-Llama-3-8B")
+            and optimization_level >= CompilationLevel.INDUCTOR):
         return
 
     prompts = [

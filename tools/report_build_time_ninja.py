@@ -16,7 +16,6 @@ Typical output looks like this:
            2.6 weighted s to build ...torch_bindings.cpp.o (31.5 s elapsed time)
            3.2 weighted s to build ...torch_bindings.cpp.o (38.5 s elapsed time)
     Longest build steps for .so (linking):
-           0.1 weighted s to build _core_C.abi3.so (0.7 s elapsed time)
            0.1 weighted s to build _moe_C.abi3.so (1.0 s elapsed time)
            0.5 weighted s to build ...flash_attn_c.abi3.so (1.1 s elapsed time)
            6.2 weighted s to build _C.abi3.so (6.2 s elapsed time)
