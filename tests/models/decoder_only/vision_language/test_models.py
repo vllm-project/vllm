@@ -44,6 +44,38 @@ COMMON_BROADCAST_SETTINGS = {
 }
 
 ### Test configuration for specific models
+# NOTE: The convention of the test settings below is to lead each test key
+# with the name of the model arch used in the test, using underscores in place
+# of hyphens; this makes it more convenient to filter tests for a specific kind
+# of model. For example....
+#
+# To run all test types for a specific key:
+#     use the k flag to substring match with a leading square bracket; if the
+#     model arch happens to be a substring of another one, you can add a
+#     trailing hyphen. E.g.,
+#                 - pytest $TEST_FILE -k "[llava-"
+#     prevents matching on "[llava_next-" & will match just the enabled cases
+#     for llava, i.e., single image, image embedding, and custom input tests.
+#
+# To run a test for a Test Info for just one of multiple models:
+#     use the k flag to substring match the model name, e.g.,
+#                 - pytest $TEST_FILE -k OpenGVLab/InternVL2-1B
+#     prevents matching on nGVLab/InternVL2-2B.
+#
+# You can also combine substrings to match more granularly, e.g.,
+#        pytest $TEST_FILE -k "test_single_image and OpenGVLab/InternVL2-1B"
+#     will run only test_single_image* for OpenGVLab/InternVL2-1B; this would
+#     match both wrappers for single image tests, since it also matches
+#     test_single_image_heavy (which forks if we have a distributed backend)
+#
+# NOTE you can add --collect-only to any of the above commands to see
+# which cases would be selected and deselected by pytest. In general,
+# this is a good idea for checking your command first, since tests are slow.
+#
+# Lastly, be aware keep in mind that this will not show tests if their skip
+# condition is met since they're filtered and won't be picked up by pytest,
+# e.g., trying to run the broadcast tests in a non-distributed environment.
+
 
 # yapf: disable
 VLM_TEST_SETTINGS = {
@@ -97,7 +129,7 @@ VLM_TEST_SETTINGS = {
         skip=(get_memory_gb() < 48), # Large GPU test
         patch_hf_runner=model_utils.glm_patch_hf_runner,
     ),
-    "intern-vl": VLMTestInfo(
+    "intern_vl": VLMTestInfo(
         models=["OpenGVLab/InternVL2-1B", "OpenGVLab/InternVL2-2B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
@@ -129,7 +161,7 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"image": 4},
         )],
     ),
-    "llava-next": VLMTestInfo(
+    "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
@@ -145,7 +177,7 @@ VLM_TEST_SETTINGS = {
         # Llava-next tests fixed sizes & the default size factors
         image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
     ),
-    "llava-one-vision": VLMTestInfo(
+    "llava_one_vision": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-7b-ov-hf"],
         test_type=VLMTestType.VIDEO,
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
@@ -163,7 +195,7 @@ VLM_TEST_SETTINGS = {
         runner_mm_key="videos",
         skip=(get_memory_gb() < 48), # Large GPU test
     ),
-    "llava-next-video": VLMTestInfo(
+    "llava_next_video": VLMTestInfo(
         models=["llava-hf/LLaVA-NeXT-Video-7B-hf"],
         test_type=VLMTestType.VIDEO,
         prompt_formatter=lambda vid_prompt: f"USER: {vid_prompt} ASSISTANT:",
@@ -245,7 +277,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         **COMMON_BROADCAST_SETTINGS,
     ),
-    "broadcast-llava-next": VLMTestInfo(
+    "broadcast-llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
         max_model_len=10240,
@@ -254,7 +286,7 @@ VLM_TEST_SETTINGS = {
         **COMMON_BROADCAST_SETTINGS,
     ),
     ### Custom input edge-cases for specific models
-    "intern-vl_diff-patches": VLMTestInfo(
+    "intern_vl-diff-patches": VLMTestInfo(
         models=["OpenGVLab/InternVL2-2B"],
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         test_type=VLMTestType.CUSTOM_INPUTS,
@@ -269,7 +301,7 @@ VLM_TEST_SETTINGS = {
             ) for inp in custom_inputs.different_patch_input_cases_internvl()
         ],
     ),
-    "llava-one-vision_multiple-images": VLMTestInfo(
+    "llava_one_vision-multiple-images": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-7b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
