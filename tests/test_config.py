@@ -3,6 +3,24 @@ import pytest
 from vllm.config import ModelConfig
 
 
+@pytest.mark.parametrize(("model_id", "expected_task"), [
+    ("facebook/opt-125m", "generate"),
+    ("intfloat/e5-mistral-7b-instruct", "embed"),
+])
+def test_auto_task(model_id, expected_task):
+    config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.task == expected_task
+
+
 @pytest.mark.parametrize(("model_id", "bad_task"), [
     ("facebook/opt-125m", "embed"),
     ("intfloat/e5-mistral-7b-instruct", "generate"),
