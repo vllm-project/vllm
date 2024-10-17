@@ -12,12 +12,6 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
-    VLLM_TEST_DYNAMO_GRAPH_CAPTURE: int = 0
-    VLLM_DYNAMO_USE_CUSTOM_DISPATCHER: bool = True
-    VLLM_TEST_COMPILE_NO_CUSTOM_OPS: int = 0
-    VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE: bool = True
-    VLLM_TORCH_COMPILE_FUSION: bool = True
-    VLLM_TORCH_COMPILE_FUSION_DUMP: List[str] = []
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
@@ -70,8 +64,11 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1: bool = False
     VLLM_TORCH_COMPILE_LEVEL: int = 0
+    VLLM_TORCH_COMPILE_FUSION: bool = True
+    VLLM_TORCH_COMPILE_FUSION_DUMP: List[str] = []
+    VLLM_CUSTOM_OPS: List[str] = []
+    VLLM_DISABLED_KERNELS: List[str] = []
 
 
 def get_default_cache_root():
@@ -211,6 +208,17 @@ environment_variables: Dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
     "VLLM_TORCH_COMPILE_LEVEL":
     lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
+    # Fine-grained control over which custom ops to enable/disable.
+    # Use 'all' to enable all, 'none' to disable all.
+    # Also specify a list of custom op names to enable (prefixed with a '+'),
+    # or disable (prefixed with a '-').
+    # Examples:
+    # - 'all,-op1' to enable all except op1
+    # - 'none,+op1,+op2' to enable only op1 and op2
+    # By default, all custom ops are enabled when running without Inductor
+    # and disabled when running with Inductor (compile_level >= Inductor).
+    "VLLM_CUSTOM_OPS":
+    lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
 
     # Internal flag to enable fusion in torch.compile
     "VLLM_TORCH_COMPILE_FUSION": lambda: bool(
@@ -218,8 +226,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # Internal flag for dumping the model graph before and after fusion
     "VLLM_TORCH_COMPILE_FUSION_DUMP":
-    lambda: list(
-        os.environ.get("VLLM_TORCH_COMPILE_FUSION_DUMP", "").split(",")),
+        lambda: list(
+            os.environ.get("VLLM_TORCH_COMPILE_FUSION_DUMP", "").split(",")),
+
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -441,10 +450,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
 
-    # If set, allowing the use of deprecated block manager V1
-    "VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1":
-    lambda: os.environ.get("VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1", "0"
-                           ) == "1",
+    # List of quantization kernels that should be disabled, used for testing
+    # and performance comparisons. Currently only affects MPLinearKernel
+    # selection
+    # (kernels: MacheteLinearKernel, MarlinLinearKernel, ExllamaLinearKernel)
+    "VLLM_DISABLED_KERNELS":
+    lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
+        "VLLM_DISABLED_KERNELS"].split(","),
 }
 
 # end-env-vars-definition

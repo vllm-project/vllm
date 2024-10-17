@@ -30,12 +30,12 @@ def find_tokenizer_file(files: List[str]):
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
         raise OSError(f"Found {len(matched_files)} files matching the "
-                      "pattern: {matched_files}. Make sure only one Mistral "
-                      "tokenizer is present in {tokenizer_name}.")
+                      f"pattern: {file_pattern}. Make sure only one Mistral "
+                      f"tokenizer is present in {files}.")
     elif len(matched_files) == 0:
         raise OSError(f"Found {len(matched_files)} files matching the "
-                      "pattern: {matched_files}. Make sure that a Mistral "
-                      "tokenizer is present in {tokenizer_name}.")
+                      f"pattern: {file_pattern}. Make sure that a Mistral "
+                      f"tokenizer is present in {files}.")
 
     return matched_files[0]
 
@@ -165,6 +165,10 @@ class MistralTokenizer:
                             messages: List["ChatCompletionMessageParam"],
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
+
+        last_message = messages[-1]
+        if last_message["role"] == "assistant":
+            last_message["prefix"] = True
 
         request = ChatCompletionRequest(messages=messages,
                                         tools=tools)  # type: ignore[type-var]
