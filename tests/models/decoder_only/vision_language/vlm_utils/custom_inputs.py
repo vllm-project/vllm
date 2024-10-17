@@ -5,7 +5,7 @@ from vllm.multimodal.utils import rescale_image_size
 
 from .core_utils import build_single_image_inputs, build_multi_image_inputs
 from .....conftest import IMAGE_ASSETS
-from ..vlm_test_types import ImageSizeWrapper, SizeType
+from .mm_test_types import ImageSizeWrapper, SizeType
 
 def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
     """Builds inputs for multi-image (varied sizes/aspect ratio) testing.
