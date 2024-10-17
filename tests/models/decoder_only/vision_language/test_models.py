@@ -62,11 +62,15 @@ COMMON_BROADCAST_SETTINGS = {
 #                 - pytest $TEST_FILE -k OpenGVLab/InternVL2-1B
 #     prevents matching on nGVLab/InternVL2-2B.
 #
-# You can also combine substrings to match more granularly, e.g.,
+# You can also combine substrings to match more granularly.
+#     ex 1:
 #        pytest $TEST_FILE -k "test_single_image and OpenGVLab/InternVL2-1B"
 #     will run only test_single_image* for OpenGVLab/InternVL2-1B; this would
 #     match both wrappers for single image tests, since it also matches
 #     test_single_image_heavy (which forks if we have a distributed backend)
+#     ex 2:
+#        pytest $TEST_FILE -k  "[llava- or [intern_vl-"
+#     will run all of the tests for only llava & internvl.
 #
 # NOTE you can add --collect-only to any of the above commands to see
 # which cases would be selected and deselected by pytest. In general,
@@ -75,7 +79,6 @@ COMMON_BROADCAST_SETTINGS = {
 # Lastly, be aware keep in mind that this will not show tests if their skip
 # condition is met since they're filtered and won't be picked up by pytest,
 # e.g., trying to run the broadcast tests in a non-distributed environment.
-
 
 # yapf: disable
 VLM_TEST_SETTINGS = {
@@ -324,7 +327,6 @@ VLM_TEST_SETTINGS = {
 }
 # yapf: enable
 
-
 ### Test wrappers
 # Wrappers around the core test running func for:
 # - single image
@@ -332,6 +334,7 @@ VLM_TEST_SETTINGS = {
 # - image embeddings
 # - video
 # - custom inputs
+
 
 @pytest.mark.parametrize(
     "model_type,model,max_tokens,num_logprobs,dtype,distributed_executor_backend,size_wrapper",
