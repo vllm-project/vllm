@@ -199,6 +199,7 @@ async def test_batch_error(tmp_socket):
         # should get the same exception as a MQEngineDeadError.
         errors = await asyncio.gather(*tasks, return_exceptions=True)
         for e in errors:
+            assert isinstance(e, MQEngineDeadError)
             assert "KeyError" in repr(e)
 
         client.close()
