@@ -8,28 +8,39 @@ import pytest
 
 from ..utils import check_embeddings_close
 
+@pytest.fixture
+def encoder_env_var_guard():
+    prior_attn_backend_env = os.getenv("VLLM_ATTENTION_BACKEND", None)
+    os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
+    yield None
+    if prior_attn_backend_env is None:
+        del os.environ["VLLM_ATTENTION_BACKEND"]
+    else:
+        os.environ["VLLM_ATTENTION_BACKEND"] = prior_attn_backend_env
+
+# Model, Guard
 MODELS = [
-    "BAAI/bge-base-en-v1.5",
     "intfloat/e5-mistral-7b-instruct",
+    "BAAI/bge-base-en-v1.5",
     "BAAI/bge-multilingual-gemma2",
 ]
 
-ENCODER_MODELS = ["BAAI/bge-base-en-v1.5"]
-
+ENCODER_ONLY = [
+    "BAAI/bge-base-en-v1.5",
+]
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models(
+    monkeypatch,
     hf_runner,
     vllm_runner,
     example_prompts,
-    model: str,
+    model,
     dtype: str,
 ) -> None:
-
-    prior_attn_backend_env = os.getenv("VLLM_ATTENTION_BACKEND", None)
-    if model in ENCODER_MODELS:
-        os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
+    if model in ENCODER_ONLY:
+        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
@@ -40,7 +51,7 @@ def test_models(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     with hf_runner(model, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
+                is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model, dtype=dtype, max_model_len=None) as vllm_model:
@@ -54,8 +65,3 @@ def test_models(
         tol=1e-2,
     )
 
-    if "VLLM_ATTENTION_BACKEND" in os.environ:
-        if prior_attn_backend_env is None:
-            del os.environ["VLLM_ATTENTION_BACKEND"]
-        else:
-            os.environ["VLLM_ATTENTION_BACKEND"] = prior_attn_backend_env
