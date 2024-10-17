@@ -12,10 +12,18 @@ from ...conftest import cleanup
 MODEL_CONFIGS = [
     {
         "model": "facebook/opt-125m",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.10,
+        "max_num_batched_tokens": 4096,
+        "tensor_parallel_size": 1,
     },
     {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.50,
         "max_model_len": 2048,
+        "max_num_batched_tokens": 4096,
+        "tensor_parallel_size": 1,
         "tokenizer_mode": "mistral",
     },
 ]
@@ -25,11 +33,7 @@ MODEL_CONFIGS = [
 def llm(model_config: dict):
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(**model_config,
-              max_num_batched_tokens=4096,
-              tensor_parallel_size=1,
-              gpu_memory_utilization=0.10,
-              enforce_eager=True)
+    llm = LLM(**model_config)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -51,11 +55,7 @@ def test_offline_mode(model_config: dict, llm: LLM, monkeypatch):
         # Need to re-import huggingface_hub and friends to setup offline mode
         _re_import_modules()
         # Cached model files should be used in offline mode
-        LLM(**model_config,
-            max_num_batched_tokens=4096,
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.10,
-            enforce_eager=True)
+        LLM(**model_config)
     finally:
         # Reset the environment after the test
         # NB: Assuming tests are run in online mode
