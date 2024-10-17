@@ -166,7 +166,7 @@ class MistralTokenizer:
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
 
-        last_message = messages[len(messages) - 1]
+        last_message = messages[-1]
         if last_message["role"] == "assistant":
             last_message["prefix"] = True
 
