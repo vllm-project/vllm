@@ -137,10 +137,9 @@ class CudaPlatform(Platform):
                             pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
                         if p2p_status != pynvml.NVML_P2P_STATUS_OK:
                             return False
-                    except pynvml.NVMLError as error:
-                        logger.error(
+                    except pynvml.NVMLError:
+                        logger.exception(
                             "NVLink detection failed. This is normal if your"
-                            " machine has no NVLink equipped.",
-                            exc_info=error)
+                            " machine has no NVLink equipped.")
                         return False
         return True

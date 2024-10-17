@@ -190,12 +190,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     "[Speculative Decoding] Disabling MQA scorer as the "
                     "MQA is only available with flash attn backend.")
 
-            if ngram_prompt_lookup_max > 0:
-                disable_mqa_scorer = True
-                logger.info(
-                    "[Speculative Decoding] Disabling MQA scorer as the "
-                    "NGramWorker does not support MQA scorer.")
-
             if "model_config" in draft_worker_kwargs and \
                 draft_worker_kwargs["model_config"].max_model_len < \
                     scorer_worker.model_config.max_model_len:
