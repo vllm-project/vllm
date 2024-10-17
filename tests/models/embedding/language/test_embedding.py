@@ -2,23 +2,9 @@
 
 Run `pytest tests/models/embedding/language/test_embedding.py`.
 """
-import os
-
 import pytest
 
 from ..utils import check_embeddings_close
-
-
-@pytest.fixture
-def encoder_env_var_guard():
-    prior_attn_backend_env = os.getenv("VLLM_ATTENTION_BACKEND", None)
-    os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
-    yield None
-    if prior_attn_backend_env is None:
-        del os.environ["VLLM_ATTENTION_BACKEND"]
-    else:
-        os.environ["VLLM_ATTENTION_BACKEND"] = prior_attn_backend_env
-
 
 # Model, Guard
 MODELS = [
