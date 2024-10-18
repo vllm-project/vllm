@@ -13,8 +13,8 @@ from transformers import PixtralVisionConfig, PretrainedConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens)
 from transformers.models.pixtral.modeling_pixtral import (
-    apply_rotary_pos_emb, generate_block_attention_mask,
-    position_ids_in_meshgrid)
+    PixtralRotaryEmbedding, apply_rotary_pos_emb,
+    generate_block_attention_mask, position_ids_in_meshgrid)
 from xformers.ops.fmha import memory_efficient_attention
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
@@ -765,67 +765,6 @@ def input_processor_for_pixtral_hf(
                         multi_modal_data=multi_modal_data)
 
 
-class PixtralHFRotaryEmbedding(nn.Module):
-    """
-    The key with pixtral embedding is just that you have a frequency for each
-    pixel positions. If you have height x width pixels (or embedding pixels),
-    then the frequency used for ROPE is given by indexing the pre_computed
-    frequency on the width and height.
-
-    What you output is of dimension (batch, height * width, dim) with dim the
-    embed dim.
-
-    This simply means that for each image hidden state, you are going to add
-    a corresponding positional embedding, based on its index in the grid.
-    """
-
-    def __init__(self, config):
-        super().__init__()
-        self.rope_type = "default"
-        self.dim = config.head_dim
-        self.base = config.rope_theta
-        max_patches_per_side = config.image_size // config.patch_size
-        freqs = 1.0 / (self.base
-                       **(torch.arange(0, self.dim, 2).float() / self.dim))
-
-        h = torch.arange(max_patches_per_side, device=freqs.device)
-        w = torch.arange(max_patches_per_side, device=freqs.device)
-
-        freqs_h = torch.outer(h, freqs[::2]).float()
-        freqs_w = torch.outer(w, freqs[1::2]).float()
-        inv_freq = torch.cat(
-            [
-                freqs_h[:, None, :].repeat(1, max_patches_per_side, 1),
-                freqs_w[None, :, :].repeat(max_patches_per_side, 1, 1),
-            ],
-            dim=-1,
-        ).reshape(
-            -1, self.dim // 2
-        )  # we reshape to only index on the position indexes, not tuple of
-        # indexes. Different from paper, but it uses a different permutation
-        # in order to obtain the same calculation
-
-        # TODO maybe make it torch compatible later on. We can also just slice
-        self.register_buffer("inv_freq",
-                             torch.cat((inv_freq, inv_freq), dim=-1),
-                             persistent=False)
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        # Core RoPE block
-        freqs = self.inv_freq[position_ids]
-        # position_ids_expanded = position_ids[:, None, :].float()
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        device_type = device_type if isinstance(
-            device_type, str) and device_type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            emb = freqs
-            cos = emb.cos()
-            sin = emb.sin()
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-
-
 class PixtralHFMLP(nn.Module):
 
     def __init__(self, config: PixtralVisionConfig):
@@ -975,7 +914,10 @@ class PixtralHFVisionModel(nn.Module):
         )
         self.ln_pre = RMSNorm(config.hidden_size, eps=1e-5)
         self.transformer = PixtralHFTransformer(config)
-        self.patch_positional_embedding = PixtralHFRotaryEmbedding(config)
+        self.dtype = next(self.parameters()).dtype
+        self.device = next(self.parameters()).device
+        self.patch_positional_embedding = PixtralRotaryEmbedding(
+            config, self.device)
 
     def forward(
         self,
@@ -990,11 +932,11 @@ class PixtralHFVisionModel(nn.Module):
                 all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
-        dtype = next(self.parameters()).dtype
         patch_embeds_list = [
             self.patch_conv(
                 img.reshape(-1, img.shape[-3], img.shape[-2],
-                            img.shape[-1]).to(dtype)) for img in pixel_values
+                            img.shape[-1]).to(self.dtype))
+            for img in pixel_values
         ]
 
         # flatten to a single sequence
@@ -1006,7 +948,7 @@ class PixtralHFVisionModel(nn.Module):
         position_ids = position_ids_in_meshgrid(
             patch_embeds_list,
             max_width=self.config.image_size // self.config.patch_size).to(
-                patch_embeds.device)
+                self.device)
 
         position_embedding = self.patch_positional_embedding(
             patch_embeds, position_ids)

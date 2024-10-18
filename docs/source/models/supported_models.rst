@@ -433,7 +433,7 @@ Text Generation
   * - :code:`PixtralForConditionalGeneration`
     - Pixtral
     - T + I\ :sup:`+`
-    - :code:`mistralai/Pixtral-12B-2409`
+    - :code:`mistralai/Pixtral-12B-2409`, :code:`mistral-community/pixtral-12b` etc.
     -
     - ✅︎
   * - :code:`QWenLMHeadModel`
