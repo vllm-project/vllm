@@ -307,6 +307,7 @@ def test_parse_chat_messages_context_text_format(
     phi3v_model_config,
     phi3v_tokenizer,
 ):
+    phi3v_model_config.chat_template_content_type = "openai"
     conversation, mm_data = parse_chat_messages(
         [{
             "role": "user",
@@ -319,10 +320,7 @@ def test_parse_chat_messages_context_text_format(
             "content": "Some stuff."
         }, {
             "role": "user",
-            "content": [{
-                "type": "text",
-                "text": "What about this one?"
-            }]
+            "content": "What about this one?"
         }], phi3v_model_config, phi3v_tokenizer)
 
     assert conversation == [
@@ -335,7 +333,10 @@ def test_parse_chat_messages_context_text_format(
         },
         {
             "role": "assistant",
-            "content": "Some stuff."
+            "content": [{
+                "type": "text",
+                "text": "Some stuff."
+            }]
         },
         {
             "role": "user",
