@@ -30,7 +30,6 @@ The following code configures vLLM in an offline mode to use speculative decodin
         tensor_parallel_size=1,
         speculative_model="facebook/opt-125m",
         num_speculative_tokens=5,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 
@@ -104,7 +103,6 @@ matching n-grams in the prompt. For more information read `this thread. <https:/
         speculative_model="[ngram]",
         num_speculative_tokens=5,
         ngram_prompt_lookup_max=4,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 
@@ -135,7 +133,6 @@ For more information see `this blog <https://pytorch.org/blog/hitchhikers-guide-
         tensor_parallel_size=4,
         speculative_model="ibm-fms/llama3-70b-accelerator",
         speculative_draft_tensor_parallel_size=1,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 
