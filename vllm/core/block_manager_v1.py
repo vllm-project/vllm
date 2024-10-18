@@ -333,6 +333,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
+                if not block.computed and block.ref_count > 1:
+                    self.gpu_allocator.free(block)
+                    for prev_block in block_table:
+                        self.gpu_allocator.free(prev_block)
+                    block_table.reset()
+                    return block_table
             else:
                 block = self.gpu_allocator.allocate()
                 # Set the reference counts of the token blocks.
@@ -355,6 +361,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self._allocate_sequence(seq,
                                     seq_group.num_seqs(),
                                     is_encoder_decoder)
+        if len(block_table) == 0:
+            return
 
         # Assign the self-attention block tables for each sequence.
         if len(wait_seqs) == 1:
@@ -635,6 +643,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             else:
                 self.cpu_allocator.free(block)
 
+    def exist(self, seq: Sequence) -> bool:
+        return seq.seq_id in self.block_tables
+
     def free(self, seq: Sequence) -> None:
         if seq.seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
@@ -741,3 +752,4 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if device == Device.CPU:
             return self.cpu_allocator.get_prefix_cache_hit_rate()
         raise ValueError(f"Invalid device: {device}")
+
