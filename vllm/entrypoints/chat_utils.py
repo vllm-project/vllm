@@ -57,6 +57,7 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
     type: Required[str]
     """The type of the content part."""
 
+
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain image_url.
     
@@ -67,6 +68,7 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     """
     image_url: Required[str]
 
+
 class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain audio_url.
     
@@ -76,6 +78,7 @@ class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     }
     """
     audio_url: Required[str]
+
 
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
@@ -407,15 +410,18 @@ _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
+
 def _is_simple_image_part(part: ChatCompletionContentPartParam) -> bool:
-    """Check if the part is CustomChatCompletionContentSimpleImageParam type."""
-    return isinstance(part, dict) and "image_url" in part and isinstance(
-        part["image_url"], str)
+    """Check if the part is CustomChatCompletionContentSimpleImageParam."""
+    image_url = part.get("image_url") if isinstance(part, dict) else None
+    return isinstance(image_url, str)
+
 
 def _is_simple_audio_part(part: ChatCompletionContentPartParam) -> bool:
-    """Check if the part is CustomChatCompletionContentSimpleAudioParam type."""
-    return isinstance(part, dict) and "audio_url" in part and isinstance(
-        part["audio_url"], str)
+    """Check if the part is CustomChatCompletionContentSimpleAudioParam."""
+    audio_url = part.get("audio_url") if isinstance(part, dict) else None
+    return isinstance(audio_url, str)
+
 
 def _parse_chat_message_content_parts(
     role: str,
@@ -435,19 +441,19 @@ def _parse_chat_message_content_parts(
             text = _TextParser(part)
             texts.append(text)
         elif _is_simple_image_part(part):
-            mm_parser.parse_image(part["image_url"]) # type: ignore
+            mm_parser.parse_image(part["image_url"])  # type: ignore
             has_image = True
         elif _is_simple_audio_part(part):
-            mm_parser.parse_audio(part["audio_url"]) # type: ignore
+            mm_parser.parse_audio(part["audio_url"])  # type: ignore
         else:
             # Process not string, CustomChatCompletionContentSimpleImageParam
             # CustomChatCompletionContentSimpleAudioParam parts.
-            part_type = part["type"] # type: ignore
+            part_type = part["type"]  # type: ignore
             if part_type == "text":
                 text = _TextParser(part)["text"]
                 texts.append(text)
             # This is the logic that distinguish it's a text / image / audio.
-            
+
             elif part_type == "image_url":
                 image_url = _ImageParser(part)["image_url"]
 
