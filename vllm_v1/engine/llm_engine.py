@@ -1,100 +1,43 @@
 import time
-from collections import deque
-from contextlib import contextmanager
-from dataclasses import dataclass
-from functools import partial
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, NamedTuple, Optional)
-from typing import Sequence as GenericSequence
-from typing import Set, Type, Union, Tuple
+from typing import (Any, Dict,
+                    Iterable, List, Mapping, Optional, Union, Tuple)
 
-import torch
 import msgspec
 import zmq
-from typing_extensions import TypeVar
+from msgspec import msgpack
 
-import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         LoadConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics_types import StatLoggerBase, Stats
-from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_utils import initialize_ray_cluster
+from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
-                         InputRegistry, LLMInputs, PromptType)
+                         InputRegistry, DecoderOnlyInputs, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import try_get_generation_config
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
-from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                  usage_message)
+from vllm.usage.usage_lib import UsageContext
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.utils import get_open_port
 
+from vllm_v1.executor.gpu_executor import GPUExecutor
 from vllm_v1.core.scheduler import Scheduler
 from vllm_v1.request import Request
-from vllm_v1.tokenizer.detokenizer import Detokenizer, RequestData, DetokenizedData
+from vllm_v1.tokenizer.detokenizer import (Detokenizer, DetokenizerInputs,
+                                           DetokenizerOutputs)
 
 logger = init_logger(__name__)
-_LOCAL_LOGGING_INTERVAL_SEC = 5
-
-
-def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
-    config = try_get_generation_config(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=model_config.revision,
-    )
-
-    if config is None:
-        return {}
-
-    return config.to_diff_dict()
 
 
 class LLMEngine:
-    """An LLM engine that receives requests and generates texts.
-
-    This is the main class for the vLLM engine. It receives requests
-    from clients and generates texts from the LLM. It includes a tokenizer, a
-    language model (possibly distributed across multiple GPUs), and GPU memory
-    space allocated for intermediate states (aka KV cache). This class utilizes
-    iteration-level scheduling and efficient memory management to maximize the
-    serving throughput.
-
-    The :class:`~vllm.LLM` class wraps this class for offline batched inference
-    and the :class:`AsyncLLMEngine` class wraps this class for online serving.
-
-    The config arguments are derived from :class:`~vllm.EngineArgs`. (See
-    :ref:`engine_args`)
-
-    Args:
-        model_config: The configuration related to the LLM model.
-        cache_config: The configuration related to the KV cache memory
-            management.
-        parallel_config: The configuration related to distributed execution.
-        scheduler_config: The configuration related to the request scheduler.
-        device_config: The configuration related to the device.
-        lora_config (Optional): The configuration related to serving multi-LoRA.
-        speculative_config (Optional): The configuration related to speculative
-            decoding.
-        executor_class: The model executor class for managing distributed
-            execution.
-        prompt_adapter_config (Optional): The configuration related to serving
-            prompt adapters.
-        log_stats: Whether to log statistics.
-        usage_context: Specified entry point, used for usage info collection.
-    """
 
     def __init__(
         self,
@@ -109,7 +52,6 @@ class LLMEngine:
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
-        executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -128,7 +70,7 @@ class LLMEngine:
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
+            "seed=%d, served_model_name=%s, "
             "num_scheduler_steps=%d, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, mm_processor_kwargs=%s)",
             VLLM_VERSION,
@@ -159,15 +101,11 @@ class LLMEngine:
             observability_config,
             model_config.seed,
             model_config.served_model_name,
-            scheduler_config.use_v2_block_manager,
             scheduler_config.num_scheduler_steps,
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
             model_config.mm_processor_kwargs,
         )
-        # TODO(woosuk): Print more configs in debug mode.
-        from vllm.plugins import load_general_plugins
-        load_general_plugins()
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -183,17 +121,21 @@ class LLMEngine:
         )
         self.log_stats = log_stats
 
-        # Detokenizer
-        # FIXME(woosuk): This is a temporary hack.
         assert not self.model_config.skip_tokenizer_init
         self.tokenizer = self._init_tokenizer()
+        if self.tokenizer:
+            # Ping the tokenizer to ensure liveness if it runs in a
+            # different process.
+            self.tokenizer.ping()
 
+        # Detokenizer
+        # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
+        # For example, it does not terminate properly. We need to improve this.
         self.port1 = get_open_port()
         self.port2 = get_open_port()
         self.detokenizer = Detokenizer(self.model_config.tokenizer, self.port1,
                                        self.port2)
         self.detokenizer.start()
-
         self.context = zmq.Context()
         self.push_socket = self.context.socket(zmq.PUSH)
         self.push_socket.connect(f"tcp://localhost:{self.port1}")
@@ -201,22 +143,19 @@ class LLMEngine:
         self.pull_socket.connect(f"tcp://localhost:{self.port2}")
         self.poller = zmq.Poller()
         self.poller.register(self.pull_socket, zmq.POLLIN)
-
-        self.encoder = msgspec.msgpack.Encoder()
-        self.decoder = msgspec.msgpack.Decoder(DetokenizedData)
+        self.encoder = msgpack.Encoder()
+        self.decoder = msgpack.Decoder(DetokenizerOutputs)
         self.detokenizer_reqs: Dict[str, Request] = {}
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
-
         self.input_preprocessor = InputPreprocessor(model_config,
                                                     self.tokenizer)
-
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
-        self.model_executor = executor_class(
+        self.model_executor = GPUExecutor(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
@@ -228,90 +167,17 @@ class LLMEngine:
             prompt_adapter_config=prompt_adapter_config,
             observability_config=self.observability_config,
         )
-
-        if not self.model_config.embedding_mode:
-            self._initialize_kv_caches()
-
-        # If usage stat is enabled, collect relevant info.
-        if is_usage_stats_enabled():
-            from vllm.model_executor.model_loader import (
-                get_architecture_class_name)
-            usage_message.report_usage(
-                get_architecture_class_name(model_config),
-                usage_context,
-                extra_kvs={
-                    # Common configuration
-                    "dtype":
-                    str(model_config.dtype),
-                    "tensor_parallel_size":
-                    parallel_config.tensor_parallel_size,
-                    "block_size":
-                    cache_config.block_size,
-                    "gpu_memory_utilization":
-                    cache_config.gpu_memory_utilization,
-
-                    # Quantization
-                    "quantization":
-                    model_config.quantization,
-                    "kv_cache_dtype":
-                    str(cache_config.cache_dtype),
-
-                    # Feature flags
-                    "enable_lora":
-                    bool(lora_config),
-                    "enable_prompt_adapter":
-                    bool(prompt_adapter_config),
-                    "enable_prefix_caching":
-                    cache_config.enable_prefix_caching,
-                    "enforce_eager":
-                    model_config.enforce_eager,
-                    "disable_custom_all_reduce":
-                    parallel_config.disable_custom_all_reduce,
-                })
-
-        if self.tokenizer:
-            # Ping the tokenizer to ensure liveness if it runs in a
-            # different process.
-            self.tokenizer.ping()
+        assert not self.model_config.embedding_mode
+        self._initialize_kv_caches()
 
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
 
-        # Metric Logging.
-        if self.log_stats:
-            if stat_loggers is not None:
-                self.stat_loggers = stat_loggers
-            else:
-                # Lazy import for prometheus multiprocessing.
-                # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
-                # before prometheus_client is imported.
-                # See https://prometheus.github.io/client_python/multiprocess/
-                from vllm.engine.metrics import (LoggingStatLogger,
-                                                 PrometheusStatLogger)
-
-                self.stat_loggers = {
-                    "logging":
-                    LoggingStatLogger(
-                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC),
-                    "prometheus":
-                    PrometheusStatLogger(
-                        local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                        labels=dict(model_name=model_config.served_model_name),
-                        max_model_len=self.model_config.max_model_len),
-                }
-                self.stat_loggers["prometheus"].info("cache_config",
-                                                     self.cache_config)
-
     def _initialize_kv_caches(self) -> None:
-        """Initialize the KV cache in the worker(s).
-
-        The workers will determine the number of blocks in both the GPU cache
-        and the swap CPU cache.
-        """
-        num_gpu_blocks, num_cpu_blocks = (
-            self.model_executor.determine_num_available_blocks())
+        num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
+        )
 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
@@ -335,11 +201,9 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
-        executor_class = _get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(
             **engine_config.to_dict(),
-            executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
@@ -367,7 +231,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
+        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderLLMInputs],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -405,47 +269,6 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
-        """Add a request to the engine's request pool.
-
-        The request is added to the request pool and will be processed by the
-        scheduler as `engine.step()` is called. The exact scheduling policy is
-        determined by the scheduler.
-
-        Args:
-            request_id: The unique ID of the request.
-            prompt: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
-                for more details about the format of each input.
-            params: Parameters for sampling or pooling.
-                :class:`~vllm.SamplingParams` for text generation.
-                :class:`~vllm.PoolingParams` for pooling.
-            arrival_time: The arrival time of the request. If None, we use
-                the current monotonic time.
-            trace_headers: OpenTelemetry trace headers.
-
-        Details:
-            - Set arrival_time to the current time if it is None.
-            - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `best_of` number of :class:`~vllm.Sequence` objects.
-            - Create a :class:`~vllm.SequenceGroup` object
-              from the list of :class:`~vllm.Sequence`.
-            - Add the :class:`~vllm.SequenceGroup` object to the scheduler.
-
-        Example:
-            >>> # initialize engine
-            >>> engine = LLMEngine.from_engine_args(engine_args)
-            >>> # set request arguments
-            >>> example_prompt = "Who is the president of the United States?"
-            >>> sampling_params = SamplingParams(temperature=0.0)
-            >>> request_id = 0
-            >>>
-            >>> # add the request to the engine
-            >>> engine.add_request(
-            >>>    str(request_id),
-            >>>    example_prompt,
-            >>>    SamplingParams(temperature=0.0))
-            >>> # continue the request processing
-            >>> ...
-        """
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -472,43 +295,7 @@ class LLMEngine:
         )
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
-        """Aborts a request(s) with the given ID.
-
-        Args:
-            request_id: The ID(s) of the request to abort.
-
-        Details:
-            - Refer to the
-              :meth:`~vllm.core.scheduler.Scheduler.abort_seq_group`
-              from class :class:`~vllm.core.scheduler.Scheduler`.
-
-        Example:
-            >>> # initialize engine and add a request with request_id
-            >>> request_id = str(0)
-            >>> # abort the request
-            >>> engine.abort_request(request_id)
-        """
         self.scheduler.abort_requests(request_id)
-
-    def get_model_config(self) -> ModelConfig:
-        """Gets the model configuration."""
-        return self.model_config
-
-    def get_parallel_config(self) -> ParallelConfig:
-        """Gets the parallel configuration."""
-        return self.parallel_config
-
-    def get_decoding_config(self) -> DecodingConfig:
-        """Gets the decoding configuration."""
-        return self.decoding_config
-
-    def get_scheduler_config(self) -> SchedulerConfig:
-        """Gets the scheduler configuration."""
-        return self.scheduler_config
-
-    def get_lora_config(self) -> LoRAConfig:
-        """Gets the LoRA configuration."""
-        return self.lora_config
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
@@ -534,22 +321,24 @@ class LLMEngine:
         return detokenized_reqs, self.scheduler.running
 
     def send_to_detokenizer(self, requests: List[Request]) -> None:
+        inputs = DetokenizerInputs(
+            req_ids=[],
+            prompt_token_ids=[],
+            new_token_ids=[],
+            skip_special_tokens=[],
+            spaces_between_special_tokens=[],
+            free_req_ids=[],
+        )
         for req in requests:
             self.detokenizer_reqs[req.request_id] = req
-        data = RequestData(
-            request_ids=[req.request_id for req in requests],
-            prompt_token_ids=[req.prompt_token_ids for req in requests],
-            new_token_ids=[req.output_token_ids for req in requests],
-            skip_special_tokens=[
-                req.sampling_params.skip_special_tokens for req in requests
-            ],
-            spaces_between_special_tokens=[
-                req.sampling_params.spaces_between_special_tokens
-                for req in requests
-            ],
-            free_request_ids=[],
-        )
-        self.push_socket.send(self.encoder.encode(data), flags=zmq.NOBLOCK)
+            inputs.req_ids.append(req.request_id)
+            inputs.prompt_token_ids.append(req.prompt_token_ids)
+            inputs.new_token_ids.append(req.output_token_ids)
+            inputs.skip_special_tokens.append(
+                req.sampling_params.skip_special_tokens)
+            inputs.spaces_between_special_tokens.append(
+                req.sampling_params.spaces_between_special_tokens)
+        self.push_socket.send(self.encoder.encode(inputs), flags=zmq.NOBLOCK)
 
     def recv_from_detokenizer(self) -> List[Request]:
         detokenized_reqs: List[Request] = []
@@ -557,9 +346,9 @@ class LLMEngine:
         if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
             msg = self.pull_socket.recv()
             data = self.decoder.decode(msg)
-            num_reqs = len(data.request_ids)
+            num_reqs = len(data.req_ids)
             for i in range(num_reqs):
-                req_id = data.request_ids[i]
+                req_id = data.req_ids[i]
                 assert req_id in self.detokenizer_reqs
                 req = self.detokenizer_reqs.pop(req_id)
                 req.output_text += data.detokenized_texts[i]
@@ -569,34 +358,14 @@ class LLMEngine:
     def terminate_detokenizer(self) -> None:
         self.push_socket.send(b"", flags=zmq.NOBLOCK)
 
-    def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
-        if not self.log_stats:
-            raise RuntimeError(
-                "Stat logging is disabled. Set `disable_log_stats=False` "
-                "argument to enable.")
-        if logger_name in self.stat_loggers:
-            raise KeyError(f"Logger with name {logger_name} already exists.")
-        self.stat_loggers[logger_name] = logger
-
-    def remove_logger(self, logger_name: str) -> None:
-        if not self.log_stats:
-            raise RuntimeError(
-                "Stat logging is disabled. Set `disable_log_stats=False` "
-                "argument to enable.")
-        if logger_name not in self.stat_loggers:
-            raise KeyError(f"Logger with name {logger_name} does not exist.")
-        del self.stat_loggers[logger_name]
-
     def check_health(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()
         self.model_executor.check_health()
 
-    def _validate_model_inputs(self, inputs: Union[LLMInputs,
+    def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
                                                    EncoderDecoderLLMInputs]):
-        assert isinstance(inputs, LLMInputs)
         prompt_ids = inputs.get("prompt_token_ids")
-
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
 
@@ -612,16 +381,35 @@ class LLMEngine:
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
 
-            # TODO: Find out how many placeholder tokens are there so we can
-            # check that chunked prefill does not truncate them
-            # max_batch_len = self.scheduler_config.max_num_batched_tokens
+    def get_model_config(self) -> ModelConfig:
+        """Gets the model configuration."""
+        return self.model_config
+
+    def get_parallel_config(self) -> ParallelConfig:
+        """Gets the parallel configuration."""
+        return self.parallel_config
+
+    def get_decoding_config(self) -> DecodingConfig:
+        """Gets the decoding configuration."""
+        return self.decoding_config
+
+    def get_scheduler_config(self) -> SchedulerConfig:
+        """Gets the scheduler configuration."""
+        return self.scheduler_config
+
+    def get_lora_config(self) -> LoRAConfig:
+        """Gets the LoRA configuration."""
+        return self.lora_config
 
 
-def _get_executor_cls(engine_config: EngineConfig) -> Type[ExecutorBase]:
-    distributed_executor_backend = (
-        engine_config.parallel_config.distributed_executor_backend)
-    assert distributed_executor_backend is None
+def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
+    config = try_get_generation_config(
+        model_config.model,
+        trust_remote_code=model_config.trust_remote_code,
+        revision=model_config.revision,
+    )
 
-    from vllm_v1.executor.gpu_executor import GPUExecutor
-    executor_class = GPUExecutor
-    return executor_class
+    if config is None:
+        return {}
+
+    return config.to_diff_dict()

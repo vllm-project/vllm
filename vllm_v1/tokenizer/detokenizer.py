@@ -1,33 +1,34 @@
 import multiprocessing
-
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import msgspec
 import zmq
+from msgspec import msgpack
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
+
 from .detokenizer_utils import (convert_prompt_ids_to_tokens,
                                 detokenize_incrementally)
 
 
-class RequestData(msgspec.Struct):
+class DetokenizerInputs(msgspec.Struct):
 
     # [num_reqs]
-    request_ids: List[str]
+    req_ids: List[str]
     prompt_token_ids: List[List[int]]
     new_token_ids: List[List[int]]
     skip_special_tokens: List[bool]
     spaces_between_special_tokens: List[bool]
 
     # [num_free_reqs]
-    free_request_ids: List[str]
+    free_req_ids: List[str]
 
 
-class DetokenizedData(msgspec.Struct):
+class DetokenizerOutputs(msgspec.Struct):
 
     # [num_reqs]
-    request_ids: List[str]
+    req_ids: List[str]
     detokenized_texts: List[str]
 
 
@@ -59,8 +60,8 @@ class Detokenizer(multiprocessing.Process):
         super().__init__()
         self.port1 = port1
         self.port2 = port2
-        self.encoder = msgspec.msgpack.Encoder()
-        self.decoder = msgspec.msgpack.Decoder(RequestData)
+        self.encoder = msgpack.Encoder()
+        self.decoder = msgpack.Decoder(DetokenizerInputs)
 
         self.tokenizer = get_tokenizer(tokenizer_name)
         self.requests: Dict[str, RequestState] = {}
@@ -77,30 +78,28 @@ class Detokenizer(multiprocessing.Process):
             if message == b"":
                 # Terminate signal.
                 break
-            data = self.decoder.decode(message)
+            inputs = self.decoder.decode(message)
 
-            for req_id in data.free_request_ids:
+            for req_id in inputs.free_req_ids:
                 self.free(req_id)
 
-            req_ids: List[str] = []
             detokenized_texts: List[str] = []
-            num_reqs = len(data.request_ids)
+            num_reqs = len(inputs.req_ids)
             for i in range(num_reqs):
-                req_id = data.request_ids[i]
-                req_ids.append(req_id)
+                req_id = inputs.req_ids[i]
                 if req_id not in self.requests:
                     self.add_request(
                         request_id=req_id,
-                        prompt_token_ids=data.prompt_token_ids[i],
-                        skip_special_tokens=data.skip_special_tokens[i],
-                        spaces_between_special_tokens=data.
+                        prompt_token_ids=inputs.prompt_token_ids[i],
+                        skip_special_tokens=inputs.skip_special_tokens[i],
+                        spaces_between_special_tokens=inputs.
                         spaces_between_special_tokens[i],
                     )
-                new_str = self.detokenize(req_id, data.new_token_ids[i])
+                new_str = self.detokenize(req_id, inputs.new_token_ids[i])
                 detokenized_texts.append(new_str)
 
-            detokenized = DetokenizedData(
-                request_ids=req_ids,
+            detokenized = DetokenizerOutputs(
+                req_ids=inputs.req_ids,
                 detokenized_texts=detokenized_texts,
             )
             self.push_socket.send(self.encoder.encode(detokenized),
