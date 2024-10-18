@@ -48,8 +48,7 @@ class OpenVINOExecutor(ExecutorBase):
     def _create_worker(self,
                        local_rank: int = 0,
                        rank: int = 0,
-                       distributed_init_method: Optional[str] = None
-    ):
+                       distributed_init_method: Optional[str] = None):
         from vllm.worker.openvino_worker import OpenVINOWorker
 
         assert (
@@ -57,8 +56,8 @@ class OpenVINOExecutor(ExecutorBase):
         ), "OpenVINOExecutor only supports single CPU socket currently."
 
         if distributed_init_method is None:
-          distributed_init_method = get_distributed_init_method(
-              get_ip(), get_open_port())
+            distributed_init_method = get_distributed_init_method(
+                get_ip(), get_open_port())
         return OpenVINOWorker(
             ov_core=self.ov_core,
             model_config=self.model_config,
