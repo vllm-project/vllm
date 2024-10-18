@@ -32,7 +32,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "flash-attn"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashAttentionImpl"]:
