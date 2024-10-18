@@ -12,18 +12,12 @@ from ...conftest import cleanup
 MODEL_CONFIGS = [
     {
         "model": "facebook/opt-125m",
-        "enforce_eager": True,
         "gpu_memory_utilization": 0.20,
-        "max_num_batched_tokens": 4096,
-        "tensor_parallel_size": 1,
     },
     {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
-        "enforce_eager": True,
-        "gpu_memory_utilization": 0.50,
+        "gpu_memory_utilization": 0.95,
         "max_model_len": 2048,
-        "max_num_batched_tokens": 4096,
-        "tensor_parallel_size": 1,
         "tokenizer_mode": "mistral",
     },
 ]
