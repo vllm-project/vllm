@@ -12,9 +12,6 @@ _SAMPLING_EPS = 1e-5
 
 class Sampler(nn.Module):
 
-    def __init__(self):
-        super().__init__()
-
     def forward(
         self,
         logits: torch.Tensor,
