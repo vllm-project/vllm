@@ -60,6 +60,7 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
 
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain image_url.
+    This is supported by OpenAI API, although it is not documented.
     
     Example:
     {
