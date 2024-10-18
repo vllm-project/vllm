@@ -246,8 +246,7 @@ class EngineArgs:
             choices=['string', 'openai'],
             help='The content to choose with chat template. "string" will '
             'keep the content field as just a string whereas "openai" '
-            'will parse the content in the current OpenAI format.'
-        )
+            'will parse the content in the current OpenAI format.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
