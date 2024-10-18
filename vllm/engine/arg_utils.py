@@ -256,7 +256,7 @@ class EngineArgs:
             choices=['string', 'openai'],
             help='The format to render text content within a chat template. '
             '"string" will keep the content field as a string whereas '
-            '"openai" will parse content in the current OpenAI format.')
+            '"openai"yapf will parse content in the current OpenAI format.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
