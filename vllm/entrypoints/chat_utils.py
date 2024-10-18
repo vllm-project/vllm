@@ -459,11 +459,11 @@ def _parse_chat_message_content_mm_part(
         if part.get("image_url") is not None:
             image_params = cast(CustomChatCompletionContentSimpleImageParam,
                                 part)
-            return "image_url", image_params["image_url"]
+            return "image_url", image_params.get("image_url", "")
         if part.get("audio_url") is not None:
             audio_params = cast(CustomChatCompletionContentSimpleAudioParam,
                                 part)
-            return "audio_url", audio_params["audio_url"]
+            return "audio_url", audio_params.get("audio_url", "")
 
         # Raise an error if no 'type' or direct URL is found.
         raise ValueError("Missing 'type' field in multimodal part.")
@@ -471,6 +471,10 @@ def _parse_chat_message_content_mm_part(
     if not isinstance(part_type, str):
         raise ValueError("Invalid 'type' field in multimodal part.")
     return part_type, "unknown part_type content"
+
+
+VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
+                                       "audio_url")
 
 
 def _parse_chat_message_content_parts(
@@ -492,6 +496,13 @@ def _parse_chat_message_content_parts(
             texts.append(text)
         else:  # Handle structured dictionary parts
             part_type, content = _parse_chat_message_content_mm_part(part)
+
+            # if part_type is text/refusal/image_url/audio_url but
+            # content is empty, logg a warning and skip
+            if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
+                logger.warning("Skipping multimodal part "
+                               "with empty / unparsable content.")
+                continue
 
             if part_type in ("text", "refusal"):
                 texts.append(content)
