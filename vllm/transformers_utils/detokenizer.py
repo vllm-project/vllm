@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Logprob, SamplingParams,
                            Sequence, SequenceGroup)
