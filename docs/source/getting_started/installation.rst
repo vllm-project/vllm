@@ -132,12 +132,12 @@ If you update the vLLM wheel and rebuild from the source to make further edits, 
 .. note::
 
     There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
-    It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to `the above section <#install-the-latest-code>`_ for instructions on how to install a specified wheel.
+    It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to `the section above <#install-the-latest-code>`_ for instructions on how to install a specified wheel.
 
 Full build (with compilation)
 -----------------------------
 
-If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes: 
+If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
 .. code-block:: console
 
