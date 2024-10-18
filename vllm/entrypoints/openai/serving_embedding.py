@@ -84,7 +84,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                          prompt_adapters=None,
                          request_logger=request_logger)
         self._enabled = self._check_embedding_mode(
-            model_config.task == "embed")
+            model_config.task == "embedding")
 
     async def create_embedding(
         self,

@@ -7,7 +7,7 @@ prompt = "<|image_1|> Represent the given image with the following question: Wha
 # Create an LLM.
 llm = LLM(
     model="TIGER-Lab/VLM2Vec-Full",
-    task="embed",
+    task="embedding",
     trust_remote_code=True,
     max_model_len=4096,
     max_num_seqs=2,

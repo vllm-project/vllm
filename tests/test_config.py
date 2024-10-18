@@ -5,7 +5,7 @@ from vllm.config import ModelConfig
 
 @pytest.mark.parametrize(("model_id", "expected_task"), [
     ("facebook/opt-125m", "generate"),
-    ("intfloat/e5-mistral-7b-instruct", "embed"),
+    ("intfloat/e5-mistral-7b-instruct", "embedding"),
 ])
 def test_auto_task(model_id, expected_task):
     config = ModelConfig(
@@ -22,7 +22,7 @@ def test_auto_task(model_id, expected_task):
 
 
 @pytest.mark.parametrize(("model_id", "bad_task"), [
-    ("facebook/opt-125m", "embed"),
+    ("facebook/opt-125m", "embedding"),
     ("intfloat/e5-mistral-7b-instruct", "generate"),
 ])
 def test_incorrect_task(model_id, bad_task):

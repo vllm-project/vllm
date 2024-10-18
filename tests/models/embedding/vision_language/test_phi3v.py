@@ -28,7 +28,7 @@ def test_models(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(model,
-                     task="embed",
+                     task="embedding",
                      max_model_len=4096,
                      max_num_seqs=2,
                      dtype=dtype,

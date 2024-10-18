@@ -33,7 +33,7 @@ logger = init_logger(__name__)
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-Task = Literal["generate", "embed"]
+Task = Literal["generate", "embedding"]
 TaskOption = Literal["auto", Task]
 
 
@@ -262,7 +262,7 @@ class ModelConfig:
             # NOTE: They are listed from highest to lowest priority, in case
             # the model supports multiple of them
             "generate": ModelRegistry.is_text_generation_model(architectures),
-            "embed": ModelRegistry.is_embedding_model(architectures)
+            "embedding": ModelRegistry.is_embedding_model(architectures),
         }
         supported_tasks: Set[Task] = {
             task
@@ -434,7 +434,7 @@ class ModelConfig:
 
         # Async postprocessor is not necessary with embedding mode
         # since there is no token generation
-        if self.task == "embed":
+        if self.task == "embedding":
             self.use_async_output_proc = False
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst
@@ -1030,7 +1030,7 @@ class SchedulerConfig:
                 # for higher throughput.
                 max_num_batched_tokens = max(max_model_len, 2048)
 
-            if task == "embed":
+            if task == "embedding":
                 # For embedding, choose specific value for higher throughput
                 max_num_batched_tokens = max(
                     max_num_batched_tokens,

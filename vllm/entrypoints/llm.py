@@ -707,10 +707,11 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if self.llm_engine.model_config.task != "embed":
+        if self.llm_engine.model_config.task != "embedding":
             raise ValueError(
-                "LLM.encode() is only supported for embedding models (XModel)."
-            )
+                "LLM.encode() is only supported for embedding models. If your "
+                "model supports both generation and embedding, you have to "
+                "explicitly pass `--task embedding` to use embedding mode.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(

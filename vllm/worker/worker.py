@@ -92,7 +92,7 @@ class Worker(LocalOrDistributedWorkerBase):
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:
             ModelRunnerClass = model_runner_cls
-        elif model_config.task == "embed":
+        elif model_config.task == "embedding":
             ModelRunnerClass = EmbeddingModelRunner
         elif self._is_encoder_decoder_model():
             ModelRunnerClass = EncoderDecoderModelRunner
