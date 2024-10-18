@@ -428,7 +428,7 @@ def _parse_chat_message_content_parts(
             raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
-    if has_text or keep_multimodal_content:
+    if keep_multimodal_content:
         role_content = [{'type': 'text', 'text': text_prompt}]
 
         if has_image:
@@ -440,6 +440,8 @@ def _parse_chat_message_content_parts(
         if mm_placeholder_counts:
             text_prompt = _get_full_multimodal_text_prompt(
                 mm_placeholder_counts, text_prompt)
+        elif has_text:
+            text_prompt = [{'type': 'text', 'text': text_prompt}]
         return [ConversationMessage(role=role, content=text_prompt)]
 
 
