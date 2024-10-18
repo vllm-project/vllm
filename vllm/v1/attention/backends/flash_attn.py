@@ -18,7 +18,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "flash-attn-new"
+        return "flash-attn-vllm-v1"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashAttentionImpl"]:

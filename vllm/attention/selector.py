@@ -222,6 +222,9 @@ def which_attn_to_use(
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         return _Backend.ROCM_FLASH
 
+    if envs.VLLM_USE_V1:
+        return _Backend.FLASH_ATTN_VLLM_V1
+
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
         if not current_platform.has_device_capability(80):

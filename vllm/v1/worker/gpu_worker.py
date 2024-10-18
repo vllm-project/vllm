@@ -63,7 +63,6 @@ class Worker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN_NEW"
         self.model_runner = GPUModelRunner(
             model_config,
             parallel_config,
