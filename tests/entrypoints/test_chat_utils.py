@@ -18,7 +18,8 @@ PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 @pytest.fixture(scope="module")
 def phi3v_model_config():
     return ModelConfig(PHI3V_MODEL_ID,
-                       PHI3V_MODEL_ID,
+                       task="generate",
+                       tokenizer=PHI3V_MODEL_ID,
                        tokenizer_mode="auto",
                        trust_remote_code=True,
                        dtype="bfloat16",

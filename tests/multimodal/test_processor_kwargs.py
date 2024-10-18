@@ -221,6 +221,7 @@ def test_max_tokens_kwarg_overrides(num_crops):
     expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
 
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})
@@ -256,6 +257,7 @@ def test_max_tokens_kwarg_overrides(num_crops):
 def test_max_tokens_with_sad_kwarg_overrides(mm_processor_kwargs):
     """Ensure that max token calcs filters out invalid mm_processor_kwargs"""
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})
@@ -278,12 +280,13 @@ def test_max_tokens_with_sad_kwarg_overrides(mm_processor_kwargs):
 
 ### Test overrides for the mapper
 @pytest.mark.parametrize("num_crops", [DEFAULT_NUM_CROPS, NUM_CROPS_OVERRIDE])
-def test_default_mapper_with_processer_kwargs(image_assets, num_crops):
+def test_default_mapper_with_processor_kwargs(image_assets, num_crops):
     """Ensure that the mapper processor kwargs can fall back to HF models."""
     # NOTE - we don't validate bad inputs for the default mapper, because it's
     # through the automodel interface in transformers, so we can't easily
     # inspect what kwargs are or are not allowed.
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs={"num_crops": num_crops},
                               limit_mm_per_prompt={"image": 1})
@@ -311,6 +314,7 @@ def test_custom_mapper_kwarg_overrides(image_assets, init_num_crops,
         init_num_crops, inference_num_crops)
 
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs=init_kwargs,
                               limit_mm_per_prompt={"image": 1})
@@ -348,6 +352,7 @@ def test_custom_mapper_with_sad_kwarg_overrides(image_assets,
     """Ensure that custom mappers filters out invalid mm_processor_kwargs"""
     # Should filter out the init time kwargs
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})

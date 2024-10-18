@@ -22,12 +22,12 @@ class MockHFConfig:
 
 @dataclass
 class MockModelConfig:
+    task = "generate"
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
     max_model_len = 100
     tokenizer_revision = None
-    embedding_mode = False
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
 

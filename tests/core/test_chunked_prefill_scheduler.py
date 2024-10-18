@@ -33,7 +33,8 @@ def test_simple():
     num_seq_group = 4
     max_model_len = 16
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
+    scheduler_config = SchedulerConfig("generate",
+                                       max_num_batched_tokens,
                                        num_seq_group,
                                        max_model_len,
                                        enable_chunked_prefill=True)
@@ -78,6 +79,7 @@ def test_chunk():
     max_model_len = 80
     max_num_batched_tokens = 64
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
@@ -126,6 +128,7 @@ def test_complex():
     max_model_len = 80
     max_num_batched_tokens = 64
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
@@ -196,6 +199,7 @@ def test_maximal_decoding():
     max_model_len = 8
     max_num_batched_tokens = 2
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
@@ -289,6 +293,7 @@ def test_prompt_limit():
     max_model_len = 64
     max_num_batched_tokens = 32
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
@@ -321,7 +326,8 @@ def test_prompt_limit_exceed():
     max_seqs = 64
     max_model_len = 32
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
+    scheduler_config = SchedulerConfig("generate",
+                                       max_num_batched_tokens,
                                        max_seqs,
                                        max_model_len,
                                        enable_chunked_prefill=True)
@@ -348,6 +354,7 @@ def test_swap():
     max_model_len = 200
     max_num_batched_tokens = 30
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
@@ -404,6 +411,7 @@ def test_running_prefill_prioritized_over_swap():
     max_model_len = 200
     max_num_batched_tokens = 30
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
@@ -498,6 +506,7 @@ def test_chunked_prefill_preempt():
     max_model_len = 200
     max_num_batched_tokens = 30
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
@@ -563,6 +572,7 @@ def test_chunked_prefill_max_seqs():
     max_model_len = 80
     max_num_batched_tokens = 64
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
@@ -617,6 +627,7 @@ def test_perfix_caching():
     max_model_len = 80
     max_num_batched_tokens = 64
     scheduler_config = SchedulerConfig(
+        "generate",
         max_num_batched_tokens,
         max_seqs,
         max_model_len,
