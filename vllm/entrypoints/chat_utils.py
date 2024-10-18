@@ -57,11 +57,15 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
     type: Required[str]
     """The type of the content part."""
 
+class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
+    """A simpler version of the param that only accepts a plain image_url."""
+    image_url: Required[str]
+
 
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartRefusalParam,
-    CustomChatCompletionContentPartParam]
+    CustomChatCompletionContentPartParam, CustomChatCompletionContentSimpleImageParam, str]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -401,29 +405,38 @@ def _parse_chat_message_content_parts(
 
     has_image = False
     for part in parts:
-        part_type = part["type"]
-        if part_type == "text":
-            text = _TextParser(part)["text"]
+        if isinstance(part, str):
+            text = _TextParser(part)
             texts.append(text)
-        elif part_type == "image_url":
-            image_url = _ImageParser(part)["image_url"]
-
-            if image_url.get("detail", "auto") != "auto":
-                logger.warning(
-                    "'image_url.detail' is currently not supported and "
-                    "will be ignored.")
-
-            mm_parser.parse_image(image_url["url"])
+        elif isinstance(part, dict) and "image_url" in part and isinstance(part["image_url"], str):
+            mm_parser.parse_image(part["image_url"])
             has_image = True
-        elif part_type == "audio_url":
-            audio_url = _AudioParser(part)["audio_url"]
-
-            mm_parser.parse_audio(audio_url["url"])
-        elif part_type == "refusal":
-            text = _RefusalParser(part)["refusal"]
-            texts.append(text)
         else:
-            raise NotImplementedError(f"Unknown part type: {part_type}")
+            part_type = part["type"]
+            if part_type == "text":
+                text = _TextParser(part)["text"]
+                texts.append(text)
+            # This is the logic that distinguish it's a text / image / audio.
+            
+            elif part_type == "image_url":
+                image_url = _ImageParser(part)["image_url"]
+
+                if image_url.get("detail", "auto") != "auto":
+                    logger.warning(
+                        "'image_url.detail' is currently not supported and "
+                        "will be ignored.")
+
+                mm_parser.parse_image(image_url["url"])
+                has_image = True
+            elif part_type == "audio_url":
+                audio_url = _AudioParser(part)["audio_url"]
+
+                mm_parser.parse_audio(audio_url["url"])
+            elif part_type == "refusal":
+                text = _RefusalParser(part)["refusal"]
+                texts.append(text)
+            else:
+                raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
     if keep_multimodal_content:
@@ -524,7 +537,7 @@ def parse_chat_messages_futures(
 ) -> Tuple[List[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
     conversation: List[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
-
+    
     for msg in messages:
         sub_messages = _parse_chat_message_content(msg, mm_tracker)
 
