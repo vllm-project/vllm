@@ -14,6 +14,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
                                          parse_chat_messages)
+from vllm.entrypoints.utils import STR_MULTI_STEP_BEAM_SEARCH_NOT_SUPPORTED
 from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -396,6 +397,10 @@ class LLM:
         TODO: how does beam search work together with length penalty, frequency
         penalty, and stopping criteria, etc.?
         """
+
+        if (self.llm_engine.scheduler_config.
+                engine_permits_multi_step_scheduling):
+            raise ValueError(STR_MULTI_STEP_BEAM_SEARCH_NOT_SUPPORTED)
 
         beam_width = params.beam_width
         max_tokens = params.max_tokens

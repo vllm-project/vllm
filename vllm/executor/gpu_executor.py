@@ -69,7 +69,7 @@ class GPUExecutor(ExecutorBase):
     def _get_worker_module_and_class(
             self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
         worker_class_fn = None
-        if self.scheduler_config.is_multi_step:
+        if self.scheduler_config.engine_permits_multi_step_scheduling:
             worker_module_name = "vllm.worker.multi_step_worker"
             worker_class_name = "MultiStepWorker"
         elif self.speculative_config:
