@@ -51,7 +51,9 @@ def run_qwen2_audio(question, audio_count):
               max_num_seqs=5,
               limit_mm_per_prompt={"audio": audio_count})
 
-    audio_in_prompt = "".join([f"Audio {idx+1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n" for idx in range(audio_count)])
+    audio_in_prompt = "".join([f"Audio {idx+1}: "
+                               f"<|audio_bos|><|AUDIO|><|audio_eos|>\n" 
+                               for idx in range(audio_count)])
 
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
               "<|im_start|>user\n"

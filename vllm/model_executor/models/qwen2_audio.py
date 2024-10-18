@@ -167,7 +167,8 @@ def input_processor_for_qwen2_audio(ctx: InputContext,
         return llm_inputs
     if len(multi_modal_data["audio"]) == 0:
         return llm_inputs
-    assert isinstance(multi_modal_data['audio'], list) and isinstance(multi_modal_data['audio'][0], tuple)
+    assert (isinstance(multi_modal_data['audio'], list) 
+            and isinstance(multi_modal_data['audio'][0], tuple))
 
     processor = cached_get_processor(ctx.model_config.model)
     audios = [_[0] for _ in multi_modal_data['audio']]
