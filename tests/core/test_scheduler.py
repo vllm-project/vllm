@@ -20,9 +20,10 @@ from .utils import (append_new_token, append_new_token_seq_group,
 def test_scheduler_add_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(
-        100,
-        64,
-        1,
+        "generate",
+        max_num_batched_tokens=100,
+        max_num_seqs=64,
+        max_model_len=1,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, cache_dtype="auto")
     cache_config.num_cpu_blocks = 4
@@ -42,9 +43,10 @@ def test_scheduler_add_seq_group():
 def test_scheduler_abort_seq_group():
     block_size = 4
     scheduler_config = SchedulerConfig(
-        100,
-        64,
-        1,
+        "generate",
+        max_num_batched_tokens=100,
+        max_num_seqs=64,
+        max_model_len=1,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 4
@@ -70,9 +72,10 @@ def test_scheduler_schedule_simple():
     num_seq_group = 4
     max_model_len = 16
     scheduler_config = SchedulerConfig(
-        64,
-        num_seq_group,
-        max_model_len,
+        "generate",
+        max_num_batched_tokens=64,
+        max_num_seqs=num_seq_group,
+        max_model_len=max_model_len,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
@@ -114,9 +117,10 @@ def test_scheduler_prefill_prioritized():
     max_model_len = 30
     max_batched_num_tokens = 30
     scheduler_config = SchedulerConfig(
-        max_batched_num_tokens,
-        2,
-        max_model_len,
+        "generate",
+        max_num_batched_tokens=max_batched_num_tokens,
+        max_num_seqs=2,
+        max_model_len=max_model_len,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
@@ -145,9 +149,10 @@ def test_scheduler_schedule_preempt_abort():
     block_size = 4
     max_model_len = 16
     scheduler_config = SchedulerConfig(
-        64,
-        2,
-        max_model_len,
+        "generate",
+        max_num_batched_tokens=64,
+        max_num_seqs=2,
+        max_model_len=max_model_len,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 2
@@ -204,9 +209,10 @@ def test_scheduler_max_seqs():
     max_seq_group = 2
     max_model_len = 16
     scheduler_config = SchedulerConfig(
-        64,
-        max_seq_group,
-        max_model_len,
+        "generate",
+        max_num_batched_tokens=64,
+        max_num_seqs=max_seq_group,
+        max_model_len=max_model_len,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
@@ -248,9 +254,10 @@ def test_scheduler_max_seqs():
 def test_scheduler_delay_factor():
     block_size = 4
     scheduler_config = SchedulerConfig(
-        100,
-        64,
-        16,
+        "generate",
+        max_num_batched_tokens=100,
+        max_num_seqs=64,
+        max_model_len=16,
         delay_factor=0.5,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
@@ -350,9 +357,10 @@ def initialize_scheduler(
 ):
     block_size = block_size
     scheduler_config = SchedulerConfig(
-        max_token_budget,
-        max_num_seqs,
-        max_model_len,
+        "generate",
+        max_num_batched_tokens=max_token_budget,
+        max_num_seqs=max_num_seqs,
+        max_model_len=max_model_len,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = num_cpu_blocks

@@ -15,7 +15,8 @@ def test_worker_apply_lora(sql_lora_files):
     worker = Worker(
         model_config=ModelConfig(
             "meta-llama/Llama-2-7b-hf",
-            "meta-llama/Llama-2-7b-hf",
+            task="auto",
+            tokenizer="meta-llama/Llama-2-7b-hf",
             tokenizer_mode="auto",
             trust_remote_code=False,
             seed=0,
@@ -27,7 +28,7 @@ def test_worker_apply_lora(sql_lora_files):
             load_format="dummy",
         ),
         parallel_config=ParallelConfig(1, 1, False),
-        scheduler_config=SchedulerConfig(32, 32, 32),
+        scheduler_config=SchedulerConfig("generate", 32, 32, 32),
         device_config=DeviceConfig("cuda"),
         cache_config=CacheConfig(block_size=16,
                                  gpu_memory_utilization=1.,
