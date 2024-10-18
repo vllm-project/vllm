@@ -14,6 +14,10 @@ jobs:
     steps:
       - uses: actions/stale@28ca1036281a5e5922ead5184a1bbf96e5fc984e # v9.0.0
         with:
+          exempt-draft-pr: true
+          exempt-issue-labels: 'keep-open'
+          exempt-pr-labels: 'keep-open'
+
           days-before-issue-stale: 90
           days-before-issue-close: 30
           stale-issue-label: 'stale'
