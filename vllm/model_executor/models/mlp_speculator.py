@@ -1,11 +1,14 @@
 import math
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
@@ -65,7 +68,10 @@ class MLPSpeculator(nn.Module):
     https://huggingface.co/ibm-fms and https://huggingface.co/ibm-granite
     """
 
-    def __init__(self, config: MLPSpeculatorConfig, **kwargs) -> None:
+    def __init__(self,
+                 config: MLPSpeculatorConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 **kwargs) -> None:
         super().__init__()
         self.n_predict = config.n_predict
         self.vocab_size = config.vocab_size
@@ -95,7 +101,10 @@ class MLPSpeculator(nn.Module):
             self.proj = nn.ModuleList([proj_first] + [proj_tied] *
                                       (self.max_speculative_tokens - 1))
 
-            head = ParallelLMHead(self.vocab_size, self.inner_dim, bias=False)
+            head = ReplicatedLinear(self.inner_dim,
+                                    self.vocab_size,
+                                    bias=False,
+                                    quant_config=quant_config)
             self.head = nn.ModuleList([head] * self.max_speculative_tokens)
 
             ln = MLPSpeculatorLayerNorm(self.inner_dim,
