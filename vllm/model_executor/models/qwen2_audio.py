@@ -281,6 +281,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                 logit_scale)
         self.sampler = Sampler()
 
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
+
     def _validate_and_reshape_mm_tensor(self,
                                         mm_input: Union[torch.Tensor,
                                                         List[torch.Tensor]],
@@ -380,14 +383,15 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
                 input_ids = None
 
-        result = self.language_model(
+        hidden_states = self.language_model(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
-        return result
+        return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
