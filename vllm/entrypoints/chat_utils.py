@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import (Any, Awaitable, Dict, Generic, Iterable, List, Literal,
-                    Mapping, Optional, Tuple, TypeVar, Union, cast)
+from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
+                    Literal, Mapping, Optional, Tuple, TypeVar, Union, cast)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -410,17 +410,56 @@ _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
+# Define a mapping from part types to their corresponding parsing functions.
+MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
+    "text": lambda part: _TextParser(part)["text"],
+    "image_url": lambda part: _ImageParser(part)["image_url"]["url"],
+    "audio_url": lambda part: _AudioParser(part)["audio_url"]["url"],
+    "refusal": lambda part: _RefusalParser(part)["refusal"],
+}
 
-def _is_simple_image_part(part: ChatCompletionContentPartParam) -> bool:
-    """Check if the part is CustomChatCompletionContentSimpleImageParam."""
-    image_url = part.get("image_url") if isinstance(part, dict) else None
-    return isinstance(image_url, str)
 
+def _parse_chat_message_content_mm_parts(
+        part: ChatCompletionContentPartParam) -> Tuple[str, str]:
+    """
+    Parses a given multi modal content part based on its type.
 
-def _is_simple_audio_part(part: ChatCompletionContentPartParam) -> bool:
-    """Check if the part is CustomChatCompletionContentSimpleAudioParam."""
-    audio_url = part.get("audio_url") if isinstance(part, dict) else None
-    return isinstance(audio_url, str)
+    Args:
+        part: A dict containing the content part, with a potential 'type' field.
+
+    Returns:
+        A tuple (part_type, content) where:
+        - part_type: Type of the part (e.g., 'text', 'image_url').
+        - content: Parsed content or an empty string if unsupported.
+
+    Raises:
+        ValueError: If the 'type' field is missing and no direct URL is found.
+    """
+    part_type = part.get("type", None)  # type: ignore
+
+    if part_type in MM_PARSER_MAP:
+        content = MM_PARSER_MAP[part_type](part)  # type: ignore
+
+        # Special case for 'image_url.detail'
+        if part_type == "image_url" and part.get(  # type: ignore
+                "detail") != "auto":
+            logger.warning("'image_url.detail' is currently not supported "
+                           "and will be ignored.")
+
+        return part_type, content  # type: ignore
+
+    # Handle missing 'type' but provided direct URL fields.
+    if part_type is None:
+        for url_type in ["image_url", "audio_url"]:
+            if url_type in part and isinstance(
+                    part[url_type],  # type: ignore
+                    str):
+                return url_type, part[url_type]  # type: ignore
+
+        # Raise an error if no 'type' or direct URL is found.
+        raise ValueError("Missing 'type' field in multimodal part.")
+
+    return part_type, "unknown part_type content"  # type: ignore
 
 
 def _parse_chat_message_content_parts(
@@ -437,40 +476,20 @@ def _parse_chat_message_content_parts(
 
     has_image = False
     for part in parts:
-        if isinstance(part, str):
+        if isinstance(part, str):  # Handle plain text parts
             text = _TextParser(part)
             texts.append(text)
-        elif _is_simple_image_part(part):
-            mm_parser.parse_image(part["image_url"])  # type: ignore
-            has_image = True
-        elif _is_simple_audio_part(part):
-            mm_parser.parse_audio(part["audio_url"])  # type: ignore
-        else:
-            # Process not string, CustomChatCompletionContentSimpleImageParam
-            # CustomChatCompletionContentSimpleAudioParam parts.
-            part_type = part["type"]  # type: ignore
-            if part_type == "text":
-                text = _TextParser(part)["text"]
-                texts.append(text)
-            # This is the logic that distinguish it's a text / image / audio.
+        else:  # Handle structured dictionary parts
+            assert isinstance(part, dict)
+            part_type, content = _parse_chat_message_content_mm_parts(part)
 
+            if part_type in ["text", "refusal"]:
+                texts.append(content)
             elif part_type == "image_url":
-                image_url = _ImageParser(part)["image_url"]
-
-                if image_url.get("detail", "auto") != "auto":
-                    logger.warning(
-                        "'image_url.detail' is currently not supported and "
-                        "will be ignored.")
-
-                mm_parser.parse_image(image_url["url"])
+                mm_parser.parse_image(content)
                 has_image = True
             elif part_type == "audio_url":
-                audio_url = _AudioParser(part)["audio_url"]
-
-                mm_parser.parse_audio(audio_url["url"])
-            elif part_type == "refusal":
-                text = _RefusalParser(part)["refusal"]
-                texts.append(text)
+                mm_parser.parse_audio(content)
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
