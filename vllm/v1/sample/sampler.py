@@ -93,7 +93,8 @@ class Sampler(nn.Module):
             q.exponential_()
         else:
             assert len(generators) == probs.shape[0]
-            # TODO(woosuk): Optimize this.
+            # TODO(woosuk): This can be slow because we handle each request
+            # one by one. Optimize this.
             for i, generator in enumerate(generators):
                 q[i].exponential_(generator=generator)
         return probs.div_(q).argmax(dim=-1).view(-1)
@@ -123,6 +124,7 @@ class Sampler(nn.Module):
         return sampled
 
 
+# This function can be replaced by a custom kernel.
 def _apply_top_k_top_p(
     logits: torch.Tensor,
     no_top_k: bool,
