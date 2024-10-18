@@ -303,7 +303,7 @@ class LlamaDecoderLayer(nn.Module):
 
         pprint(f"RESIDUAL SHAPE = {residual.shape}")
 
-        def slices(residual) -> bool:
+        def slices(residual) -> List[torch.Tensor]:
             if not self.fuse_gemms or not should_slice(residual.shape):
                 pprint(f"SLICES TOO SMALL {[residual.shape]}")
                 return []
