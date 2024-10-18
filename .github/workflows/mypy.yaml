@@ -32,4 +32,5 @@ jobs:
         pip install types-setuptools
     - name: Mypy
       run: |
+        echo "::add-matcher::.github/workflows/matchers/mypy.json"
         tools/mypy.sh
