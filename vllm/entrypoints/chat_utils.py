@@ -442,7 +442,7 @@ def _parse_chat_message_content_parts(
         if mm_placeholder_counts:
             text_prompt = _get_full_multimodal_text_prompt(
                 mm_placeholder_counts, text_prompt)
-        elif has_text and chat_template_text_content_format == "openai":
+        if chat_template_text_content_format == "openai":
             text_prompt = [{'type': 'text', 'text': text_prompt}]
         return [ConversationMessage(role=role, content=text_prompt)]
 
