@@ -290,7 +290,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         assert prompt_text is not None
                         assert prompt_logprobs is not None
                         # echo the prompt and first token
-                        delta_text = prompt_text + output.text
+                        delta_text = prompt_text + output.text # type: ignore
                         delta_token_ids = [
                             *prompt_token_ids, *output.token_ids
                         ]
@@ -432,7 +432,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             *output.logprobs,
                         ]
 
-                    output_text = prompt_text + output.text
+                    output_text = prompt_text + output.text # type: ignore
                 else:
                     token_ids = output.token_ids
                     out_logprobs = output.logprobs
