@@ -80,7 +80,8 @@ class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartRefusalParam,
-    CustomChatCompletionContentPartParam, CustomChatCompletionContentSimpleImageParam,
+    CustomChatCompletionContentPartParam,
+    CustomChatCompletionContentSimpleImageParam,
     CustomChatCompletionContentSimpleAudioParam, str]
 
 
@@ -439,8 +440,8 @@ def _parse_chat_message_content_parts(
         elif _is_simple_audio_part(part):
             mm_parser.parse_audio(part["audio_url"]) # type: ignore
         else:
-            # If part is not string, CustomChatCompletionContentSimpleImageParam
-            # CustomChatCompletionContentSimpleAudioParam, process in the following way.
+            # Process not string, CustomChatCompletionContentSimpleImageParam
+            # CustomChatCompletionContentSimpleAudioParam parts.
             part_type = part["type"] # type: ignore
             if part_type == "text":
                 text = _TextParser(part)["text"]
