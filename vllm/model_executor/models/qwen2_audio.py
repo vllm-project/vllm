@@ -44,7 +44,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
 from vllm.sequence import IntermediateTensors, SequenceData
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsPP
 
 logger = init_logger(__name__)
 
@@ -247,7 +247,8 @@ def input_mapper_for_qwen2_audio(
                                            input_mapper_for_qwen2_audio)
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "audio", get_max_qwen2_audio_audio_tokens)
-class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                         SupportsPP):
 
     def __init__(self,
                  config: Qwen2AudioConfig,
@@ -361,7 +362,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
