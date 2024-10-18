@@ -516,7 +516,10 @@ def parse_chat_messages(
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
-            msg, mm_tracker, model_config.chat_template_content_type)
+            msg,
+            mm_tracker,
+            model_config.chat_template_content_type,
+        )
 
         conversation.extend(sub_messages)
 
@@ -535,7 +538,10 @@ def parse_chat_messages_futures(
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
-            msg, mm_tracker, model_config.chat_template_content_type)
+            msg,
+            mm_tracker,
+            model_config.chat_template_content_type,
+        )
 
         conversation.extend(sub_messages)
 
