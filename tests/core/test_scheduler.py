@@ -1046,7 +1046,7 @@ def test_scheduling_budget():
 def test_prefill_schedule_identical_prompts(use_v2_block_manager: bool,
                                             enable_prefix_caching: bool):
     """
-    Test idential prompts with prefix cache, expect only one is sheduled
+    Test idential prompts with prefix cache, expect only one is scheduled
     """
     block_size = 4
     num_seq_group = 4
