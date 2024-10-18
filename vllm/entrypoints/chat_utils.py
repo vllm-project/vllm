@@ -537,7 +537,7 @@ def parse_chat_messages_futures(
 ) -> Tuple[List[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
     conversation: List[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
-    
+
     for msg in messages:
         sub_messages = _parse_chat_message_content(msg, mm_tracker)
 
