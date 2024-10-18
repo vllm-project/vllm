@@ -97,7 +97,7 @@ def _sgmv_expand_slice_kernel(
     c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (offset_cn[None, :] <
                                                            (slice_offset + N))
     if ADD_INPUTS:
-        tiled_out = tl.load(c_ptr, mask=c_mask)
+        tiled_out = tl.load(c_ptr, mask=c_mask, other=0.0)
         tiled_c += tiled_out
     tl.store(c_ptr, tiled_c, mask=c_mask)
 
