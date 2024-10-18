@@ -34,4 +34,5 @@ jobs:
 
       - name: "Run actionlint"
         run: |
+          echo "::add-matcher::.github/workflows/matchers/actionlint.json"
           tools/actionlint.sh -color
