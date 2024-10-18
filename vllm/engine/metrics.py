@@ -459,6 +459,7 @@ class PrometheusStatLogger(StatLoggerBase):
                         stats.cpu_prefix_cache_hit_rate)
         self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
                         stats.gpu_prefix_cache_hit_rate)
+        # Including max-lora in metric, in future this property of lora config maybe extended to be dynamic.
         lora_info = {
             self.metrics.labelname_running_lora_adapters:
             ",".join(stats.running_lora_adapters),
