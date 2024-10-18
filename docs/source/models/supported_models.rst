@@ -294,6 +294,10 @@ Text Embedding
     - 
     - ✅︎
 
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
 Reward Modeling
 ---------------
 
@@ -433,7 +437,7 @@ Text Generation
   * - :code:`PixtralForConditionalGeneration`
     - Pixtral
     - T + I\ :sup:`+`
-    - :code:`mistralai/Pixtral-12B-2409`
+    - :code:`mistralai/Pixtral-12B-2409`, :code:`mistral-community/pixtral-12b` etc.
     -
     - ✅︎
   * - :code:`QWenLMHeadModel`
@@ -481,6 +485,10 @@ Multimodal Embedding
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
+
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
 
 ----
 

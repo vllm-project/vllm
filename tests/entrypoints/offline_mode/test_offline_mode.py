@@ -5,8 +5,7 @@ import sys
 import pytest
 
 from vllm import LLM
-
-from ...conftest import cleanup
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_CONFIGS = [
     {
@@ -36,7 +35,7 @@ def cache_models():
     # Cache model files first
     for model_config in MODEL_CONFIGS:
         LLM(**model_config)
-        cleanup()
+        cleanup_dist_env_and_memory()
 
     yield
 

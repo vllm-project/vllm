@@ -2,12 +2,12 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 # yapf: disable
-from mistral_common.tokens.tokenizers.mistral import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as PublicMistralTokenizer)
 # yapf: enable
@@ -194,7 +194,7 @@ class MistralTokenizer:
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
 
-        last_message = messages[-1]
+        last_message = cast(Dict[str, Any], messages[-1])
         if last_message["role"] == "assistant":
             last_message["prefix"] = True
 
