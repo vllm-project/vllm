@@ -108,6 +108,10 @@ class AttentionMetadata:
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
 
+    # Number of original input tokens (without any decoding).
+    # Some models (phi3-LongRoPE) need this info to decide model settings
+    num_orig_input_tokens_tensor: Optional[torch.Tensor]
+
     @property
     @abstractmethod
     def prefill_metadata(self) -> Optional["AttentionMetadata"]:
@@ -198,7 +202,8 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
     @abstractmethod
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int) -> T:
+              num_orig_input_tokens_list: List[int], cuda_graph_pad_size: int,
+              batch_size: int) -> T:
         """Build attention metadata with on-device tensors."""
         raise NotImplementedError
 
