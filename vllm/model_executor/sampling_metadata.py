@@ -470,8 +470,9 @@ class SamplingTensors:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
                         prompt_token_ids_array = seq_data.prompt_token_ids_array
-                        if repetition_penalty_range is not None and isinstance(repetition_penalty_range,
-                                                                               int) and repetition_penalty_range > 0:
+                        if (repetition_penalty_range is not None
+                                and isinstance(repetition_penalty_range, int)
+                                and repetition_penalty_range > 0):
                             _range = int(repetition_penalty_range)
                             if len(prompt_token_ids_array) > _range:
                                 prompt_tokens.append(prompt_token_ids_array[-_range:])

@@ -163,7 +163,8 @@ class SamplingParams(
             a first argument.
         sampler_priority: Allows you to customize the order in which
             the different samplers are applied.
-            In the Priority of the sampler. Defaults to _DEFAULT_SAMPLER_PRIORITY.
+            In the Priority of the sampler.
+            Defaults to _DEFAULT_SAMPLER_PRIORITY.
             With this, custom orders like:
             penalties->temperature->top_k top_p->min_p will be applied.
         truncate_prompt_tokens: If set to an integer k, will use only the last k

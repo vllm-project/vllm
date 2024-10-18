@@ -251,14 +251,14 @@ class Sampler(nn.Module):
 
         # use sample order to apply samplers
         for sample_name in sample_order:
-            if sample_name == "penalties":
+            if sample_name == "penalties" and do_penalties:
                 # Apply presence and frequency penalties.
-                if do_penalties:
-                    logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
-                                              sampling_tensors.output_tokens,
-                                              sampling_tensors.presence_penalties,
-                                              sampling_tensors.frequency_penalties,
-                                              sampling_tensors.repetition_penalties)
+                logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                          sampling_tensors.output_tokens,
+                                          sampling_tensors.presence_penalties,
+                                          sampling_tensors.frequency_penalties,
+                                          sampling_tensors.repetition_penalties)
+
             elif sample_name == "temperature":
                 # Use float32 to apply temperature scaling.
                 # Use in-place division to avoid creating a new tensor.
@@ -269,9 +269,8 @@ class Sampler(nn.Module):
                 if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
                     logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                                 sampling_tensors.top_ks)
-            elif sample_name == "min_p":
-                if do_min_p:
-                    logits = _apply_min_p(logits, sampling_tensors.min_ps)
+            elif sample_name == "min_p" and do_min_p:
+                logits = _apply_min_p(logits, sampling_tensors.min_ps)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
