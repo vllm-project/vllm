@@ -157,7 +157,7 @@ vLLM will use guided decoding to ensure the response matches the tool parameter 
 To enable this feature, you should set the following flags:
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
 deems appropriate.
-* `--tool-call-parser` -- select the tool parser to use - currently either `hermes` or `mistral` or `llama3_json` or `internlm`. Additional tool parsers 
+* `--tool-call-parser` -- select the tool parser to use (listed below). Additional tool parsers 
 will continue to be added in the future, and also can register your own tool parsers in the `--tool-parser-plugin`.
 * `--tool-parser-plugin` -- **optional** tool parser plugin used to register user defined tool parsers into vllm, the registered tool parser name can be specified in `--tool-call-parser`.
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
@@ -168,7 +168,7 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template! 
 
-#### Hermes Models
+#### Hermes Models (`hermes`)
 All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
 * `NousResearch/Hermes-2-Pro-*`
 * `NousResearch/Hermes-2-Theta-*`
@@ -180,7 +180,7 @@ step in their creation_.
 
 Flags: `--tool-call-parser hermes`
 
-#### Mistral Models
+#### Mistral Models (`mistral`)
 Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
 * Additional mistral function-calling models are compatible as well.
@@ -199,7 +199,7 @@ when tools are provided, that results in much better reliability when working wi
 
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
-#### Llama Models
+#### Llama Models (`llama3_json`)
 Supported models:
 * `meta-llama/Meta-Llama-3.1-8B-Instruct`
 * `meta-llama/Meta-Llama-3.1-70B-Instruct`
@@ -219,17 +219,17 @@ it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
 
-#### InternLM Models
+#### InternLM Models (`internlm`)
 Supported models:
 * `internlm/internlm2_5-7b-chat` (confirmed)
 * Additional internlm2.5 function-calling models are compatible as well
 
 Known issues:
-* Although this implementation also supports Internlm2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
+* Although this implementation also supports InternLM2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
 
-#### Jamba Models
+#### Jamba Models (`jamba`)
 AI21's Jamba-1.5 models are supported.
 * `ai21labs/AI21-Jamba-1.5-Mini`
 * `ai21labs/AI21-Jamba-1.5-Large`
