@@ -35,8 +35,8 @@ class Metrics:
     details on limitations.
     """
     labelname_finish_reason = "finished_reason"
-    labelname_waiting_adapters = "waiting_adapters"
-    labelname_running_adapters = "running_adapters"
+    labelname_waiting_lora_adapters = "waiting_lora_adapters"
+    labelname_running_lora_adapters = "running_lora_adapters"
     labelname_max_lora = "max_lora"
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
@@ -62,9 +62,9 @@ class Metrics:
             name="vllm:lora_requests_info",
             documentation="Running stats on lora requests waiting and under process.",
             labelnames=[
-                self.labelname_running_adapters,
+                self.labelname_running_lora_adapters,
                 self.labelname_max_lora, 
-                self.labelname_waiting_adapters],
+                self.labelname_waiting_lora_adapters],
             multiprocess_mode="livemostrecent"
         )
         self.gauge_scheduler_swapped = self._gauge_cls(
@@ -458,8 +458,8 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
                         stats.gpu_prefix_cache_hit_rate)
         lora_info = {
-            self.metrics.labelname_running_adapters: ','.join(stats.running_adapters),
-            self.metrics.labelname_waiting_adapters: ','.join(stats.waiting_adapters),
+            self.metrics.labelname_running_lora_adapters: ','.join(stats.running_lora_adapters),
+            self.metrics.labelname_waiting_lora_adapters: ','.join(stats.waiting_lora_adapters),
             self.metrics.labelname_max_lora: stats.max_lora,
             }
         self._log_gauge_string(self.metrics.gauge_lora_info, lora_info)

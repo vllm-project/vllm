@@ -1618,13 +1618,13 @@ class LLMEngine:
         finished_reason_requests: List[str] = []
         
         # Lora requests
-        running_adapters = dict(collectionsCounter([
+        running_lora_adapters = dict(collectionsCounter([
             running_request.lora_request.lora_name
             for scheduler in self.scheduler
             for running_request in scheduler.running
             if running_request.lora_request
             ]))
-        waiting_adapters = dict(collectionsCounter([
+        waiting_lora_adapters = dict(collectionsCounter([
             waiting_request.lora_request.lora_name
             for scheduler in self.scheduler
             for waiting_request in scheduler.waiting
@@ -1756,8 +1756,8 @@ class LLMEngine:
             n_requests=n_requests,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
-            waiting_adapters=list(waiting_adapters.keys()),
-            running_adapters=list(running_adapters.keys())
+            waiting_lora_adapters=list(waiting_lora_adapters.keys()),
+            running_lora_adapters=list(running_lora_adapters.keys())
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
