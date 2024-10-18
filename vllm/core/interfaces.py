@@ -88,6 +88,10 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
+    def exist(self, seq: Sequence) -> bool:
+        pass
+
+    @abstractmethod
     def free(self, seq: Sequence) -> None:
         pass
 

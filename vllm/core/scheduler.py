@@ -342,7 +342,6 @@ class Scheduler:
         self.waiting: Deque[SequenceGroup] = deque()
         # Sequence groups in the RUNNING state.
         # Contain decode requests.
-        self.waiting_dupe: Deque[SequenceGroup] = deque()
         self.running: Deque[SequenceGroup] = deque()
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
@@ -843,16 +842,41 @@ class Scheduler:
         self.running = running_queue
         return force_preemption_count
     
-    def _do_schedule_prefills(
+    def _schedule_prefills(
         self,
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
-        enable_chunking: bool,
-        ignored_seq_groups: List[SequenceGroup],
-        seq_groups: List[ScheduledSequenceGroup],
-        waiting_queue: Deque[SequenceGroup],
-        leftover_waiting_sequences: Deque[SequenceGroup] = None):
-        
+        enable_chunking: bool = False,
+    ) -> SchedulerPrefillOutputs:
+        """Schedule sequence groups that are in prefill stage.
+
+        Note that the current scheduler treats PREEMPTED_FOR_RECOMPUTE
+        as a new prefill (that starts from beginning -> most recently generated
+        tokens).
+
+        It schedules waiting requests as long as it fits `budget` and
+        curr_loras <= max_lora from the scheduling config. The input arguments
+        `budget` and `curr_loras` are updated based on scheduled seq_groups.
+
+        Args:
+            budget: The scheduling budget. The argument is in-place updated
+                when any requests are scheduled.
+            curr_loras: Currently batched lora request ids. The argument is
+                in-place updated when any requests are scheduled.
+            enable_chunking: If True, seq group can be chunked and only a
+                chunked number of tokens are scheduled  if
+                `budget.num_batched_tokens` has not enough capacity to schedule
+                all tokens.
+
+        Returns:
+            SchedulerPrefillOutputs.
+        """
+        ignored_seq_groups: List[SequenceGroup] = []
+        seq_groups: List[ScheduledSequenceGroup] = []
+
+        waiting_queue = self.waiting
+
+        leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
 
@@ -919,11 +943,13 @@ class Scheduler:
                                                num_new_seqs=num_new_seqs)):
                 break
 
+            waiting_queue.popleft()
+            if not self._allocate_and_set_running(seq_group):
+                leftover_waiting_sequences.appendleft(seq_group)
+                continue
             # Can schedule this request.
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
-            waiting_queue.popleft()
-            self._allocate_and_set_running(seq_group)
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
@@ -948,62 +974,10 @@ class Scheduler:
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
-        if leftover_waiting_sequences:
-            # Queue requests that couldn't be scheduled.
-            waiting_queue.extendleft(leftover_waiting_sequences)
-            if len(seq_groups) > 0:
-                self.prev_prompt = True
-
-    def _schedule_prefills(
-        self,
-        budget: SchedulingBudget,
-        curr_loras: Optional[Set[int]],
-        enable_chunking: bool = False,
-    ) -> SchedulerPrefillOutputs:
-        """Schedule sequence groups that are in prefill stage.
-
-        Note that the current scheduler treats PREEMPTED_FOR_RECOMPUTE
-        as a new prefill (that starts from beginning -> most recently generated
-        tokens).
-
-        It schedules waiting requests as long as it fits `budget` and
-        curr_loras <= max_lora from the scheduling config. The input arguments
-        `budget` and `curr_loras` are updated based on scheduled seq_groups.
-
-        Args:
-            budget: The scheduling budget. The argument is in-place updated
-                when any requests are scheduled.
-            curr_loras: Currently batched lora request ids. The argument is
-                in-place updated when any requests are scheduled.
-            enable_chunking: If True, seq group can be chunked and only a
-                chunked number of tokens are scheduled  if
-                `budget.num_batched_tokens` has not enough capacity to schedule
-                all tokens.
-
-        Returns:
-            SchedulerPrefillOutputs.
-        """
-        ignored_seq_groups: List[SequenceGroup] = []
-        seq_groups: List[ScheduledSequenceGroup] = []
-        leftover_waiting_sequences: Deque[SequenceGroup] = deque()
-
-
-        self._do_schedule_prefills(
-            budget=budget,
-            curr_loras=curr_loras,
-            enable_chunking=enable_chunking,
-            ignored_seq_groups=ignored_seq_groups,
-            seq_groups=seq_groups,
-            waiting_queue=self.waiting_dupe)
-    
-        self._do_schedule_prefills(
-            budget=budget,
-            curr_loras=curr_loras,
-            enable_chunking=enable_chunking,
-            ignored_seq_groups=ignored_seq_groups,
-            seq_groups=seq_groups,
-            waiting_queue=self.waiting,
-            leftover_waiting_sequences=leftover_waiting_sequences)
+        # Queue requests that couldn't be scheduled.
+        waiting_queue.extendleft(leftover_waiting_sequences)
+        if len(seq_groups) > 0:
+            self.prev_prompt = True
 
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
@@ -1438,13 +1412,13 @@ class Scheduler:
 
             self._async_stopped.clear()
 
-    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
+    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> bool:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             if not self.block_manager.exist(seq):
-                self.waiting_dupe.append(seq_group)
-                return
+                return False
             seq.status = SequenceStatus.RUNNING
+        return True
 
     def _append_slots(self,
                       seq_group: SequenceGroup,
