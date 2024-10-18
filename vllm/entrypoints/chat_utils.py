@@ -402,13 +402,11 @@ def _parse_chat_message_content_parts(
             MODEL_KEEP_MULTI_MODAL_CONTENT
 
     has_image = False
-    has_text = False
     for part in parts:
         part_type = part["type"]
         if part_type == "text":
             text = _TextParser(part)["text"]
             texts.append(text)
-            has_text = True
         elif part_type == "image_url":
             image_url = _ImageParser(part)["image_url"]
 
