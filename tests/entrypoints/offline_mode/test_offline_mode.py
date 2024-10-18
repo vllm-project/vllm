@@ -1,7 +1,6 @@
 """Tests for HF_HUB_OFFLINE mode"""
 import importlib
 import sys
-import weakref
 
 import pytest
 
@@ -37,7 +36,7 @@ def cache_models():
     # Cache model files first
     for model_config in MODEL_CONFIGS:
         LLM(**model_config)
- 
+
     cleanup()
 
     yield
