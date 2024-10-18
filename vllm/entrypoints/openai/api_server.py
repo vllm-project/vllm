@@ -27,6 +27,8 @@ from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
+from vllm.engine.disagg_prefill.client import PDMQLLMEngineClient
+from vllm.engine.disagg_prefill.engine import run_pd_mp_engine
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launcher import serve_http
@@ -69,6 +71,7 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
+IS_DISAGG_PREFILL_DECODE = envs.VLLM_DISTRIBUTED_KV_ROLE in ["consumer", "producer"]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -170,8 +173,17 @@ async def build_async_engine_client_from_engine_args(
         # the current process might have CUDA context,
         # so we need to spawn a new process
         context = multiprocessing.get_context("spawn")
-
-        engine_process = context.Process(target=run_mp_engine,
+        engine_process = None
+        if IS_DISAGG_PREFILL_DECODE:
+            # TODO: remove hard code
+            engine_process = context.Process(target=run_pd_mp_engine,
+                                         args=(engine_args,
+                                               UsageContext.OPENAI_API_SERVER,
+                                               ipc_path,
+                                               "localhost",
+                                               5672))
+        else:
+            engine_process = context.Process(target=run_mp_engine,
                                          args=(engine_args,
                                                UsageContext.OPENAI_API_SERVER,
                                                ipc_path))
@@ -182,7 +194,12 @@ async def build_async_engine_client_from_engine_args(
         # NOTE: Actually, this is not true yet. We still need to support
         # embedding models via RPC (see TODO above)
         engine_config = engine_args.create_engine_config()
-        mp_engine_client = MQLLMEngineClient(ipc_path, engine_config)
+        mp_engine_client = None
+        if IS_DISAGG_PREFILL_DECODE:
+            # TODO: remove hard code
+            mp_engine_client = PDMQLLMEngineClient(ipc_path, engine_config, "localhost", 5672)
+        else:
+            mp_engine_client = MQLLMEngineClient(ipc_path, engine_config)
 
         try:
             while True:
