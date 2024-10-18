@@ -10,7 +10,6 @@ from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
@@ -21,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest, LLMGuidedOptions)
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import EmbeddingRequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -31,7 +30,13 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs, is_list_of
-from vllm.v1.outputs import RequestOutput as RequestOutputV1
+
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.llm_engine import LLMEngine
+    from vllm.v1.outputs import RequestOutput
+else:
+    from vllm.engine.llm_engine import LLMEngine
+    from vllm.outputs import RequestOutput
 
 logger = init_logger(__name__)
 
@@ -176,13 +181,8 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             **kwargs,
         )
-        if envs.VLLM_USE_V1:
-            from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
-            self.llm_engine = LLMEngineV1.from_engine_args(
-                engine_args, usage_context=UsageContext.LLM_CLASS)
-        else:
-            self.llm_engine = LLMEngine.from_engine_args(
-                engine_args, usage_context=UsageContext.LLM_CLASS)
+        self.llm_engine = LLMEngine.from_engine_args(
+            engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
     def get_tokenizer(self) -> AnyTokenizer:
@@ -880,7 +880,7 @@ class LLM:
             )
 
         # Run the engine.
-        outputs: List[Union[RequestOutput, RequestOutputV1,
+        outputs: List[Union[RequestOutput,
                             EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
@@ -890,8 +890,7 @@ class LLM:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
-                        if isinstance(output,
-                                      (RequestOutput, RequestOutputV1)):
+                        if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
                             assert output.prompt_token_ids is not None
                             total_in_toks += len(output.prompt_token_ids)
