@@ -13,7 +13,7 @@ MODEL_CONFIGS = [
     {
         "model": "facebook/opt-125m",
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.10,
+        "gpu_memory_utilization": 0.20,
         "max_num_batched_tokens": 4096,
         "tensor_parallel_size": 1,
     },

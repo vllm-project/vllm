@@ -4,7 +4,6 @@ from typing import List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
-from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
@@ -93,7 +92,7 @@ class RequestOutput:
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[PromptType],
+        prompt: Optional[str],
         prompt_token_ids: Optional[List[int]],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
