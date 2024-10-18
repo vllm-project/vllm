@@ -6,8 +6,7 @@ import weakref
 import pytest
 
 from vllm import LLM
-
-from ...conftest import cleanup
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "facebook/opt-125m"
 
@@ -27,7 +26,7 @@ def llm():
 
         del llm
 
-    cleanup()
+    cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skip_global_cleanup

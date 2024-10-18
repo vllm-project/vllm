@@ -4,10 +4,10 @@ from typing import List, Optional, Sequence, Tuple, Union
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import PromptLogprobs, SampleLogprobs
 
-from ...conftest import cleanup
 from ...models.utils import (TokensTextLogprobs,
                              TokensTextLogprobsPromptLogprobs,
                              check_logprobs_close, check_outputs_equal)
@@ -44,7 +44,7 @@ def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
         yield llm
 
         del llm
-        cleanup()
+        cleanup_dist_env_and_memory()
 
     return generate
 

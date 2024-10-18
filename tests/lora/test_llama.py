@@ -4,9 +4,8 @@ import pytest
 import ray
 
 import vllm
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
-
-from .conftest import cleanup
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
@@ -93,7 +92,7 @@ def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
     output_tp1 = do_sample(llm_tp1, sql_lora_files, lora_id=1)
 
     del llm_tp1
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     llm_tp2 = vllm.LLM(MODEL_PATH,
                        enable_lora=True,
@@ -103,7 +102,7 @@ def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
     output_tp2 = do_sample(llm_tp2, sql_lora_files, lora_id=1)
 
     del llm_tp2
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     assert output_tp1 == output_tp2
 
@@ -115,7 +114,7 @@ def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
     output_tp4 = do_sample(llm_tp4, sql_lora_files, lora_id=1)
 
     del llm_tp4
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     assert output_tp1 == output_tp4
 
