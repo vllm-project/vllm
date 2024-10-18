@@ -53,12 +53,12 @@ class Detokenizer(multiprocessing.Process):
     def __init__(
         self,
         tokenizer_name: str,
-        port1: int,
-        port2: int,
+        pull_port: int,
+        push_port: int,
     ):
         super().__init__()
-        self.port1 = port1
-        self.port2 = port2
+        self.pull_port = pull_port
+        self.push_port = push_port
         self.msgpack_encoder = msgpack.Encoder()
         self.msgpack_decoder = msgpack.Decoder(DetokenizerInputs)
 
@@ -68,9 +68,9 @@ class Detokenizer(multiprocessing.Process):
     def run(self):
         self.zmq_context = zmq.Context()
         self.pull_socket = self.zmq_context.socket(zmq.PULL)
-        self.pull_socket.bind(f"tcp://*:{self.port1}")
+        self.pull_socket.bind(f"tcp://*:{self.pull_port}")
         self.push_socket = self.zmq_context.socket(zmq.PUSH)
-        self.push_socket.bind(f"tcp://*:{self.port2}")
+        self.push_socket.bind(f"tcp://*:{self.push_port}")
 
         while True:
             message = self.pull_socket.recv()

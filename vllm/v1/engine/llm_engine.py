@@ -136,16 +136,16 @@ class LLMEngine:
         # Detokenizer
         # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
         # For example, it does not terminate properly. We need to improve this.
-        self.port1 = get_open_port()
-        self.port2 = get_open_port()
-        self.detokenizer = Detokenizer(self.model_config.tokenizer, self.port1,
-                                       self.port2)
+        self.push_port = get_open_port()
+        self.pull_port = get_open_port()
+        self.detokenizer = Detokenizer(self.model_config.tokenizer,
+                                       self.push_port, self.pull_port)
         self.detokenizer.start()
         self.zmq_context = zmq.Context()
         self.push_socket = self.zmq_context.socket(zmq.PUSH)
-        self.push_socket.connect(f"tcp://localhost:{self.port1}")
+        self.push_socket.connect(f"tcp://localhost:{self.push_port}")
         self.pull_socket = self.zmq_context.socket(zmq.PULL)
-        self.pull_socket.connect(f"tcp://localhost:{self.port2}")
+        self.pull_socket.connect(f"tcp://localhost:{self.pull_port}")
         self.poller = zmq.Poller()
         self.poller.register(self.pull_socket, zmq.POLLIN)
         self.msgpack_encoder = msgpack.Encoder()
