@@ -133,23 +133,12 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
         messages=messages,
         n=2,
         max_tokens=10,
+        logprobs=True,
+        top_logprobs=5,
         extra_body=dict(use_beam_search=True))
     assert len(chat_completion.choices) == 2
     assert chat_completion.choices[
         0].message.content != chat_completion.choices[1].message.content
-
-    with pytest.raises(openai.BadRequestError) as exc_info:
-        await client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            n=2,
-            max_tokens=10,
-            logprobs=True,
-            top_logprobs=5,
-            extra_body=dict(use_beam_search=True))
-
-    # Assert that the exception message is correct
-    assert "Only the `cumulative_logprob` " in str(exc_info.value)
 
 
 @pytest.mark.asyncio
