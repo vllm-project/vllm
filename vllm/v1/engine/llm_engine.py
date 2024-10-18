@@ -49,10 +49,13 @@ class LLMEngine:
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
         log_stats: bool,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
     ) -> None:
+        # Override the configs for V1.
+        scheduler_config.max_num_seqs = max(scheduler_config.max_num_seqs, 1024)
+        scheduler_config.max_num_batched_tokens = max(
+            scheduler_config.max_num_batched_tokens, 4096)
+
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "

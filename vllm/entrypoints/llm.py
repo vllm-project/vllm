@@ -6,6 +6,7 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
 
 from tqdm import tqdm
 
+from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.engine.arg_utils import EngineArgs
@@ -30,7 +31,6 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs, is_list_of
-from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 from vllm.v1.outputs import RequestOutput as RequestOutputV1
 
 logger = init_logger(__name__)
@@ -176,13 +176,12 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             **kwargs,
         )
-        # FIXME:
-        engine_args.max_num_seqs = max(engine_args.max_num_seqs, 2048)
-        engine_args.enable_chunked_prefill = False
-        self.llm_engine = LLMEngineV1.from_engine_args(
-            engine_args, usage_context=UsageContext.LLM_CLASS)
-        # self.llm_engine = LLMEngine.from_engine_args(
-        #     engine_args, usage_context=UsageContext.LLM_CLASS)
+        if envs.VLLM_USE_V1:
+            from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
+            self.llm_engine = LLMEngineV1.from_engine_args(engine_args)
+        else:
+            self.llm_engine = LLMEngine.from_engine_args(
+                engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
     def get_tokenizer(self) -> AnyTokenizer:
