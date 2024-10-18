@@ -52,8 +52,7 @@ print("-" * 80)
 del regular_llm
 cleanup_dist_env_and_memory()
 
-# The second LLM needs to request a higher gpu_memory_utilization because
-# the first LLM has already allocated a full 30% of the gpu memory.
+# Create an LLM with prefix caching enabled.
 prefix_cached_llm = LLM(model="facebook/opt-125m",
                         enable_prefix_caching=True,
                         gpu_memory_utilization=0.4)
