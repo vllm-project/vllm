@@ -57,7 +57,8 @@ def test_auto_gptq(model_arg_exptype: Tuple[str, None, str]) -> None:
 
     try:
         model_config = ModelConfig(model_path,
-                                   model_path,
+                                   task="auto",
+                                   tokenizer=model_path,
                                    tokenizer_mode="auto",
                                    trust_remote_code=False,
                                    seed=0,

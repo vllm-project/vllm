@@ -25,7 +25,7 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TokenizerPoolConfig
+from vllm.config import TaskOption, TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel,
@@ -619,6 +619,7 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
+        task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
@@ -634,6 +635,7 @@ class VllmRunner:
     ) -> None:
         self.model = LLM(
             model=model_name,
+            task=task,
             tokenizer=tokenizer_name,
             trust_remote_code=True,
             dtype=dtype,

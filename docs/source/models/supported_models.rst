@@ -294,6 +294,10 @@ Text Embedding
     - 
     - ✅︎
 
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embed` to run the model in embedding mode.
+
 Reward Modeling
 ---------------
 
@@ -481,6 +485,10 @@ Multimodal Embedding
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
+
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embed` to run the model in embedding mode.
 
 ----
 

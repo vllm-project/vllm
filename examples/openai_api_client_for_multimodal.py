@@ -7,8 +7,8 @@ Launch the vLLM server with the following command:
 vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
 
 (multi-image inference with Phi-3.5-vision-instruct)
-vllm serve microsoft/Phi-3.5-vision-instruct --max-model-len 4096 \
-    --trust-remote-code --limit-mm-per-prompt image=2
+vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
+    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt image=2
 
 (audio inference with Ultravox)
 vllm serve fixie-ai/ultravox-v0_3 --max-model-len 4096

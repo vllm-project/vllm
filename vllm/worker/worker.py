@@ -92,7 +92,7 @@ class Worker(LocalOrDistributedWorkerBase):
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:
             ModelRunnerClass = model_runner_cls
-        elif self._is_embedding_model():
+        elif model_config.task == "embed":
             ModelRunnerClass = EmbeddingModelRunner
         elif self._is_encoder_decoder_model():
             ModelRunnerClass = EncoderDecoderModelRunner
@@ -146,9 +146,6 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _is_encoder_decoder_model(self):
         return self.model_config.is_encoder_decoder_model
-
-    def _is_embedding_model(self):
-        return self.model_config.is_embedding_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":

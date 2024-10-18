@@ -23,6 +23,8 @@ TEST_IMAGE_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
+        "--task",
+        "generate",
         "--dtype",
         "bfloat16",
         "--max-model-len",
