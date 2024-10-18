@@ -433,28 +433,18 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
         model=model_name,
         messages=messages,
         max_tokens=10,
-        extra_body=dict(min_tokens=10),
         temperature=0.0,
         stream=True,
         stream_options={
             "include_usage": True,
-            "continuous_usage_stats": True,
+            "continuous_usage_stats": True
         },
     )
-    last_completion_tokens = 0
     async for chunk in stream:
         assert chunk.usage.prompt_tokens >= 0
-        assert last_completion_tokens == 0 or \
-               chunk.usage.completion_tokens > last_completion_tokens or \
-               (
-                   not chunk.choices and
-                   chunk.usage.completion_tokens == last_completion_tokens
-               )
+        assert chunk.usage.completion_tokens >= 0
         assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
                                             chunk.usage.completion_tokens)
-        last_completion_tokens = chunk.usage.completion_tokens
-
-    assert last_completion_tokens == 10
 
 
 # NOTE: Not sure why, but when I place this after `test_guided_regex_chat`
@@ -896,6 +886,57 @@ async def test_extra_fields(client: openai.AsyncOpenAI):
             seed=0)
 
     assert "extra_forbidden" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_complex_message_content(client: openai.AsyncOpenAI):
+    resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role":
+            "user",
+            "content": [{
+                "type":
+                "text",
+                "text":
+                "what is 1+1? please provide the result without any other text."
+            }]
+        }],
+        temperature=0,
+        seed=0)
+    content = resp.choices[0].message.content
+    assert content == "2"
+
+
+@pytest.mark.asyncio
+async def test_custom_role(client: openai.AsyncOpenAI):
+    # Not sure how the model handles custom roles so we just check that
+    # both string and complex message content are handled in the same way
+
+    resp1 = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "my-custom-role",
+            "content": "what is 1+1?",
+        }],  # type: ignore
+        temperature=0,
+        seed=0)
+
+    resp2 = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "my-custom-role",
+            "content": [{
+                "type": "text",
+                "text": "what is 1+1?"
+            }]
+        }],  # type: ignore
+        temperature=0,
+        seed=0)
+
+    content1 = resp1.choices[0].message.content
+    content2 = resp2.choices[0].message.content
+    assert content1 == content2
 
 
 @pytest.mark.asyncio

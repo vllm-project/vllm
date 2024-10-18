@@ -392,7 +392,7 @@ def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
-    keep_content_structure: bool,
+    chat_template_content_type: str,
 ) -> List[ConversationMessage]:
     texts: List[str] = []
 
@@ -442,7 +442,7 @@ def _parse_chat_message_content_parts(
         if mm_placeholder_counts:
             text_prompt = _get_full_multimodal_text_prompt(
                 mm_placeholder_counts, text_prompt)
-        elif has_text and keep_content_structure:
+        elif has_text and chat_template_content_type == "openai":
             text_prompt = [{'type': 'text', 'text': text_prompt}]
         return [ConversationMessage(role=role, content=text_prompt)]
 
@@ -455,24 +455,23 @@ _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
+    chat_template_content_type: str,
 ) -> List[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
 
-    keep_content_structure = True
     if content is None:
         content = []
     elif isinstance(content, str):
         content = [
             ChatCompletionContentPartTextParam(type="text", text=content)
         ]
-        keep_content_structure = False
 
     result = _parse_chat_message_content_parts(
         role,
         content,  # type: ignore
         mm_tracker,
-        keep_content_structure,
+        chat_template_content_type,
     )
 
     for result_msg in result:

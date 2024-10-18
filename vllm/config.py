@@ -110,6 +110,7 @@ class ModelConfig:
                  model: str,
                  tokenizer: str,
                  tokenizer_mode: str,
+                 chat_template_content_type: str,
                  trust_remote_code: bool,
                  dtype: Union[str, torch.dtype],
                  seed: int,
@@ -137,6 +138,7 @@ class ModelConfig:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
+        self.chat_template_content_type = chat_template_content_type
         self.trust_remote_code = trust_remote_code
         self.seed = seed
         self.revision = revision
