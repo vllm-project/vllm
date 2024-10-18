@@ -4,7 +4,7 @@ import numpy as np
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm_v1.request import Request
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 

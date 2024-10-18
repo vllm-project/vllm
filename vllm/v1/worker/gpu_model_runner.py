@@ -17,14 +17,14 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available)
-from vllm_v1.attention.backends.flash_attn import (FlashAttentionBackend,
+from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm_v1.outputs import ModelRunnerOutput
-from vllm_v1.sample.metadata import SamplingMetadata
-from vllm_v1.sample.sampler import Sampler
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import Sampler
 
 if TYPE_CHECKING:
-    from vllm_v1.core.scheduler import SchedulerOutput
+    from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
 

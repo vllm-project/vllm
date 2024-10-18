@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Union
 
 import torch
 
-from vllm_v1.request import Request
+from vllm.v1.request import Request
 
 
 @dataclass

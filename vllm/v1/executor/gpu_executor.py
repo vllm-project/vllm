@@ -8,8 +8,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
-from vllm_v1.outputs import ModelRunnerOutput
-from vllm_v1.worker.gpu_worker import Worker
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 

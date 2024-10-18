@@ -113,7 +113,7 @@ def get_attn_backend(
             FlashAttentionBackend)
         return FlashAttentionBackend
     if backend == _Backend.FLASH_ATTN_NEW:
-        from vllm_v1.attention.backends.flash_attn import (  # noqa: F401
+        from vllm.v1.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend as FlashAttentionBackendNew)
         return FlashAttentionBackendNew
     if backend == _Backend.XFORMERS:

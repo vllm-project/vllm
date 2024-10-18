@@ -4,8 +4,8 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
-from vllm_v1.outputs import SamplerOutput
-from vllm_v1.sample.metadata import SamplingMetadata
+from vllm.v1.outputs import SamplerOutput
+from vllm.v1.sample.metadata import SamplingMetadata
 
 _SAMPLING_EPS = 1e-5
 

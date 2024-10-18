@@ -30,8 +30,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs, is_list_of
-from vllm_v1.engine.llm_engine import LLMEngine as LLMEngineV1
-from vllm_v1.outputs import RequestOutput as RequestOutputV1
+from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
+from vllm.v1.outputs import RequestOutput as RequestOutputV1
 
 logger = init_logger(__name__)
 

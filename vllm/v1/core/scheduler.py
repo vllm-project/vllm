@@ -6,9 +6,9 @@ from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import SamplingParams
-from vllm_v1.core.kv_cache_manager import KVCacheManager
-from vllm_v1.outputs import ModelRunnerOutput
-from vllm_v1.request import Request, RequestStatus
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 

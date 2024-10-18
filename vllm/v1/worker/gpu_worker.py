@@ -17,13 +17,13 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
-from vllm_v1.outputs import ModelRunnerOutput
-from vllm_v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm_v1.core.scheduler import SchedulerOutput
+    from vllm.v1.core.scheduler import SchedulerOutput
 
 
 class Worker:
