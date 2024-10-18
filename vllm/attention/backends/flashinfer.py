@@ -17,6 +17,7 @@ except ImportError:
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
@@ -124,7 +125,8 @@ class FlashInferState(AttentionState):
                 self.runner.parallel_config))
             num_kv_heads = self.runner.model_config.get_num_kv_heads(
                 self.runner.parallel_config)
-            use_tensor_cores = num_qo_heads // num_kv_heads > 4
+            use_tensor_cores = (num_qo_heads // num_kv_heads >
+                                4) or envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
                 "NHD",
@@ -183,7 +185,8 @@ class FlashInferState(AttentionState):
             self.runner.parallel_config))
         num_kv_heads = self.runner.model_config.get_num_kv_heads(
             self.runner.parallel_config)
-        use_tensor_cores = num_qo_heads // num_kv_heads > 4
+        use_tensor_cores = (num_qo_heads // num_kv_heads >
+                            4) or envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES
         self._graph_decode_wrapper = \
             CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
             self._graph_decode_workspace_buffer, _indptr_buffer,
