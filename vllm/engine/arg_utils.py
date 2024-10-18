@@ -86,7 +86,7 @@ class EngineArgs:
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
-    chat_template_content_type: str = "string"
+    chat_template_text_content_format: str ='string'
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
@@ -242,7 +242,7 @@ class EngineArgs:
         parser.add_argument(
             '--chat-template-text-content-format',
             type=str,
-            default='string',
+            default=EngineArgs.chat_template_text_content_format,
             choices=['string', 'openai'],
             help='The content to choose with chat template. "string" will '
             'keep the content field as just a string whereas "openai" '
@@ -850,7 +850,7 @@ class EngineArgs:
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
             tokenizer_mode=self.tokenizer_mode,
-            chat_template_content_type=self.chat_template_content_type,
+            chat_template_text_content_format=self.chat_template_text_content_format,
             trust_remote_code=self.trust_remote_code,
             dtype=self.dtype,
             seed=self.seed,
