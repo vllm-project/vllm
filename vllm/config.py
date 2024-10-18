@@ -261,23 +261,23 @@ class ModelConfig:
         architectures = getattr(hf_config, "architectures", [])
 
         task_support: Dict[Task, bool] = {
-            # NOTE: They are listed from highest to lowest priority, in case
-            # the model supports multiple of them
+            # NOTE: Listed from highest to lowest priority,
+            # in case the model supports multiple of them
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "embedding": ModelRegistry.is_embedding_model(architectures),
         }
-        supported_tasks: Set[Task] = {
-            task
-            for task, is_supported in task_support.items() if is_supported
-        }
+        supported_tasks_lst: List[Task] = [
+            task for task, is_supported in task_support.items() if is_supported
+        ]
+        supported_tasks = set(supported_tasks_lst)
 
         if task_option == "auto":
-            task = next(iter(supported_tasks))
+            selected_task = next(iter(supported_tasks_lst))
 
             if len(supported_tasks) > 1:
                 logger.info(
                     "This model supports multiple tasks: %s. "
-                    "Defaulting to '%s'.", supported_tasks, task)
+                    "Defaulting to '%s'.", supported_tasks, selected_task)
         else:
             if task_option not in supported_tasks:
                 msg = (
@@ -285,9 +285,9 @@ class ModelConfig:
                     f"Supported tasks: {supported_tasks}")
                 raise ValueError(msg)
 
-            task = task_option
+            selected_task = task_option
 
-        return supported_tasks, task
+        return supported_tasks, selected_task
 
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)

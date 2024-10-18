@@ -341,7 +341,7 @@ class LLM:
 
             supported_tasks = self.llm_engine.model_config.supported_tasks
             if "generate" in supported_tasks:
-                messages += (
+                messages.append(
                     "Your model supports the 'generate' task, but is "
                     f"currently initialized for the '{task}' task. Please "
                     "initialize the model using `--task generate`.")
@@ -724,7 +724,7 @@ class LLM:
 
             supported_tasks = self.llm_engine.model_config.supported_tasks
             if "embedding" in supported_tasks:
-                messages += (
+                messages.append(
                     "Your model supports the 'embedding' task, but is "
                     f"currently initialized for the '{task}' task. Please "
                     "initialize the model using `--task embedding`.")
