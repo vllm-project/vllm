@@ -29,11 +29,13 @@ generating_prompts = [prefix + prompt for prompt in prompts]
 sampling_params = SamplingParams(temperature=0.0)
 
 # Create an LLM.
-regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.4)
+regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.3)
 
+# The second LLM needs to request a higher gpu_memory_utilization because
+# the first LLM has already allocated a full 30% of the gpu memory.
 prefix_cached_llm = LLM(model="facebook/opt-125m",
                         enable_prefix_caching=True,
-                        gpu_memory_utilization=0.4)
+                        gpu_memory_utilization=0.6)
 print("Results without `enable_prefix_caching`")
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
