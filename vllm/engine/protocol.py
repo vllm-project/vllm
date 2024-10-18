@@ -174,7 +174,7 @@ class EngineClient(ABC):
                                  cumulative_logprob=beam.cum_logprob,
                                  token_ids=beam.tokens[tokenized_length:],
                                  index=i,
-                                 logprobs=beam.cum_logprob,
+                                 logprobs=beam.logprobs,
                                  finish_reason=beam.finish_reason if
                                  beam.finish_reason is not None else "length",
                                  stop_reason=beam.stop_reason)
