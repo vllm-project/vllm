@@ -2,6 +2,10 @@
 
 CI=${1:-0}
 
+if [ $CI -eq 1 ]; then
+    set -e
+fi
+
 run_mypy() {
     echo "Running mypy on $1"
     if [ $CI -eq 1 ] && [ -z "$1" ]; then
