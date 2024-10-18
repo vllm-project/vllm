@@ -39,7 +39,7 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "flashinfer"
+        return "FLASHINFER"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashInferImpl"]:
