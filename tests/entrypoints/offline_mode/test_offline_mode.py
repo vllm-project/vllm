@@ -32,33 +32,28 @@ MODEL_CONFIGS = [
 ]
 
 
-@pytest.fixture(scope="function")
-def llm(model_config: dict):
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(**model_config)
-
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
-
-        del llm
-
+@pytest.fixture(scope="module")
+def cache_models():
+    # Cache model files first
+    for model_config in MODEL_CONFIGS:
+        LLM(**model_config)
+ 
     cleanup()
+
+    yield
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("model_config", MODEL_CONFIGS)
-def test_offline_mode(model_config: dict, llm: LLM, monkeypatch):
-    # we use the llm fixture to ensure the model files are in-cache
-    del llm
-
+@pytest.mark.usefixtures("cache_models")
+def test_offline_mode(monkeypatch):
     # Set HF to offline mode and ensure we can still construct an LLM
     try:
         monkeypatch.setenv("HF_HUB_OFFLINE", "1")
         # Need to re-import huggingface_hub and friends to setup offline mode
         _re_import_modules()
         # Cached model files should be used in offline mode
-        LLM(**model_config)
+        for model_config in MODEL_CONFIGS:
+            LLM(**model_config)
     finally:
         # Reset the environment after the test
         # NB: Assuming tests are run in online mode
