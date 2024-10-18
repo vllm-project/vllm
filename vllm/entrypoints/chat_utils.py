@@ -96,7 +96,7 @@ class ConversationMessage(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
 
-    content: Optional[str]
+    content: Optional[Union[str,  List[ChatCompletionContentPartTextParam]]]
     """The contents of the message"""
 
     tool_call_id: Optional[str]
@@ -441,7 +441,7 @@ def _parse_chat_message_content_parts(
             text_prompt = _get_full_multimodal_text_prompt(
                 mm_placeholder_counts, text_prompt)
         if chat_template_text_format == "openai":
-            role_content = [{'type': 'text', 'text': text_prompt}]
+            role_content = [ChatCompletionContentPartTextParam(type="text", text=content)]
             return [ConversationMessage(role=role, content=role_content)]
         return [ConversationMessage(role=role, content=text_prompt)]
 
