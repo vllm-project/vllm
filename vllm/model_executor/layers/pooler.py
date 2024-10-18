@@ -13,6 +13,8 @@ class PoolingType(IntEnum):
     LAST = 0
     ALL = 1
     CLS = 2
+    MEAN = 3
+    MAX = 4
 
 
 class Pooler(nn.Module):
