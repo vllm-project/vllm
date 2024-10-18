@@ -412,14 +412,6 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def non_learnable_rms(weights: torch.Tensor):
-        """
-        Args:
-            weights (torch.Tensor): set RMSNorm weights to a non learnable
-            torch.ones Tensor.
-        """
-        return torch.ones(weights.shape[0])
-
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
