@@ -413,10 +413,14 @@ MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
-    "text": lambda part: _TextParser(part)["text"],
-    "image_url": lambda part: _ImageParser(part)["image_url"]["url"],
-    "audio_url": lambda part: _AudioParser(part)["audio_url"]["url"],
-    "refusal": lambda part: _RefusalParser(part)["refusal"],
+    "text":
+    lambda part: _TextParser(part).get("text", ""),
+    "image_url":
+    lambda part: _ImageParser(part).get("image_url", {}).get("url", ""),
+    "audio_url":
+    lambda part: _AudioParser(part).get("audio_url", {}).get("url", ""),
+    "refusal":
+    lambda part: _RefusalParser(part).get("refusal", ""),
 }
 
 
@@ -431,36 +435,42 @@ def _parse_chat_message_content_mm_part(
     Returns:
         A tuple (part_type, content) where:
         - part_type: Type of the part (e.g., 'text', 'image_url').
-        - content: Parsed content or an empty string if unsupported.
+        - content: Parsed content (e.g., text, image URL).
 
     Raises:
         ValueError: If the 'type' field is missing and no direct URL is found.
     """
-    part_type = part.get("type", None)  # type: ignore
+    assert isinstance(
+        part, dict)  # This is needed to avoid mypy errors: part.get() from str
+    part_type = part.get("type", None)
 
-    if part_type in MM_PARSER_MAP:
-        content = MM_PARSER_MAP[part_type](part)  # type: ignore
+    if isinstance(part_type, str) and part_type in MM_PARSER_MAP:
+        content = MM_PARSER_MAP[part_type](part)
 
         # Special case for 'image_url.detail'
-        if part_type == "image_url" and part.get(  # type: ignore
-                "detail") != "auto":
+        if part_type == "image_url" and part.get("detail") != "auto":
             logger.warning("'image_url.detail' is currently not supported "
                            "and will be ignored.")
 
-        return part_type, content  # type: ignore
+        return part_type, content
 
     # Handle missing 'type' but provided direct URL fields.
     if part_type is None:
-        for url_type in ["image_url", "audio_url"]:
-            if url_type in part and isinstance(
-                    part[url_type],  # type: ignore
-                    str):
-                return url_type, part[url_type]  # type: ignore
+        if part.get("image_url") is not None:
+            image_params = cast(CustomChatCompletionContentSimpleImageParam,
+                                part)
+            return "image_url", image_params["image_url"]
+        if part.get("audio_url") is not None:
+            audio_params = cast(CustomChatCompletionContentSimpleAudioParam,
+                                part)
+            return "audio_url", audio_params["audio_url"]
 
         # Raise an error if no 'type' or direct URL is found.
         raise ValueError("Missing 'type' field in multimodal part.")
 
-    return part_type, "unknown part_type content"  # type: ignore
+    if not isinstance(part_type, str):
+        raise ValueError("Invalid 'type' field in multimodal part.")
+    return part_type, "unknown part_type content"
 
 
 def _parse_chat_message_content_parts(
@@ -481,10 +491,9 @@ def _parse_chat_message_content_parts(
             text = _TextParser(part)
             texts.append(text)
         else:  # Handle structured dictionary parts
-            assert isinstance(part, dict)
             part_type, content = _parse_chat_message_content_mm_part(part)
 
-            if part_type in ["text", "refusal"]:
+            if part_type in ("text", "refusal"):
                 texts.append(content)
             elif part_type == "image_url":
                 mm_parser.parse_image(content)
