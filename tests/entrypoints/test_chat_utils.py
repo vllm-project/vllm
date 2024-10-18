@@ -328,7 +328,10 @@ def test_parse_chat_messages_context_text_format(
     assert conversation == [
         {
             "role": "user",
-            "content": "What's in this text?"
+            "content": [{
+                "type": "text",
+                "text": "What's in this text?"
+            }]
         },
         {
             "role": "assistant",
@@ -336,7 +339,10 @@ def test_parse_chat_messages_context_text_format(
         },
         {
             "role": "user",
-            "content": "What about this one?"
+            "content": [{
+                "type": "text",
+                "text": "What about this one?"
+            }]
         },
     ]
 
