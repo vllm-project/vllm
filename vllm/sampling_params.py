@@ -246,7 +246,7 @@ class SamplingParams(
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        sampler_priority: str = _DEFAULT_SAMPLER_PRIORITY,
+        sampler_priority: Optional[str] = _DEFAULT_SAMPLER_PRIORITY,
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
