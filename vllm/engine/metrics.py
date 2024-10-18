@@ -460,13 +460,12 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
                         stats.gpu_prefix_cache_hit_rate)
         lora_info = {
-            self.metrics.labelname_running_lora_adapters: ",".join(
-                stats.running_lora_adapters
-            ),
-            self.metrics.labelname_waiting_lora_adapters: ",".join(
-                stats.waiting_lora_adapters
-            ),
-            self.metrics.labelname_max_lora: stats.max_lora,
+            self.metrics.labelname_running_lora_adapters:
+            ",".join(stats.running_lora_adapters),
+            self.metrics.labelname_waiting_lora_adapters:
+            ",".join(stats.waiting_lora_adapters),
+            self.metrics.labelname_max_lora:
+            stats.max_lora,
         }
         self._log_gauge_string(self.metrics.gauge_lora_info, lora_info)
         # Iteration level data
