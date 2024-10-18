@@ -195,7 +195,7 @@ class Scheduler:
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
-        sampled: List[Tuple[Request, int]] = []
+        sampled: List[Tuple[Request, int]] = [] # (request, num_sampled_tokens)
         for request in self.running:
             req_id = request.request_id
             # TODO: Consider speculative decoding.
