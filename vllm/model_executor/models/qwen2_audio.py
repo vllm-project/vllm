@@ -30,7 +30,8 @@ from transformers import Qwen2AudioConfig, Qwen2AudioEncoder
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -158,13 +159,13 @@ def get_max_qwen2_audio_audio_tokens(ctx: InputContext) -> int:
     return output_lengths
 
 
-def input_processor_for_qwen2_audio(ctx: InputContext,
-                                    llm_inputs: LLMInputs) -> LLMInputs:
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+def input_processor_for_qwen2_audio(
+        ctx: InputContext, inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "audio" not in multi_modal_data:
-        return llm_inputs
+        return inputs
     if len(multi_modal_data["audio"]) == 0:
-        return llm_inputs
+        return inputs
     assert (isinstance(multi_modal_data['audio'], list)
             and isinstance(multi_modal_data['audio'][0], tuple))
 
@@ -184,7 +185,7 @@ def input_processor_for_qwen2_audio(ctx: InputContext,
 
     audio_token_index = ctx.model_config.hf_config.audio_token_index
 
-    input_ids = llm_inputs['prompt_token_ids']
+    input_ids = inputs['prompt_token_ids']
 
     new_input_ids = []
     audio_num = input_ids.count(audio_token_index)
@@ -201,9 +202,9 @@ def input_processor_for_qwen2_audio(ctx: InputContext,
         start = end + 1
     new_input_ids.extend(input_ids[start:])
 
-    return LLMInputs(
+    return token_inputs(
         prompt_token_ids=new_input_ids,
-        prompt=llm_inputs['prompt'],
+        prompt=inputs['prompt'],
         multi_modal_data=multi_modal_data,
     )
 
