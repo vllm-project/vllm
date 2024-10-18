@@ -18,6 +18,9 @@ jobs:
           exempt-issue-labels: 'keep-open'
           exempt-pr-labels: 'keep-open'
 
+          labels-to-add-when-unstale: 'unstale'
+          labels-to-remove-when-stale: 'unstale'
+
           days-before-issue-stale: 90
           days-before-issue-close: 30
           stale-issue-label: 'stale'
