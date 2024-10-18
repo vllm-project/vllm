@@ -10,12 +10,15 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.activation import GeluAndMul, get_act_fn
+from vllm.model_executor.layers.layernorm import NORM_CLASS_REGISTRY
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -62,7 +65,7 @@ class MPTAttention(nn.Module):
         else:
             self.total_num_kv_heads = self.total_num_heads
         assert not config.attn_config["prefix_lm"]
-        assert config.attn_config["alibi"]
+        assert config.attn_config["alibi"] or config.attn_config["rope"]
 
         # pylint: disable=invalid-name
         self.Wqkv = QKVParallelLinear(
@@ -74,8 +77,9 @@ class MPTAttention(nn.Module):
             quant_config=quant_config,
         )
         if self.qk_ln:
-            self.q_ln = nn.LayerNorm(self.d_model)
-            self.k_ln = nn.LayerNorm(self.d_model)
+            norm_class = NORM_CLASS_REGISTRY[config.norm_type]
+            self.q_ln = norm_class(self.d_model)
+            self.k_ln = norm_class(self.d_model)
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
@@ -98,13 +102,24 @@ class MPTAttention(nn.Module):
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        # Create the alibi slopes and slice them.
-        tp_rank = get_tensor_model_parallel_rank()
-        head_start = tp_rank * self.num_heads
-        head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _get_alibi_slopes(self.total_num_heads,
-                                         self.alibi_bias_max)
-        alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+
+        alibi_slopes = None
+        self.rotary_emb = None
+        if config.attn_config["alibi"]:
+            # Create the alibi slopes and slice them.
+            tp_rank = get_tensor_model_parallel_rank()
+            head_start = tp_rank * self.num_heads
+            head_end = (tp_rank + 1) * self.num_heads
+            alibi_slopes = _get_alibi_slopes(self.total_num_heads,
+                                             self.alibi_bias_max)
+            alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+        elif config.attn_config["rope"]:
+            self.rotary_emb = get_rope(
+                config.d_model // config.n_heads,
+                rotary_dim=config.d_model // config.n_heads,
+                max_position=config.max_seq_len,
+                base=config.attn_config["rope_theta"],
+            )
 
         self.head_dim = self.d_model // self.total_num_heads
         scaling = self.head_dim**-0.5
@@ -123,7 +138,6 @@ class MPTAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        del position_ids  # unused.
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
@@ -131,6 +145,8 @@ class MPTAttention(nn.Module):
         if self.qk_ln:
             q = self.q_ln(q)
             k = self.k_ln(k)
+        if self.rotary_emb:
+            q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.out_proj(attn_output)
         return output
@@ -146,7 +162,7 @@ class MPTMLP(nn.Module):
         super().__init__()
         hidden_size = config.d_model
         expansion_ratio = config.expansion_ratio
-        intermediate_size = expansion_ratio * hidden_size
+        intermediate_size = int(expansion_ratio * hidden_size)
         self.up_proj = ColumnParallelLinear(
             hidden_size,
             intermediate_size,
@@ -168,6 +184,43 @@ class MPTMLP(nn.Module):
         return x
 
 
+class MPTGLU(nn.Module):
+
+    def __init__(
+        self,
+        config: MPTConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__()
+        hidden_size = config.d_model
+        intermediate_size = int(config.expansion_ratio * hidden_size)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=not config.no_bias,
+            quant_config=quant_config,
+        )
+        self.act = GeluAndMul()
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=not config.no_bias,
+            quant_config=quant_config,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+
+FFN_CLASS_REGISTRY = {
+    'mptmlp': MPTMLP,
+    'mptglu': MPTGLU,
+}
+
+
 class MPTBlock(nn.Module):
 
     def __init__(
@@ -178,10 +231,12 @@ class MPTBlock(nn.Module):
     ):
         super().__init__()
         hidden_size = config.d_model
-        self.norm_1 = nn.LayerNorm(hidden_size)
+        norm_class = NORM_CLASS_REGISTRY[config.norm_type]
+        self.norm_1 = norm_class(hidden_size)
         self.attn = MPTAttention(config, cache_config, quant_config)
-        self.norm_2 = nn.LayerNorm(hidden_size)
-        self.ffn = MPTMLP(config, quant_config)
+        self.norm_2 = norm_class(hidden_size)
+        self.ffn = FFN_CLASS_REGISTRY[config.ffn_config["ffn_type"]](
+            config, quant_config)
 
     def forward(
         self,
@@ -215,7 +270,12 @@ class MPTModel(nn.Module):
     ):
         super().__init__()
         assert config.embedding_fraction == 1.0
-        assert config.norm_type == "low_precision_layernorm"
+        assert config.norm_type in (
+            "layernorm",
+            "low_precision_layernorm",
+            "rmsnorm",
+            "low_precision_rmsnorm",
+        )
 
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
@@ -225,7 +285,7 @@ class MPTModel(nn.Module):
             config.n_layers,
             lambda prefix: MPTBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.blocks")
-        self.norm_f = nn.LayerNorm(config.d_model)
+        self.norm_f = NORM_CLASS_REGISTRY[config.norm_type](config.d_model)
         if config.no_bias:
             for module in self.modules():
                 if hasattr(module, "bias") and isinstance(
@@ -314,14 +374,37 @@ class MPTForCausalLM(nn.Module, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                stacked_name = name.replace(weight_name, param_name)
+                if stacked_name not in params_dict:
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if stacked_name.endswith(".bias"):
+                    continue
+                if is_pp_missing_parameter(stacked_name, self):
+                    continue
+
+                param = params_dict[stacked_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
