@@ -86,7 +86,7 @@ class EngineArgs:
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
-    chat_template_text_format: str ='string'
+    chat_template_text_format: str = 'string'
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
@@ -245,8 +245,8 @@ class EngineArgs:
             default=EngineArgs.chat_template_text_format,
             choices=['string', 'openai'],
             help='The format to render text content within a chat template. '
-                 '"string" will keep the content field as a string whereas '
-                 '"openai" will parse content in the current OpenAI format.')
+            '"string" will keep the content field as a string whereas '
+            '"openai" will parse content in the current OpenAI format.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
