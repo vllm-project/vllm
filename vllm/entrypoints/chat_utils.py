@@ -420,7 +420,7 @@ MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
 }
 
 
-def _parse_chat_message_content_mm_parts(
+def _parse_chat_message_content_mm_part(
         part: ChatCompletionContentPartParam) -> Tuple[str, str]:
     """
     Parses a given multi modal content part based on its type.
@@ -482,7 +482,7 @@ def _parse_chat_message_content_parts(
             texts.append(text)
         else:  # Handle structured dictionary parts
             assert isinstance(part, dict)
-            part_type, content = _parse_chat_message_content_mm_parts(part)
+            part_type, content = _parse_chat_message_content_mm_part(part)
 
             if part_type in ["text", "refusal"]:
                 texts.append(content)
