@@ -94,6 +94,7 @@ class EngineClient(ABC):
         all_beams = [
             BeamSearchSequence(tokens=prompt_token_ids,
                                cum_logprob=0,
+                               logprobs=[],
                                multi_modal_data=multi_modal_data,
                                mm_processor_kwargs=mm_processor_kwargs)
         ]
@@ -135,7 +136,8 @@ class EngineClient(ABC):
                                 BeamSearchSequence(
                                     tokens=current_beam.tokens +
                                     [token_id] if include_stop_str_in_output
-                                    else current_beam.tokens,  #
+                                    else current_beam.tokens,  
+                                    logprobs=current_beam.logprobs + [logprobs],
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     finish_reason="stop",
@@ -144,6 +146,7 @@ class EngineClient(ABC):
                             new_beams.append(
                                 BeamSearchSequence(
                                     tokens=current_beam.tokens + [token_id],
+                                    logprobs=current_beam.logprobs + [logprobs],
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     multi_modal_data=current_beam.
