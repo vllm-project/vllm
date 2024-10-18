@@ -29,6 +29,12 @@ class DetokenizerOutputs(msgspec.Struct):
     # [num_reqs]
     req_ids: List[str]
     detokenized_texts: List[str]
+    # NOTE(woosuk): The number of the output token ids of each request
+    # at the time of detokenization. The detokenizer returns this to the engine
+    # because the request state (including the output token ids) is
+    # asynchronously updated in the engine, while RequestOutput requires the
+    # output token ids to be consistent with the detokenized text.
+    num_output_token_ids: List[int]
 
 
 @dataclass
@@ -38,6 +44,7 @@ class RequestState:
 
     token_ids: List[int]
     tokens: List[str]
+    num_prompt_tokens: int
 
     prefix_offset: int
     read_offset: int
@@ -85,6 +92,7 @@ class Detokenizer(multiprocessing.Process):
                 self.free(req_id)
 
             detokenized_texts: List[str] = []
+            num_output_token_ids: List[int] = []
             num_reqs = len(inputs.req_ids)
             for i in range(num_reqs):
                 req_id = inputs.req_ids[i]
@@ -98,10 +106,14 @@ class Detokenizer(multiprocessing.Process):
                     )
                 new_str = self.detokenize(req_id, inputs.new_token_ids[i])
                 detokenized_texts.append(new_str)
+                req_state = self.requests[req_id]
+                num_output_token_ids.append(
+                    len(req_state.token_ids) - req_state.num_prompt_tokens)
 
             detokenized = DetokenizerOutputs(
                 req_ids=inputs.req_ids,
                 detokenized_texts=detokenized_texts,
+                num_output_token_ids=num_output_token_ids,
             )
             self.push_socket.send(self.msgpack_encoder.encode(detokenized),
                                   flags=zmq.NOBLOCK)
@@ -122,6 +134,7 @@ class Detokenizer(multiprocessing.Process):
             req_id=request_id,
             token_ids=prompt_token_ids,
             tokens=tokens,
+            num_prompt_tokens=len(prompt_token_ids),
             prefix_offset=prefix_offset,
             read_offset=read_offset,
             skip_special_tokens=skip_special_tokens,

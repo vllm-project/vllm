@@ -26,7 +26,7 @@ from vllm.utils import get_open_port
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.outputs import RequestOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.tokenizer.detokenizer import (Detokenizer, DetokenizerInputs,
                                            DetokenizerOutputs)
 from vllm.version import __version__ as VLLM_VERSION
@@ -131,6 +131,7 @@ class LLMEngine:
             # different process.
             self.tokenizer.ping()
 
+        # Request id -> (Request, num_lagged_steps)
         self.requests: Dict[str, Tuple[Request, int]] = {}
 
         # Detokenizer
@@ -302,7 +303,8 @@ class LLMEngine:
         )
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
-        self.scheduler.abort_requests(request_id)
+        self.scheduler.finish_requests(request_id,
+                                       RequestStatus.FINISHED_ABORTED)
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
@@ -319,8 +321,7 @@ class LLMEngine:
             sampled = self.scheduler.update_from_output(
                 scheduler_output, output)
             self.send_to_detokenizer(sampled)
-        detokenized_reqs = self.recv_from_detokenizer()
-        outputs = [RequestOutput.from_request(req) for req in detokenized_reqs]
+        outputs = self.recv_from_detokenizer()
         return outputs
 
     def send_to_detokenizer(self, sampled: List[Tuple[Request, int]]) -> None:
@@ -330,7 +331,7 @@ class LLMEngine:
             new_token_ids=[],
             skip_special_tokens=[],
             spaces_between_special_tokens=[],
-            free_req_ids=[],  # TODO
+            free_req_ids=[],  # TODO(woosuk): Implement freeing.
         )
         for req, num_tokens in sampled:
             num_lagged_steps = self.requests[req.request_id][1] + 1
@@ -346,9 +347,10 @@ class LLMEngine:
         self.push_socket.send(self.msgpack_encoder.encode(inputs),
                               flags=zmq.NOBLOCK)
 
-    def recv_from_detokenizer(self) -> List[Request]:
+    def recv_from_detokenizer(self) -> List[RequestOutput]:
         detokenized_reqs: List[Request] = []
         socks = dict(self.poller.poll(timeout=0))
+        req_outputs: List[RequestOutput] = []
         if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
             msg = self.pull_socket.recv()
             outputs = self.msgpack_decoder.decode(msg)
@@ -362,9 +364,15 @@ class LLMEngine:
                 num_lagged_steps -= 1
                 if num_lagged_steps == 0 and req.is_finished():
                     self.requests.pop(req_id)
+                    finished = True
                 else:
                     self.requests[req_id] = (req, num_lagged_steps)
-        return detokenized_reqs
+                    finished = False
+
+                req_output = RequestOutput.from_request_async(
+                    req, outputs.num_output_token_ids[i], finished)
+                req_outputs.append(req_output)
+        return req_outputs
 
     def terminate_detokenizer(self) -> None:
         self.push_socket.send(b"", flags=zmq.NOBLOCK)
@@ -391,6 +399,9 @@ class LLMEngine:
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
+    @classmethod
+    def validate_outputs(cls, outputs, output_type):
+        return outputs
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
