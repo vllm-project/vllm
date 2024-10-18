@@ -455,7 +455,8 @@ class SamplingTensors:
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
                 sampling_params = seq_group.sampling_params
-                repetition_penalty_range = sampling_params.repetition_penalty_range
+                repetition_penalty_range = (sampling_params.
+                                            repetition_penalty_range)
                 seq_ids = seq_group.seq_ids
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
@@ -494,7 +495,11 @@ class SamplingTensors:
             device,
             dtype,
         )
-        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p, sampler_order)
+        return (sampling_tensors,
+                do_penalties,
+                do_top_p_top_k,
+                do_min_p,
+                sampler_order)
 
     @classmethod
     def from_lists(

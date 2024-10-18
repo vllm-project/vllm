@@ -253,7 +253,8 @@ class Sampler(nn.Module):
         for sample_name in sample_order:
             if sample_name == "penalties" and do_penalties:
                 # Apply presence and frequency penalties.
-                logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
+                logits = _apply_penalties(logits,
+                                          sampling_tensors.prompt_tokens,
                                           sampling_tensors.output_tokens,
                                           sampling_tensors.presence_penalties,
                                           sampling_tensors.frequency_penalties,
