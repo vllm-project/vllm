@@ -7,9 +7,8 @@ import zmq
 from msgspec import msgpack
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
-
-from .detokenizer_utils import (convert_prompt_ids_to_tokens,
-                                detokenize_incrementally)
+from vllm.transformers_utils.detokenizer_utils import (
+    convert_prompt_ids_to_tokens, detokenize_incrementally)
 
 
 class DetokenizerInputs(msgspec.Struct):
