@@ -399,6 +399,7 @@ class LLMEngine:
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
+
     @classmethod
     def validate_outputs(cls, outputs, output_type):
         return outputs

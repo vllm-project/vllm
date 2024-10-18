@@ -880,8 +880,7 @@ class LLM:
             )
 
         # Run the engine.
-        outputs: List[Union[RequestOutput,
-                            EmbeddingRequestOutput]] = []
+        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
