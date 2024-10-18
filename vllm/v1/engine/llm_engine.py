@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Union, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import zmq
 from msgspec import msgpack
