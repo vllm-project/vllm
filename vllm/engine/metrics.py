@@ -4,7 +4,6 @@ from typing import Dict, List, Optional, Type, Union, cast
 
 import numpy as np
 import prometheus_client
-import time
 
 from vllm.engine.metrics_types import (StatLoggerBase, Stats,
                                        SupportsMetricsInfo)
@@ -42,7 +41,6 @@ class Metrics:
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
-    _info_cls = prometheus_client.Info
 
     def __init__(self, labelnames: List[str], max_model_len: int):
         # Unregister any existing vLLM collectors (for CI/CD)
