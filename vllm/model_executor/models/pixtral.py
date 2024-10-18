@@ -921,7 +921,6 @@ class PixtralHFVisionModel(nn.Module):
 
     def process_image(self, img: torch.Tensor) -> torch.Tensor:
         """Process a single image tensor, handling various input shapes."""
-        print(f"Original image shape: {img.shape}")
 
         # Ensure the tensor has at least 4 dimensions (batch, channels, height, width)
         if img.dim() < 4:
@@ -936,22 +935,16 @@ class PixtralHFVisionModel(nn.Module):
             raise ValueError(f"Expected {self.config.num_channels} channels, but got {img.shape[1]}")
 
         img = img.to(self.dtype)
-        print(f"Processed image shape before patch_conv: {img.shape}")
         result = self.patch_conv(img)
-        print(f"Processed image shape after patch_conv: {result.shape}")
         return result
 
     def process_input(self, item: Union[torch.Tensor, List], depth: int = 0) -> List[torch.Tensor]:
         """Recursively process input items, handling nested lists."""
         patch_embeds = []
-        indent = "  " * depth
-        print(f"{indent}Type at depth {depth}: {type(item)}")
 
         if isinstance(item, torch.Tensor):
-            print(f"{indent}Shape of tensor: {item.shape}")
             patch_embeds.append(self.process_image(item))
         elif isinstance(item, list):
-            print(f"{indent}Length of list: {len(item)}")
             for subitem in item:
                 patch_embeds.extend(self.process_input(subitem, depth + 1))
         else:
@@ -972,8 +965,6 @@ class PixtralHFVisionModel(nn.Module):
             image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
         """
-        print(f"Type of pixel_values: {type(pixel_values)}")
-        print(f"Length of pixel_values: {len(pixel_values)}")
 
         # pass images through initial convolution independently
         patch_embeds_list = self.process_input(pixel_values)

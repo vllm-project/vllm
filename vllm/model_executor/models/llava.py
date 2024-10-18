@@ -301,41 +301,19 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            def print_image_structure(images, depth=0):
-                indent = "  " * depth
-                if isinstance(images, torch.Tensor):
-                    print(f"{indent}Tensor shape: {images.shape}")
-                elif isinstance(images, list):
-                    print(f"{indent}List length: {len(images)}")
-                    for i, item in enumerate(images):
-                        print(f"{indent}Item {i}:")
-                        print_image_structure(item, depth + 1)
-                else:
-                    print(f"{indent}Unexpected type: {type(images)}")
-
             # Case for models like PixtralHF that have dynamic image sizes
             # so we need to produce a list of tensors
             if image_sizes is not None:
                 images = pixel_values
                 if isinstance(images, torch.Tensor):
                     # if passed as batch take all images
-                    print("Processing tensor input:")
-                    print(f"Original tensor shape: {images.shape}")
                     NN, N, B, C, W, H = images.shape
                     images = images.reshape(NN * N * B, C, W, H)
-                    print(f"Reshaped tensor shape: {images.shape}")
                     images = [images[i] for i in range(images.size(0))]
-                    print("After conversion to list:")
-                    print_image_structure(images)
                 elif isinstance(images, list):
                     # if passed as list flatten lists of tensors
-                    print("Processing list input:")
-                    print_image_structure(images)
                     while isinstance(images, list) and len(images) == 1:
-                        print(f"Unwrapping list of length 1")
                         images = images[0]
-                    print("Final structure after unwrapping:")
-                    print_image_structure(images)
 
                 # TODO: Add validation based on image_sizes
                 return LlavaImagePixelInputs(
