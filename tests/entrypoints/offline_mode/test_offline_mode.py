@@ -21,7 +21,7 @@ MODEL_CONFIGS = [
     {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.50,
+        "gpu_memory_utilization": 0.95,
         "max_model_len": 64,
         "max_num_batched_tokens": 64,
         "max_num_seqs": 64,
@@ -36,8 +36,7 @@ def cache_models():
     # Cache model files first
     for model_config in MODEL_CONFIGS:
         LLM(**model_config)
-
-    cleanup()
+        cleanup()
 
     yield
 
