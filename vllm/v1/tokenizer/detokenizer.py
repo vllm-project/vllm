@@ -6,9 +6,9 @@ import msgspec
 import zmq
 from msgspec import msgpack
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
 class DetokenizerInputs(msgspec.Struct):
@@ -59,17 +59,17 @@ class Detokenizer(multiprocessing.Process):
         super().__init__()
         self.port1 = port1
         self.port2 = port2
-        self.encoder = msgpack.Encoder()
-        self.decoder = msgpack.Decoder(DetokenizerInputs)
+        self.msgpack_encoder = msgpack.Encoder()
+        self.msgpack_decoder = msgpack.Decoder(DetokenizerInputs)
 
         self.tokenizer = get_tokenizer(tokenizer_name)
         self.requests: Dict[str, RequestState] = {}
 
     def run(self):
-        self.context = zmq.Context()
-        self.pull_socket = self.context.socket(zmq.PULL)
+        self.zmq_context = zmq.Context()
+        self.pull_socket = self.zmq_context.socket(zmq.PULL)
         self.pull_socket.bind(f"tcp://*:{self.port1}")
-        self.push_socket = self.context.socket(zmq.PUSH)
+        self.push_socket = self.zmq_context.socket(zmq.PUSH)
         self.push_socket.bind(f"tcp://*:{self.port2}")
 
         while True:
@@ -77,7 +77,7 @@ class Detokenizer(multiprocessing.Process):
             if message == b"":
                 # Terminate signal.
                 break
-            inputs = self.decoder.decode(message)
+            inputs = self.msgpack_decoder.decode(message)
 
             for req_id in inputs.free_req_ids:
                 self.free(req_id)
@@ -101,7 +101,7 @@ class Detokenizer(multiprocessing.Process):
                 req_ids=inputs.req_ids,
                 detokenized_texts=detokenized_texts,
             )
-            self.push_socket.send(self.encoder.encode(detokenized),
+            self.push_socket.send(self.msgpack_encoder.encode(detokenized),
                                   flags=zmq.NOBLOCK)
 
     def add_request(

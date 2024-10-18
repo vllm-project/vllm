@@ -75,7 +75,7 @@ class GPUModelRunner:
         self.head_size = model_config.get_head_size()
 
         # Lazy initialization
-        self.model: nn.Module  # Set after load_model
+        # self.model: nn.Module  # Set after load_model
         self.kv_caches: List[torch.Tensor] = []
 
         # Request states.

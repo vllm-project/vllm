@@ -58,7 +58,7 @@ class LLMEngine:
         scheduler_config.max_num_seqs = max(scheduler_config.max_num_seqs,
                                             1024)
         scheduler_config.max_num_batched_tokens = max(
-            scheduler_config.max_num_batched_tokens, 4096)
+            scheduler_config.max_num_batched_tokens, 8192)
 
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -141,15 +141,15 @@ class LLMEngine:
         self.detokenizer = Detokenizer(self.model_config.tokenizer, self.port1,
                                        self.port2)
         self.detokenizer.start()
-        self.context = zmq.Context()
-        self.push_socket = self.context.socket(zmq.PUSH)
+        self.zmq_context = zmq.Context()
+        self.push_socket = self.zmq_context.socket(zmq.PUSH)
         self.push_socket.connect(f"tcp://localhost:{self.port1}")
-        self.pull_socket = self.context.socket(zmq.PULL)
+        self.pull_socket = self.zmq_context.socket(zmq.PULL)
         self.pull_socket.connect(f"tcp://localhost:{self.port2}")
         self.poller = zmq.Poller()
         self.poller.register(self.pull_socket, zmq.POLLIN)
-        self.encoder = msgpack.Encoder()
-        self.decoder = msgpack.Decoder(DetokenizerOutputs)
+        self.msgpack_encoder = msgpack.Encoder()
+        self.msgpack_decoder = msgpack.Decoder(DetokenizerOutputs)
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -343,14 +343,15 @@ class LLMEngine:
                 req.sampling_params.skip_special_tokens)
             inputs.spaces_between_special_tokens.append(
                 req.sampling_params.spaces_between_special_tokens)
-        self.push_socket.send(self.encoder.encode(inputs), flags=zmq.NOBLOCK)
+        self.push_socket.send(self.msgpack_encoder.encode(inputs),
+                              flags=zmq.NOBLOCK)
 
     def recv_from_detokenizer(self) -> List[Request]:
         detokenized_reqs: List[Request] = []
         socks = dict(self.poller.poll(timeout=0))
         if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
             msg = self.pull_socket.recv()
-            outputs = self.decoder.decode(msg)
+            outputs = self.msgpack_decoder.decode(msg)
             num_reqs = len(outputs.req_ids)
             for i in range(num_reqs):
                 req_id = outputs.req_ids[i]
