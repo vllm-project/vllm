@@ -251,7 +251,7 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "mm_processor_kwargs=%s)",
+            "chat_template_text_format=%s, mm_processor_kwargs=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -286,6 +286,7 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
             use_cached_outputs,
+            model_config.chat_template_text_format,
             model_config.mm_processor_kwargs,
         )
         # TODO(woosuk): Print more configs in debug mode.
