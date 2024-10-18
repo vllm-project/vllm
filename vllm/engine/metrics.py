@@ -34,6 +34,7 @@ class Metrics:
     See https://prometheus.github.io/client_python/multiprocess/ for more
     details on limitations.
     """
+
     labelname_finish_reason = "finished_reason"
     labelname_waiting_lora_adapters = "waiting_lora_adapters"
     labelname_running_lora_adapters = "running_lora_adapters"
@@ -60,12 +61,13 @@ class Metrics:
             multiprocess_mode="sum")
         self.gauge_lora_info = self._gauge_cls(
             name="vllm:lora_requests_info",
-            documentation="Running stats on lora requests waiting and under process.",
+            documentation="Running stats on lora requests.",
             labelnames=[
                 self.labelname_running_lora_adapters,
-                self.labelname_max_lora, 
-                self.labelname_waiting_lora_adapters],
-            multiprocess_mode="livemostrecent"
+                self.labelname_max_lora,
+                self.labelname_waiting_lora_adapters,
+            ],
+            multiprocess_mode="livemostrecent",
         )
         self.gauge_scheduler_swapped = self._gauge_cls(
             name="vllm:num_requests_swapped",
@@ -437,8 +439,8 @@ class PrometheusStatLogger(StatLoggerBase):
         # Convenience function for logging list to histogram.
         for datum in data:
             histogram.labels(**self.labels).observe(datum)
-            
-    def _log_gauge_string(self, gauge, data:Dict[str,str]) -> None:
+
+    def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
         gauge.labels(**data).set(1)
 
     def _log_prometheus(self, stats: Stats) -> None:
@@ -458,10 +460,14 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
                         stats.gpu_prefix_cache_hit_rate)
         lora_info = {
-            self.metrics.labelname_running_lora_adapters: ','.join(stats.running_lora_adapters),
-            self.metrics.labelname_waiting_lora_adapters: ','.join(stats.waiting_lora_adapters),
+            self.metrics.labelname_running_lora_adapters: ",".join(
+                stats.running_lora_adapters
+            ),
+            self.metrics.labelname_waiting_lora_adapters: ",".join(
+                stats.waiting_lora_adapters
+            ),
             self.metrics.labelname_max_lora: stats.max_lora,
-            }
+        }
         self._log_gauge_string(self.metrics.gauge_lora_info, lora_info)
         # Iteration level data
         self._log_counter(self.metrics.counter_num_preemption,
