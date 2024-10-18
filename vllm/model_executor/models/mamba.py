@@ -226,11 +226,6 @@ class MambaDecoderLayer(nn.Module):
         self.config = config
         self.is_falcon_mamba = config.model_type == "falcon_mamba"
         self.mixer = MambaMixer(config, layer_idx)
-
-        if not self.is_falcon_mamba:
-            self.feed_forward = MambaMLP(config, quant_config=quant_config)
-            self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                            eps=config.layer_norm_epsilon)
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -247,12 +242,8 @@ class MambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, attn_metadata, mamba_cache_params)
-        if not self.is_falcon_mamba:
-            # Fully Connected
-            hidden_states, residual = self.pre_ff_layernorm(
-                hidden_states, residual)
-            hidden_states = self.feed_forward(hidden_states)
+        hidden_states = self.mixer(hidden_states, attn_metadata,
+                                   mamba_cache_params)
         return hidden_states, residual
 
 
