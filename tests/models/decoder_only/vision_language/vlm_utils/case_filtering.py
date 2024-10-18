@@ -5,6 +5,8 @@ handling multimodal placeholder substitution, and so on.
 import itertools
 from typing import Dict, Iterable, Tuple
 
+import pytest
+
 from .types import (EMBEDDING_SIZE_FACTORS, ImageSizeWrapper, SizeType,
                     VLMTestInfo, VLMTestType)
 
@@ -14,7 +16,8 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
                                fork_per_test: bool) -> Dict[str, VLMTestInfo]:
     """Given the dict of potential test settings to run, return a subdict
     of tests who have the current test type enabled, with the matching val for
-    fork_per_test.
+    fork_per_test, as well as a list of the all tests that were enabled, but
+    skipped.
     """
 
     def matches_test_type(test_info: VLMTestInfo, test_type: VLMTestType):
@@ -22,11 +25,9 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
             isinstance(test_info.test_type, Iterable)
             and test_type in test_info.test_type)
 
-    filtered_test_settings = {}
+    matching_tests = {}
+    skipped_names = []
     for test_name, test_info in test_settings.items():
-        # Skip if it's explicitly disabled
-        if test_info.skip:
-            continue
         # Otherwise check if the test has the right type & keep if it does
         if matches_test_type(test_info, test_type):
             # Embedding tests need to have a conversion func in their test info
@@ -43,9 +44,12 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
             # Everything looks okay; keep if this is has correct proc handling
             if (test_info.distributed_executor_backend
                     is not None) == fork_per_test:
-                filtered_test_settings[test_name] = test_info
+                matching_tests[test_name] = test_info
+                # Check if it's skipped or not
+                if test_info.skip:
+                    skipped_names.append(test_name)
 
-    return filtered_test_settings
+    return matching_tests, skipped_names
 
 
 def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
@@ -56,8 +60,8 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
     through an itertools product so that each test can set things like
     size factors etc, while still running in isolated test cases.
     """
-    test_settings = get_filtered_test_settings(test_settings, test_type,
-                                               fork_new_process_for_each_test)
+    matching_tests, skipped_names = get_filtered_test_settings(
+        test_settings, test_type, fork_new_process_for_each_test)
 
     # Ensure that something is wrapped as an iterable it's not already
     ensure_wrapped = lambda e: e if isinstance(e, (list, tuple)) else (e, )
@@ -88,14 +92,25 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
                 raise ValueError("Test has type CUSTOM_INPUTS, but none given")
 
             iterables.append(test_info.custom_test_opts)
-        return list(itertools.product(*iterables))
+
+        # Wrap all model cases in a pytest parameter & explicitly skip anything
+        # that had a met skip condition, but otherwise matched the filter.
+        return [
+            pytest.param(
+                *case,
+                marks=pytest.mark.skipif(
+                    model_type in skipped_names,
+                    reason=
+                    f"Skip condition for model type {model_type} is met"  # noqa: E501
+                )) for case in list(itertools.product(*iterables))
+        ]
 
     # Get a list per model type, where each entry contains a tuple of all of
     # that model type's cases, then flatten them into the top level so that
     # we can consume them in one mark.parametrize call.
     cases_by_model_type = [
         get_model_type_cases(model_type, test_info)
-        for model_type, test_info in test_settings.items()
+        for model_type, test_info in matching_tests.items()
     ]
     return list(itertools.chain(*cases_by_model_type))
 

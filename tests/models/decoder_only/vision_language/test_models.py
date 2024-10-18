@@ -71,10 +71,6 @@ COMMON_BROADCAST_SETTINGS = {
 # NOTE you can add --collect-only to any of the above commands to see
 # which cases would be selected and deselected by pytest. In general,
 # this is a good idea for checking your command first, since tests are slow.
-#
-# Lastly, be aware keep in mind that this will not show tests if their skip
-# condition is met since they're filtered and won't be picked up by pytest,
-# e.g., trying to run the broadcast tests in a non-distributed environment.
 
 # yapf: disable
 VLM_TEST_SETTINGS = {

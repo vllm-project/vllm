@@ -7,12 +7,12 @@ import torch
 
 from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
                                    resize_video, sample_frames_from_video)
+
 from .....conftest import _ImageAssets, _VideoAssets
 from .types import (MULTI_IMAGE_BASE_PROMPT, SINGLE_IMAGE_BASE_PROMPTS,
                     TEST_IMG_PLACEHOLDER, TEST_VIDEO_PLACEHOLDER,
-                    VIDEO_BASE_PROMPT, ImageSizeWrapper, SizeType,
-                    VLMTestInfo)
-                    
+                    VIDEO_BASE_PROMPT, ImageSizeWrapper, SizeType, VLMTestInfo)
+
 
 def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
                                                                       str],
@@ -233,4 +233,3 @@ def apply_image_size_scaling(image, size: Union[float, Tuple[int, int]],
         # We have a list of fixed sizes
         return image.resize(size)
     raise ValueError("ImageSizeWrapper type must be FIXED_SIZE or SIZE_FACTOR")
-
