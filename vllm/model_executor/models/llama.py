@@ -288,7 +288,7 @@ class LlamaDecoderLayer(nn.Module):
 
         pprint(f"RESIDUAL SHAPE = {residual.shape}")
 
-        def slices(residual) -> bool:
+        def slices(residual) -> List[torch.Tensor]:
             if not self.fuse_gemms or not should_slice(residual.shape):
                 pprint(f"SLICES TOO SMALL {[residual.shape]}")
                 return []
@@ -351,7 +351,7 @@ class LlamaModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        fuse_gemms = False #True
+        fuse_gemms = False # True
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *

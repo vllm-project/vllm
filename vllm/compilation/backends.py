@@ -4,11 +4,12 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.fx as fx
+from typing import Tuple, List, Optional
 
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-from torch._inductor.pattern_matcher import PatternMatcherPass, register_replacement, fwd_only, joint_fwd_bwd
+from torch._inductor.pattern_matcher import PatternMatcherPass, register_replacement, fwd_only, joint_fwd_bwd, Match
 
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 
 from vllm.logger import init_logger
 
@@ -20,6 +21,12 @@ logger = init_logger(__name__)
 aten = torch.ops.aten
 
 FILENO=0
+
+
+def pprint(x):
+    #print(x)
+    pass
+
 
 def match_gemm_rs_ag_gemm_orig():
     permute_2 = torch.ops.aten.permute(arg7_1, [1, 0])
@@ -70,7 +77,7 @@ def match_gemm_rs_ag_gemm(arg7_1, getitem_22, arg8_1, getitem_1, arg9_1):
 
 
 # getitem_1 full residual
-def replace_gemm_rs_ag_gemm(arg7_1, getitem_24, arg8_1, getitem_1, arg9_1):
+def replace_gemm_rs_ag_gemm_orig(arg7_1, getitem_24, arg8_1, getitem_1, arg9_1):
     split_1 = torch.ops.aten.split.Tensor(getitem_1, 2048)
     getitem_26 = split_1[0];  split_1 = None
     permute_3 = torch.ops.aten.permute.default(arg7_1, [1, 0])
@@ -89,11 +96,60 @@ def replace_gemm_rs_ag_gemm(arg7_1, getitem_24, arg8_1, getitem_1, arg9_1):
     getitem_35 = getitem_34[0]
     return getitem_35, getitem_31
 
+def slices(residual) -> List[torch.Tensor]:
+    n_slices = get_tensor_model_parallel_world_size()
+    residual_slices = torch.chunk(residual, n_slices, dim=0)
+    #pprint(f"SLICES {[r.shape for r in residual_slices]}")
+    return residual_slices
+
+@torch.library.custom_op("vllm::gemm_rs_ag_gemm", mutates_args=())
+def gemm_rs_ag_gemm(arg7_1: torch.Tensor, getitem_22: torch.Tensor, arg8_1: torch.Tensor, getitem_1: torch.Tensor, arg9_1: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
+
+    # this is terrible
+    if True:
+        res_slices = slices(getitem_1)
+        slice_size = res_slices[get_tensor_model_parallel_rank()].shape[0]
+        print(f"SLICE_SIZE = {slice_size}, orig_shape={getitem_1.shape}, slice_shapes=[{[x.shape for x in res_slices]}]")
+    else:
+        slice_size = 2048
+
+    split_1 = torch.ops.aten.split.Tensor(getitem_1, slice_size)  # XXXXXXXXXXX
+    getitem_26 = split_1[0];  split_1 = None
+    permute_3 = torch.ops.aten.permute.default(arg7_1, [1, 0])
+    clone = torch.ops.aten.clone.default(permute_3, memory_format = torch.contiguous_format)
+    fused_matmul_reduce_scatter = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(getitem_22, clone, 'avg', 0, group_name) # XXXXXXXXXXXXX
+    auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = fused_matmul_reduce_scatter, residual = getitem_26, weight = arg8_1, epsilon = 1e-05)
+    getitem_29 = auto_functionalized_4[1]
+    getitem_30 = auto_functionalized_4[2]
+    slice_scatter_2 = torch.ops.aten.slice_scatter.default(getitem_1, getitem_30, 0, 0, slice_size) # XXXXXXXXXXXXXXX
+    split_2 = torch.ops.aten.split.Tensor(slice_scatter_2, slice_size) # XXXXXXXXXXX
+    getitem_31 = split_2[0]  # local residual
+    permute_5 = torch.ops.aten.permute.default(arg9_1, [1, 0])
+    clone_1 = torch.ops.aten.clone.default(permute_5, memory_format = torch.contiguous_format)
+    fused_all_gather_matmul = torch.ops.symm_mem.fused_all_gather_matmul.default(getitem_29, [clone_1], 0, group_name) # XXXXXXXXXXX
+    getitem_34 = fused_all_gather_matmul[1]
+    getitem_35 = getitem_34[0]
+    return getitem_35, getitem_31   # matmul, residual
+
+# this is wrong
+@torch.library.register_fake("vllm::gemm_rs_ag_gemm")
+def gemm_rs_ag_gemm_fake(arg7_1: torch.Tensor, getitem_22: torch.Tensor, arg8_1: torch.Tensor, getitem_1: torch.Tensor, arg9_1: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    mm_res = torch.empty((getitem_22.shape[0], arg9_1.shape[0]), device=getitem_22.device, dtype=getitem_22.dtype)  #???
+    resid = torch.empty_like(getitem_1)
+    return (mm_res, resid)
+
+def replace_gemm_rs_ag_gemm(arg7_1, getitem_22, arg8_1, getitem_1, arg9_1):
+    results = torch.ops.vllm.gemm_rs_ag_gemm(arg7_1, getitem_22, arg8_1, getitem_1, arg9_1)
+    getitem_34 = results[0]
+    getitem_35 = results[1]
+    return getitem_34, getitem_35
+
 
 def match_final(arg227_1, getitem_1022, getitem_1020, arg228_1):
     permute_128 = torch.ops.aten.permute.default(arg227_1, [1, 0])
     mm_127 = torch.ops.aten.mm.default(getitem_1022, permute_128)
-    auto_functionalized_224 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_127, group_name = 'tp:0')
+    auto_functionalized_224 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_127, group_name = 'tp:0') # TODO: not same as group name
     getitem_1024 = auto_functionalized_224[1]
     auto_functionalized_225 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = getitem_1024, residual = getitem_1020, weight = arg228_1, epsilon = 1e-05)
     getitem_1026 = auto_functionalized_225[1]
@@ -101,46 +157,131 @@ def match_final(arg227_1, getitem_1022, getitem_1020, arg228_1):
 
 
 def replace_final(arg227_1, getitem_1215, getitem_1209, arg228_1):
+    group_name = torch.distributed.group.WORLD.group_name # factor out?
     permute_254 = torch.ops.aten.permute.default(arg227_1, [1, 0])
     mm_1 = torch.ops.aten.mm.default(getitem_1215, permute_254)
-    auto_functionalized_161 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = 'tp:0')
+    auto_functionalized_161 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = 'tp:0') # TODO: not same as group name
     getitem_1217 = auto_functionalized_161[1]
-    all_gather_into_tensor = torch.ops._c10d_functional.all_gather_into_tensor.default(getitem_1209, 2, '0')
+    all_gather_into_tensor = torch.ops._c10d_functional.all_gather_into_tensor.default(getitem_1209, 2, group_name)
     wait_tensor = torch.ops._c10d_functional.wait_tensor.default(all_gather_into_tensor)
     auto_functionalized_162 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = getitem_1217, residual = wait_tensor, weight = arg228_1, epsilon = 1e-05)
     getitem_1219 = auto_functionalized_162[1]
     return getitem_1219
 
 
-my_patterns = PatternMatcherPass()
-my_patterns2 = PatternMatcherPass()
-x = torch.empty([4,4], device='cuda')
-w = torch.empty([4,4], device='cuda')
-resid = torch.empty([4,4], device='cuda')
-resid_w = torch.empty([4,4], device='cuda')
-x2 = torch.empty([4,4], device='cuda')
-inputs = [x, w, resid, resid_w, x2]
-inputs_small = inputs[0:2]
-inputs_med = inputs[0:4]
+my_patterns: Optional[PatternMatcherPass] = None
+my_patterns2: Optional[PatternMatcherPass] = None
 
-register_replacement(match_gemm_rs_ag_gemm,
-                     replace_gemm_rs_ag_gemm,
-                     inputs,
-                     fwd_only,
-                     [my_patterns])
+def get_matches():
+    global my_patterns
+    global my_patterns2
+    matches = []
+    matches2 = []
 
-final_inputs = [x, w, resid, resid_w]
-register_replacement(match_final,
-                     replace_final,
-                     final_inputs,
-                     fwd_only,
-                     [my_patterns2])
+    def record_match_fn(match: Match):
+        matches.append(match)
+        return False
+
+    def record_match_fn2(match: Match):
+        matches2.append(match)
+        return False
+
+    if not my_patterns:
+        my_patterns = PatternMatcherPass()
+        my_patterns2 = PatternMatcherPass()
+
+        x = torch.empty([4,4], device='cuda')
+        w = torch.empty([4,4], device='cuda')
+        resid = torch.empty([4,4], device='cuda')
+        resid_w = torch.empty([4,4], device='cuda')
+        x2 = torch.empty([4,4], device='cuda')
+        inputs = [x, w, resid, resid_w, x2]
+        inputs_small = inputs[0:2]
+        inputs_med = inputs[0:4]
+
+        register_replacement(match_gemm_rs_ag_gemm,
+                             replace_gemm_rs_ag_gemm,
+                             inputs,
+                             fwd_only,
+                             [my_patterns],
+                             extra_check=record_match_fn)
+
+        final_inputs = [x, w, resid, resid_w]
+        register_replacement(match_final,
+                             replace_final,
+                             final_inputs,
+                             fwd_only,
+                             [my_patterns2])
+
+    return matches, matches2
+
+def process_matches(graph: fx.Graph, matches):
+    print(f"len = {len(matches)}")
+    for match in matches:
+        last_node_in_match = match.nodes[-1] #max(match.nodes, key=lambda x: nodes.index(x))
+
+        with graph.inserting_after(last_node_in_match):
+            fused_node = graph.call_function(torch.ops.vllm.gemm_rs_ag_gemm.default, kwargs=match.kwargs)
+
+            graph.inserting_after(fused_node)
+            result_node_new = graph.call_function(operator.getitem, (fused_node, 0))
+            residual_node_new = graph.call_function(operator.getitem, (fused_node, 1))
+
+        # find the output and the residual
+        def find_fn(op):
+            for node in reversed(match.nodes):
+                if node.op == "call_function" and node.target == op:
+                    return node
+            return None
+
+        def find_auto_fn(op):
+            for node in reversed(match.nodes):
+                if node.op == "call_function" and node.target == auto_functionalized and node.args[0] == op:
+                    return node
+            return None
+
+        def find_getitem(node, idx):
+            for user in reversed(node.users):
+                if user.op == "call_function" and user.target == operator.getitem and user.args[1] == idx:
+                    return user
+            return None
+
+        rms_node = find_auto_fn(torch.ops._C.fused_add_rms_norm.default)
+        gemm_node = find_fn(torch.ops.aten.mm.default)
+        assert rms_node is not None
+        assert gemm_node is not None
+
+        #assert len(rms_node.users) == 2
+        #assert len(gemm_node.users) == 1
+
+        # meta["val"] is used by de-functionalization
+        rms_val = rms_node.meta["val"]
+        gemm_val = gemm_node.meta["val"]
+        fused_node.meta["val"] = (gemm_val, rms_val[2])
+
+        find_getitem(rms_node, 2).replace_all_uses_with(residual_node_new)
+        gemm_node.replace_all_uses_with(result_node_new)
+
+    # Finally, remove matched nodes
+    graph.eliminate_dead_code()
+    assert all(node not in graph.nodes for match in matches for node in match.nodes)
+
+def process_matches2(graph: fx.Graph, matches2):
+    print(f"len2 = {len(matches2)}")
 
 def async_rewrite(graph: fx.Graph):
+    matches, matches2 = get_matches()
+    matches.clear()
+    matches2.clear()
+
     count = my_patterns.apply(graph)
     print(f"fused gemm match count = {count}")
     count = my_patterns2.apply(graph)
     print(f"final match count = {count}")
+
+    process_matches(graph, matches)
+    process_matches2(graph, matches2)
+
     return graph
 
 
