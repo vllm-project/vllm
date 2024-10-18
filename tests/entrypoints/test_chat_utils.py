@@ -307,7 +307,7 @@ def test_parse_chat_messages_context_text_format(
     phi3v_model_config,
     phi3v_tokenizer,
 ):
-    phi3v_model_config.chat_template_text_content_format = "openai"
+    phi3v_model_config.chat_template_text_format = "openai"
     conversation, mm_data = parse_chat_messages(
         [{
             "role": "user",
