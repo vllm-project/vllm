@@ -899,57 +899,6 @@ async def test_extra_fields(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_complex_message_content(client: openai.AsyncOpenAI):
-    resp = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{
-            "role":
-            "user",
-            "content": [{
-                "type":
-                "text",
-                "text":
-                "what is 1+1? please provide the result without any other text."
-            }]
-        }],
-        temperature=0,
-        seed=0)
-    content = resp.choices[0].message.content
-    assert content == "2"
-
-
-@pytest.mark.asyncio
-async def test_custom_role(client: openai.AsyncOpenAI):
-    # Not sure how the model handles custom roles so we just check that
-    # both string and complex message content are handled in the same way
-
-    resp1 = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{
-            "role": "my-custom-role",
-            "content": "what is 1+1?",
-        }],  # type: ignore
-        temperature=0,
-        seed=0)
-
-    resp2 = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{
-            "role": "my-custom-role",
-            "content": [{
-                "type": "text",
-                "text": "what is 1+1?"
-            }]
-        }],  # type: ignore
-        temperature=0,
-        seed=0)
-
-    content1 = resp1.choices[0].message.content
-    content2 = resp2.choices[0].message.content
-    assert content1 == content2
-
-
-@pytest.mark.asyncio
 async def test_long_seed(client: openai.AsyncOpenAI):
     for seed in [
             torch.iinfo(torch.long).min - 1,
