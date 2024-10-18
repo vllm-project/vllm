@@ -216,7 +216,9 @@ class ModelConfig:
         self.override_neuron_config = override_neuron_config if is_neuron(
         ) else None
 
-        self.task: Final = self._resolve_task(task, self.hf_config)
+        supported_tasks, task = self._resolve_task(task, self.hf_config)
+        self.supported_tasks = supported_tasks
+        self.task: Final = task
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -255,7 +257,7 @@ class ModelConfig:
         self,
         task_option: TaskOption,
         hf_config: PretrainedConfig,
-    ) -> Task:
+    ) -> Tuple[Set[Task], Task]:
         architectures = getattr(hf_config, "architectures", [])
 
         task_support: Dict[Task, bool] = {
@@ -285,7 +287,7 @@ class ModelConfig:
 
             task = task_option
 
-        return task
+        return supported_tasks, task
 
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)

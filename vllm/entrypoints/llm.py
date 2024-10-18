@@ -332,10 +332,21 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if self.llm_engine.model_config.task != "generate":
-            raise ValueError(
+        task = self.llm_engine.model_config.task
+        if task != "generate":
+            messages = [
                 "LLM.generate() is only supported for (conditional) generation "
-                "models (XForCausalLM, XForConditionalGeneration).")
+                "models (XForCausalLM, XForConditionalGeneration).",
+            ]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "generate" in supported_tasks:
+                messages += (
+                    "Your model supports the 'generate' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task generate`.")
+
+            raise ValueError(" ".join(messages))
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -707,11 +718,18 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if self.llm_engine.model_config.task != "embedding":
-            raise ValueError(
-                "LLM.encode() is only supported for embedding models. If your "
-                "model supports both generation and embedding, you have to "
-                "explicitly pass `--task embedding` to use embedding mode.")
+        task = self.llm_engine.model_config.task
+        if task != "embedding":
+            messages = ["LLM.encode() is only supported for embedding models."]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "embedding" in supported_tasks:
+                messages += (
+                    "Your model supports the 'embedding' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task embedding`.")
+
+            raise ValueError(" ".join(messages))
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
