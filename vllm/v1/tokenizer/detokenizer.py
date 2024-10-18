@@ -57,6 +57,8 @@ class Detokenizer(multiprocessing.Process):
         push_port: int,
     ):
         super().__init__()
+        # NOTE: The pull_port of the detokenizer should be the same as the
+        # push_port of the engine. Vice versa.
         self.pull_port = pull_port
         self.push_port = push_port
         self.msgpack_encoder = msgpack.Encoder()
