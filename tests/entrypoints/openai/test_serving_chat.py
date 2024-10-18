@@ -26,6 +26,7 @@ class MockModelConfig:
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
+    chat_template_text_format = "string"
     max_model_len = 100
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
