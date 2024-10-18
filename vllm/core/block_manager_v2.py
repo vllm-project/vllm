@@ -244,7 +244,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
         return new_cows
-    
+
     def exist(self, seq: Sequence) -> bool:
         return seq.seq_id in self.block_tables
 

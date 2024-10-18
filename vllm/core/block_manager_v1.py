@@ -334,8 +334,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
                 if not block.computed and block.ref_count > 1:
+                    # the block is being computed
                     self.gpu_allocator.free(block)
-                    for prev_block in block_table:
+                    for prev_block in block_table.list():
                         self.gpu_allocator.free(prev_block)
                     block_table.reset()
                     return block_table
@@ -752,4 +753,3 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if device == Device.CPU:
             return self.cpu_allocator.get_prefix_cache_hit_rate()
         raise ValueError(f"Invalid device: {device}")
-

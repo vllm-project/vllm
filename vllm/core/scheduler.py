@@ -841,7 +841,7 @@ class Scheduler:
         self.waiting = waiting_queue
         self.running = running_queue
         return force_preemption_count
-    
+
     def _schedule_prefills(
         self,
         budget: SchedulingBudget,
@@ -945,6 +945,9 @@ class Scheduler:
 
             waiting_queue.popleft()
             if not self._allocate_and_set_running(seq_group):
+                # Postpone this sequence since there is already one
+                # scheduled which has the same prefix, and prevent updating
+                # the same kv cache slot(s) simultaneously
                 leftover_waiting_sequences.appendleft(seq_group)
                 continue
             # Can schedule this request.
@@ -1413,6 +1416,8 @@ class Scheduler:
             self._async_stopped.clear()
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> bool:
+        """Return true if sequence can run
+        """
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             if not self.block_manager.exist(seq):

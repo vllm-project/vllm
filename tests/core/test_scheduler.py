@@ -355,6 +355,7 @@ def initialize_scheduler(
     block_size=4,
     num_cpu_blocks=8,
     num_gpu_blocks=8,
+    enable_prefix_caching=False,
 ):
     block_size = block_size
     scheduler_config = SchedulerConfig(
@@ -362,7 +363,11 @@ def initialize_scheduler(
         max_num_seqs,
         max_model_len,
         use_v2_block_manager=use_v2_block_manager)
-    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config = CacheConfig(block_size=block_size,
+                               gpu_memory_utilization=1.0,
+                               swap_space=1,
+                               cache_dtype="auto",
+                               enable_prefix_caching=enable_prefix_caching)
     cache_config.num_cpu_blocks = num_cpu_blocks
     cache_config.num_gpu_blocks = num_gpu_blocks
     scheduler = Scheduler(scheduler_config, cache_config, lora_config)
@@ -1034,3 +1039,32 @@ def test_scheduling_budget():
     assert budget.num_curr_seqs == 0
     budget.subtract_num_seqs(seq_group.request_id, 2)
     assert budget.num_curr_seqs == 0
+
+
+@pytest.mark.parametrize('use_v2_block_manager', [False])
+@pytest.mark.parametrize('enable_prefix_caching', [True])
+def test_prefill_schedule_identical_prompts(use_v2_block_manager: bool,
+                                            enable_prefix_caching: bool):
+    """
+    Test idential prompts with prefix cache, expect only one is sheduled
+    """
+    block_size = 4
+    num_seq_group = 4
+
+    scheduler = initialize_scheduler(
+        use_v2_block_manager=use_v2_block_manager,
+        block_size=block_size,
+        enable_prefix_caching=enable_prefix_caching)
+    for i in range(num_seq_group):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=block_size +
+                                           block_size // 2,
+                                           block_size=block_size)
+
+        scheduler.add_seq_group(seq_group)
+    budget = create_token_budget()
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.seq_groups) == 1
+    assert len(remaining_waiting) == num_seq_group - 1
