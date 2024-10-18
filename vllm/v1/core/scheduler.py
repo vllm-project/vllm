@@ -179,6 +179,8 @@ class Scheduler:
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             preempted_req_ids=preempted_req_ids,
+            # These two fields are existing states in the scheduler
+            # instead of newly scheduled in this step.
             finished_req_ids=self.finished_req_ids,
             aborted_req_ids=self.aborted_req_ids,
         )
