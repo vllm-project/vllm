@@ -33,6 +33,7 @@ from vllm.multimodal.utils import (async_get_and_parse_audio,
                                    async_get_and_parse_image,
                                    get_and_parse_audio, get_and_parse_image)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -163,16 +164,18 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|image|>"
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|image_pad|><|vision_end|>"
+            if model_type == "molmo":
+                return ""
 
-            raise TypeError(f"Unknown model type: {model_type}")
+            raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
             if model_type == "ultravox":
                 return "<|reserved_special_token_0|>"
-            raise TypeError(f"Unknown model type: {model_type}")
+            raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "video":
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|video_pad|><|vision_end|>"
-            raise TypeError(f"Unknown model type: {model_type}")
+            raise TypeError(f"Unknown {modality} model type: {model_type}")
         else:
             raise TypeError(f"Unknown modality: {modality}")
 
@@ -562,14 +565,14 @@ def apply_mistral_chat_template(
     **kwargs: Any,
 ) -> List[int]:
     if chat_template is not None:
-        logger.warning(
+        print_warning_once(
             "'chat_template' cannot be overridden for mistral tokenizer.")
     if "add_generation_prompt" in kwargs:
-        logger.warning(
+        print_warning_once(
             "'add_generation_prompt' is not supported for mistral tokenizer, "
             "so it will be ignored.")
     if "continue_final_message" in kwargs:
-        logger.warning(
+        print_warning_once(
             "'continue_final_message' is not supported for mistral tokenizer, "
             "so it will be ignored.")
 
