@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Set, Union
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -191,11 +191,11 @@ class Scheduler:
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
-    ) -> List[Request]:
+    ) -> List[Tuple[Request, int]]:
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
-        finished_reqs: List[Request] = []
+        sampled: List[Tuple[Request, int]] = []
         for request in self.running:
             req_id = request.request_id
             # TODO: Consider speculative decoding.
@@ -204,18 +204,18 @@ class Scheduler:
                 req_index = model_runner_output.req_id_to_index[req_id]
                 token_id = sampled_token_ids[req_index]
                 request.output_token_ids.append(token_id)
+                sampled.append((request, 1))
                 # TODO: Update the KV cache manager for prefix caching.
 
                 if (request.num_tokens >= self.max_model_len
                         or request.num_output_tokens >= request.max_tokens):
                     request.status = RequestStatus.FINISHED_LENGTH_CAPPED
                     self.finished_req_ids.add(req_id)
-                    finished_reqs.append(request)
                     self._free_request(request)
                     continue
             new_running.append(request)
         self.running = new_running
-        return finished_reqs
+        return sampled
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)

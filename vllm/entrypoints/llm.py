@@ -879,28 +879,33 @@ class LLM:
             )
 
         # Run the engine.
-        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
+        outputs: List[Union[RequestOutput, RequestOutputV1,
+                            EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
-            finished_reqs, _ = self.llm_engine.step()
-            for req in finished_reqs:
-                output = RequestOutputV1.from_request(req)
-                outputs.append(output)
-                if use_tqdm:
-                    # Calculate tokens only for RequestOutput
-                    assert output.prompt_token_ids is not None
-                    total_in_toks += len(output.prompt_token_ids)
-                    in_spd = total_in_toks / pbar.format_dict["elapsed"]
-                    total_out_toks += len(output.outputs[0].token_ids)
-                    out_spd = (total_out_toks / pbar.format_dict["elapsed"])
-                    pbar.postfix = (f"est. speed input: {in_spd:.2f} toks/s, "
-                                    f"output: {out_spd:.2f} toks/s")
-                    pbar.update(1)
+            step_outputs = self.llm_engine.step()
+            for output in step_outputs:
+                if output.finished:
+                    outputs.append(output)
+                    if use_tqdm:
+                        if isinstance(output,
+                                      (RequestOutput, RequestOutputV1)):
+                            # Calculate tokens only for RequestOutput
+                            assert output.prompt_token_ids is not None
+                            total_in_toks += len(output.prompt_token_ids)
+                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                            total_out_toks += sum(
+                                len(stp.token_ids) for stp in output.outputs)
+                            out_spd = (total_out_toks /
+                                       pbar.format_dict["elapsed"])
+                            pbar.postfix = (
+                                f"est. speed input: {in_spd:.2f} toks/s, "
+                                f"output: {out_spd:.2f} toks/s")
+                        pbar.update(1)
 
         if use_tqdm:
             pbar.close()
-        self.llm_engine.terminate_detokenizer()
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.

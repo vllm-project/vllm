@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union, Tuple
 
 import zmq
 from msgspec import msgpack
@@ -25,6 +25,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_port
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.outputs import RequestOutput
 from vllm.v1.request import Request
 from vllm.v1.tokenizer.detokenizer import (Detokenizer, DetokenizerInputs,
                                            DetokenizerOutputs)
@@ -49,10 +50,13 @@ class LLMEngine:
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
         log_stats: bool,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
     ) -> None:
         # Override the configs for V1.
-        scheduler_config.max_num_seqs = max(scheduler_config.max_num_seqs, 1024)
+        scheduler_config.max_num_seqs = max(scheduler_config.max_num_seqs,
+                                            1024)
         scheduler_config.max_num_batched_tokens = max(
             scheduler_config.max_num_batched_tokens, 4096)
 
@@ -127,6 +131,8 @@ class LLMEngine:
             # different process.
             self.tokenizer.ping()
 
+        self.requests: Dict[str, Tuple[Request, int]] = {}
+
         # Detokenizer
         # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
         # For example, it does not terminate properly. We need to improve this.
@@ -144,7 +150,6 @@ class LLMEngine:
         self.poller.register(self.pull_socket, zmq.POLLIN)
         self.encoder = msgpack.Encoder()
         self.decoder = msgpack.Decoder(DetokenizerOutputs)
-        self.detokenizer_reqs: Dict[str, Request] = {}
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -237,6 +242,8 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
+        assert prompt_adapter_request is None
+        assert trace_headers is None
         self._validate_model_inputs(processed_inputs)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
@@ -252,10 +259,11 @@ class LLMEngine:
                       processed_inputs,
                       arrival_time,
                       sampling_params=params)
+        self.requests[request_id] = (req, 0)
         self.scheduler.add_request(req)
 
     def stop_remote_worker_execution_loop(self) -> None:
-        self.model_executor.stop_remote_worker_execution_loop()
+        raise NotImplementedError("TP not implemented yet.")
 
     def add_request(
         self,
@@ -298,41 +306,39 @@ class LLMEngine:
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
-        # FIXME(woosuk)
-        return self.scheduler.get_num_unfinished_requests()
+        return len(self.requests)
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests."""
-        # FIXME(woosuk)
-        return (self.scheduler.has_unfinished_requests()
-                or len(self.detokenizer_reqs) > 0)
+        return len(self.requests) > 0
 
-    def step(self) -> Tuple[List[Request], List[Request]]:
+    def step(self) -> List[RequestOutput]:
         if self.scheduler.has_unfinished_requests():
             scheduler_output = self.scheduler.schedule()
             output = self.model_executor.execute_model(scheduler_output)
-            finished_reqs = self.scheduler.update_from_output(
+            sampled = self.scheduler.update_from_output(
                 scheduler_output, output)
-
-            if finished_reqs:
-                self.send_to_detokenizer(finished_reqs)
+            self.send_to_detokenizer(sampled)
         detokenized_reqs = self.recv_from_detokenizer()
-        return detokenized_reqs, self.scheduler.running
+        outputs = [RequestOutput.from_request(req) for req in detokenized_reqs]
+        return outputs
 
-    def send_to_detokenizer(self, requests: List[Request]) -> None:
+    def send_to_detokenizer(self, sampled: List[Tuple[Request, int]]) -> None:
         inputs = DetokenizerInputs(
             req_ids=[],
             prompt_token_ids=[],
             new_token_ids=[],
             skip_special_tokens=[],
             spaces_between_special_tokens=[],
-            free_req_ids=[],
+            free_req_ids=[],  # TODO
         )
-        for req in requests:
-            self.detokenizer_reqs[req.request_id] = req
+        for req, num_tokens in sampled:
+            num_lagged_steps = self.requests[req.request_id][1] + 1
+            self.requests[req.request_id] = (req, num_lagged_steps)
+
             inputs.req_ids.append(req.request_id)
             inputs.prompt_token_ids.append(req.prompt_token_ids)
-            inputs.new_token_ids.append(req.output_token_ids)
+            inputs.new_token_ids.append(req.output_token_ids[-num_tokens:])
             inputs.skip_special_tokens.append(
                 req.sampling_params.skip_special_tokens)
             inputs.spaces_between_special_tokens.append(
@@ -344,14 +350,19 @@ class LLMEngine:
         socks = dict(self.poller.poll(timeout=0))
         if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
             msg = self.pull_socket.recv()
-            data = self.decoder.decode(msg)
-            num_reqs = len(data.req_ids)
+            outputs = self.decoder.decode(msg)
+            num_reqs = len(outputs.req_ids)
             for i in range(num_reqs):
-                req_id = data.req_ids[i]
-                assert req_id in self.detokenizer_reqs
-                req = self.detokenizer_reqs.pop(req_id)
-                req.output_text += data.detokenized_texts[i]
+                req_id = outputs.req_ids[i]
+                req, num_lagged_steps = self.requests[req_id]
+                req.output_text += outputs.detokenized_texts[i]
                 detokenized_reqs.append(req)
+
+                num_lagged_steps -= 1
+                if num_lagged_steps == 0 and req.is_finished():
+                    self.requests.pop(req_id)
+                else:
+                    self.requests[req_id] = (req, num_lagged_steps)
         return detokenized_reqs
 
     def terminate_detokenizer(self) -> None:
