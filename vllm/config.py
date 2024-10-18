@@ -110,7 +110,6 @@ class ModelConfig:
                  model: str,
                  tokenizer: str,
                  tokenizer_mode: str,
-                 chat_template_text_format: str,
                  trust_remote_code: bool,
                  dtype: Union[str, torch.dtype],
                  seed: int,
@@ -134,11 +133,11 @@ class ModelConfig:
                  use_async_output_proc: bool = True,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
+                 chat_template_text_format: str = "string",
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
-        self.chat_template_text_format = chat_template_text_format
         self.trust_remote_code = trust_remote_code
         self.seed = seed
         self.revision = revision
@@ -169,6 +168,7 @@ class ModelConfig:
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
+        self.chat_template_text_format = chat_template_text_format
         self.mm_processor_kwargs = mm_processor_kwargs
 
         # Set enforce_eager to False if the value is unset.
