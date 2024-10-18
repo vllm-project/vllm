@@ -219,7 +219,7 @@ it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
 
-#### Internlm Models
+#### InternLM Models
 Supported models:
 * `internlm/internlm2_5-7b-chat` (confirmed)
 * Additional internlm2.5 function-calling models are compatible as well
