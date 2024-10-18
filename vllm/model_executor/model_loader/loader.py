@@ -30,6 +30,7 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -122,7 +123,8 @@ def _get_model_initialization_kwargs(
         model_class: Type[nn.Module],
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
-        scheduler_config: Optional[SchedulerConfig] = None) -> Dict[str, Any]:
+        scheduler_config: Optional[SchedulerConfig] = None
+        ) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
 
@@ -152,14 +154,17 @@ def build_model(model_class: Type[nn.Module], hf_config: PretrainedConfig,
                 quant_config: Optional[QuantizationConfig], *,
                 lora_config: Optional[LoRAConfig],
                 multimodal_config: Optional[MultiModalConfig],
-                scheduler_config: Optional[SchedulerConfig]) -> nn.Module:
+                scheduler_config: Optional[SchedulerConfig],
+                pooling_config: Optional[PoolingConfig] = None) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
-                                                    scheduler_config)
+                                                    scheduler_config
+                                                    )
 
     return model_class(config=hf_config,
                        cache_config=cache_config,
                        quant_config=quant_config,
+                       pooling_config=pooling_config,
                        **extra_kwargs)
 
 
@@ -180,6 +185,7 @@ def _initialize_model(
         lora_config=lora_config,
         multimodal_config=model_config.multimodal_config,
         scheduler_config=scheduler_config,
+        pooling_config=model_config.pooling_config
     )
 
 

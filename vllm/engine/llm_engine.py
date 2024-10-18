@@ -290,7 +290,7 @@ class LLMEngine:
             model_config.use_async_output_proc,
             use_cached_outputs,
             model_config.chat_template_text_format,
-            model_config.mm_processor_kwargs,
+            model_config.mm_processor_kwargs
         )
         # TODO(woosuk): Print more configs in debug mode.
         self.model_config = model_config

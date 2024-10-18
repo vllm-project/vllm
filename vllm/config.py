@@ -10,11 +10,13 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
+                                            get_pooling_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         is_hip, is_openvino, print_warning_once)
@@ -173,6 +175,7 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.pooling_config = self.get_pooling_config() 
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -404,6 +407,12 @@ class ModelConfig:
                 "CUDA graph is not supported on BitAndBytes 8bit yet, "
                 "fallback to the eager mode.")
             self.enforce_eager = True
+
+    def get_pooling_config(self) -> PoolingConfig:
+        pooling_config = get_pooling_config(self.model, 
+                                            self.revision)
+        return PoolingConfig(pooling_config["pooling_type"], 
+                             pooling_config["normalize"])
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
