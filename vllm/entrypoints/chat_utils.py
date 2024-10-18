@@ -515,7 +515,8 @@ def parse_chat_messages(
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
-        sub_messages = _parse_chat_message_content(msg, mm_tracker, model_config.chat_template_content_type)
+        sub_messages = _parse_chat_message_content(
+            msg, mm_tracker, model_config.chat_template_content_type)
 
         conversation.extend(sub_messages)
 
@@ -533,7 +534,8 @@ def parse_chat_messages_futures(
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
-        sub_messages = _parse_chat_message_content(msg, mm_tracker, model_config.chat_template_content_type)
+        sub_messages = _parse_chat_message_content(
+            msg, mm_tracker, model_config.chat_template_content_type)
 
         conversation.extend(sub_messages)
 
