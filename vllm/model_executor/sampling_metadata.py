@@ -381,7 +381,7 @@ class SamplingTensors:
         vocab_size: int,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> Tuple["SamplingTensors", bool, bool, bool]:
+    ) -> Tuple["SamplingTensors", bool, bool, bool, list]:
         prompt_tokens: List[array] = []
         output_tokens: List[array] = []
         top_ks: List[int] = []
@@ -394,6 +394,7 @@ class SamplingTensors:
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
+        sampler_order = []
 
         assert sampling_metadata.seq_groups is not None
         for seq_group in sampling_metadata.seq_groups:
@@ -405,6 +406,7 @@ class SamplingTensors:
             r = sampling_params.repetition_penalty
             top_p = sampling_params.top_p
             min_p = sampling_params.min_p
+            sampler_priority = sampling_params.sampler_priority
 
             # k should not be greater than the vocab size.
             top_k = min(sampling_params.top_k, vocab_size)
@@ -423,7 +425,7 @@ class SamplingTensors:
                                      or abs(f) >= _SAMPLING_EPS
                                      or abs(r - 1.0) >= _SAMPLING_EPS):
                 do_penalties = True
-
+            sampler_order = sampler_priority.split(",")
             is_prompt = seq_group.is_prompt
             if is_prompt and sampling_params.prompt_logprobs is not None:
                 # For tokens in the prompt that we only need to get
@@ -452,6 +454,8 @@ class SamplingTensors:
 
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
+                sampling_params = seq_group.sampling_params
+                repetition_penalty_range = sampling_params.repetition_penalty_range
                 seq_ids = seq_group.seq_ids
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
@@ -465,7 +469,14 @@ class SamplingTensors:
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
-                        prompt_tokens.append(seq_data.prompt_token_ids_array)
+                        prompt_token_ids_array = seq_data.prompt_token_ids_array
+                        if repetition_penalty_range is not None and isinstance(repetition_penalty_range,
+                                                                               int) and repetition_penalty_range > 0:
+                            _range = int(repetition_penalty_range)
+                            if len(prompt_token_ids_array) > _range:
+                                prompt_tokens.append(prompt_token_ids_array[-_range:])
+                        else:
+                            prompt_tokens.append(seq_data.prompt_token_ids_array)
                         output_tokens.append(seq_data.output_token_ids_array)
 
         sampling_tensors = SamplingTensors.from_lists(
@@ -482,7 +493,7 @@ class SamplingTensors:
             device,
             dtype,
         )
-        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
+        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p, sampler_order)
 
     @classmethod
     def from_lists(

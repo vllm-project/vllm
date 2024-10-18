@@ -195,13 +195,14 @@ class Sampler(nn.Module):
 
         # Initialize new sampling tensors
         (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p) = SamplingTensors.from_sampling_metadata(
+         do_min_p, sampler_order) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         self._sampling_tensors = sampling_tensors
         self._do_penalties = do_penalties
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
+        self._sampler_order = sampler_order
 
     def forward(
         self,
@@ -244,28 +245,33 @@ class Sampler(nn.Module):
         do_penalties = self._do_penalties
         do_top_p_top_k = self._do_top_p_top_k
         do_min_p = self._do_min_p
+        sample_order = self._sampler_order
 
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
-        # Apply presence and frequency penalties.
-        if do_penalties:
-            logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
-                                      sampling_tensors.output_tokens,
-                                      sampling_tensors.presence_penalties,
-                                      sampling_tensors.frequency_penalties,
-                                      sampling_tensors.repetition_penalties)
+        # use sample order to apply samplers
+        for sample_name in sample_order:
+            if sample_name == "penalties":
+                # Apply presence and frequency penalties.
+                if do_penalties:
+                    logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                              sampling_tensors.output_tokens,
+                                              sampling_tensors.presence_penalties,
+                                              sampling_tensors.frequency_penalties,
+                                              sampling_tensors.repetition_penalties)
+            elif sample_name == "temperature":
+                # Use float32 to apply temperature scaling.
+                # Use in-place division to avoid creating a new tensor.
+                logits = logits.to(torch.float)
+                logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
 
-        # Use float32 to apply temperature scaling.
-        # Use in-place division to avoid creating a new tensor.
-        logits = logits.to(torch.float)
-        logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
-
-        if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
-            logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
-                                        sampling_tensors.top_ks)
-
-        if do_min_p:
-            logits = _apply_min_p(logits, sampling_tensors.min_ps)
+            elif sample_name == "top_p_top_k":
+                if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
+                    logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
+                                                sampling_tensors.top_ks)
+            elif sample_name == "min_p":
+                if do_min_p:
+                    logits = _apply_min_p(logits, sampling_tensors.min_ps)
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.

@@ -16,6 +16,7 @@ logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
+_DEFAULT_SAMPLER_PRIORITY = "penalties,temperature,top_k_top_p,min_p"
 
 
 class SamplingType(IntEnum):
@@ -120,6 +121,8 @@ class SamplingParams(
             they appear in the prompt and the generated text so far. Values > 1
             encourage the model to use new tokens, while values < 1 encourage
             the model to repeat tokens.
+        repetition_penalty_range:  The number of most recent tokens to consider
+            for repetition penalty.
         temperature: Float that controls the randomness of the sampling. Lower
             values make the model more deterministic, while higher values make
             the model more random. Zero means greedy sampling.
@@ -158,6 +161,11 @@ class SamplingParams(
         logits_processors: List of functions that modify logits based on
             previously generated tokens, and optionally prompt tokens as
             a first argument.
+        sampler_priority: Allows you to customize the order in which
+            the different samplers are applied.
+            In the Priority of the sampler. Defaults to _DEFAULT_SAMPLER_PRIORITY.
+            With this, custom orders like:
+            penalties->temperature->top_k top_p->min_p will be applied.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
@@ -176,6 +184,7 @@ class SamplingParams(
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
+    repetition_penalty_range: Optional[int] = 0
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1
@@ -199,6 +208,7 @@ class SamplingParams(
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    sampler_priority: str = _DEFAULT_SAMPLER_PRIORITY
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
 
     # The below fields are not supposed to be used as an input.
@@ -218,6 +228,7 @@ class SamplingParams(
         presence_penalty: Optional[float] = 0.0,
         frequency_penalty: Optional[float] = 0.0,
         repetition_penalty: Optional[float] = 1.0,
+        repetition_penalty_range: Optional[int] = 0,
         temperature: Optional[float] = 1.0,
         top_p: Optional[float] = 1.0,
         top_k: int = -1,
@@ -235,6 +246,7 @@ class SamplingParams(
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
+        sampler_priority: str = DEFAULT_SAMPLER_PRIORITY,
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
@@ -257,6 +269,8 @@ class SamplingParams(
             if frequency_penalty is None else frequency_penalty,
             repetition_penalty=1.0
             if repetition_penalty is None else repetition_penalty,
+            repetition_penalty_range=0
+            if repetition_penalty_range is None else repetition_penalty_range,
             temperature=1.0 if temperature is None else temperature,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
@@ -274,6 +288,8 @@ class SamplingParams(
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
             logits_processors=logits_processors,
+            sampler_priority=_DEFAULT_SAMPLER_PRIORITY
+            if sampler_priority is None else sampler_priority,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
             guided_decoding=guided_decoding,
@@ -458,6 +474,7 @@ class SamplingParams(
             f"presence_penalty={self.presence_penalty}, "
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
+            f"repetition_penalty_range={self.repetition_penalty_range}, "
             f"temperature={self.temperature}, "
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
@@ -474,6 +491,7 @@ class SamplingParams(
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
+            f"sampler_priority={self.sampler_priority}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}), "
             f"guided_decoding={self.guided_decoding}")
 
