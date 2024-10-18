@@ -125,8 +125,7 @@ class FlashInferState(AttentionState):
                 self.runner.parallel_config))
             num_kv_heads = self.runner.model_config.get_num_kv_heads(
                 self.runner.parallel_config)
-            use_tensor_cores = (num_qo_heads // num_kv_heads >
-                                4) or envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES
+            use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
                 "NHD",
