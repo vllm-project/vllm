@@ -1,20 +1,17 @@
 import time
-from typing import (Any, Dict,
-                    Iterable, List, Mapping, Optional, Union, Tuple)
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
-import msgspec
 import zmq
 from msgspec import msgpack
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
-                         InputRegistry, DecoderOnlyInputs, PromptType)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
+                         EncoderDecoderLLMInputs, InputRegistry, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -25,11 +22,10 @@ from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
-from vllm.version import __version__ as VLLM_VERSION
 from vllm.utils import get_open_port
-
-from vllm_v1.executor.gpu_executor import GPUExecutor
+from vllm.version import __version__ as VLLM_VERSION
 from vllm_v1.core.scheduler import Scheduler
+from vllm_v1.executor.gpu_executor import GPUExecutor
 from vllm_v1.request import Request
 from vllm_v1.tokenizer.detokenizer import (Detokenizer, DetokenizerInputs,
                                            DetokenizerOutputs)

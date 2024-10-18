@@ -1,13 +1,11 @@
 """A layer that samples the next tokens from the model's outputs."""
-from dataclasses import dataclass
-from math import inf
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
 
-from vllm_v1.sample.metadata import SamplingMetadata
 from vllm_v1.outputs import SamplerOutput
+from vllm_v1.sample.metadata import SamplingMetadata
 
 _SAMPLING_EPS = 1e-5
 

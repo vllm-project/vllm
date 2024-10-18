@@ -1,14 +1,12 @@
 import enum
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
-                    Optional, Union)
+from typing import TYPE_CHECKING, List, Optional, Union
 
-from vllm.sampling_params import SamplingParams
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
-    from vllm.inputs import LLMInputs
-    from vllm.multimodal.base import MultiModalDataDict
+    from vllm.inputs import DecoderOnlyInputs
 
 
 class Request:
@@ -16,7 +14,7 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        inputs: "LLMInputs",
+        inputs: "DecoderOnlyInputs",
         arrival_time: float,
         sampling_params: SamplingParams,
         lora_request: Optional[LoRARequest] = None,

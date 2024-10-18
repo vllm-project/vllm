@@ -1,16 +1,11 @@
-import enum
-import os
-import random
-import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import (Callable, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from dataclasses import dataclass
+from typing import Deque, Dict, Iterable, List, Optional, Set, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
 from vllm.multimodal import MultiModalDataDict
+from vllm.sampling_params import SamplingParams
 from vllm_v1.core.kv_cache_manager import KVCacheManager
 from vllm_v1.outputs import ModelRunnerOutput
 from vllm_v1.request import Request, RequestStatus
@@ -140,7 +135,8 @@ class Scheduler:
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
-                    assert False, f"Invalid request status: {request.status}"
+                    raise RuntimeError(
+                        f"Invalid request status: {request.status}")
 
                 req_to_new_block_ids[request.request_id] = (
                     computed_block_ids + new_block_ids)

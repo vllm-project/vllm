@@ -1,8 +1,6 @@
-import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from unittest.mock import patch
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
-                    Tuple, Type, TypeVar, Union)
 
 import numpy as np
 import torch
@@ -12,17 +10,16 @@ import torch.nn as nn
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import (DeviceMemoryProfiler, is_pin_memory_available, cdiv,
-                        STR_DTYPE_TO_TORCH_DTYPE)
 from vllm.multimodal import MultiModalDataDict
-from vllm.forward_context import set_forward_context
-
-from vllm_v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm_v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm_v1.outputs import SamplerOutput, ModelRunnerOutput
+from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
+                        is_pin_memory_available)
+from vllm_v1.attention.backends.flash_attn import (FlashAttentionBackend,
+                                                   FlashAttentionMetadata)
+from vllm_v1.outputs import ModelRunnerOutput
 from vllm_v1.sample.metadata import SamplingMetadata
 from vllm_v1.sample.sampler import Sampler
 
@@ -376,7 +373,7 @@ class GPUModelRunner:
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
-        with DeviceMemoryProfiler() as m:
+        with DeviceMemoryProfiler() as m:  # noqa: SIM117
             with patch("vllm.model_executor.layers.sampler.Sampler", Sampler):
                 self.model = get_model(model_config=self.model_config,
                                        device_config=self.device_config,
@@ -547,8 +544,8 @@ class PersistentBatch:
         elif sampling_params.sampling_type == SamplingType.RANDOM:
             self.random_reqs.add(req_index)
         elif sampling_params.sampling_type == SamplingType.RANDOM_SEED:
-            # TODO
-            assert False
+            # TODO(woosuk): Support per-request random seed.
+            raise NotImplementedError("Per-request seed is not supported yet.")
 
         self.top_p_cpu[req_index] = sampling_params.top_p
         if sampling_params.top_p < 1:
