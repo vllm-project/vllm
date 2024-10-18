@@ -23,6 +23,7 @@ def phi3v_model_config():
                        trust_remote_code=True,
                        dtype="bfloat16",
                        seed=0,
+                       chat_template_text_format="string",
                        limit_mm_per_prompt={
                            "image": 2,
                        })
