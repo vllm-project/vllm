@@ -5,6 +5,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.fx as fx
 
+from vllm.compilation.fusion import get_fusion_pass
 from vllm.logger import init_logger
 
 from .compile_context import get_compile_context
@@ -93,16 +94,66 @@ def fix_functionalization(graph: fx.Graph):
                         user.replace_all_uses_with(replace_node)
                         nodes_to_remove.append(user)
                 nodes_to_remove.append(node)
+            elif (node.args[0] ==
+                  torch.ops._C.fused_add_rms_norm_static_fp8_quant.default):
+                # manual replace for fused_add_rms_norm_static_fp8_quant
+                # this is the most effective optimization for llama
+                # failing to do this will result in many unnecessary copies
+
+                kwargs = node.kwargs
+
+                result = kwargs['result']
+                residual = kwargs['residual']
+
+                # Create a new call to torch.ops._C.rotary_embedding.default
+                with graph.inserting_before(node):
+                    # just insert the call to the custom op
+                    # NOTE: don't run dead code elimination,
+                    # otherwise this op will be removed
+                    graph.call_function(
+                        torch.ops._C.fused_add_rms_norm_static_fp8_quant.
+                        default,
+                        kwargs=kwargs)
+
+                for user in list(node.users):
+                    if user.op == 'call_function' and user.target == operator.getitem:  # noqa
+                        # Remove the getitem node
+                        if user.args[1] == 1:
+                            replace_node = result
+                        elif user.args[1] == 2:
+                            replace_node = residual
+                        user.replace_all_uses_with(replace_node)
+                        nodes_to_remove.append(user)
+                nodes_to_remove.append(node)
 
             elif node.args[0] == torch.ops._C.rms_norm.default:
                 # manual replace for rms_norm
 
                 kwargs = node.kwargs
 
-                input = kwargs['input']
-                out = kwargs['out']
-                weight = kwargs['weight']
-                epsilon = kwargs['epsilon']
+                replace_node = kwargs['result']
+                # Create a new call to torch.ops._C.rotary_embedding.default
+                # cannot use kwargs, because we have an `out`, see https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351 # noqa
+                with graph.inserting_before(node):
+                    # just insert the call to the custom op
+                    # NOTE: don't run dead code elimination,
+                    # otherwise this op will be removed
+                    graph.call_function(torch.ops._C.rms_norm.default,
+                                        kwargs=kwargs)
+
+                for user in list(node.users):
+                    if user.op == 'call_function' and user.target == operator.getitem:  # noqa
+                        user.replace_all_uses_with(replace_node)
+                        nodes_to_remove.append(user)
+                nodes_to_remove.append(node)
+
+            elif node.args[
+                    0] == torch.ops._C.rms_norm_static_fp8_quant.default:
+                # manual replace for rms_norm
+
+                kwargs = node.kwargs
+
+                replace_node = kwargs['result']
                 # Create a new call to torch.ops._C.rotary_embedding.default
                 # cannot use kwargs, because we have an `out`, see https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351 # noqa
                 with graph.inserting_before(node):
@@ -110,11 +161,8 @@ def fix_functionalization(graph: fx.Graph):
                     # NOTE: don't run dead code elimination,
                     # otherwise this op will be removed
                     graph.call_function(
-                        torch.ops._C.rms_norm.default,
-                        args=(out, input, weight, epsilon),
-                    )
-
-                replace_node = out
+                        torch.ops._C.rms_norm_static_fp8_quant.default,
+                        kwargs=kwargs)
 
                 for user in list(node.users):
                     if user.op == 'call_function' and user.target == operator.getitem:  # noqa
@@ -157,6 +205,14 @@ def fix_functionalization(graph: fx.Graph):
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
 
+fusion_pass = get_fusion_pass()
+
+
+def post_grad_post_passes(graph: fx.Graph):
+    fusion_pass(graph)
+    fix_functionalization(graph)
+
+
 def wrap_inductor(graph, example_inputs, additional_inductor_config):
     from torch._inductor import config
     current_config = config.shallow_copy_dict()
@@ -167,8 +223,8 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
     if current_config['post_grad_custom_post_pass'] is not None:
         logger.warning(
             "post_grad_custom_post_pass is already set in the config. "
-            "Overwriting it with the fix_functionalization")
-    current_config['post_grad_custom_post_pass'] = fix_functionalization
+            "Overwriting it with the post_grad_post_passes")  # TODO combine
+    current_config['post_grad_custom_post_pass'] = post_grad_post_passes
     return compile_fx(graph, example_inputs, config_patches=current_config)
 
 
