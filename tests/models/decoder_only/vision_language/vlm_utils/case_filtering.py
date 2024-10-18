@@ -5,8 +5,8 @@ handling multimodal placeholder substitution, and so on.
 import itertools
 from typing import Dict, Iterable, Tuple
 
-from .mm_test_types import (EMBEDDING_SIZE_FACTORS, ImageSizeWrapper, SizeType,
-                            VLMTestInfo, VLMTestType)
+from .types import (EMBEDDING_SIZE_FACTORS, ImageSizeWrapper, SizeType,
+                    VLMTestInfo, VLMTestType)
 
 
 def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],

@@ -16,7 +16,7 @@ from vllm.transformers_utils.tokenizer import patch_padding_side
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from .....conftest import HfRunner, ImageAsset, _ImageAssets
-from .mm_test_types import RunnerOutput
+from .types import RunnerOutput
 
 
 ####### vLLM output processors functions

@@ -14,13 +14,10 @@ from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
                           _VideoAssets)
 from ....utils import fork_new_process_for_each_test, get_memory_gb
 from ...utils import check_outputs_equal
-from .vlm_utils import custom_inputs, model_utils
+from .vlm_utils import custom_inputs, model_utils, runners
 from .vlm_utils.case_filtering import get_parametrized_options
-from .vlm_utils.core_utils import (run_custom_inputs_test, run_embedding_test,
-                                   run_multi_image_test, run_single_image_test,
-                                   run_video_test)
-from .vlm_utils.mm_test_types import (CustomTestOptions, ImageSizeWrapper,
-                                      VLMTestInfo, VLMTestType)
+from .vlm_utils.types import (CustomTestOptions, ImageSizeWrapper, VLMTestInfo,
+                              VLMTestType)
 
 # This hack is needed for phi3v & paligemma models
 # ROCm Triton FA can run into shared memory issues with these models,
@@ -34,7 +31,7 @@ COMMON_BROADCAST_SETTINGS = {
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
-    "image_size_factors": ((.25, 0.5, 1.0), ),
+    "image_size_factors": [(.25, 0.5, 1.0)],
     "distributed_executor_backend": (
         "ray",
         "mp",
@@ -117,7 +114,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         dtype="bfloat16" if is_cpu() else "half",
-        image_size_factors=((), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)),
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
     "glm4": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
@@ -177,7 +174,7 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"image": 4},
         )],
         # Llava-next tests fixed sizes & the default size factors
-        image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
+        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
     ),
     "llava_one_vision": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-7b-ov-hf"],
@@ -193,7 +190,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         # Llava-one-vision tests fixed sizes & the default size factors
-        image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
+        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
         runner_mm_key="videos",
         skip=(get_memory_gb() < 48), # Large GPU test
     ),
@@ -206,7 +203,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
         # Llava-next-video tests fixed sizes & the default size factors
-        image_sizes=(((1669, 2560), (2560, 1669), (183, 488), (488, 183),),),
+        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
         runner_mm_key="videos",
     ),
     "minicpmv": VLMTestInfo(
@@ -350,7 +347,7 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str, model: str,
                              vllm_runner: Type[VllmRunner],
                              image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_single_image_test(
+    runners.run_single_image_test(
         tmp_path=tmp_path,
         test_info=test_info,
         model=model,
@@ -380,7 +377,7 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str, model: str,
                             vllm_runner: Type[VllmRunner],
                             image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_multi_image_test(
+    runners.run_multi_image_test(
         tmp_path=tmp_path,
         test_info=test_info,
         model=model,
@@ -408,7 +405,7 @@ def test_image_embedding_models(
         size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
         vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_embedding_test(
+    runners.run_embedding_test(
         test_info=test_info,
         model=model,
         max_tokens=max_tokens,
@@ -436,7 +433,7 @@ def test_video_models(model_type: str, model: str, max_tokens: int,
                       hf_runner: Type[HfRunner], vllm_runner: Type[VllmRunner],
                       video_assets: _VideoAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_video_test(
+    runners.run_video_test(
         test_info=test_info,
         model=model,
         num_frames=num_frames,
@@ -470,7 +467,7 @@ def test_custom_inputs_models(
     vllm_runner: Type[VllmRunner],
 ):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_custom_inputs_test(
+    runners.run_custom_inputs_test(
         test_info=test_info,
         model=model,
         max_tokens=max_tokens,
@@ -499,7 +496,7 @@ def test_single_image_models_heavy(
         size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
         vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_single_image_test(
+    runners.run_single_image_test(
         tmp_path=tmp_path,
         test_info=test_info,
         model=model,
@@ -529,7 +526,7 @@ def test_multi_image_models_heavy(
         size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
         vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_multi_image_test(
+    runners.run_multi_image_test(
         tmp_path=tmp_path,
         test_info=test_info,
         model=model,
@@ -558,7 +555,7 @@ def test_image_embedding_models_heavy(
         size_wrapper: ImageSizeWrapper, hf_runner: Type[HfRunner],
         vllm_runner: Type[VllmRunner], image_assets: _ImageAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_embedding_test(
+    runners.run_embedding_test(
         test_info=test_info,
         model=model,
         max_tokens=max_tokens,
@@ -587,7 +584,7 @@ def test_video_models_heavy(model_type: str, model: str, max_tokens: int,
                             vllm_runner: Type[VllmRunner],
                             video_assets: _VideoAssets):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_video_test(
+    runners.run_video_test(
         test_info=test_info,
         model=model,
         num_frames=num_frames,
@@ -616,7 +613,7 @@ def test_custom_inputs_models_heavy(
         custom_test_opts: CustomTestOptions, hf_runner: Type[HfRunner],
         vllm_runner: Type[VllmRunner]):
     test_info = VLM_TEST_SETTINGS[model_type]
-    run_custom_inputs_test(
+    runners.run_custom_inputs_test(
         test_info=test_info,
         model=model,
         max_tokens=max_tokens,
