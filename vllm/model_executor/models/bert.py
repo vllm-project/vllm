@@ -21,6 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
+from vllm.transformers_utils.config import get_pooling_config
 
 class BertEmbedding(nn.Module):
 
@@ -390,7 +391,8 @@ class BertEmbeddingModel(nn.Module):
     ) -> None:
         super().__init__()
         self.model = BertModel(config, cache_config, quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.CLS, normalize=True)
+        self.pooling_type = self.get_pooling_type()
+        self._pooler = Pooler(pooling_type=self.pooling_type, normalize=True)
 
     def forward(
         self,
@@ -417,3 +419,12 @@ class BertEmbeddingModel(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)
+
+    def get_pooling_type(self):
+        pooling_type_name = get_pooling_config(self.model)
+        pooling_types = PoolingType.__dict__.items()
+        pooling_type = next((value for key, 
+                             value in pooling_types if key.lower() 
+                             in pooling_type_name), 
+                             None)
+        return PoolingType(pooling_type)
