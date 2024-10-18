@@ -93,14 +93,11 @@ class GPUModelRunner:
         # Keep the states of the pre-empted requests.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-        for req_id in scheduler_output.aborted_req_ids:
-            self.requests.pop(req_id, None)
 
         # Remove the requests from the persistent batch.
         stopped_req_ids = set().union(
             scheduler_output.preempted_req_ids,
             scheduler_output.finished_req_ids,
-            scheduler_output.aborted_req_ids,
         )
         removed_req_indices: List[int] = []
         for req_id in stopped_req_ids:
@@ -292,8 +289,7 @@ class GPUModelRunner:
         scheduler_output: "SchedulerOutput",
     ) -> SamplingMetadata:
         skip_copy = True
-        if (scheduler_output.aborted_req_ids
-                or scheduler_output.finished_req_ids
+        if (scheduler_output.finished_req_ids
                 or scheduler_output.preempted_req_ids):
             skip_copy = False
         if (scheduler_output.scheduled_new_reqs

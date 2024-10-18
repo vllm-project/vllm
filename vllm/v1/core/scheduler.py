@@ -48,8 +48,11 @@ class Scheduler:
         self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
 
+        # The request IDs that are finished in between the previous and the
+        # current steps. This is used to notify the workers about the finished
+        # requests so that they can free the cached states for those requests.
+        # This is flushed at the end of each scheduling step.
         self.finished_req_ids: Set[str] = set()
-        self.aborted_req_ids: Set[str] = set()
 
     def schedule(self) -> "SchedulerOutput":
         scheduled_new_reqs: List[Request] = []
@@ -179,14 +182,14 @@ class Scheduler:
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             preempted_req_ids=preempted_req_ids,
-            # These two fields are existing states in the scheduler
-            # instead of newly scheduled in this step.
+            # finished_req_ids is an existing state in the scheduler,
+            # instead of being newly scheduled in this step.
+            # It contains the request IDs that are finished in between
+            # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            aborted_req_ids=self.aborted_req_ids,
         )
 
         self.finished_req_ids = set()
-        self.aborted_req_ids = set()
         return scheduler_output
 
     def update_from_output(
@@ -223,25 +226,36 @@ class Scheduler:
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
 
-    def abort_requests(self, request_ids: Union[str, Iterable[str]]) -> None:
+    def finish_requests(
+        self,
+        request_ids: Union[str, Iterable[str]],
+        finished_status: RequestStatus,
+    ) -> None:
+        """Handles the finish signal from outside the scheduler.
+
+        For example, the API server can abort a request when the client
+        disconnects.
+        """
+        assert finished_status.is_finished()
         if isinstance(request_ids, str):
             request_ids = (request_ids, )
         request_ids = set(request_ids)
 
-        # TODO: Optimize this.
+        # TODO(woosuk): Traversing the whole waiting queue can be slow.
+        # Optimize this.
         for queue in [self.waiting, self.running]:
-            aborted_reqs: List[Request] = []
+            finished_reqs: List[Request] = []
             for request in queue:
                 if not request_ids:
                     break
                 if request.request_id in request_ids:
-                    request.status = RequestStatus.FINISHED_ABORTED
-                    aborted_reqs.append(request)
+                    request.status = finished_status
+                    finished_reqs.append(request)
                     request_ids.remove(request.request_id)
 
-            for request in aborted_reqs:
+            for request in finished_reqs:
                 queue.remove(request)
-                self.aborted_req_ids.add(request.request_id)
+                self.finished_req_ids.add(request.request_id)
                 self._free_request(request)
 
     def stop_requests(self, request_ids: Union[str, Iterable[str]]) -> None:
@@ -359,4 +373,3 @@ class SchedulerOutput:
 
     preempted_req_ids: Set[str]
     finished_req_ids: Set[str]
-    aborted_req_ids: Set[str]
