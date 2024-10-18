@@ -16,8 +16,6 @@ logger = init_logger(__name__)
 
 class GPUExecutor:
 
-    uses_ray: bool = False
-
     def __init__(
         self,
         model_config: ModelConfig,
@@ -96,17 +94,6 @@ class GPUExecutor:
     ) -> ModelRunnerOutput:
         output = self.worker.execute_model(scheduler_output)
         return output
-
-    def check_health(self) -> None:
-        # GPUExecutor will always be healthy as long as
-        # it's running.
-        return
-
-    def start_profile(self) -> None:
-        self.worker.start_profile()
-
-    def stop_profile(self) -> None:
-        self.worker.stop_profile()
 
 
 class GPUExecutorAsync(GPUExecutor):
