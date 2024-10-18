@@ -97,9 +97,7 @@ def dummy_data_for_qwen2_audio(ctx: InputContext, seq_len: int,
         (0, seq_len - max_llm_audio_tokens),
     )
     dummy_audio = np.full((max_llm_audio_tokens * 2 * 2 * 160, ), 0.)
-    return dummy_seqdata, {
-        "audio": [(dummy_audio, 16000)] * num_audios
-    }
+    return dummy_seqdata, {"audio": [(dummy_audio, 16000)] * num_audios}
 
 
 def get_processor(
@@ -167,7 +165,7 @@ def input_processor_for_qwen2_audio(ctx: InputContext,
         return llm_inputs
     if len(multi_modal_data["audio"]) == 0:
         return llm_inputs
-    assert (isinstance(multi_modal_data['audio'], list) 
+    assert (isinstance(multi_modal_data['audio'], list)
             and isinstance(multi_modal_data['audio'][0], tuple))
 
     processor = cached_get_processor(ctx.model_config.model)
