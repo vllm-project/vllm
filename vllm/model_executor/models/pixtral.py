@@ -701,12 +701,12 @@ def input_processor_for_pixtral_hf(
     new_prompt = inputs.get("prompt")
     new_token_ids = inputs["prompt_token_ids"]
 
+    image_token = processor.image_token
+    image_break_token = processor.image_break_token
+    image_end_token = processor.image_end_token
+
     # Update new_prompt if present
     if new_prompt:
-        image_token = processor.image_token
-        image_break_token = processor.image_break_token
-        image_end_token = processor.image_end_token
-
         parts = new_prompt.split(image_token)
         assert len(parts) - 1 == len(image_data)
         new_parts = [parts[0]]  # Start with the part before any image tokens
@@ -729,9 +729,10 @@ def input_processor_for_pixtral_hf(
         new_prompt = "".join(new_parts)
 
     # Update new_token_ids
-    image_token_id = 10
-    image_break_id = 12
-    image_end_id = 13
+    convert_tokens_to_ids = processor.tokenizer.convert_tokens_to_ids
+    image_token_id = convert_tokens_to_ids(image_token)
+    image_break_id = convert_tokens_to_ids(image_break_token)
+    image_end_id = convert_tokens_to_ids(image_end_token)
     placeholder_token_id = -999
     # Find all image token indices at once
     placeholder_indices = [
