@@ -433,6 +433,7 @@ class LLM:
                         for token_id, logprob_obj in logprobs.items():
                             new_beam = BeamSearchSequence(
                                 tokens=current_beam.tokens + [token_id],
+                                logprobs=current_beam.logprobs + [logprobs],
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob)
 
