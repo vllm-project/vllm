@@ -22,6 +22,7 @@ class _Backend(enum.Enum):
     TORCH_SDPA = enum.auto()
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
+    HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
     NO_ATTENTION = enum.auto()
@@ -141,6 +142,10 @@ def get_attn_backend(
         logger.info("Using Flashinfer backend.")
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
+    elif backend == _Backend.HPU_ATTN:
+        logger.info("Using HPUAttention backend.")
+        from vllm.attention.backends.hpu_attn import HPUAttentionBackend
+        return HPUAttentionBackend
     elif backend == _Backend.PALLAS:
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
@@ -216,6 +221,9 @@ def which_attn_to_use(
         else:
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         return _Backend.ROCM_FLASH
+
+    if current_platform.is_hpu():
+        return _Backend.HPU_ATTN
 
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
