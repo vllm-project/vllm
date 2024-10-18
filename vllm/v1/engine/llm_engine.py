@@ -23,12 +23,12 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_port
-from vllm.version import __version__ as VLLM_VERSION
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request
 from vllm.v1.tokenizer.detokenizer import (Detokenizer, DetokenizerInputs,
                                            DetokenizerOutputs)
+from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
