@@ -178,7 +178,8 @@ class LLM:
         )
         if envs.VLLM_USE_V1:
             from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
-            self.llm_engine = LLMEngineV1.from_engine_args(engine_args)
+            self.llm_engine = LLMEngineV1.from_engine_args(
+                engine_args, usage_context=UsageContext.LLM_CLASS)
         else:
             self.llm_engine = LLMEngine.from_engine_args(
                 engine_args, usage_context=UsageContext.LLM_CLASS)
