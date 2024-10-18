@@ -43,7 +43,8 @@ def test_chatglm3_lora(chatglm3_lora_files):
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
-                   trust_remote_code=True)
+                   trust_remote_code=True,
+                   enable_chunked_prefill=True)
 
     expected_lora_output = [
         "SELECT count(*) FROM singer",

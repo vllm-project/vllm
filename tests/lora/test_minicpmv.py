@@ -61,6 +61,7 @@ def test_minicpmv_lora(minicpmv_lora_files):
         max_loras=4,
         max_lora_rank=64,
         trust_remote_code=True,
+        enable_chunked_prefill=True,
     )
 
     output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
