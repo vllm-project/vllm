@@ -100,7 +100,7 @@ class MistralToolParser(ToolParser):
                     function=FunctionCall(
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
-                        arguments=json.dumps(raw_function_call["arguments"])))
+                        arguments=json.dumps(raw_function_call["arguments"], ensure_ascii=False)))
                 for raw_function_call in function_call_arr
             ]
 
