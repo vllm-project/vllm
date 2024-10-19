@@ -55,10 +55,12 @@ class LLMEngine:
         input_registry: InputRegistry = INPUT_REGISTRY,
     ) -> None:
         # Override the configs for V1.
-        scheduler_config.max_num_seqs = max(scheduler_config.max_num_seqs,
-                                            1024)
-        scheduler_config.max_num_batched_tokens = max(
-            scheduler_config.max_num_batched_tokens, 8192)
+        if usage_context == UsageContext.LLM_CLASS:
+            scheduler_config.max_num_seqs = 1024
+            scheduler_config.max_num_batched_tokens = 8192
+        elif usage_context == UsageContext.OPENAI_API_SERVER:
+            scheduler_config.max_num_seqs = 256
+            scheduler_config.max_num_batched_tokens = 2048
 
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -321,8 +323,8 @@ class LLMEngine:
             sampled = self.scheduler.update_from_output(
                 scheduler_output, output)
             self.send_to_detokenizer(sampled)
-        outputs = self.recv_from_detokenizer()
-        return outputs
+        req_outputs = self.recv_from_detokenizer()
+        return req_outputs
 
     def send_to_detokenizer(self, sampled: List[Tuple[Request, int]]) -> None:
         inputs = DetokenizerInputs(
@@ -338,7 +340,12 @@ class LLMEngine:
             self.requests[req.request_id] = (req, num_lagged_steps)
 
             inputs.req_ids.append(req.request_id)
-            inputs.prompt_token_ids.append(req.prompt_token_ids)
+            if len(req.output_token_ids) == num_tokens:
+                # The request is first detokenized.
+                inputs.prompt_token_ids.append(req.prompt_token_ids)
+            else:
+                # The request is already detokenized.
+                inputs.prompt_token_ids.append([])
             inputs.new_token_ids.append(req.output_token_ids[-num_tokens:])
             inputs.skip_special_tokens.append(
                 req.sampling_params.skip_special_tokens)

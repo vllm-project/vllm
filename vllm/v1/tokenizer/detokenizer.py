@@ -15,6 +15,8 @@ class DetokenizerInputs(msgspec.Struct):
 
     # [num_reqs]
     req_ids: List[str]
+    # A request's prompt token ids is sent to the detokenizer only when
+    # the request is first detokenized. Otherwise, an empty list is sent.
     prompt_token_ids: List[List[int]]
     new_token_ids: List[List[int]]
     skip_special_tokens: List[bool]
