@@ -6,12 +6,11 @@ import ray
 from prometheus_client import REGISTRY
 
 from vllm import EngineArgs, LLMEngine
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
-
-from ..conftest import cleanup
 
 MODELS = [
     "facebook/opt-125m",
@@ -307,7 +306,7 @@ def test_metric_spec_decode_interval(
 
     finally:
         del engine
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 def assert_metrics(engine: LLMEngine, disable_log_stats: bool,

@@ -264,6 +264,8 @@ _ACTIVATION_REGISTRY = LazyDict({
     lambda: nn.ReLU(),
     "relu2":
     lambda: ReLUSquaredActivation(),
+    "silu":
+    lambda: nn.SiLU(),
     "quick_gelu":
     lambda: QuickGELU(),
 })
