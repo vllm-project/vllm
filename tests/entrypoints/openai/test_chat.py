@@ -28,7 +28,8 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "8192",
+        "4096",
+        "--disable_sliding_window",
         "--enforce-eager",
         # lora config below
         "--enable-lora",
