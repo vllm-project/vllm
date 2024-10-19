@@ -1,12 +1,14 @@
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import (Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type,
+                    Union)
 
 import zmq
 from msgspec import msgpack
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
+                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
@@ -49,10 +51,12 @@ class LLMEngine:
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
+        executor_class: Type[GPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        use_cached_outputs: bool = False,
     ) -> None:
         # Override the configs for V1.
         if usage_context == UsageContext.LLM_CLASS:
@@ -162,7 +166,7 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
-        self.model_executor = GPUExecutor(
+        self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
@@ -208,9 +212,11 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
+        executor_class = cls._get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(
             **engine_config.to_dict(),
+            executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
@@ -430,6 +436,10 @@ class LLMEngine:
     def get_lora_config(self) -> LoRAConfig:
         """Gets the LoRA configuration."""
         return self.lora_config
+
+    @classmethod
+    def _get_executor_cls(cls, engine_config: EngineConfig):
+        return GPUExecutor
 
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
