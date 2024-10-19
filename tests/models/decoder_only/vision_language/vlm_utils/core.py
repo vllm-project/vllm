@@ -32,6 +32,7 @@ def run_test(
     limit_mm_per_prompt: Dict[str, int],
     model_kwargs: Optional[Dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
+    task: str = "auto",
     runner_mm_key: str = "images",
     distributed_executor_backend: Optional[str] = None,
     tensor_parallel_size: int = 1,
@@ -60,7 +61,8 @@ def run_test(
                      limit_mm_per_prompt=limit_mm_per_prompt,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=enforce_eager) as vllm_model:
+                     enforce_eager=enforce_eager,
+                     task=task) as vllm_model:
         for prompts, media in vllm_inputs:
             vllm_kwargs[runner_mm_key] = media
             vllm_output = vllm_model.generate_greedy_logprobs(

@@ -87,6 +87,7 @@ class VLMTestInfo(NamedTuple):
     enforce_eager: bool = True
     max_model_len: int = 1024
     max_num_seqs: int = 256
+    task: str = "auto"
     tensor_parallel_size: int = 1
 
     # Optional callable which gets a list of token IDs from the model tokenizer
@@ -152,6 +153,7 @@ class VLMTestInfo(NamedTuple):
             "enforce_eager": self.enforce_eager,
             "max_model_len": self.max_model_len,
             "max_num_seqs": self.max_num_seqs,
+            "task": self.task,
             "hf_output_post_proc": self.hf_output_post_proc,
             "vllm_output_post_proc": self.vllm_output_post_proc,
             "auto_cls": self.auto_cls,

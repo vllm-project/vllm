@@ -3,7 +3,7 @@ modality, getting all combinations (similar to pytest's parametrization),
 handling multimodal placeholder substitution, and so on.
 """
 import itertools
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import pytest
 
@@ -11,9 +11,9 @@ from .types import (EMBEDDING_SIZE_FACTORS, ImageSizeWrapper, SizeType,
                     VLMTestInfo, VLMTestType)
 
 
-def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
-                               test_type: VLMTestType,
-                               fork_per_test: bool) -> Dict[str, VLMTestInfo]:
+def get_filtered_test_settings(
+        test_settings: Dict[str, VLMTestInfo], test_type: VLMTestType,
+        fork_per_test: bool) -> Tuple[Dict[str, VLMTestInfo], List[str]]:
     """Given the dict of potential test settings to run, return a subdict
     of tests who have the current test type enabled, with the matching val for
     fork_per_test, as well as a list of the all tests that were enabled, but

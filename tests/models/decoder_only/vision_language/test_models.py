@@ -234,6 +234,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
         max_model_len=4096,
         max_num_seqs=2,
+        task="generate",
         # use eager mode for hf runner, since phi3v didn't work with flash_attn
         model_kwargs={"_attn_implementation": "eager"},
         use_tokenizer_eos=True,
