@@ -52,7 +52,7 @@
         {%- set messages = messages[1:] %}
     {%- else %}
         {{- raise_exception("Cannot put tools in the first user message when there's no first user message!") }}
-    {%- endif %}
+{%- endif %}
     {{- '<|start_header_id|>user<|end_header_id|>\n\n' -}}
     {{- "Given the following functions, please respond with a JSON for a function call " }}
     {{- "with its proper arguments that best answers the given prompt.\n\n" }}
@@ -74,14 +74,14 @@
         {%- endif %}
         {%- set tool_call = message.tool_calls[0].function %}
         {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' -}}
-        {{- '{"name": "' + tool_call.name + '", ' }}
+        {{- "<|python_tag|>" + '{"name": "' + tool_call.name + '", ' }}
         {{- '"parameters": ' }}
         {{- tool_call.arguments | tojson }}
         {{- "}" }}
-        {{- "<|eot_id|>" }}
+        {{- "<|eom_id|>" }}
     {%- elif message.role == "tool" or message.role == "ipython" %}
         {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
-        {%- if message.content is mapping %}
+        {%- if message.content is mapping or message.content is iterable %}
             {{- message.content | tojson }}
         {%- else %}
             {%- set content = message.content.strip() %}
