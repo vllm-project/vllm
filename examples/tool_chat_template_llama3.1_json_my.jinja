@@ -78,7 +78,7 @@
         {{- '"parameters": ' }}
         {{- tool_call.arguments | tojson }}
         {{- "}" }}
-        {{- "<|eom_id|>" }}
+        {{- "<|eot_id|>" }}
     {%- elif message.role == "tool" or message.role == "ipython" %}
         {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
         {%- if message.content is mapping or message.content is iterable %}
