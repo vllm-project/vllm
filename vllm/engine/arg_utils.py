@@ -428,7 +428,11 @@ class EngineArgs:
             help='The fraction of GPU memory to be used for the model '
             'executor, which can range from 0 to 1. For example, a value of '
             '0.5 would imply 50%% GPU memory utilization. If unspecified, '
-            'will use the default value of 0.9.')
+            'will use the default value of 0.9. This is a global gpu memory '
+            'utilization limit, for example if 50%% of the gpu memory is '
+            'already used before vLLM starts and --gpu-memory-utilization is '
+            'set to 0.9, then only 40%% of the gpu memory will be allocated '
+            'to the model executor.')
         parser.add_argument(
             '--num-gpu-blocks-override',
             type=int,

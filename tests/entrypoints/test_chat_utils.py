@@ -388,3 +388,29 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
                     "text": "What about these two?"
                 }]
             }], phi3v_model_config, phi3v_tokenizer)
+
+
+def test_parse_chat_messages_multiple_images_uncommon_input(
+    phi3v_model_config,
+    phi3v_tokenizer,
+    image_url,
+):
+    conversation, mm_data = parse_chat_messages([{
+        "role":
+        "user",
+        "content": [
+            "What's in these images?", {
+                "image_url": image_url
+            }, {
+                "image_url": image_url
+            }
+        ]
+    }], phi3v_model_config, phi3v_tokenizer)
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "<|image_1|>\n<|image_2|>\nWhat's in these images?"
+    }]
+    _assert_mm_data_is_image_input(mm_data, 2)
