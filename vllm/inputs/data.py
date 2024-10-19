@@ -163,6 +163,14 @@ class TokenInputs(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
+    instruction_seq: NotRequired[Optional[str]]
+    """
+    The instruction sequence that is usually prepended to the original prompt
+    when passing to the model. Certain models need to extract this instruction
+    sequence from the prompt in order to adjust certain operations of the
+    model such as the attention mask.
+    """
+
 
 def token_inputs(
     prompt_token_ids: List[int],
@@ -171,6 +179,7 @@ def token_inputs(
     multi_modal_data: Optional["MultiModalDataDict"] = None,
     multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+    instruction_seq: Optional[str] = None,
 ) -> TokenInputs:
     """Construct :class:`TokenInputs` from optional values."""
     inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
@@ -185,6 +194,8 @@ def token_inputs(
         inputs["multi_modal_placeholders"] = multi_modal_placeholders
     if mm_processor_kwargs is not None:
         inputs["mm_processor_kwargs"] = mm_processor_kwargs
+    if instruction_seq is not None:
+        inputs["instruction_seq"] = instruction_seq
 
     return inputs
 

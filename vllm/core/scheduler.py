@@ -12,6 +12,7 @@ from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
@@ -523,7 +524,7 @@ class Scheduler:
                 chunked number of tokens are scheduled  if
                 `budget.num_batched_tokens` has not enough capacity to schedule
                 all tokens.
-    
+
         Returns:
             SchedulerRunningOutputs.
         """
@@ -841,10 +842,10 @@ class Scheduler:
                 self._get_num_new_uncached_and_cached_tokens(
                     seq_group, SequenceStatus.WAITING, False, budget))
 
-            #Only preempt if priority inversion exists
+            # Only preempt if priority inversion exists
             while running_queue and self._get_priority(
                     running_queue[-1]) > self._get_priority(seq_group):
-                #Only preempt if waiting sequence cannot be allocated
+                # Only preempt if waiting sequence cannot be allocated
                 can_allocate = self.block_manager.can_allocate(seq_group)
                 if (num_new_tokens_uncached > 0
                         and can_allocate == AllocStatus.OK
@@ -854,7 +855,7 @@ class Scheduler:
                         )):
                     break
 
-                #Adjust budget to remove the victim sequence group
+                # Adjust budget to remove the victim sequence group
                 vseq_group = running_queue.pop()
                 num_running_tokens_uncached, _ = (
                     self._get_num_new_uncached_and_cached_tokens(
@@ -865,11 +866,11 @@ class Scheduler:
                 budget.subtract_num_seqs(vseq_group.request_id,
                                          num_running_seqs)
 
-                #Preempt out the victim sequence group
+                # Preempt out the victim sequence group
                 self._preempt(vseq_group, blocks_to_swap_out)
                 waiting_queue.appendleft(vseq_group)
                 force_preemption_count += 1
-            #Put the sequence back into the waiting queue
+            # Put the sequence back into the waiting queue
             waiting_queue.appendleft(seq_group)
 
         waiting_queue = deque(sorted(waiting_queue, key=self._get_priority))
@@ -1036,7 +1037,7 @@ class Scheduler:
 
     def _schedule_default(self) -> SchedulerOutputs:
         """Schedule queued requests.
-        
+
         The current policy is designed to optimize the throughput. First,
         it batches as many prefill requests as possible. And it schedules
         decodes. If there's a pressure on GPU memory, decode requests can
@@ -1141,7 +1142,7 @@ class Scheduler:
 
     def _schedule_chunked_prefill(self) -> SchedulerOutputs:
         """Schedule queued requests.
-        
+
         Chunked prefill allows to chunk prefill requests, batch them together
         with decode requests. This policy 1. schedule as many decoding requests
         as possible. 2. schedule chunked prefill requests that are not
@@ -1350,6 +1351,25 @@ class Scheduler:
                         seqs[0].data.get_len()):
                     do_sample = False
 
+            pooling_params = seq_group.pooling_params
+
+            # Store instruction_seq in pooling_params.
+            instruction_seq = seq.inputs.inputs.get("instruction_seq")
+            if instruction_seq is not None:
+                if pooling_params is None:
+                    pooling_params = PoolingParams()
+                    pooling_params.additional_data = {
+                        "instruction_seq": instruction_seq
+                    }
+                elif pooling_params.additional_data is None:
+                    pooling_params.additional_data = {
+                        "instruction_seq": instruction_seq
+                    }
+                else:
+                    pooling_params.additional_data[
+                        "instruction_seq"] = seq.inputs.inputs.get(
+                            "instruction_seq")
+
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
@@ -1360,7 +1380,7 @@ class Scheduler:
                     sampling_params=seq_group.sampling_params,
                     block_tables=block_tables,
                     do_sample=do_sample,
-                    pooling_params=seq_group.pooling_params,
+                    pooling_params=pooling_params,
                     token_chunk_size=token_chunk_size,
                     lora_request=seq_group.lora_request,
                     computed_block_nums=common_computed_block_nums,
