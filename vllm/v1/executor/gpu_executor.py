@@ -6,8 +6,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async)
+from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker
 
@@ -99,14 +98,3 @@ class GPUExecutor:
         # GPUExecutor will always be healthy as long as
         # it's running.
         return
-
-
-class GPUExecutorAsync(GPUExecutor):
-
-    async def execute_model_async(
-        self,
-        scheduler_output,
-    ) -> ModelRunnerOutput:
-        output = await make_async(self.worker.execute_model
-                                  )(scheduler_output=scheduler_output)
-        return output
