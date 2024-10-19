@@ -150,7 +150,10 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
-                        prompt=prompt_inputs,
+                        prompt={
+                            "prompt_token_ids":
+                            prompt_inputs["prompt_token_ids"]
+                        },
                         model_config=self.model_config,
                         request_id=request_id,
                         params=sampling_params,
