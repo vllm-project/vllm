@@ -28,7 +28,8 @@ jobs:
         pip install -r requirements-lint.txt
     - name: Analysing the code with ruff
       run: |
-        ruff check .
+        echo "::add-matcher::.github/workflows/matchers/ruff.json"
+        ruff check --output-format github .
     - name: Spelling check with codespell
       run: |
         codespell --toml pyproject.toml
