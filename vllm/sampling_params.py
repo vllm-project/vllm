@@ -41,14 +41,17 @@ class GuidedDecodingParams:
 
     @staticmethod
     def from_optional(
-        json: Optional[Union[Dict, BaseModel, str]],
+        json: Optional[Union[Dict, BaseModel, str]] = None,
         regex: Optional[str] = None,
         choice: Optional[List[str]] = None,
         grammar: Optional[str] = None,
         json_object: Optional[bool] = None,
         backend: Optional[str] = None,
         whitespace_pattern: Optional[str] = None,
-    ) -> "GuidedDecodingParams":
+    ) -> Optional["GuidedDecodingParams"]:
+        if all(arg is None
+               for arg in (json, regex, choice, grammar, json_object)):
+            return None
         # Extract json schemas from pydantic models
         if isinstance(json, (BaseModel, type(BaseModel))):
             json = json.model_json_schema()
