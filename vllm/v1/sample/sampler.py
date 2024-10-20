@@ -64,14 +64,13 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        logits = _apply_top_k_top_p(
+        return _apply_top_k_top_p(
             logits,
             sampling_metadata.no_top_k,
             sampling_metadata.top_k,
             sampling_metadata.no_top_p,
             sampling_metadata.top_p,
         )
-        return logits
 
     def get_probs(self, logits: torch.Tensor) -> torch.Tensor:
         return torch.softmax(logits, dim=-1, dtype=torch.float32)
@@ -89,14 +88,18 @@ class Sampler(nn.Module):
         no_generator: bool,
     ) -> torch.Tensor:
         q = torch.empty_like(probs)
-        if no_generator:
-            q.exponential_()
-        else:
+        # NOTE(woosuk): To batch-process the requests without their own seeds,
+        # which is the common case, we first assume that every request does
+        # not have its own seed. Then, we overwrite the values for the requests
+        # that have their own seeds.
+        q.exponential_()
+        if not no_generator:
             assert len(generators) == probs.shape[0]
             # TODO(woosuk): This can be slow because we handle each request
             # one by one. Optimize this.
             for i, generator in enumerate(generators):
-                q[i].exponential_(generator=generator)
+                if generator is not None:
+                    q[i].exponential_(generator=generator)
         return probs.div_(q).argmax(dim=-1).view(-1)
 
     def sample(
