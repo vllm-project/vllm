@@ -39,24 +39,6 @@ class DetokenizerOutputs(msgspec.Struct):
     num_output_token_ids: List[int]
 
 
-@dataclass
-class RequestState:
-
-    req_id: str
-
-    token_ids: List[int]
-    tokens: List[str]
-    num_prompt_tokens: int
-
-    prefix_offset: int
-    read_offset: int
-
-    skip_special_tokens: bool
-    spaces_between_special_tokens: bool
-
-    output_text: str = ""
-
-
 class Detokenizer(multiprocessing.Process):
 
     def __init__(
@@ -175,3 +157,21 @@ class Detokenizer(multiprocessing.Process):
             req_state.output_text += new_decoded_token_text
             decoded_text += new_decoded_token_text
         return decoded_text
+
+
+@dataclass
+class RequestState:
+
+    req_id: str
+
+    token_ids: List[int]
+    tokens: List[str]
+    num_prompt_tokens: int
+
+    prefix_offset: int
+    read_offset: int
+
+    skip_special_tokens: bool
+    spaces_between_special_tokens: bool
+
+    output_text: str = ""
