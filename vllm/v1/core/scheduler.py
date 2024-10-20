@@ -53,6 +53,11 @@ class Scheduler:
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: Set[str] = set()
 
+        # OPTIMIZATION: Cache the RunningRequestData objects to avoid creating
+        # them at each scheduling step.
+        # Request id -> RunningRequestData
+        self.running_reqs_data: Dict[str, RunningRequestData] = {}
+
     def schedule(self) -> "SchedulerOutput":
         scheduled_new_reqs: List[Request] = []
         scheduled_resumed_reqs: List[Request] = []
@@ -178,7 +183,7 @@ class Scheduler:
                 req.num_computed_tokens) for req in scheduled_resumed_reqs
         ]
         running_reqs_data = [
-            RunningRequestData.from_request(
+            self._make_running_request_data(
                 req, req_to_new_block_ids[req.request_id],
                 req.num_computed_tokens) for req in scheduled_running_reqs
         ]
@@ -199,6 +204,24 @@ class Scheduler:
 
         self.finished_req_ids = set()
         return scheduler_output
+
+    def _make_running_request_data(
+        self,
+        request: Request,
+        new_block_ids: List[int],
+        num_computed_tokens: int,
+    ) -> "RunningRequestData":
+        # OPTIMIZATION: Cache the RunningRequestData objects to avoid creating
+        # them at each scheduling step.
+        if request.request_id in self.running_reqs_data:
+            req_data = self.running_reqs_data[request.request_id]
+            req_data.new_block_ids = new_block_ids
+            req_data.num_computed_tokens = num_computed_tokens
+        else:
+            req_data = RunningRequestData.from_request(request, new_block_ids,
+                                                       num_computed_tokens)
+            self.running_reqs_data[request.request_id] = req_data
+        return req_data
 
     def update_from_output(
         self,
@@ -269,6 +292,7 @@ class Scheduler:
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
         self.kv_cache_manager.free(request)
+        self.running_reqs_data.pop(request.request_id, None)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
