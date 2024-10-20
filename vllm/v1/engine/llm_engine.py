@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
@@ -370,7 +370,7 @@ class LLMEngine:
                         and req.is_finished())
             req_output = self._make_request_output(
                 req, detokenizer_output.num_output_token_ids[i],
-                req.output_text, finished)
+                detokenizer_output.detokenized_texts[i], finished)
             req_outputs.append(req_output)
 
             if finished:
@@ -386,7 +386,7 @@ class LLMEngine:
         self,
         request: Request,
         num_output_tokens: int,
-        output_text: str,
+        new_output_text: str,
         finished: bool,
     ) -> RequestOutput:
         req_output = self.request_outputs.get(request.request_id)
@@ -396,6 +396,7 @@ class LLMEngine:
                 index=0,
                 text="",
                 token_ids=[],
+                cumulative_logprob=None,
                 logprobs=None,  # TODO
                 finish_reason=None,
                 stop_reason=None,
@@ -404,15 +405,31 @@ class LLMEngine:
                 request_id=request.request_id,
                 prompt=request.prompt,
                 prompt_token_ids=request.prompt_token_ids,
+                prompt_logprobs=None,  # TODO
                 outputs=[completion_output],
                 finished=False,
             )
             self.request_outputs[request.request_id] = req_output
 
         completion_output = req_output.outputs[0]
-        completion_output.text = output_text
-        completion_output.token_ids = (
-            request.output_token_ids[:num_output_tokens])
+        if request.sampling_params.output_kind == RequestOutputKind.CUMULATIVE:
+            completion_output.text += new_output_text
+            completion_output.token_ids = (
+                request.output_token_ids[:num_output_tokens])
+        elif request.sampling_params.output_kind == RequestOutputKind.DELTA:
+            completion_output.text = new_output_text
+            num_prev_tokens = len(completion_output.token_ids)
+            completion_output.token_ids = request.output_token_ids[
+                num_prev_tokens:num_output_tokens]
+        elif (request.sampling_params.output_kind ==
+              RequestOutputKind.FINAL_ONLY):
+            if finished:
+                completion_output.text = request.output_text
+                completion_output.token_ids = request.output_token_ids
+            else:
+                completion_output.text = ""
+                completion_output.token_ids = []
+
         if finished:
             completion_output.finish_reason = request.get_finished_reason()
             completion_output.stop_reason = request.stop_reason
