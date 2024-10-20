@@ -1,6 +1,8 @@
-import os
 from typing import List, Optional, Type
 
+import vllm.envs as envs
+from vllm.model_executor.layers.quantization.kernels.exllama import (
+    ExllamaLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.machete import (
     MacheteLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.marlin import (
@@ -13,6 +15,7 @@ from vllm.platforms import current_platform
 _POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [
     MacheteLinearKernel,
     MarlinLinearKernel,
+    ExllamaLinearKernel,
 ]
 
 
@@ -45,8 +48,7 @@ def choose_mp_linear_kernel(
 
     failure_reasons = []
     for kernel in _POSSIBLE_KERNELS:
-        if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "")\
-            .split(","):
+        if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
             failure_reasons.append(
                 f' {kernel.__name__} disabled by environment variable')
             continue

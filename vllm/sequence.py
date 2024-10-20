@@ -13,8 +13,7 @@ from typing import Set, Tuple, Union, cast
 import msgspec
 import torch
 
-from vllm.inputs import EncoderDecoderLLMInputs, LLMInputs
-from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -22,11 +21,17 @@ from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
+    from vllm.inputs import SingletonInputs
     from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
 VLLM_INVALID_TOKEN_ID = -1
+
+
+def array_full(token_id: int, count: int):
+    """:class:`array` equivalent of :func:`numpy.full`."""
+    return array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
 
 
 # We use dataclass for now because it is used for
@@ -173,22 +178,34 @@ class SequenceData(msgspec.Struct,
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+    def from_prompt_token_counts(
+            *token_counts: Tuple[int, int]) -> "SequenceData":
+        """
+        Construct a :class:`SequenceData` instance by concatenating
+        prompt token sequences.
+
+        Each tuple represents one token sequence, expressed in the form
+        :code:`(token_id, count)`.
+        """
         if len(token_counts) == 0:
             return SequenceData.from_seqs([])
 
-        arrs = [
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
-            for token_id, count in token_counts
-        ]
+        prompt_token_ids_arr = reduce(
+            array.__iadd__,
+            (array_full(token_id, count) for token_id, count in token_counts),
+        )
 
-        return SequenceData(reduce(array.__add__, arrs))
+        return SequenceData(prompt_token_ids_arr)
 
     @staticmethod
     def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
     ) -> "SequenceData":
+        """
+        Construct a :class:`SequenceData` instance from prompt and output
+        token sequences.
+        """
         prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      prompt_token_ids)
 
@@ -362,14 +379,14 @@ class SequenceData(msgspec.Struct,
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
-    The sequence is constructed from the LLMInputs instance passed
-    in through the `inputs` constructor argument.
+    The sequence is constructed from the :code:`SingletonInputs` instance
+    passed in through the :code:`inputs` constructor argument.
 
-    For encoder/decoder models, LLMInputs encapsulates both a
+    For encoder/decoder models, SingletonInputs encapsulates both a
     decoder and encoder prompt, creating an ambiguity about which
     prompt to construct the sequence from. The `from_decoder_prompt`
     constructor argument signals whether to construct the Sequence
-    from the LLMInputs decoder prompt, or encoder prompt.
+    from the SingletonInputs decoder prompt, or encoder prompt.
 
     Args:
         seq_id: The ID of the sequence.
@@ -379,16 +396,16 @@ class Sequence:
         eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
         lora_request: LoRA request.
         prompt_adapter_request: Prompt Adapter request.
-        from_decoder_prompt: Construct Sequence from LLMInputs decoder prompt
-                             (True) or encoder prompt (False.) Must be True
-                             for decoder-only model.
+        from_decoder_prompt: Construct Sequence from SingletonInputs decoder
+                             prompt (True) or encoder prompt (False.) Must be
+                             True for decoder-only model.
 
     """
 
     def __init__(
         self,
         seq_id: int,
-        inputs: "LLMInputs",
+        inputs: "SingletonInputs",
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -404,19 +421,19 @@ class Sequence:
         self.from_decoder_prompt = from_decoder_prompt
 
         # For decoder-only models, a Sequence is constructed
-        # from an LLMInputs instance (the `inputs` arg.)
+        # from an DecoderOnlyInputs instance (the `inputs` arg.)
         #
         # For encoder/decoder models the same `inputs`
         # instance could be utilized to construct either an
         # encoder sequence or a decoder sequence, because
-        # `LLMInputs` has both decoder- and encoder-oriented
+        # `DecoderOnlyInputs` has both decoder- and encoder-oriented
         # member variables (i.e. it encapsulates both an encoder
         # and a decoder prompt.) The decision of which type of sequence
         # to generate is determined by the `from_decoder_prompt` argument.
         #
         # When constructing a encoder sequence
         # (`from_decoder_prompt` False) it matters that
-        # the `LLMInputs` instance stored in `inputs` is valid
+        # the `DecoderOnlyInputs` instance stored in `inputs` is valid
         # in the sense that its encoder-related member variables are
         # populated; below, an exception is raised if this is
         # not the case.
@@ -424,8 +441,7 @@ class Sequence:
         # When constructing a decoder sequence (`from_decoder_prompt` True)
         # it does not matter whether `inputs` has its encoder-related
         # member variables populated.
-        if not (from_decoder_prompt
-                or is_valid_encoder_decoder_llm_inputs(inputs)):
+        if not (from_decoder_prompt or is_encoder_decoder_inputs(inputs)):
             raise ValueError("Cannot extract encoder input prompt from "
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
@@ -471,15 +487,19 @@ class Sequence:
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        if self.inputs.get("multi_modal_data") and self.inputs.get(
-                "encoder_multi_modal_data"):
+        inputs = self.inputs
+
+        if (inputs.get("multi_modal_data")
+                and inputs.get("encoder_multi_modal_data")):
             raise ValueError(
                 "Multi-modal data in both encoder and decoder is not supported."
             )
-        inputs = self.inputs
-        return self.inputs.get("multi_modal_data") or (cast(
-            EncoderDecoderLLMInputs,
-            inputs).get("encoder_multi_modal_data")) or {}
+
+        return cast(
+            "MultiModalDataDict",
+            (inputs.get("multi_modal_data")
+             or inputs.get("encoder_multi_modal_data") or {}),
+        )
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
@@ -768,7 +788,7 @@ class SequenceGroup:
             assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
             self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
-    def get_last_latency(self, now: float) -> Optional[float]:
+    def get_last_latency(self, now: float) -> float:
         """Sets the last token time for Request level timings."""
         # If still in prefill phase, raise Error.
         if self.is_prefill():
@@ -1178,7 +1198,7 @@ class PoolerOutput(
 
     spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> EmbeddingSequenceGroupOutput:
         return self.outputs[idx]
 
     def __setitem__(self, idx: int, value):
