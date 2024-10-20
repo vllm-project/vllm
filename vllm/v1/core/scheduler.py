@@ -258,27 +258,6 @@ class Scheduler:
                 self.finished_req_ids.add(request.request_id)
                 self._free_request(request)
 
-    def stop_requests(self, request_ids: Union[str, Iterable[str]]) -> None:
-        if isinstance(request_ids, str):
-            request_ids = (request_ids, )
-        request_ids = set(request_ids)
-
-        # TODO: Optimize this.
-        for queue in [self.waiting, self.running]:
-            stopped_reqs: List[Request] = []
-            for request in queue:
-                if not request_ids:
-                    break
-                if request.request_id in request_ids:
-                    request.status = RequestStatus.FINISHED_STOPPED
-                    stopped_reqs.append(request)
-                    request_ids.remove(request.request_id)
-
-            for request in stopped_reqs:
-                queue.remove(request)
-                self.finished_req_ids.add(request.request_id)
-                self._free_request(request)
-
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
         self.kv_cache_manager.free(request)
