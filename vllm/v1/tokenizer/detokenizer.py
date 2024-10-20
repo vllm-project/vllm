@@ -66,17 +66,21 @@ class Detokenizer(multiprocessing.Process):
         push_port: int,
     ):
         super().__init__()
+        self.tokenizer_name = tokenizer_name
         # NOTE: The pull_port of the detokenizer should be the same as the
         # push_port of the engine. Vice versa.
         self.pull_port = pull_port
         self.push_port = push_port
-        self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_decoder = msgpack.Decoder(DetokenizerInputs)
-
-        self.tokenizer = get_tokenizer(tokenizer_name)
-        self.requests: Dict[str, RequestState] = {}
 
     def run(self):
+        # Initialize these objects after the process is forked since they are
+        # not picklable.
+        self.msgpack_encoder = msgpack.Encoder()
+        self.msgpack_decoder = msgpack.Decoder(DetokenizerInputs)
+        self.tokenizer = get_tokenizer(self.tokenizer_name)
+        # req_id -> RequestState
+        self.request_states: Dict[str, RequestState] = {}
+
         self.zmq_context = zmq.Context()
         self.pull_socket = self.zmq_context.socket(zmq.PULL)
         self.pull_socket.bind(f"tcp://*:{self.pull_port}")
@@ -98,7 +102,7 @@ class Detokenizer(multiprocessing.Process):
             num_reqs = len(inputs.req_ids)
             for i in range(num_reqs):
                 req_id = inputs.req_ids[i]
-                if req_id not in self.requests:
+                if req_id not in self.request_states:
                     self.add_request(
                         request_id=req_id,
                         prompt_token_ids=inputs.prompt_token_ids[i],
@@ -108,7 +112,7 @@ class Detokenizer(multiprocessing.Process):
                     )
                 new_str = self.detokenize(req_id, inputs.new_token_ids[i])
                 detokenized_texts.append(new_str)
-                req_state = self.requests[req_id]
+                req_state = self.request_states[req_id]
                 num_output_token_ids.append(
                     len(req_state.token_ids) - req_state.num_prompt_tokens)
 
@@ -132,7 +136,7 @@ class Detokenizer(multiprocessing.Process):
             prompt_ids=prompt_token_ids,
             skip_special_tokens=skip_special_tokens,
         )
-        self.requests[request_id] = RequestState(
+        self.request_states[request_id] = RequestState(
             req_id=request_id,
             token_ids=prompt_token_ids,
             tokens=tokens,
@@ -144,12 +148,12 @@ class Detokenizer(multiprocessing.Process):
         )
 
     def free(self, request_id: str) -> None:
-        del self.requests[request_id]
+        del self.request_states[request_id]
 
     def detokenize(self, request_id: str, new_token_ids: List[int]) -> str:
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
-        req_state = self.requests[request_id]
+        req_state = self.request_states[request_id]
         decoded_text = ""
         for new_token_id in new_token_ids:
             req_state.token_ids.append(new_token_id)
