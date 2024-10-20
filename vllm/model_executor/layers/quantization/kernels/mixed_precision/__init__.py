@@ -1,12 +1,12 @@
 from typing import List, Optional, Type
 
 import vllm.envs as envs
+from vllm.platforms import current_platform
+
 from .exllama import ExllamaLinearKernel
 from .machete import MacheteLinearKernel
 from .marlin import MarlinLinearKernel
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
-
-from vllm.platforms import current_platform
 
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [

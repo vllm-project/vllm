@@ -1,8 +1,6 @@
 from typing import Callable, List, Optional, Set
 
 import torch
-from torch.nn import Parameter
-
 from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm.logger import init_logger
