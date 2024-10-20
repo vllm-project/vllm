@@ -42,7 +42,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         # [out, in] (different than cutlass_scaled_mm)
         weight = getattr(layer, self.w_q_name)
         replace_parameter(layer, self.w_q_name,
-                          torch.nn.Parameter(weight.data.contiguous(), 
+                          torch.nn.Parameter(weight.data, 
                                              requires_grad=False))
 
         # WEIGHT SCALE
@@ -56,10 +56,10 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
                                                   layer.logical_widths)
 
         # [out_channel,] (different than cutlass_scaled_mm)
-        weight_scale = weight_scale.squeeze(-1).to(torch.bfloat16)
+        weight_scale = weight_scale.squeeze(-1)
         replace_parameter(
             layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data.contiguous(), 
+            torch.nn.Parameter(weight_scale.data, 
                                requires_grad=False))
 
     def apply_weights(self,
