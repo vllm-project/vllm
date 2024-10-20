@@ -142,14 +142,16 @@ class MQLLMEngine:
 
         executor_class = LLMEngine._get_executor_cls(engine_config)
 
-        return cls(
-            ipc_path=ipc_path,
-            use_async_sockets=engine_config.model_config.use_async_output_proc,
-            **engine_config.to_dict(),
-            executor_class=executor_class,
-            log_requests=not engine_args.disable_log_requests,
-            log_stats=not engine_args.disable_log_stats,
-            usage_context=usage_context)
+        use_async_sockets = (engine_config.model_config.use_async_output_proc
+                             and not VLLM_USE_V1)
+
+        return cls(ipc_path=ipc_path,
+                   use_async_sockets=use_async_sockets,
+                   **engine_config.to_dict(),
+                   executor_class=executor_class,
+                   log_requests=not engine_args.disable_log_requests,
+                   log_stats=not engine_args.disable_log_stats,
+                   usage_context=usage_context)
 
     def start(self):
         try:
