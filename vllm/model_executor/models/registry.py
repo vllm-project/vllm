@@ -14,7 +14,8 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.utils import is_hip
 
-from .interfaces import supports_multimodal, supports_pp
+from .interfaces import (has_inner_state, is_attention_free,
+                         supports_multimodal, supports_pp)
 from .interfaces_base import is_embedding_model, is_text_generation_model
 
 logger = init_logger(__name__)
@@ -28,8 +29,7 @@ _TEXT_GENERATION_MODELS = {
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
-    "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
-    "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
+    # ChatGLMModel supports multimodal
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
@@ -52,6 +52,7 @@ _TEXT_GENERATION_MODELS = {
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
+    "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
@@ -70,6 +71,7 @@ _TEXT_GENERATION_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
+    # QWenLMHeadModel supports multimodal
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
@@ -84,15 +86,21 @@ _TEXT_GENERATION_MODELS = {
 }
 
 _EMBEDDING_MODELS = {
-    "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
+    # [Text-only]
+    "BertModel": ("bert", "BertEmbeddingModel"),
+    "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
-    "Gemma2Model": ("gemma2_embedding", "Gemma2EmbeddingModel"),
+    # [Multimodal]
+    "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
 }
 
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
+    "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
+    "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
@@ -100,6 +108,7 @@ _MULTIMODAL_MODELS = {
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
+    "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "PaliGemmaForConditionalGeneration": ("paligemma", "PaliGemmaForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
@@ -157,6 +166,8 @@ class _ModelInfo:
     is_embedding_model: bool
     supports_multimodal: bool
     supports_pp: bool
+    has_inner_state: bool
+    is_attention_free: bool
 
     @staticmethod
     def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
@@ -165,6 +176,8 @@ class _ModelInfo:
             is_embedding_model=is_embedding_model(model),
             supports_multimodal=supports_multimodal(model),
             supports_pp=supports_pp(model),
+            has_inner_state=has_inner_state(model),
+            is_attention_free=is_attention_free(model),
         )
 
 
@@ -379,6 +392,14 @@ class _ModelRegistry:
         architectures: Union[str, List[str]],
     ) -> bool:
         return self.inspect_model_cls(architectures).supports_pp
+
+    def model_has_inner_state(self, architectures: Union[str,
+                                                         List[str]]) -> bool:
+        return self.inspect_model_cls(architectures).has_inner_state
+
+    def is_attention_free_model(self, architectures: Union[str,
+                                                           List[str]]) -> bool:
+        return self.inspect_model_cls(architectures).is_attention_free
 
 
 ModelRegistry = _ModelRegistry({

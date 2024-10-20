@@ -73,11 +73,9 @@ class MQLLMEngine:
         # For MQLLMEngine, we can use cached outputs, since each new request
         # output is immediately pickled and send over the socket, which frees
         # the python object to be reused again.
-        use_cached_outputs = True
+        kwargs['use_cached_outputs'] = True
 
-        self.engine = LLMEngine(*args,
-                                **kwargs,
-                                use_cached_outputs=use_cached_outputs)
+        self.engine = LLMEngine(*args, **kwargs)
         self.log_requests = log_requests
 
         self.use_async_sockets = use_async_sockets
@@ -285,7 +283,8 @@ class MQLLMEngine:
                 params=request.params,
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
-                prompt_adapter_request=request.prompt_adapter_request)
+                prompt_adapter_request=request.prompt_adapter_request,
+                priority=request.priority)
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)

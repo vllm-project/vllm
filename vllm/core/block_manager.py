@@ -17,16 +17,15 @@ SeqId = int
 EncoderSeqId = str
 
 
-class BlockSpaceManagerV2(BlockSpaceManager):
+class SelfAttnBlockSpaceManager(BlockSpaceManager):
     """BlockSpaceManager which manages the allocation of KV cache.
 
     It owns responsibility for allocation, swapping, allocating memory for
     autoregressively-generated tokens, and other advanced features such as
     prefix caching, forking/copy-on-write, and sliding-window memory allocation.
 
-    The current implementation is partial; in particular prefix caching and
-    sliding-window are not feature complete. This class implements the design
-    described in https://github.com/vllm-project/vllm/pull/3492.
+    This class implements the design described in
+    https://github.com/vllm-project/vllm/pull/3492.
 
     Lookahead slots
         The block manager has the notion of a "lookahead slot". These are slots
@@ -190,7 +189,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         assert (request_id
                 not in self.cross_block_tables), \
-                "block table already exists"
+            "block table already exists"
 
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
