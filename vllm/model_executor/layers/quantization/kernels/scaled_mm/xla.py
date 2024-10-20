@@ -1,8 +1,6 @@
 from typing import Optional, Tuple
 
 import torch
-import torch_xla
-import torch_xla.core.xla_model as xm
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -37,13 +35,12 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
         return True, None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:        
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # [out, in] (different than cutlass_scaled_mm)
         weight = getattr(layer, self.w_q_name)
         replace_parameter(layer, self.w_q_name,
-                          torch.nn.Parameter(weight.data, 
-                                             requires_grad=False))
+                          torch.nn.Parameter(weight.data, requires_grad=False))
 
         # WEIGHT SCALE
         # XLA kernels support only per-tensor and per-channel.
@@ -59,8 +56,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         weight_scale = weight_scale.squeeze(-1)
         replace_parameter(
             layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, 
-                               requires_grad=False))
+            torch.nn.Parameter(weight_scale.data, requires_grad=False))
 
     def apply_weights(self,
                       layer: torch.nn.Module,

@@ -9,7 +9,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import _make_synced_weight_loader
 from vllm.platforms import current_platform
 
-
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
     "ModelWeightParameter", "ChannelQuantScaleParameter",
