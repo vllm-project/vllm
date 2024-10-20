@@ -43,6 +43,8 @@ class Scheduler:
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
 
+        # req_id -> Request
+        self.requests: Dict[str, Request] = {}
         # Priority queues for requests.
         self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
@@ -247,7 +249,6 @@ class Scheduler:
                 if (request.num_tokens >= self.max_model_len
                         or request.num_output_tokens >= request.max_tokens):
                     request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-                    self.finished_req_ids.add(req_id)
                     self._free_request(request)
                     continue
             new_running.append(request)
@@ -256,6 +257,7 @@ class Scheduler:
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
+        self.requests[request.request_id] = request
 
     def finish_requests(
         self,
@@ -272,27 +274,24 @@ class Scheduler:
             request_ids = (request_ids, )
         request_ids = set(request_ids)
 
-        # TODO(woosuk): Traversing the whole waiting queue can be slow.
-        # Optimize this.
-        for queue in [self.waiting, self.running]:
-            finished_reqs: List[Request] = []
-            for request in queue:
-                if not request_ids:
-                    break
-                if request.request_id in request_ids:
-                    request.status = finished_status
-                    finished_reqs.append(request)
-                    request_ids.remove(request.request_id)
+        for req_id in request_ids:
+            request = self.requests.get(req_id)
+            if request is None:
+                continue
 
-            for request in finished_reqs:
-                queue.remove(request)
-                self.finished_req_ids.add(request.request_id)
-                self._free_request(request)
+            if request.status == RequestStatus.RUNNING:
+                self.running.remove(request)
+            else:
+                self.waiting.remove(request)
+            request.status = finished_status
+            self._free_request(request)
 
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
         self.kv_cache_manager.free(request)
         self.running_reqs_data.pop(request.request_id, None)
+        del self.requests[request.request_id]
+        self.finished_req_ids.add(request.request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
