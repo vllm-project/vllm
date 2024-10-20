@@ -54,11 +54,12 @@ class LLMEngine:
         use_cached_outputs: bool = False,
     ) -> None:
         # Override the configs for V1.
+        # FIXME
         if usage_context == UsageContext.LLM_CLASS:
             scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 8192
         elif usage_context == UsageContext.OPENAI_API_SERVER:
-            scheduler_config.max_num_seqs = 256
+            scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 2048
 
         logger.info(
