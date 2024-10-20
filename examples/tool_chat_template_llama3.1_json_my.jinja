@@ -86,7 +86,7 @@
         {%- else %}
             {%- set content = message.content.strip() %}
             {%- if content.startswith('{') and content.endswith('}') or content.startswith('[') and content.endswith(']') %}
-                {{- content }}
+                {{- content | tojson }}
             {%- else %}
                 {{- {"output": message.content} | tojson }}
             {%- endif %}
