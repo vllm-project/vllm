@@ -1,38 +1,25 @@
 # -*- coding: utf-8 -*-
-from functools import partial
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather)
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.models.internlm2 import (InternLM2Attention,
+                                                  InternLM2ForCausalLM,
+                                                  InternLM2MLP, InternLM2Model)
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
-from vllm.model_executor.models.internlm2 import InternLM2Attention, InternLM2MLP, InternLM2Model, InternLM2ForCausalLM
+from .utils import make_layers
+
 
 class InternLM2VEDecoderLayer(nn.Module):
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -97,15 +84,21 @@ class InternLM2VEDecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.ffn_norm(hidden_states, residual)
         if visual_token_mask is not None and visual_token_mask.any():
-            visual_token_mask=visual_token_mask.repeat(1, self.hidden_size).bool()
-            hidden_states[visual_token_mask] = self.feed_forward_ve(hidden_states[visual_token_mask].reshape(-1,self.hidden_size)).flatten()
-            hidden_states[~visual_token_mask] = self.feed_forward(hidden_states[~visual_token_mask].reshape(-1,self.hidden_size)).flatten()
+            visual_token_mask = visual_token_mask.repeat(
+                1, self.hidden_size).bool()
+            hidden_states[visual_token_mask] = self.feed_forward_ve(
+                hidden_states[visual_token_mask].reshape(
+                    -1, self.hidden_size)).flatten()
+            hidden_states[~visual_token_mask] = self.feed_forward(
+                hidden_states[~visual_token_mask].reshape(
+                    -1, self.hidden_size)).flatten()
         else:
             hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
 
 class InternLM2VEModel(InternLM2Model):
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -117,9 +110,9 @@ class InternLM2VEModel(InternLM2Model):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: InternLM2VEDecoderLayer(config, cache_config,
-                                                quant_config),
+                                                   quant_config),
             prefix=f"{prefix}.layers")
-    
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -160,6 +153,7 @@ class InternLM2VEModel(InternLM2Model):
 
 
 class InternLM2VEForCausalLM(InternLM2ForCausalLM):
+
     def __init__(
         self,
         config: PretrainedConfig,

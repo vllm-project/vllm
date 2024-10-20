@@ -106,7 +106,7 @@ class InternVisionPatchModel(nn.Module):
 
     def get_input_embeddings(self):
         return self.embeddings
-    
+
     def forward(
         self,
         pixel_values: Optional[torch.Tensor] = None,
