@@ -141,6 +141,7 @@ def parser_with_config():
     parser.add_argument('--config', type=str)
     parser.add_argument('--port', type=int)
     parser.add_argument('--tensor-parallel-size', type=int)
+    parser.add_argument('--trust-remote-code', action='store_true')
     return parser
 
 
@@ -214,6 +215,7 @@ def test_config_args(parser_with_config):
     args = parser_with_config.parse_args(
         ['serve', 'mymodel', '--config', './data/test_config.yaml'])
     assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code
 
 
 def test_config_file(parser_with_config):
