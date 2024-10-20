@@ -23,10 +23,9 @@ class Scheduler:
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
-        # Note for LoRA scheduling: the current policy is extremely
-        # simple and NOT fair. It can lead to starvation of some
-        # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
+        # TODO: Support LoRA.
+        assert lora_config is None, "V1 does not support LoRA yet."
 
         num_gpu_blocks = cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
