@@ -125,9 +125,6 @@ class LLMEngine:
         )
         self.log_stats = log_stats
 
-        # Request id -> (Request, num_lagged_steps)
-        self.requests: Dict[str, Tuple[Request, int]] = {}
-
         assert not self.model_config.skip_tokenizer_init
         self.tokenizer = self._init_tokenizer()
         if self.tokenizer:
@@ -143,6 +140,14 @@ class LLMEngine:
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
+
+        # NOTE(woosuk): Now that the detokenizer works asynchronously, we need
+        # to keep track of how many steps each request has been lagged behind
+        # in terms of detokenization.
+        # Request id -> Request
+        self.requests: Dict[str, Request] = {}
+        # Request id -> how many detokenizer steps the request should wait for
+        self.num_lagged_steps: Dict[str, int] = {}
 
         self.model_executor = executor_class(
             model_config=model_config,
@@ -246,7 +251,8 @@ class LLMEngine:
                       processed_inputs,
                       arrival_time,
                       sampling_params=params)
-        self.requests[request_id] = (req, 0)
+        self.requests[request_id] = req
+        self.num_lagged_steps[request_id] = 0
         self.scheduler.add_request(req)
 
     def stop_remote_worker_execution_loop(self) -> None:
@@ -301,6 +307,12 @@ class LLMEngine:
         return len(self.requests) > 0
 
     def step(self) -> List[RequestOutput]:
+        # NOTE(woosuk): This method may return an empty list when the
+        # detokenizer is still processing the outputs. This should not be
+        # considered as the end of the generation process.
+        # FIXME(woosuk): Currently, the step method is inefficient because it
+        # creates RequestOutput objects for all running requests, while they
+        # may not be needed unless the output is streamed to the client.
         if self.scheduler.has_unfinished_requests():
             scheduler_output = self.scheduler.schedule()
             output = self.model_executor.execute_model(scheduler_output)
@@ -320,21 +332,21 @@ class LLMEngine:
             free_req_ids=[],  # TODO(woosuk): Implement freeing.
         )
         for req, num_tokens in sampled:
-            num_lagged_steps = self.requests[req.request_id][1] + 1
-            self.requests[req.request_id] = (req, num_lagged_steps)
-
             inputs.req_ids.append(req.request_id)
             if len(req.output_token_ids) == num_tokens:
                 # The request is first detokenized.
                 inputs.prompt_token_ids.append(req.prompt_token_ids)
             else:
-                # The request is already detokenized.
+                # The prompt token ids are already cached in the detokenizer.
                 inputs.prompt_token_ids.append([])
             inputs.new_token_ids.append(req.output_token_ids[-num_tokens:])
             inputs.skip_special_tokens.append(
                 req.sampling_params.skip_special_tokens)
             inputs.spaces_between_special_tokens.append(
                 req.sampling_params.spaces_between_special_tokens)
+
+            # Update the number of lagged steps.
+            self.num_lagged_steps[req.request_id] += 1
         self.detokenizer.send(inputs)
 
     def recv_from_detokenizer(self) -> List[RequestOutput]:
@@ -346,15 +358,15 @@ class LLMEngine:
         num_reqs = len(detokenizer_output.req_ids)
         for i in range(num_reqs):
             req_id = detokenizer_output.req_ids[i]
-            req, num_lagged_steps = self.requests[req_id]
+            req = self.requests[req_id]
             req.output_text += detokenizer_output.detokenized_texts[i]
 
-            num_lagged_steps -= 1
-            if num_lagged_steps == 0 and req.is_finished():
-                self.requests.pop(req_id)
+            self.num_lagged_steps[req_id] -= 1
+            if self.num_lagged_steps[req_id] == 0 and req.is_finished():
+                del self.requests[req_id]
+                del self.num_lagged_steps[req_id]
                 finished = True
             else:
-                self.requests[req_id] = (req, num_lagged_steps)
                 finished = False
 
             req_output = RequestOutput.from_request_async(
