@@ -23,7 +23,7 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.outputs import RequestOutput
+from vllm.v1.outputs import CompletionOutput, RequestOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.tokenizer.detokenizer import Detokenizer, DetokenizerInputs
 from vllm.version import __version__ as VLLM_VERSION
@@ -141,13 +141,17 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
+        # Request id -> Request
+        self.requests: Dict[str, Request] = {}
         # NOTE(woosuk): Now that the detokenizer works asynchronously, we need
         # to keep track of how many steps each request has been lagged behind
         # in terms of detokenization.
-        # Request id -> Request
-        self.requests: Dict[str, Request] = {}
-        # Request id -> how many detokenizer steps the request should wait for
+        # Request id -> how many detokenizer steps the request should wait for.
         self.num_lagged_steps: Dict[str, int] = {}
+        # OPTIMIZATION: Cache the request output and update it incrementally.
+        # This is used to avoid creating a new RequestOutput object every step.
+        # Request id -> RequestOutput
+        self.request_outputs: Dict[str, RequestOutput] = {}
 
         self.model_executor = executor_class(
             model_config=model_config,
@@ -362,23 +366,58 @@ class LLMEngine:
             req.output_text += detokenizer_output.detokenized_texts[i]
 
             self.num_lagged_steps[req_id] -= 1
-            if self.num_lagged_steps[req_id] == 0 and req.is_finished():
+            finished = (self.num_lagged_steps[req_id] == 0
+                        and req.is_finished())
+            req_output = self._make_request_output(
+                req, detokenizer_output.num_output_token_ids[i],
+                req.output_text, finished)
+            req_outputs.append(req_output)
+
+            if finished:
                 del self.requests[req_id]
                 del self.num_lagged_steps[req_id]
-                finished = True
-            else:
-                finished = False
-
-            req_output = req.make_output(
-                num_output_tokens=detokenizer_output.num_output_token_ids[i],
-                output_text=req.output_text,
-                finished=finished,
-            )
-            req_outputs.append(req_output)
+                del self.request_outputs[req_id]
         return req_outputs
 
     def terminate_detokenizer(self) -> None:
         self.detokenizer.terminate()
+
+    def _make_request_output(
+        self,
+        request: Request,
+        num_output_tokens: int,
+        output_text: str,
+        finished: bool,
+    ) -> RequestOutput:
+        req_output = self.request_outputs.get(request.request_id)
+        if req_output is None:
+            # TODO: Support `n` > 1.
+            completion_output = CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[],
+                logprobs=None,  # TODO
+                finish_reason=None,
+                stop_reason=None,
+            )
+            req_output = RequestOutput(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                prompt_token_ids=request.prompt_token_ids,
+                outputs=[completion_output],
+                finished=False,
+            )
+            self.request_outputs[request.request_id] = req_output
+
+        completion_output = req_output.outputs[0]
+        completion_output.text = output_text
+        completion_output.token_ids = (
+            request.output_token_ids[:num_output_tokens])
+        if finished:
+            completion_output.finish_reason = request.get_finished_reason()
+            completion_output.stop_reason = request.stop_reason
+            req_output.finished = finished
+        return req_output
 
     def check_health(self) -> None:
         if self.tokenizer:

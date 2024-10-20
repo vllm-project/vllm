@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
-from vllm.v1.outputs import CompletionOutput, RequestOutput
 
 if TYPE_CHECKING:
     from vllm.inputs import DecoderOnlyInputs
@@ -42,25 +41,6 @@ class Request:
         self.output_text = ""
         self.num_computed_tokens = 0
 
-        # TODO: Support `n` > 1.
-        # OPTIMIZATION: Cache the request output and update it incrementally.
-        # This is used to avoid creating a new RequestOutput object every step.
-        self._completion_output = CompletionOutput(
-            index=0,
-            text=self.output_text,
-            token_ids=self.output_token_ids,
-            logprobs=None,  # TODO
-            finish_reason=None,
-            stop_reason=None,
-        )
-        self._request_output = RequestOutput(
-            request_id=self.request_id,
-            prompt=self.prompt,
-            prompt_token_ids=self.prompt_token_ids,
-            outputs=[self._completion_output],
-            finished=False,
-        )
-
     @property
     def num_tokens(self) -> int:
         return self.num_prompt_tokens + len(self.output_token_ids)
@@ -74,21 +54,6 @@ class Request:
 
     def get_finished_reason(self) -> Union[str, None]:
         return RequestStatus.get_finished_reason(self.status)
-
-    def make_output(
-        self,
-        num_output_tokens: int,
-        output_text: str,
-        finished: bool,
-    ) -> RequestOutput:
-        self._completion_output.text = output_text
-        self._completion_output.token_ids = (
-            self.output_token_ids[:num_output_tokens])
-        if finished:
-            self._completion_output.finish_reason = self.get_finished_reason()
-            self._completion_output.stop_reason = self.stop_reason
-            self._request_output.finished = finished
-        return self._request_output
 
 
 class RequestStatus(enum.IntEnum):
