@@ -277,6 +277,7 @@ class Scheduler:
         for req_id in request_ids:
             request = self.requests.get(req_id)
             if request is None:
+                # Invalid request ID.
                 continue
 
             if request.status == RequestStatus.RUNNING:
