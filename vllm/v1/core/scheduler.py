@@ -235,7 +235,7 @@ class Scheduler:
         For example, the API server can abort a request when the client
         disconnects.
         """
-        assert finished_status.is_finished()
+        assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
             request_ids = (request_ids, )
         request_ids = set(request_ids)
