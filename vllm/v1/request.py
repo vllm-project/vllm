@@ -74,17 +74,17 @@ class RequestStatus(enum.IntEnum):
 
     @staticmethod
     def get_finished_reason(status: "RequestStatus") -> Union[str, None]:
-        return _FINISHED_REASON_MAP.get(status, None)
+        return _FINISHED_REASON_MAP.get(status)
 
 
 # Mapping of finished statuses to their finish reasons.
+# NOTE: The ignored sequences are the sequences whose prompt lengths
+# are longer than the model's length cap. Therefore, the stop
+# reason should also be "length" as in OpenAI API.
 _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_STOPPED: "stop",
     RequestStatus.FINISHED_LENGTH_CAPPED: "length",
     RequestStatus.FINISHED_ABORTED: "abort",
-    # The ignored sequences are the sequences whose prompt lengths
-    # are longer than the model's length cap. Therefore, the stop
-    # reason should also be "length" as in OpenAI API.
     RequestStatus.FINISHED_IGNORED: "length",
 }
 
