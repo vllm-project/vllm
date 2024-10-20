@@ -68,9 +68,14 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         assert i_s is None
         assert i_zp is None
         assert i_azp_adj is None
+        assert bias is None, "Bias is not supported for XLA yet."
 
         import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
-        return torch.ops.xla.quantized_matmul(x,
-                                              w_q,
-                                              w_s,
-                                              quantize_activation=True)
+        return torch.ops.xla.quantized_matmul(
+            x, 
+            w_q, 
+            w_s,
+            zero_point=None,
+            block_size=-1,
+            int4_weight=False,
+            quantize_activation=True)
