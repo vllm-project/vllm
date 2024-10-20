@@ -124,18 +124,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                       torch.tensor([], dtype=torch.float32,
                                    device=self.device))
                      for _ in range(num_layers)]
-        
-        xm.wait_device_ops()
-        m = xm.get_memory_info(self.device)
-        total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.    
-        print("\n\nBEFORE")
-        print(m)
-        print(f"{total_memory_size=}")
-        print(f"{profiled=}")
-        print("\n\n")
 
-        print(f"{self.scheduler_config.max_num_batched_tokens}")
         self.model_runner._dummy_run(
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
@@ -145,21 +134,19 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
 
-        # Get the maximum amount of memory used by the model weights and
-        # intermediate activations.
+        dtype_btyes = get_dtype_size(self.cache_dtype)
+        block_size = self.cache_config.block_size
+        block_size_bytes = (dtype_btyes * block_size * num_layers * 2 *
+                            head_size * num_kv_heads)
 
+        # Calculate the TPU KV cache size based on profiling.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
-        print("\n\nAFTER")
-        print(m)
-        print(f"{total_memory_size=}")
-        print(f"{profiled=}")
-        print("\n\n")
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
+        profiled = m["bytes_used"]  # Weights + intermediate activations.
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
         dtype_btyes = get_dtype_size(self.cache_dtype)
         block_size_bytes = (dtype_btyes * self.cache_config.block_size *
