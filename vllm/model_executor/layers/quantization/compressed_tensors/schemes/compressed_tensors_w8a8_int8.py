@@ -58,7 +58,6 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                                       input_dim=1,
                                       output_dim=0,
                                       weight_loader=weight_loader)
-
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE

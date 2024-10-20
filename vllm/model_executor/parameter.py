@@ -6,6 +6,9 @@ from torch.nn import Parameter
 
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.model_executor.utils import _make_synced_weight_loader
+from vllm.platforms import current_platform
+
 
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
@@ -36,6 +39,9 @@ class BasevLLMParameter(Parameter):
 
         :returns: a torch.nn.parameter
         """
+
+        if current_platform.is_tpu():
+            weight_loader = _make_synced_weight_loader(weight_loader)
 
         self._weight_loader = weight_loader
 

@@ -124,6 +124,18 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                       torch.tensor([], dtype=torch.float32,
                                    device=self.device))
                      for _ in range(num_layers)]
+        
+        xm.wait_device_ops()
+        m = xm.get_memory_info(self.device)
+        total_memory_size = m["bytes_limit"]
+        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.    
+        print("\n\nBEFORE")
+        print(m)
+        print(f"{total_memory_size=}")
+        print(f"{profiled=}")
+        print("\n\n")
+
+        print(f"{self.scheduler_config.max_num_batched_tokens}")
         self.model_runner._dummy_run(
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
@@ -135,9 +147,15 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
+
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
         profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+        print("\n\nAFTER")
+        print(m)
+        print(f"{total_memory_size=}")
+        print(f"{profiled=}")
+        print("\n\n")
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *

@@ -395,11 +395,27 @@ class DefaultModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
+                import torch_xla.core.xla_model as xm
+                xm.wait_device_ops()
+                m = xm.get_memory_info()
+                print(f"before _initialize_model: {m=}")
+                breakpoint()
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
+                import torch_xla.core.xla_model as xm
+                xm.mark_step()
+                xm.wait_device_ops()
+                m = xm.get_memory_info()
+                print(f"after _initialize_model: {m=}")
+                breakpoint()
 
             model.load_weights(self._get_all_weights(model_config, model))
+            xm.wait_device_ops()
+            m = xm.get_memory_info()
+            print(f"after load_weights: {m=}")
+
+            breakpoint()
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
@@ -411,6 +427,16 @@ class DefaultModelLoader(BaseModelLoader):
                     # parameters onto device for processing and back off after.
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+
+                    if current_platform.is_tpu():
+                        import torch_xla.core.xla_model as xm
+                        xm.mark_step()
+            
+            xm.wait_device_ops()
+            m = xm.get_memory_info()
+            print(f"after process_weights: {m=}")
+            print(model)
+            breakpoint()
         return model.eval()
 
 
