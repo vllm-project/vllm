@@ -42,6 +42,7 @@ class Request:
         self.output_text = ""
         self.num_computed_tokens = 0
 
+        # TODO: Support `n` > 1.
         # OPTIMIZATION: Cache the request output and update it incrementally.
         # This is used to avoid creating a new RequestOutput object every step.
         self._completion_output = CompletionOutput(
