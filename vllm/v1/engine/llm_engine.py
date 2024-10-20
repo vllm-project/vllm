@@ -369,8 +369,11 @@ class LLMEngine:
             else:
                 finished = False
 
-            req_output = RequestOutput.from_request_async(
-                req, detokenizer_output.num_output_token_ids[i], finished)
+            req_output = req.make_output(
+                num_output_tokens=detokenizer_output.num_output_token_ids[i],
+                output_text=req.output_text,
+                finished=finished,
+            )
             req_outputs.append(req_output)
         return req_outputs
 

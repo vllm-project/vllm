@@ -3,8 +3,6 @@ from typing import Dict, List, Optional, Union
 
 import torch
 
-from vllm.v1.request import Request
-
 
 @dataclass
 class SamplerOutput:
@@ -61,46 +59,3 @@ class RequestOutput:
     prompt_token_ids: List[int]
     outputs: List[CompletionOutput]
     finished: bool
-
-    @classmethod
-    def from_request(cls, request: Request) -> "RequestOutput":
-        # TODO: Support `n` > 1.
-        completion_output = CompletionOutput(
-            index=0,
-            text=request.output_text,
-            token_ids=request.output_token_ids,
-            logprobs=None,  # TODO
-            finish_reason=request.get_finished_reason(),
-            stop_reason=request.stop_reason,
-        )
-        return cls(
-            request_id=request.request_id,
-            prompt=request.prompt,
-            prompt_token_ids=request.prompt_token_ids,
-            outputs=[completion_output],
-            finished=request.is_finished(),
-        )
-
-    @classmethod
-    def from_request_async(
-        cls,
-        request: Request,
-        num_output_tokens: int,
-        finished: bool,
-    ) -> "RequestOutput":
-        # TODO: Support `n` > 1.
-        completion_output = CompletionOutput(
-            index=0,
-            text=request.output_text,
-            token_ids=request.output_token_ids[:num_output_tokens],
-            logprobs=None,  # TODO
-            finish_reason=request.get_finished_reason() if finished else None,
-            stop_reason=request.stop_reason if finished else None,
-        )
-        return cls(
-            request_id=request.request_id,
-            prompt=request.prompt,
-            prompt_token_ids=request.prompt_token_ids,
-            outputs=[completion_output],
-            finished=finished,
-        )
