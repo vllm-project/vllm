@@ -1283,8 +1283,12 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             raise ex
 
         for key, value in config.items():
-            processed_args.append('--' + key)
-            processed_args.append(str(value))
+            if isinstance(value, bool):
+                if value:
+                    processed_args.append('--' + key)
+            else:
+                processed_args.append('--' + key)
+                processed_args.append(str(value))
 
         return processed_args
 
