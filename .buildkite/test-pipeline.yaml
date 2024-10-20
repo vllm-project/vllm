@@ -1,0 +1,10 @@
+steps:
+- label: Entrypoints Test # 40min
+  working_dir: "/vllm-workspace/tests"
+  fast_check: true
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  commands:
+  - pip install -e ./plugins/vllm_add_dummy_model
+  - pytest -v -s entrypoints/temp
