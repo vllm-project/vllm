@@ -1222,7 +1222,11 @@
         "skipUrlSync": false
       },
       {
-        "definition": "label_values(model_name)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values(vllm:num_requests_running, model_name)",
         "hide": 0,
         "includeAll": false,
         "label": "model_name",
@@ -1230,7 +1234,7 @@
         "name": "model_name",
         "options": [],
         "query": {
-          "query": "label_values(model_name)",
+          "query": "label_values(vllm:num_requests_running, model_name)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
