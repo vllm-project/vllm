@@ -68,7 +68,7 @@ class Scheduler:
 
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
-        # Each request just has the num_computed_tokens, and num_tokens,
+        # Each request just has the num_computed_tokens and num_tokens,
         # which is equal to len(prompt_token_ids) + len(output_token_ids).
         # At each step, the scheduler tries to assign tokens to the requests
         # so that each request's num_computed_tokens can catch up its
