@@ -161,7 +161,7 @@ class LLMEngine:
             prompt_adapter_config=prompt_adapter_config,
             observability_config=self.observability_config,
         )
-        assert not self.model_config.embedding_mode
+        assert self.model_config.task != "embedding"
         self._initialize_kv_caches()
 
         # Create the scheduler.
@@ -427,6 +427,12 @@ class LLMEngine:
     @classmethod
     def _get_executor_cls(cls, engine_config: EngineConfig):
         return GPUExecutor
+
+    def is_tracing_enabled(self) -> bool:
+        return False
+
+    def do_log_stats(self, *args, **kwargs) -> None:
+        pass
 
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
