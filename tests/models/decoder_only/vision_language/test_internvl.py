@@ -24,6 +24,7 @@ HF_MULTIIMAGE_IMAGE_PROMPT = "<|im_start|>User\nImage-1: <image>\nImage-2: <imag
 models = [
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL2-2B",
+    "OpenGVLab/Mono-InternVL-2B",
     # Broken due to outdated implementation of Phi-3
     # See: https://huggingface.co/OpenGVLab/InternVL2-4B/discussions/3
     # "OpenGVLab/InternVL2-4B",
@@ -52,9 +53,15 @@ def generate(
 
     input_embeds = input_embeds.reshape(B, N, C)
 
-    outputs = self.language_model.generate(
+    forward_kwargs = dict(
         inputs_embeds=input_embeds,
         attention_mask=attention_mask,
+    )
+    if getattr(self, "use_visual_token_mask", False):
+        visual_token_mask = selected.reshape(B, N, 1).to(input_embeds.dtype)
+        forward_kwargs["visual_token_mask"] = visual_token_mask
+    outputs = self.language_model.generate(
+        **forward_kwargs,
         **generate_kwargs,
     )
 
