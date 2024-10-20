@@ -7,4 +7,4 @@ steps:
   - vllm/
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
-  - pytest -v -s entrypoints/temp
+  - pytest -v -s /vllm-workspace/crash_repro.py
