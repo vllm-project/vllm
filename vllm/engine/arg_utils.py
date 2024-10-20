@@ -17,7 +17,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -1128,18 +1128,6 @@ class AsyncEngineArgs(EngineArgs):
                             action='store_true',
                             help='Disable logging requests.')
         return parser
-
-
-class StoreBoolean(argparse.Action):
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        if values.lower() == "true":
-            setattr(namespace, self.dest, True)
-        elif values.lower() == "false":
-            setattr(namespace, self.dest, False)
-        else:
-            raise ValueError(f"Invalid boolean value: {values}. "
-                             "Expected 'true' or 'false'.")
 
 
 # These functions are used by sphinx to build the documentation
