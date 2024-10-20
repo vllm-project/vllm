@@ -35,7 +35,7 @@ def llm(enable_chunked_prefill, enable_prefix_caching, use_v2_block_manager, mon
     enforce_eager=True,
     load_format="mistral",
     max_model_len=4096,
-    model="mistralai/Ministral-8B-Instruct-2410",
+    model="sasha0552/Ministral-8B-Instruct-2410",
     swap_space=0,
     tensor_parallel_size=1,
     tokenizer_mode="mistral",
