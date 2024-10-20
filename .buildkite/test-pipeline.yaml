@@ -320,7 +320,7 @@ steps:
     - pytest -v -s models/decoder_only/language/test_big_models.py
 
 - label: Decoder-only Language Models Test (Extended) # 1h20min
-  #mirror_hardwares: [amd]
+  nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
