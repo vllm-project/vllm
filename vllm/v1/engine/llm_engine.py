@@ -2,9 +2,6 @@ import time
 from typing import (Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type,
                     Union)
 
-import zmq
-from msgspec import msgpack
-
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig,
@@ -24,13 +21,12 @@ from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_open_port
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.outputs import RequestOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.tokenizer.detokenizer import (Detokenizer, DetokenizerInputs,
-                                           DetokenizerOutputs)
+from vllm.v1.tokenizer.detokenizer import Detokenizer, DetokenizerInputs
+
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -130,33 +126,16 @@ class LLMEngine:
         )
         self.log_stats = log_stats
 
+        # Request id -> (Request, num_lagged_steps)
+        self.requests: Dict[str, Tuple[Request, int]] = {}
+
         assert not self.model_config.skip_tokenizer_init
         self.tokenizer = self._init_tokenizer()
         if self.tokenizer:
             # Ping the tokenizer to ensure liveness if it runs in a
             # different process.
             self.tokenizer.ping()
-
-        # Request id -> (Request, num_lagged_steps)
-        self.requests: Dict[str, Tuple[Request, int]] = {}
-
-        # Detokenizer
-        # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
-        # For example, it does not terminate properly. We need to improve this.
-        self.push_port = get_open_port()
-        self.pull_port = get_open_port()
-        self.detokenizer = Detokenizer(self.model_config.tokenizer,
-                                       self.push_port, self.pull_port)
-        self.detokenizer.start()
-        self.zmq_context = zmq.Context()
-        self.push_socket = self.zmq_context.socket(zmq.PUSH)
-        self.push_socket.connect(f"tcp://localhost:{self.push_port}")
-        self.pull_socket = self.zmq_context.socket(zmq.PULL)
-        self.pull_socket.connect(f"tcp://localhost:{self.pull_port}")
-        self.poller = zmq.Poller()
-        self.poller.register(self.pull_socket, zmq.POLLIN)
-        self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_decoder = msgpack.Decoder(DetokenizerOutputs)
+        self.detokenizer = Detokenizer(self.model_config.tokenizer)
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -357,38 +336,35 @@ class LLMEngine:
                 req.sampling_params.skip_special_tokens)
             inputs.spaces_between_special_tokens.append(
                 req.sampling_params.spaces_between_special_tokens)
-        self.push_socket.send(self.msgpack_encoder.encode(inputs),
-                              flags=zmq.NOBLOCK)
+        self.detokenizer.send(inputs)
 
     def recv_from_detokenizer(self) -> List[RequestOutput]:
-        detokenized_reqs: List[Request] = []
-        socks = dict(self.poller.poll(timeout=0))
+        detokenizer_output = self.detokenizer.recv()
+        if detokenizer_output is None:
+            return []
+
         req_outputs: List[RequestOutput] = []
-        if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
-            msg = self.pull_socket.recv()
-            outputs = self.msgpack_decoder.decode(msg)
-            num_reqs = len(outputs.req_ids)
-            for i in range(num_reqs):
-                req_id = outputs.req_ids[i]
-                req, num_lagged_steps = self.requests[req_id]
-                req.output_text += outputs.detokenized_texts[i]
-                detokenized_reqs.append(req)
+        num_reqs = len(detokenizer_output.req_ids)
+        for i in range(num_reqs):
+            req_id = detokenizer_output.req_ids[i]
+            req, num_lagged_steps = self.requests[req_id]
+            req.output_text += detokenizer_output.detokenized_texts[i]
 
-                num_lagged_steps -= 1
-                if num_lagged_steps == 0 and req.is_finished():
-                    self.requests.pop(req_id)
-                    finished = True
-                else:
-                    self.requests[req_id] = (req, num_lagged_steps)
-                    finished = False
+            num_lagged_steps -= 1
+            if num_lagged_steps == 0 and req.is_finished():
+                self.requests.pop(req_id)
+                finished = True
+            else:
+                self.requests[req_id] = (req, num_lagged_steps)
+                finished = False
 
-                req_output = RequestOutput.from_request_async(
-                    req, outputs.num_output_token_ids[i], finished)
-                req_outputs.append(req_output)
+            req_output = RequestOutput.from_request_async(
+                req, detokenizer_output.num_output_token_ids[i], finished)
+            req_outputs.append(req_output)
         return req_outputs
 
     def terminate_detokenizer(self) -> None:
-        self.push_socket.send(b"", flags=zmq.NOBLOCK)
+        self.detokenizer.terminate()
 
     def check_health(self) -> None:
         if self.tokenizer:

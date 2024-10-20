@@ -1,6 +1,6 @@
 import multiprocessing
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import msgspec
 import zmq
@@ -9,6 +9,7 @@ from msgspec import msgpack
 from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils import get_open_port
 
 
 class DetokenizerInputs(msgspec.Struct):
@@ -39,7 +40,44 @@ class DetokenizerOutputs(msgspec.Struct):
     num_output_token_ids: List[int]
 
 
-class Detokenizer(multiprocessing.Process):
+class Detokenizer:
+
+    def __init__(self, tokenizer_name: str):
+        # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
+        # For example, it does not terminate properly. We need to improve this.
+        self.push_port = get_open_port()
+        self.pull_port = get_open_port()
+        self.detokenizer = DetokenizerProc(tokenizer_name, self.push_port,
+                                           self.pull_port)
+        self.detokenizer.start()
+
+        self.zmq_context = zmq.Context()
+        self.push_socket = self.zmq_context.socket(zmq.PUSH)
+        self.push_socket.connect(f"tcp://localhost:{self.push_port}")
+        self.pull_socket = self.zmq_context.socket(zmq.PULL)
+        self.pull_socket.connect(f"tcp://localhost:{self.pull_port}")
+        self.poller = zmq.Poller()
+        self.poller.register(self.pull_socket, zmq.POLLIN)
+        self.msgpack_encoder = msgpack.Encoder()
+        self.msgpack_decoder = msgpack.Decoder(DetokenizerOutputs)
+
+    def send(self, inputs: DetokenizerInputs) -> None:
+        self.push_socket.send(self.msgpack_encoder.encode(inputs),
+                              flags=zmq.NOBLOCK)
+
+    def recv(self) -> Optional[DetokenizerOutputs]:
+        socks = dict(self.poller.poll(timeout=0))
+        if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
+            msg = self.pull_socket.recv()
+            return self.msgpack_decoder.decode(msg)
+        return None
+
+    def terminate(self) -> None:
+        self.push_socket.send(b"", flags=zmq.NOBLOCK)
+        self.detokenizer.join()
+
+
+class DetokenizerProc(multiprocessing.Process):
 
     def __init__(
         self,
