@@ -1,9 +1,9 @@
 import enum
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import RequestMetrics
 
 if TYPE_CHECKING:
     from vllm.inputs import DecoderOnlyInputs
@@ -90,32 +90,3 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_ABORTED: "abort",
     RequestStatus.FINISHED_IGNORED: "length",
 }
-
-
-@dataclass
-class RequestMetrics:
-    """Metrics associated with a request.
-
-    Attributes:
-        arrival_time: The time when the request arrived.
-        first_scheduled_time: The time when the request was first scheduled.
-        first_token_time: The time when the first token was generated.
-        time_in_queue: The time the request spent in the queue.
-        finished_time: The time when the request was finished.
-        scheduler_time: The time spent in the scheduler when this request was
-                        being considered by the scheduler.
-        model_forward_time: The time spent in the model forward pass when this
-                            request was in the batch.
-        model_execute_time: The time spent in the model execute function. This
-                            will include model forward, block/sync across
-                            workers, cpu-gpu sync time and sampling time.
-    """
-    arrival_time: float
-    last_token_time: float
-    first_scheduled_time: Optional[float]
-    first_token_time: Optional[float]
-    time_in_queue: Optional[float]
-    finished_time: Optional[float] = None
-    scheduler_time: Optional[float] = None
-    model_forward_time: Optional[float] = None
-    model_execute_time: Optional[float] = None
