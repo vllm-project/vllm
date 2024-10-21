@@ -501,7 +501,7 @@ class LLMEngine:
     def stop_profile(self) -> None:
         pass
 
-    def get_tokenizer_group(self):
+    def get_tokenizer_group(self, *args, **kwargs):
         return self.tokenizer
 
 

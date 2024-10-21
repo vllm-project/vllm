@@ -62,7 +62,7 @@ class RequestOutput:
     request_id: str
     prompt: Optional[str]
     prompt_token_ids: List[int]
-    prompt_logprobs: Optional[Dict[int, float]]
+    prompt_logprobs: Optional[List[Optional[Dict[int, float]]]]
     outputs: List[CompletionOutput]
     finished: bool
     metrics: Optional[RequestMetrics] = None
