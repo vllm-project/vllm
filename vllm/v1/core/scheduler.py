@@ -86,13 +86,13 @@ class Scheduler:
                 break
 
             request = self.running[req_index]
-            num_tokens = request.num_tokens - request.num_computed_tokens
-            num_tokens = min(num_tokens, token_budget)
-            assert num_tokens > 0
+            num_new_tokens = request.num_tokens - request.num_computed_tokens
+            num_new_tokens = min(num_new_tokens, token_budget)
+            assert num_new_tokens > 0
 
             while True:
                 new_block_ids = self.kv_cache_manager.append_slots(
-                    request, num_tokens)
+                    request, num_new_tokens)
                 if new_block_ids is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -111,8 +111,8 @@ class Scheduler:
                     scheduled_running_reqs.append(request)
 
                     req_to_new_block_ids[request.request_id] = new_block_ids
-                    num_scheduled_tokens[request.request_id] = num_tokens
-                    token_budget -= num_tokens
+                    num_scheduled_tokens[request.request_id] = num_new_tokens
+                    token_budget -= num_new_tokens
                     req_index += 1
                     break
 
@@ -136,11 +136,11 @@ class Scheduler:
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
-                num_tokens = request.num_tokens - num_computed_tokens
-                num_tokens = min(num_tokens, token_budget)
-                assert num_tokens > 0
+                num_new_tokens = request.num_tokens - num_computed_tokens
+                num_new_tokens = min(num_new_tokens, token_budget)
+                assert num_new_tokens > 0
                 new_block_ids = self.kv_cache_manager.allocate_slots(
-                    request, num_tokens, computed_block_ids)
+                    request, num_new_tokens, computed_block_ids)
                 if new_block_ids is None:
                     # The request cannot be scheduled.
                     break
@@ -158,8 +158,8 @@ class Scheduler:
 
                 req_to_new_block_ids[request.request_id] = (
                     computed_block_ids + new_block_ids)
-                num_scheduled_tokens[request.request_id] = num_tokens
-                token_budget -= num_tokens
+                num_scheduled_tokens[request.request_id] = num_new_tokens
+                token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
 
         # Check if the scheduling constraints are satisfied.
