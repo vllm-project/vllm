@@ -153,7 +153,8 @@ class SchedulerOutputs:
     def _sort_by_lora_ids(self):
         self.scheduled_seq_groups = sorted(
             self.scheduled_seq_groups,
-            key=lambda g: (g.seq_group.lora_int_id, g.seq_group.request_id))
+            key=lambda g: (not g.seq_group.is_prefill(), g.seq_group.
+                           lora_int_id, g.seq_group.request_id))
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:
