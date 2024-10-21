@@ -382,18 +382,16 @@ class BertEmbeddingModel(nn.Module):
        _pooler: An instance of Pooler used for pooling operations.
    """
 
-    def __init__(
-        self,
-        config: BertConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        pooling_config: Optional[PoolingConfig] = None
-    ) -> None:
+    def __init__(self,
+                 config: BertConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 pooling_config: Optional[PoolingConfig] = None) -> None:
         super().__init__()
         self.model = BertModel(config, cache_config, quant_config)
         print(pooling_config.pooling_type)
         print(pooling_config.normalize)
-        self._pooler = Pooler(pooling_config.pooling_type, 
+        self._pooler = Pooler(pooling_config.pooling_type,
                               pooling_config.normalize)
 
     def forward(

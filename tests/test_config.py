@@ -1,7 +1,7 @@
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.model_executor.layers.pooler import PoolingConfig
+from vllm.model_executor.layers.pooler import (PoolingConfig, PoolingType)
 
 
 @pytest.mark.parametrize(("model_id", "expected_task"), [
@@ -117,7 +117,9 @@ def test_get_pooling_config():
     minilm_pooling_config = minilm_model_config.get_pooling_config()
 
     assert isinstance(minilm_model_config.pooling_config, PoolingConfig)
-    assert minilm_pooling_config.normalize  
+    assert minilm_pooling_config.normalize
+    assert isinstance(minilm_pooling_config.pooling_type, PoolingType)
+    assert minilm_pooling_config.pooling_type == PoolingType.MEAN
 
 
 def test_rope_customization():

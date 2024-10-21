@@ -27,16 +27,16 @@ class PoolingConfig():
         get_pooling_type(pooling_type_name): Returns the pooling 
         type enum value corresponding to the given string.
     """
+
     def __init__(self, pooling_type: str, normalize: bool):
         self.pooling_type = self.get_pooling_type(pooling_type)
-        self.normalize = normalize 
+        self.normalize = normalize
 
     def get_pooling_type(self, pooling_type_name: str) -> PoolingType:
         pooling_types = PoolingType.__dict__.items()
-        return PoolingType(next((value for key, 
-                             value in pooling_types if key.lower() 
-                             in pooling_type_name), 
-                             2))
+        return PoolingType(
+            next((value for key, value in pooling_types
+                  if key.lower() in pooling_type_name), 2))
 
 
 class Pooler(nn.Module):

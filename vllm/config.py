@@ -174,7 +174,7 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
-        self.pooling_config = self.get_pooling_config() 
+        self.pooling_config = self.get_pooling_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -407,9 +407,8 @@ class ModelConfig:
             self.enforce_eager = True
 
     def get_pooling_config(self) -> PoolingConfig:
-        pooling_config = get_pooling_config(self.model, 
-                                            self.revision)
-        return PoolingConfig(pooling_config["pooling_type"], 
+        pooling_config = get_pooling_config(self.model, self.revision)
+        return PoolingConfig(pooling_config["pooling_type"],
                              pooling_config["normalize"])
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
