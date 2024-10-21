@@ -47,7 +47,7 @@ class CompletionOutput:
     text: str
     token_ids: List[int]
     cumulative_logprob: Optional[float]  # Do we need this?
-    logprobs: Optional[Dict[int, float]]
+    logprobs: Optional[List[Dict[int, float]]]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
