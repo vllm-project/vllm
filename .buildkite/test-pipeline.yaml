@@ -77,8 +77,8 @@ steps:
   - vllm/
   - tests/basic_correctness/test_chunked_prefill
   commands:
-  - VLLM_ATTENTION_BACKEND=XFORMERS VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s basic_correctness/test_chunked_prefill.py
-  - VLLM_ATTENTION_BACKEND=FLASH_ATTN VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test # 10min
   mirror_hardwares: [amd]
@@ -88,11 +88,7 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
-  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core/test_scheduler.py
-  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/test_chunked_prefill_scheduler.py
-  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/block/e2e/test_correctness.py
-  - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest -v -s core core/block/e2e/test_correctness_sliding_window.py
-  - pytest -v -s core --ignore=core/block/e2e/test_correctness.py --ignore=core/test_scheduler.py --ignore=core/test_chunked_prefill_scheduler.py --ignore=core/block/e2e/test_correctness.py --ignore=core/block/e2e/test_correctness_sliding_window.py
+  - pytest -v -s core
 
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"
@@ -184,6 +180,7 @@ steps:
     - python3 offline_inference_vision_language_multi_image.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
+    - python3 offline_profile.py --model facebook/opt-125m
 
 - label: Prefix Caching Test # 9min
   #mirror_hardwares: [amd]
@@ -191,8 +188,7 @@ steps:
   - vllm/
   - tests/prefix_caching
   commands:
-    - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s prefix_caching/test_prefix_caching.py
-    - pytest -v -s prefix_caching --ignore=prefix_caching/test_prefix_caching.py
+    - pytest -v -s prefix_caching
 
 - label: Samplers Test # 36min
   source_file_dependencies:
@@ -216,8 +212,7 @@ steps:
   - tests/spec_decode
   commands:
     - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
-    - VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest -v -s spec_decode/e2e/test_compatibility.py
-    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py --ignore=spec_decode/e2e/test_compatibility.py
+    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amd]
@@ -235,14 +230,12 @@ steps:
   commands:
   - pytest -v -s compile/test_basic_correctness.py
 
-# TODO: re-write in comparison tests, and fix symbolic shape
-# for quantization ops.
-# - label: "PyTorch Fullgraph Test" # 18min
-#   source_file_dependencies:
-#   - vllm/
-#   - tests/compile
-#   commands:
-#   - pytest -v -s compile/test_full_graph.py
+- label: "PyTorch Fullgraph Test" # 18min
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
   mirror_hardwares: [amd]
@@ -317,13 +310,22 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
-- label: Decoder-only Language Models Test # 1h36min
+- label: Decoder-only Language Models Test (Standard) # 35min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
   commands:
-    - pytest -v -s models/decoder_only/language
+    - pytest -v -s models/decoder_only/language/test_models.py
+    - pytest -v -s models/decoder_only/language/test_big_models.py
+
+- label: Decoder-only Language Models Test (Extended) # 1h20min
+  nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/language
+  commands:
+    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py --ignore=models/decoder_only/language/test_big_models.py
 
 - label: Decoder-only Multi-Modal Models Test # 1h31min
   #mirror_hardwares: [amd]
@@ -340,10 +342,12 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/embedding/language
+  - tests/models/embedding/vision_language
   - tests/models/encoder_decoder/language
   - tests/models/encoder_decoder/vision_language
   commands:
     - pytest -v -s models/embedding/language
+    - pytest -v -s models/embedding/vision_language
     - pytest -v -s models/encoder_decoder/language
     - pytest -v -s models/encoder_decoder/vision_language
 
@@ -402,7 +406,7 @@ steps:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
-  - TARGET_TEST_SUITE=L4 VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1  pytest basic_correctness/ -v -s -m distributed_2_gpus
+  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m distributed_2_gpus
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus

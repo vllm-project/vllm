@@ -24,7 +24,7 @@ class XFormersBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "xformers"
+        return "XFORMERS"
 
     @staticmethod
     def get_impl_cls() -> Type["XFormersImpl"]:
@@ -287,13 +287,15 @@ def _get_attn_bias(
     * Appropriate attention bias value given the attention type
     '''
 
-    if attn_type == AttentionType.DECODER:
+    if (attn_type == AttentionType.DECODER
+            or attn_type == AttentionType.ENCODER_ONLY):
         return attn_metadata.attn_bias
     elif attn_type == AttentionType.ENCODER:
         return attn_metadata.encoder_attn_bias
-    else:
-        # attn_type == AttentionType.ENCODER_DECODER
+    elif attn_type == AttentionType.ENCODER_DECODER:
         return attn_metadata.cross_attn_bias
+    else:
+        raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
 def _set_attn_bias(
@@ -313,7 +315,8 @@ def _set_attn_bias(
                  encoder/decoder cross-attention
     '''
 
-    if attn_type == AttentionType.DECODER:
+    if (attn_type == AttentionType.DECODER
+            or attn_type == AttentionType.ENCODER_ONLY):
         attn_metadata.attn_bias = attn_bias
     elif attn_type == AttentionType.ENCODER:
         attn_metadata.encoder_attn_bias = attn_bias
@@ -371,6 +374,12 @@ def _get_seq_len_block_table_args(
         # No block tables associated with encoder attention
         return (attn_metadata.encoder_seq_lens_tensor,
                 attn_metadata.max_encoder_seq_len, None)
+    elif attn_type == AttentionType.ENCODER_ONLY:
+        assert is_prompt, "Should not have decode for encoder only model."
+
+        # No block tables associated with encoder attention
+        return (attn_metadata.seq_lens_tensor,
+                attn_metadata.max_prefill_seq_len, None)
     else:
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
@@ -479,7 +488,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             * ENCODER: no KV caching; pass encoder sequence
                 attributes (encoder_seq_lens/encoder_seq_lens_tensor/
                 max_encoder_seq_len) to kernel, in lieu of decoder
-                sequence attributes (seq_lens/seq_lens_tensor/max_seq_len)
+                sequence attributes (seq_lens/seq_lens_tensor/max_seq_len).
+                Used for encoder branch of encoder-decoder models.
+            * ENCODER_ONLY: no kv_caching, uses the normal attention 
+                attributes (seq_lens/seq_lens_tensor/max_seq_len).
             * ENCODER_DECODER: cross-attention behavior;
                 use cross-attention block table for caching KVs derived
                 from encoder hidden states; since KV sequence lengths
@@ -509,6 +521,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
             raise AttributeError("Encoder attention requires setting "
                                  "encoder metadata attributes.")
+
         elif (attn_type == AttentionType.ENCODER_DECODER
               and (not attn_metadata.is_all_cross_attn_metadata_set)):
             raise AttributeError("Encoder/decoder cross-attention "
@@ -609,6 +622,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
+                assert attn_type != AttentionType.ENCODER_ONLY, (
+                    "Encoder-only models should not have prefix attention.")
 
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
@@ -638,6 +653,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
+            assert attn_type != AttentionType.ENCODER_ONLY, (
+                "Encoder-only models should not have decode metadata.")
 
             (
                 seq_lens_arg,
@@ -703,36 +720,60 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                           None, :].expand(value.shape[0], self.num_kv_heads,
                                           self.num_queries_per_kv,
                                           value.shape[-1])
+
         # Set attention bias if not provided. This typically happens at
         # the very attention layer of every iteration.
         # FIXME(woosuk): This is a hack.
         attn_bias = _get_attn_bias(attn_metadata, attn_type)
         if attn_bias is None:
             if self.alibi_slopes is None:
+
+                # Cross attention block of decoder branch of encoder-decoder
+                # model uses seq_lens for dec / encoder_seq_lens for enc
                 if (attn_type == AttentionType.ENCODER_DECODER):
                     assert attn_metadata.seq_lens is not None
                     assert attn_metadata.encoder_seq_lens is not None
 
-                    # Default enc/dec cross-attention mask is non-causal
+                    # Cross-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
                         attn_metadata.seq_lens, attn_metadata.encoder_seq_lens)
+
+                # Encoder branch of encoder-decoder model uses
+                # attn_metadata.encoder_seq_lens
                 elif attn_type == AttentionType.ENCODER:
+
                     assert attn_metadata.encoder_seq_lens is not None
 
-                    # Default encoder self-attention mask is non-causal
+                    # Encoder self-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
                         attn_metadata.encoder_seq_lens)
-                else:
+
+                # Self-attention block of encoder-only model just
+                # uses the seq_lens directly.
+                elif attn_type == AttentionType.ENCODER_ONLY:
                     assert attn_metadata.seq_lens is not None
 
-                    # Default decoder self-attention mask is causal
+                    # Encoder self-attention mask is non-causal
+                    attn_bias = BlockDiagonalMask.from_seqlens(
+                        attn_metadata.seq_lens)
+
+                # Self-attention block of decoder branch just
+                # uses the seq_lens directly
+                elif attn_type == AttentionType.DECODER:
+                    assert attn_metadata.seq_lens is not None
+
+                    # Decoder self-attention mask is causal
                     attn_bias = BlockDiagonalCausalMask.from_seqlens(
                         attn_metadata.seq_lens)
+                else:
+                    raise ValueError("Unknown AttentionType: %s", attn_type)
+
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
                 attn_bias = [attn_bias]
             else:
+                assert attn_type == AttentionType.DECODER
                 assert attn_metadata.seq_lens is not None
                 attn_bias = _make_alibi_bias(self.alibi_slopes,
                                              self.num_kv_heads, query.dtype,
