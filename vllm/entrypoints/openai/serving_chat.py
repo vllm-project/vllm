@@ -324,7 +324,7 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 tool_parsers = [None] * num_choices
         except RuntimeError as e:
-            logger.error("Error in tool parser creation: %s", e)
+            logger.exception("Error in tool parser creation.")
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
             yield "data: [DONE]\n\n"
@@ -435,6 +435,12 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = None
 
                     delta_text = output.text
+
+                    if not delta_text and not output.token_ids and \
+                        not previous_num_tokens[i]:
+                        # Chunked prefill case, don't return empty chunks
+                        continue
+
                     delta_message: Optional[DeltaMessage]
 
                     # handle streaming deltas for tools with named tool_choice
@@ -594,7 +600,7 @@ class OpenAIServingChat(OpenAIServing):
 
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            logger.error("error in chat completion stream generator: %s", e)
+            logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
@@ -681,7 +687,7 @@ class OpenAIServingChat(OpenAIServing):
                 try:
                     tool_parser = self.tool_parser(tokenizer)
                 except RuntimeError as e:
-                    logger.error("Error in tool parser creation: %s", e)
+                    logger.exception("Error in tool parser creation.")
                     return self.create_error_response(str(e))
 
                 tool_call_info = tool_parser.extract_tool_calls(
