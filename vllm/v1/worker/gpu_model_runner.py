@@ -329,14 +329,15 @@ class GPUModelRunner:
         # NOTE: CPU-GPU synchronization happens here.
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
         sampled_token_ids_list = sampled_token_ids.tolist()
-        # TODO: Optimize.
+        # TODO(woosuk): The following loop can be slow since it iterates over
+        # the requests one by one. Optimize.
         num_reqs = self.persistent_batch.num_reqs
         for i, req_id in enumerate(self.persistent_batch.req_ids[:num_reqs]):
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
-            num_prompt_tokens = len(req_state.prompt_token_ids)
-            if seq_len >= num_prompt_tokens:
+            assert seq_len <= req_state.num_tokens
+            if seq_len == req_state.num_tokens:
                 # Append the sampled token to the output token ids.
                 token_id = sampled_token_ids_list[i]
                 self.persistent_batch.token_ids_cpu[i, seq_len] = token_id
@@ -402,18 +403,14 @@ class GPUModelRunner:
 
     @torch.inference_mode()
     def capture_model(self) -> None:
+        # TODO: Implement CUDA graph support.
         return
 
     def initialize_kv_cache(self, num_blocks: int) -> None:
         assert len(self.kv_caches) == 0
-        # Models like Jamba, have mixed typed layers, E.g Mamba
-        num_attn_layers = self.model_config.get_num_attention_layers(
-            self.parallel_config)
-        num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
-        head_size = self.model_config.get_head_size()
         kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks, self.block_size, num_kv_heads, head_size)
-        for _ in range(num_attn_layers):
+            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
+        for _ in range(self.num_attn_layers):
             self.kv_caches.append(
                 torch.zeros(kv_cache_shape,
                             dtype=self.kv_cache_dtype,
@@ -433,6 +430,10 @@ class CachedRequestState:
     block_ids: List[int]
     num_computed_tokens: int
     output_token_ids: List[int]
+
+    @property
+    def num_tokens(self) -> int:
+        return len(self.prompt_token_ids) + len(self.output_token_ids)
 
 
 class PersistentBatch:

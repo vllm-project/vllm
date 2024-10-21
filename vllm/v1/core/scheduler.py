@@ -240,6 +240,7 @@ class Scheduler:
             # When the request's num_computed_tokens catches up its num_tokens,
             # the request generates output tokens. Otherwise, we ignore the
             # sampler output for the request.
+            assert request.num_computed_tokens <= request.num_tokens
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
                 # NOTE(woosuk): Currently, we assume that each request
