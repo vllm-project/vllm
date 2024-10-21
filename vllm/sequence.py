@@ -1456,6 +1456,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
                 params=params,
                 **kwargs,
             )  # type: ignore
+            assert seq_group is not None
             engine.seq_id_to_seq_group[request_id_i] = group
             group.to_be_finished[request_id_i] = seq_group
             seqs.append(seq_group.seqs[0])
@@ -1466,8 +1467,15 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         group.assembled_seq_group = SequenceGroup(
             request_id=request_id,
             seqs=seqs,
+            arrival_time=seq_group.arrival_time,
             sampling_params=original_params,
-            **kwargs,
+            lora_request=seq_group.lora_request,
+            embeddings=seq_group.embeddings,
+            pooling_params=seq_group.pooling_params,
+            encoder_seq=seq_group.encoder_seq,
+            trace_headers=seq_group.trace_headers,
+            prompt_adapter_request=seq_group.prompt_adapter_request,
+            priority=seq_group.priority,
         )
 
     def maybe_assemble_group(self) -> Optional[SequenceGroup]:
