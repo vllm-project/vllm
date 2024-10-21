@@ -305,15 +305,26 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             # so we need to produce a list of tensors
             if image_sizes is not None:
                 images = pixel_values
-                if isinstance(images, torch.Tensor):
-                    # if passed as batch take all images
-                    NN, N, B, C, W, H = images.shape
-                    images = images.reshape(NN * N * B, C, W, H)
-                    images = [images[i] for i in range(images.size(0))]
-                elif isinstance(images, list):
-                    # if passed as list flatten lists of tensors
-                    while isinstance(images, list) and len(images) == 1:
-                        images = images[0]
+
+                def flatten_to_3d_tensors(item):
+                    if isinstance(item, torch.Tensor):
+                        if item.dim() == 3:
+                            return [item]
+                        elif item.dim() > 3:
+                            return [t for t in item.view(-1, *item.shape[-3:])]
+                        else:
+                            raise ValueError(
+                                f"Unexpected tensor dimension: {item.dim()}")
+                    elif isinstance(item, list):
+                        return [
+                            t for subitem in item
+                            for t in flatten_to_3d_tensors(subitem)
+                        ]
+                    else:
+                        raise ValueError(f"Unexpected type: {type(item)}")
+
+                # Restructure the batched images into a list of lists of images
+                images = flatten_to_3d_tensors(pixel_values)
 
                 # TODO: Add validation based on image_sizes
                 return LlavaImagePixelInputs(

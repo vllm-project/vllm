@@ -901,41 +901,6 @@ class PixtralHFVisionModel(nn.Module):
         self.patch_positional_embedding = PixtralRotaryEmbedding(
             config, self.device)
 
-    def process_image(self, img: torch.Tensor) -> torch.Tensor:
-        """Process a single image tensor, handling various input shapes."""
-
-        # Ensure the tensor has at least 4 dimensions (b, c, h, w)
-        if img.dim() < 4:
-            img = img.unsqueeze(0)  # Add batch dimension if not present
-
-        # If there are more than 4 dimensions, flatten all but the last 3
-        if img.dim() > 4:
-            img = img.view(-1, *img.shape[-3:])
-
-        # Ensure we have the correct number of channels
-        if img.shape[1] != self.config.num_channels:
-            raise ValueError(f"Expected {self.config.num_channels} channels, "
-                             f"but got {img.shape[1]}")
-
-        img = img.to(self.dtype)
-        result = self.patch_conv(img)
-        return result
-
-    def process_input(self, item: Union[torch.Tensor,
-                                        List]) -> List[torch.Tensor]:
-        """Recursively process input items, handling nested lists."""
-        patch_embeds = []
-
-        if isinstance(item, torch.Tensor):
-            patch_embeds.append(self.process_image(item))
-        elif isinstance(item, list):
-            for subitem in item:
-                patch_embeds.extend(self.process_input(subitem))
-        else:
-            raise ValueError(f"Unexpected type in input: {type(item)}")
-
-        return patch_embeds
-
     def forward(
         self,
         pixel_values: List[torch.Tensor],
@@ -951,9 +916,11 @@ class PixtralHFVisionModel(nn.Module):
             image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
         """
-
         # pass images through initial convolution independently
-        patch_embeds_list = self.process_input(pixel_values)
+        patch_embeds_list = [
+            self.patch_conv(img.unsqueeze(0).to(self.dtype))
+            for img in pixel_values
+        ]
 
         # flatten to a single sequence
         patch_embeds = torch.cat(
