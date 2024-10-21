@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Type, Union, cast
 
 import numpy as np
 import prometheus_client
@@ -34,7 +34,11 @@ class Metrics:
     See https://prometheus.github.io/client_python/multiprocess/ for more
     details on limitations.
     """
+
     labelname_finish_reason = "finished_reason"
+    labelname_waiting_lora_adapters = "waiting_lora_adapters"
+    labelname_running_lora_adapters = "running_lora_adapters"
+    labelname_max_lora = "max_lora"
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
@@ -55,6 +59,16 @@ class Metrics:
             documentation="Number of requests waiting to be processed.",
             labelnames=labelnames,
             multiprocess_mode="sum")
+        self.gauge_lora_info = self._gauge_cls(
+            name="vllm:lora_requests_info",
+            documentation="Running stats on lora requests.",
+            labelnames=[
+                self.labelname_running_lora_adapters,
+                self.labelname_max_lora,
+                self.labelname_waiting_lora_adapters,
+            ],
+            multiprocess_mode="livemostrecent",
+        )
         self.gauge_scheduler_swapped = self._gauge_cls(
             name="vllm:num_requests_swapped",
             documentation="Number of requests swapped to CPU.",
@@ -134,12 +148,6 @@ class Metrics:
                 labelnames=labelnames,
                 buckets=build_1_2_5_buckets(max_model_len),
             )
-        self.histogram_best_of_request = self._histogram_cls(
-            name="vllm:request_params_best_of",
-            documentation="Histogram of the best_of request parameter.",
-            labelnames=labelnames,
-            buckets=[1, 2, 5, 10, 20],
-        )
         self.histogram_n_request = self._histogram_cls(
             name="vllm:request_params_n",
             documentation="Histogram of the n request parameter.",
@@ -255,10 +263,11 @@ class _RayHistogramWrapper:
                  labelnames: Optional[List[str]] = None,
                  buckets: Optional[List[float]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
+        boundaries = buckets if buckets else []
         self._histogram = ray_metrics.Histogram(name=name,
                                                 description=documentation,
                                                 tag_keys=labelnames_tuple,
-                                                boundaries=buckets)
+                                                boundaries=boundaries)
 
     def labels(self, **labels):
         self._histogram.set_default_tags(labels)
@@ -273,9 +282,12 @@ class RayMetrics(Metrics):
     RayMetrics is used by RayPrometheusStatLogger to log to Ray metrics.
     Provides the same metrics as Metrics but uses Ray's util.metrics library.
     """
-    _gauge_cls = _RayGaugeWrapper
-    _counter_cls = _RayCounterWrapper
-    _histogram_cls = _RayHistogramWrapper
+    _gauge_cls: Type[prometheus_client.Gauge] = cast(
+        Type[prometheus_client.Gauge], _RayGaugeWrapper)
+    _counter_cls: Type[prometheus_client.Counter] = cast(
+        Type[prometheus_client.Counter], _RayCounterWrapper)
+    _histogram_cls: Type[prometheus_client.Histogram] = cast(
+        Type[prometheus_client.Histogram], _RayHistogramWrapper)
 
     def __init__(self, labelnames: List[str], max_model_len: int):
         if ray_metrics is None:
@@ -428,6 +440,9 @@ class PrometheusStatLogger(StatLoggerBase):
         for datum in data:
             histogram.labels(**self.labels).observe(datum)
 
+    def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
+        gauge.labels(**data).set(1)
+
     def _log_prometheus(self, stats: Stats) -> None:
         # System state data
         self._log_gauge(self.metrics.gauge_scheduler_running,
@@ -444,7 +459,17 @@ class PrometheusStatLogger(StatLoggerBase):
                         stats.cpu_prefix_cache_hit_rate)
         self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
                         stats.gpu_prefix_cache_hit_rate)
-
+        # Including max-lora in metric, in future this property of lora
+        # config maybe extended to be dynamic.
+        lora_info = {
+            self.metrics.labelname_running_lora_adapters:
+            ",".join(stats.running_lora_adapters),
+            self.metrics.labelname_waiting_lora_adapters:
+            ",".join(stats.waiting_lora_adapters),
+            self.metrics.labelname_max_lora:
+            stats.max_lora,
+        }
+        self._log_gauge_string(self.metrics.gauge_lora_info, lora_info)
         # Iteration level data
         self._log_counter(self.metrics.counter_num_preemption,
                           stats.num_preemption_iter)
@@ -473,8 +498,6 @@ class PrometheusStatLogger(StatLoggerBase):
             self.metrics.histogram_num_generation_tokens_request,
             stats.num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
-        self._log_histogram(self.metrics.histogram_best_of_request,
-                            stats.best_of_requests)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:

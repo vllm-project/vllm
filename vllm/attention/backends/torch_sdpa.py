@@ -25,7 +25,7 @@ class TorchSDPABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "torch-sdpa"
+        return "TORCH_SDPA"
 
     @staticmethod
     def get_impl_cls() -> Type["TorchSDPABackendImpl"]:

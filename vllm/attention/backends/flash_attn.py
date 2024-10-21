@@ -32,7 +32,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "flash-attn"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashAttentionImpl"]:
@@ -111,11 +111,8 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Maximum query length in the batch.
     max_query_len: Optional[int]
 
-    # Number of query tokens for each request in the batch.
-    # Currently, we require that all requests have the same number of query
-    # tokens during the decoding phase. When speculavie decoding is enabled,
-    # decode_query_len might be greater than 1. In all other cases, it is 1.
-    decode_query_len: Optional[int]
+    # Max number of query tokens among request in the batch.
+    max_decode_query_len: Optional[int]
 
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
@@ -173,9 +170,9 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
-            decode_query_len=0,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
+            max_decode_query_len=0,
             max_decode_seq_len=0,
             query_start_loc=self.query_start_loc[:self.num_prefills + 1],
             seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
@@ -202,12 +199,14 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            decode_query_len=self.decode_query_len,
+            max_decode_query_len=self.max_decode_query_len,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=None,
-            seq_start_loc=None,
+            query_start_loc=self.query_start_loc[self.num_prefills:]
+            if self.query_start_loc is not None else None,
+            seq_start_loc=self.seq_start_loc[self.num_prefills:]
+            if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
@@ -306,8 +305,6 @@ class FlashAttentionMetadataBuilder(
         self.runner = input_builder.runner
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
-        self.use_v2_block_manager = (
-            input_builder.scheduler_config.use_v2_block_manager)
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -356,9 +353,9 @@ class FlashAttentionMetadataBuilder(
 
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
-            start_idx = compute_slot_mapping_start_idx(
-                is_prompt, query_len, context_len, self.sliding_window,
-                self.use_v2_block_manager)
+            start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
+                                                       context_len,
+                                                       self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
@@ -413,9 +410,9 @@ class FlashAttentionMetadataBuilder(
         max_query_len = max(query_lens)
         decode_query_lens = query_lens[self.num_prefills:]
         if len(decode_query_lens) > 0:
-            decode_query_len = max(decode_query_lens)
+            max_decode_query_len = max(decode_query_lens)
         else:
-            decode_query_len = 1
+            max_decode_query_len = 1
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
@@ -468,7 +465,7 @@ class FlashAttentionMetadataBuilder(
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
-            decode_query_len=decode_query_len,
+            max_decode_query_len=max_decode_query_len,
             max_prefill_seq_len=max_prefill_seq_len,
             max_decode_seq_len=max_decode_seq_len,
             query_start_loc=query_start_loc,
@@ -527,8 +524,8 @@ class FlashAttentionImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        self.sliding_window = ((sliding_window, sliding_window)
-                               if sliding_window is not None else (-1, -1))
+        self.sliding_window = ((sliding_window - 1,
+                                0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -537,12 +534,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        if sliding_window is not None:
-            # NOTE(woosuk): flash-attn's sliding window does not work with
-            # paged KV cache.
-            raise ValueError(
-                "Sliding window is not supported in FlashAttention.")
 
         support_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
         if head_size not in support_head_sizes:
@@ -708,6 +699,7 @@ def unified_flash_attention(
                 max_seqlen_k=max_seq_len,
                 softmax_scale=softmax_scale,
                 causal=True,
+                window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 block_table=prefill_meta.block_tables,
                 softcap=logits_soft_cap,
@@ -715,20 +707,39 @@ def unified_flash_attention(
 
     if decode_meta := attn_metadata.decode_metadata:
         # Decoding run.
-        _, num_head, head_dim = decode_query.shape
-        decode_query = decode_query.reshape(-1, decode_meta.decode_query_len,
-                                            num_head, head_dim)
-        decode_output = flash_attn_with_kvcache(
-            q=decode_query,
-            k_cache=key_cache,
-            v_cache=value_cache,
-            block_table=decode_meta.block_tables,
-            cache_seqlens=decode_meta.seq_lens_tensor,
-            softmax_scale=softmax_scale,
-            causal=True,
-            alibi_slopes=alibi_slopes,
-            softcap=logits_soft_cap,
-        ).squeeze(1)
+        # Use flash_attn_varlen_func kernel for speculative decoding
+        # because different queries might have different lengths.
+        assert decode_meta.max_decode_query_len is not None
+        if decode_meta.max_decode_query_len > 1:
+            decode_output = flash_attn_varlen_func(
+                q=decode_query,
+                k=key_cache,
+                v=value_cache,
+                cu_seqlens_q=decode_meta.query_start_loc,
+                max_seqlen_q=decode_meta.max_decode_query_len,
+                cu_seqlens_k=decode_meta.seq_start_loc,
+                max_seqlen_k=decode_meta.max_decode_seq_len,
+                softmax_scale=softmax_scale,
+                causal=True,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                softcap=logits_soft_cap,
+                block_table=decode_meta.block_tables,
+            )
+        else:
+            # Use flash_attn_with_kvcache for normal decoding.
+            decode_output = flash_attn_with_kvcache(
+                q=decode_query.unsqueeze(1),
+                k_cache=key_cache,
+                v_cache=value_cache,
+                block_table=decode_meta.block_tables,
+                cache_seqlens=decode_meta.seq_lens_tensor,
+                softmax_scale=softmax_scale,
+                causal=True,
+                window_size=window_size,
+                alibi_slopes=alibi_slopes,
+                softcap=logits_soft_cap,
+            ).squeeze(1)
 
     if prefill_output is None:
         assert decode_output is not None
@@ -740,7 +751,6 @@ def unified_flash_attention(
     # Chunked prefill does not work with speculative decoding.
     # Therefore, the query length for decode should be 1 in chunked prefill.
     assert decode_meta is not None
-    assert decode_meta.decode_query_len == 1
     decode_output = decode_output.squeeze(1)
     output = torch.cat([prefill_output, decode_output], dim=0)
     return output.view(num_tokens, hidden_size)

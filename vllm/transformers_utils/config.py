@@ -23,9 +23,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MedusaConfig,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              MPTConfig, NemotronConfig,
-                                             NVLM_D_Config, Qwen2VLConfig,
-                                             RWConfig, SolarConfig,
-                                             UltravoxConfig)
+                                             NVLM_D_Config, RWConfig,
+                                             SolarConfig, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
@@ -58,7 +57,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "NVLM_D": NVLM_D_Config,
     "solar": SolarConfig,
     "ultravox": UltravoxConfig,
-    "qwen2_vl": Qwen2VLConfig,
     "grok-1": Grok1Config,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
@@ -91,6 +89,43 @@ def file_or_path_exists(model: Union[str, Path], config_name, revision,
         # Don't raise in offline mode, all we know is that we don't have this
         # file cached.
         return False
+
+
+def patch_rope_scaling(config: PretrainedConfig) -> None:
+    """Provide backwards compatibility for RoPE."""
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        patch_rope_scaling(text_config)
+
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is not None:
+        patch_rope_scaling_dict(rope_scaling)
+
+
+def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+    if "rope_type" not in rope_scaling and "type" in rope_scaling:
+        rope_scaling["rope_type"] = rope_scaling["type"]
+        logger.info("Replacing legacy 'type' key with 'rope_type'")
+
+    if "rope_type" not in rope_scaling:
+        raise ValueError("rope_scaling should have a 'rope_type' key")
+
+    if rope_scaling["rope_type"] == "su":
+        rope_scaling["rope_type"] = "longrope"
+        logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
+    elif rope_scaling["rope_type"] == "mrope":
+        assert "mrope_section" in rope_scaling
+        rope_scaling["rope_type"] = "default"
+        logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
+
+
+def uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model with this config uses M-ROPE."""
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return False
+
+    return "mrope_section" in rope_scaling
 
 
 def get_config(
@@ -196,6 +231,8 @@ def get_config(
                 value,
             )
             config.update({key: value})
+
+    patch_rope_scaling(config)
 
     return config
 

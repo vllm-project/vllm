@@ -70,16 +70,10 @@ COPY requirements-build.txt requirements-build.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
 
-# files and directories related to build wheels
-COPY csrc csrc
-COPY setup.py setup.py
-COPY cmake cmake
-COPY CMakeLists.txt CMakeLists.txt
-COPY README.md README.md
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
-COPY pyproject.toml pyproject.toml
-COPY vllm vllm
+COPY . .
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
@@ -144,7 +138,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.12
 WORKDIR /vllm-workspace

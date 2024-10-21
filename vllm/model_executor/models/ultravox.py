@@ -18,7 +18,7 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY
-from vllm.inputs.data import LLMInputs
+from vllm.inputs.data import DecoderOnlyInputs, token_inputs
 from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -156,10 +156,10 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
     return MultiModalInputs({"audio_features": audio_features})
 
 
-def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+def input_processor_for_ultravox(ctx: InputContext, inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "audio" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     feature_extractor = whisper_feature_extractor(ctx)
     audios = multi_modal_data["audio"]
@@ -196,16 +196,16 @@ def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
 
     new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
         tokenizer,
-        llm_inputs.get("prompt"),
-        llm_inputs["prompt_token_ids"],
+        inputs.get("prompt"),
+        inputs["prompt_token_ids"],
         placeholder_token_id=_AUDIO_PLACEHOLDER_TOKEN,
         repeat_count=audio_token_counts,
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 class StackAudioFrames(nn.Module):
@@ -499,5 +499,5 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
         loader = AutoWeightsLoader(self,
-                                   allow_unexpected_prefixes=["audio_tower."])
+                                   ignore_unexpected_prefixes=["audio_tower."])
         loader.load_weights(weights, mapper=hf_to_vllm_mapper)

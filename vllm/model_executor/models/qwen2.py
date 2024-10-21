@@ -364,6 +364,14 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ]
     embedding_modules = {}
     embedding_padding_modules = []
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
 
     def __init__(
         self,
@@ -436,7 +444,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            ignore_prefixes=(["lm_head."]
-                             if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
         )
         loader.load_weights(weights)

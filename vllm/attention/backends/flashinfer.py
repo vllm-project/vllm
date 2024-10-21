@@ -17,6 +17,7 @@ except ImportError:
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
@@ -39,7 +40,7 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "flashinfer"
+        return "FLASHINFER"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashInferImpl"]:
@@ -124,7 +125,8 @@ class FlashInferState(AttentionState):
                 self.runner.parallel_config))
             num_kv_heads = self.runner.model_config.get_num_kv_heads(
                 self.runner.parallel_config)
-            use_tensor_cores = num_qo_heads // num_kv_heads > 4
+            use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (
+                num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
                 "NHD",
@@ -183,7 +185,8 @@ class FlashInferState(AttentionState):
             self.runner.parallel_config))
         num_kv_heads = self.runner.model_config.get_num_kv_heads(
             self.runner.parallel_config)
-        use_tensor_cores = num_qo_heads // num_kv_heads > 4
+        use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (
+            num_qo_heads // num_kv_heads > 4)
         self._graph_decode_wrapper = \
             CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
             self._graph_decode_workspace_buffer, _indptr_buffer,
@@ -475,8 +478,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
-        self.use_v2_block_manager = (
-            input_builder.scheduler_config.use_v2_block_manager)
 
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
         # for the precise definition of the following fields.
@@ -542,9 +543,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             is_profile_run = is_block_tables_empty(block_tables)
 
             # Compute slot mapping.
-            start_idx = compute_slot_mapping_start_idx(
-                is_prompt, query_len, context_len, self.sliding_window,
-                self.use_v2_block_manager)
+            start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
+                                                       context_len,
+                                                       self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
