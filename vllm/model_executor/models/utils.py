@@ -21,7 +21,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal.base import NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_cpu, is_pin_memory_available
+from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
