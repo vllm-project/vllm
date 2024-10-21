@@ -80,7 +80,8 @@ class GPUModelRunner:
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
-        self.persistent_batch = PersistentBatch(
+        # Persistent batch.
+        self.input_batch = InputBatch(
             max_num_reqs=self.scheduler_config.max_num_seqs,
             max_model_len=self.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
@@ -101,7 +102,7 @@ class GPUModelRunner:
         )
         removed_req_indices: List[int] = []
         for req_id in stopped_req_ids:
-            req_index = self.persistent_batch.remove_request(req_id)
+            req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
                 removed_req_indices.append(req_index)
 
@@ -109,11 +110,11 @@ class GPUModelRunner:
         for req_data in scheduler_output.scheduled_running_reqs:
             req_id = req_data.req_id
             req_state = self.requests[req_id]
-            req_index = self.persistent_batch.req_id_to_index[req_id]
+            req_index = self.input_batch.req_id_to_index[req_id]
 
             # Update the num_computed_tokens.
             req_state.num_computed_tokens = req_data.num_computed_tokens
-            self.persistent_batch.num_computed_tokens_cpu[req_index] = (
+            self.input_batch.num_computed_tokens_cpu[req_index] = (
                 req_data.num_computed_tokens)
 
             # Update the block table.
@@ -123,7 +124,7 @@ class GPUModelRunner:
             start_index = len(req_state.block_ids)
             end_index = start_index + num_new_blocks
             req_state.block_ids.extend(req_data.new_block_ids)
-            self.persistent_batch.block_table_cpu[
+            self.input_batch.block_table_cpu[
                 req_index, start_index:end_index] = req_data.new_block_ids
 
         req_ids_to_add: List[str] = []
@@ -163,29 +164,29 @@ class GPUModelRunner:
             else:
                 # Append to the end.
                 req_index = None
-            self.persistent_batch.add_request(req_state, req_index)
+            self.input_batch.add_request(req_state, req_index)
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
-            self.persistent_batch.condense(removed_req_indices)
+            self.input_batch.condense(removed_req_indices)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
-        num_reqs = self.persistent_batch.num_reqs
+        num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.persistent_batch.block_table[:num_reqs].copy_(
-            self.persistent_batch.block_table_cpu_tensor[:num_reqs],
+        self.input_batch.block_table[:num_reqs].copy_(
+            self.input_batch.block_table_cpu_tensor[:num_reqs],
             non_blocking=True)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
-        for req_id in self.persistent_batch.req_ids[:num_reqs]:
+        for req_id in self.input_batch.req_ids[:num_reqs]:
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
@@ -211,7 +212,7 @@ class GPUModelRunner:
                                 device="cpu",
                                 pin_memory=self.pin_memory)
         positions_np = positions.numpy()
-        np.add(self.persistent_batch.num_computed_tokens_cpu[req_indices],
+        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
 
@@ -226,13 +227,13 @@ class GPUModelRunner:
                                 device="cpu",
                                 pin_memory=self.pin_memory)
         torch.index_select(torch.from_numpy(
-            self.persistent_batch.token_ids_cpu).flatten(),
+            self.input_batch.token_ids_cpu).flatten(),
                            0,
                            token_indices,
                            out=input_ids)
 
         # Calculate the slot mapping.
-        block_numbers = self.persistent_batch.block_table_cpu_tensor.flatten()[
+        block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
             token_indices // self.block_size]
         block_offsets = token_indices % self.block_size
         slot_mapping = torch.empty((total_num_scheduled_tokens, ),
@@ -252,7 +253,7 @@ class GPUModelRunner:
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
 
-        seq_lens = (self.persistent_batch.num_computed_tokens_cpu[:num_reqs] +
+        seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
                     num_scheduled_tokens)
         max_seq_len = seq_lens.max()
         seq_start_loc = torch.empty((num_reqs + 1, ),
@@ -273,7 +274,7 @@ class GPUModelRunner:
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_start_loc=seq_start_loc,
-            block_table=self.persistent_batch.block_table[:num_reqs],
+            block_table=self.input_batch.block_table[:num_reqs],
             slot_mapping=slot_mapping,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
@@ -296,8 +297,7 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.persistent_batch.make_sampling_metadata(
-            skip_copy)
+        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
         return sampling_metadata
 
     @torch.inference_mode()
@@ -331,8 +331,8 @@ class GPUModelRunner:
         sampled_token_ids_list = sampled_token_ids.tolist()
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        num_reqs = self.persistent_batch.num_reqs
-        for i, req_id in enumerate(self.persistent_batch.req_ids[:num_reqs]):
+        num_reqs = self.input_batch.num_reqs
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -340,16 +340,16 @@ class GPUModelRunner:
             if seq_len == req_state.num_tokens:
                 # Append the sampled token to the output token ids.
                 token_id = sampled_token_ids_list[i]
-                self.persistent_batch.token_ids_cpu[i, seq_len] = token_id
+                self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
             else:
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.
-                generator = self.persistent_batch.generators[i]
+                generator = self.input_batch.generators[i]
                 if generator is not None:
                     offset = generator.get_offset()
                     generator = generator.set_offset(offset - 1)
-                    self.persistent_batch.generators[i] = generator
+                    self.input_batch.generators[i] = generator
 
         if sampler_output.logprob_token_ids is None:
             logprob_token_ids = None
@@ -360,8 +360,8 @@ class GPUModelRunner:
         else:
             logprobs = sampler_output.logprobs.cpu()
         model_runner_output = ModelRunnerOutput(
-            req_ids=self.persistent_batch.req_ids[:num_reqs],
-            req_id_to_index=self.persistent_batch.req_id_to_index,
+            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids_cpu=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
@@ -436,7 +436,7 @@ class CachedRequestState:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
 
 
-class PersistentBatch:
+class InputBatch:
 
     def __init__(
         self,
