@@ -2,7 +2,8 @@ import json
 import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Iterable, Iterator, List, Optional, Tuple, TypedDict, Union
+from typing import (Callable, Iterable, Iterator, List, Optional, Tuple,
+                    TypedDict, Union)
 
 from pydantic import Field
 from typing_extensions import Annotated
@@ -10,6 +11,8 @@ from typing_extensions import Annotated
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.fim.fim_encoder import (FIMEncoder,
+                                                     FIMEncoderManager)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -77,6 +80,7 @@ class OpenAIServing:
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        fim_encoder: Optional[str] = None,
     ):
         super().__init__()
 
@@ -116,6 +120,9 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
+
+        self.fim_class: Optional[Callable[[AnyTokenizer], FIMEncoder]] = \
+            FIMEncoderManager.get_fim_encoder_class(fim_encoder)
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -204,22 +211,33 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt: str,
+        suffix: Optional[str],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
-        if truncate_prompt_tokens is None:
-            encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
+        if suffix:
+            if not (fim_class := self.fim_class):
+                raise ValueError("fim support must be enabled to use suffix")
+            if truncate_prompt_tokens is not None:
+                raise ValueError(
+                    "truncate_prompt_tokens is not supported with suffix")
+            fim_encoder = fim_class.for_tokenizer(  # type: ignore[attr-defined]
+                tokenizer)
+            input_ids = fim_encoder.encode_with_suffix(prompt=prompt,
+                                                       suffix=suffix)
         else:
-            encoded = tokenizer(prompt,
-                                add_special_tokens=add_special_tokens,
-                                truncation=True,
-                                max_length=truncate_prompt_tokens)
+            if truncate_prompt_tokens is None:
+                encoded = tokenizer(prompt,
+                                    add_special_tokens=add_special_tokens)
+            else:
+                encoded = tokenizer(prompt,
+                                    add_special_tokens=add_special_tokens,
+                                    truncation=True,
+                                    max_length=truncate_prompt_tokens)
 
-        input_ids = encoded.input_ids
+            input_ids = encoded.input_ids
 
-        input_text = prompt
-
-        return self._validate_input(request, input_ids, input_text)
+        return self._validate_input(request, input_ids, input_text=prompt)
 
     def _normalize_prompt_tokens_to_input(
         self,
@@ -307,6 +325,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_inputs: Iterable[Union[str, List[int]]],
+        suffix: Optional[str] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
@@ -320,10 +339,14 @@ class OpenAIServing:
                     request,
                     tokenizer,
                     prompt=text,
+                    suffix=suffix,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=add_special_tokens,
                 )
             else:
+                if suffix:
+                    raise ValueError(
+                        "suffix is only supported with string prompt input")
                 yield self._normalize_prompt_tokens_to_input(
                     request,
                     tokenizer,
@@ -336,6 +359,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
+        suffix: Optional[str] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
@@ -356,10 +380,14 @@ class OpenAIServing:
                     request,
                     tokenizer,
                     prompt=prompt_input["content"],
+                    suffix=suffix,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=add_special_tokens,
                 )
             else:
+                if suffix:
+                    raise ValueError(
+                        "suffix is only supported with string prompt input")
                 yield self._normalize_prompt_tokens_to_input(
                     request,
                     tokenizer,
