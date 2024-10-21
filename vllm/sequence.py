@@ -1381,38 +1381,80 @@ class ExecuteModelRequest(
 
 
 @dataclass
-class SeqGroupHolder:
+class SequenceGroupBase:
     group_id: str  # the original request id before splitting
 
-    # all the request ids that are part of this group
-    seq_ids: Set[str] = field(default_factory=set)
+    # seq id to a unique index inside this group
+    seq_id_to_index: Dict[str, int] = field(default_factory=dict)
 
-    # all the finished requests
-    finished_reqs: List[SequenceGroup] = field(default_factory=list)
+    # seq ids to be finished
+    to_be_finished: Set[str] = field(default_factory=set)
 
-    def maybe_finish_and_assemble(
-            self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
-        self.seq_ids.remove(seq_group.request_id)
-        self.finished_reqs.append(seq_group)
-        if len(self.seq_ids) == 0:
-            params = self.finished_reqs[0].sampling_params
+    # seq id to finished sequences
+    finished_reqs: Dict[str, SequenceGroup] = field(default_factory=dict)
+
+    @staticmethod
+    def add_request(request_id: str, engine, params, *args, **kwargs):
+        """When we are ready to add a request with request_id and params
+        into the engine, we can split the request into multiple requests.
+        """
+        raise NotImplementedError
+
+    def dealta_output(self, seq: SequenceGroup):
+        """The sequence `seq` needs to produce delta output.
+        We need to restore the `index` information.
+        """
+        raise NotImplementedError
+
+    def finish_seq(self, seq: SequenceGroup):
+        """The sequence `seq` finishes, we should record the information.
+        """
+        self.to_be_finished.remove(seq.request_id)
+        self.finished_reqs[seq.request_id] = seq
+
+    def maybe_assemble_group(self) -> Optional[SequenceGroup]:
+        """Assemble the sequence group, for producing the final
+        output, or adding request in the engine again.
+        """
+        raise NotImplementedError
+
+
+class ParallelSampleSequenceGroup(SequenceGroupBase):
+
+    @staticmethod
+    def add_request(request_id: str, engine, params, **kwargs):
+        params = copy.deepcopy(params)
+        n = params.n
+        params.n = 1
+        group = SequenceGroupBase(request_id)
+        for i in range(n):
+            request_id_i = f"{request_id}_parallel_sample_{i}"
+            group.seq_id_to_index[request_id_i] = i
+            group.to_be_finished.add(request_id_i)
+            engine.add_request(
+                request_id_i,
+                params=params,
+                **kwargs,
+            )  # type: ignore
+            engine.seq_id_to_seq_group[request_id_i] = group
+
+    def maybe_assemble_group(self) -> Optional[SequenceGroup]:
+        if len(self.to_be_finished) == 0:
+            finished_reqs = list(self.finished_reqs.values())
+            params = finished_reqs[0].sampling_params
             assert params is not None
-            params.n = len(self.finished_reqs)
-            assembled_seq_group = SequenceGroup(
-                request_id=self.group_id,
-                seqs=[x.seqs[0] for x in self.finished_reqs],
-                sampling_params=params,
-                arrival_time=self.finished_reqs[0].arrival_time,
-                lora_request=self.finished_reqs[0].lora_request,
-                trace_headers=self.finished_reqs[0].trace_headers,
-                prompt_adapter_request=self.finished_reqs[0].
-                prompt_adapter_request,
-                priority=self.finished_reqs[0].priority,
-                embeddings=self.finished_reqs[0].embeddings,
-                pooling_params=self.finished_reqs[0].pooling_params,
-            )
-            assembled_seq_group.cached_request_output = self.finished_reqs[
-                0].cached_request_output
+            params.n = len(finished_reqs)
+            assembled_seq_group = copy.deepcopy(finished_reqs[0])
+            assembled_seq_group.request_id = self.group_id
+
+            # Get the top-n sequences.
+            n = params._real_n or params.n
+            seqs = [x.seqs[0] for x in finished_reqs]
+            sorting_key = lambda seq: seq.get_cumulative_logprob()
+            sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
+            top_n_seqs = sorted_seqs[:n]
+            assembled_seq_group.seqs = top_n_seqs
+            assembled_seq_group.sampling_params = params
             return assembled_seq_group
         else:
             return None

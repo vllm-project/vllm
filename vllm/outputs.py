@@ -7,7 +7,7 @@ from typing import Union
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
-                           SeqGroupHolder, SequenceGroup, SequenceStatus)
+                           SequenceGroup, SequenceGroupBase, SequenceStatus)
 
 
 @dataclass
@@ -116,7 +116,7 @@ class RequestOutput:
     @classmethod
     def from_seq_group(
         cls, seq_group: SequenceGroup, use_cache: bool,
-        group_id_to_holders: Dict[str, SeqGroupHolder]
+        seq_id_to_seq_group: Dict[str, SequenceGroupBase]
     ) -> Optional["RequestOutput"]:
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
@@ -128,17 +128,16 @@ class RequestOutput:
                 not finished):
             return None
 
-        if finished and seq_group.request_id in group_id_to_holders:
-            # parallel sampling can not stream the output
-            assert sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
-            holder: SeqGroupHolder = group_id_to_holders[seq_group.request_id]
-            del group_id_to_holders[seq_group.request_id]
-            assembled_seq_group = holder.maybe_finish_and_assemble(seq_group)
+        if finished and seq_group.request_id in seq_id_to_seq_group:
+            group: SequenceGroupBase = seq_id_to_seq_group[
+                seq_group.request_id]
+            group.finish_seq(seq_group)
+            assembled_seq_group = group.maybe_assemble_group()
             # only part of the request is finished
             if assembled_seq_group is None:
                 return None
             return cls.from_seq_group(assembled_seq_group, use_cache,
-                                      group_id_to_holders)
+                                      seq_id_to_seq_group)
 
         # Init cache (if needed)
         if use_cache and seq_group.cached_request_output is None:
@@ -150,15 +149,7 @@ class RequestOutput:
                 outputs=[],
                 finished=False)
 
-        seqs = seq_group.get_seqs()
-        if len(seqs) == 1:
-            top_n_seqs = seqs
-        else:
-            # Get the top-n sequences.
-            n = sampling_params._real_n or sampling_params.n
-            sorting_key = lambda seq: seq.get_cumulative_logprob()
-            sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
-            top_n_seqs = sorted_seqs[:n]
+        top_n_seqs = seq_group.get_seqs()
 
         # Create the outputs.
         # NOTE: We need omit logprobs here explicitly because the sequence
@@ -221,9 +212,13 @@ class RequestOutput:
                 output.stop_reason = seq.stop_reason
 
             else:
+                index = i
+                if not finished and seq_group.request_id in seq_id_to_seq_group:
+                    group = seq_id_to_seq_group[seq_group.request_id]
+                    index = group.seq_id_to_index[seq_group.request_id]
                 output = CompletionOutput(
-                    seqs.index(seq), output_text, [output_token_ids]
-                    if isinstance(output_token_ids, int) else output_token_ids,
+                    index, output_text, [output_token_ids] if isinstance(
+                        output_token_ids, int) else output_token_ids,
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
                     SequenceStatus.get_finished_reason(seq.status),
@@ -324,7 +319,7 @@ class RequestOutputFactory:
 
     @staticmethod
     def create(seq_group: SequenceGroup,
-               group_id_to_holders: Dict[str, SeqGroupHolder],
+               seq_id_to_seq_group: Dict[str, SequenceGroupBase],
                use_cache: bool = False):
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
@@ -332,4 +327,4 @@ class RequestOutputFactory:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group, use_cache,
-                                                group_id_to_holders)
+                                                seq_id_to_seq_group)
