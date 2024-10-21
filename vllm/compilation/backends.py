@@ -244,8 +244,8 @@ def vllm_backend(
 
 def select_default_backend(level: int) -> Union[str, Callable]:
     if level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
-        backend = "eager"
-        return backend
+        backend_str = "eager"
+        return backend_str
     assert level in [
         CompilationLevel.INDUCTOR, CompilationLevel.INDUCTOR_MAX_AUTOTUNE
     ], f"Invalid level {level}"

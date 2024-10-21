@@ -17,6 +17,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
+from vllm.attention.backends.utils import CommonAttentionState
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.levels import CompilationLevel
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
@@ -46,6 +47,7 @@ from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available,
                         supports_dynamo)
@@ -572,17 +574,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # paged attn. We can remove it if we make paged attn kernel
             # to properly handle slinding window attn.
             curr_sliding_window_block = self.sliding_window_blocks
-            if self.scheduler_config.use_v2_block_manager:
-                # number of elements in last block
-                suff_len = inter_data.seq_lens[seq_idx] % self.block_size
-                sliding_seq_len = min(
-                    inter_data.seq_lens[seq_idx],
-                    self.block_aligned_sliding_window + suff_len)
-                if suff_len > 0:
-                    curr_sliding_window_block += 1
-            else:
-                sliding_seq_len = min(inter_data.seq_lens[seq_idx],
-                                      self.sliding_window)
+            # number of elements in last block
+            suff_len = inter_data.seq_lens[seq_idx] % self.block_size
+            sliding_seq_len = min(inter_data.seq_lens[seq_idx],
+                                  self.block_aligned_sliding_window + suff_len)
+            if suff_len > 0:
+                curr_sliding_window_block += 1
 
         inter_data.curr_sliding_window_blocks[
             seq_idx] = curr_sliding_window_block
@@ -1001,16 +998,29 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_block_tables = np.zeros(
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
+
+        # Attention-free but stateful models like Mamba need a placeholder attn
+        # backend, as the attention metadata is needed to manage internal state.
+        # However we must bypass attention selection altogether for some models
+        # used for speculative decoding to avoid a divide-by-zero in
+        # model_config.get_head_size()
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
+        needs_attn_backend = (num_attn_heads != 0
+                              or self.model_config.is_attention_free)
+
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
-            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
-        )
-        self.attn_state = self.attn_backend.get_state_cls()(
-            weakref.proxy(self))
+        ) if needs_attn_backend else None
+        if self.attn_backend:
+            self.attn_state = self.attn_backend.get_state_cls()(
+                weakref.proxy(self))
+        else:
+            self.attn_state = CommonAttentionState(weakref.proxy(self))
 
         # Multi-modal data support
         self.input_registry = input_registry
@@ -1364,10 +1374,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def model_is_mrope(self) -> bool:
         """Detect if the model has "mrope" rope_scaling type.
         mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
-        if rope_scaling is None:
-            return False
-        return rope_scaling.get("type", None) == "mrope"
+        return uses_mrope(self.model_config.hf_config)
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
@@ -1729,10 +1736,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         return [output]
 
 
-class CUDAGraphRunner:
+# NOTE: this is nn.Module so the profiler can properly capture/group
+#  kernels calls made within the graph
+class CUDAGraphRunner(nn.Module):
 
     def __init__(self, model: nn.Module, backend_name: str,
                  attn_state: AttentionState, is_encoder_decoder_model: bool):
+        super().__init__()
         self.model = model
         self.backend_name = backend_name
         self.attn_state = attn_state
@@ -1878,9 +1888,6 @@ class CUDAGraphRunner:
             return self.output_buffers["hidden_states"]
 
         return self.output_buffers
-
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
