@@ -381,6 +381,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
+    # Specify the role of current vllm instance
+    # Value can be "producer", "consumer" or "both".
+    "VLLM_DISTRIBUTED_KV_ROLE":
+    lambda: os.getenv("VLLM_DISTRIBUTED_KV_ROLE", None),
+
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
     lambda: bool(int(os.getenv("VLLM_NO_DEPRECATION_WARNING", "0"))),
