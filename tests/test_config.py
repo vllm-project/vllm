@@ -1,6 +1,7 @@
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.model_executor.layers.pooler import PoolingConfig, PoolingType
 
 
 @pytest.mark.parametrize(("model_id", "expected_task"), [
@@ -100,6 +101,25 @@ def test_get_sliding_window():
 
     mistral_model_config.hf_config.sliding_window = TEST_SLIDING_WINDOW
     assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
+
+
+def test_get_pooling_config():
+    minilm_model_config = ModelConfig(
+        "sentence-transformers/all-MiniLM-L12-v2",
+        "sentence-transformers/all-MiniLM-L12-v2",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+    )
+
+    minilm_pooling_config = minilm_model_config.get_pooling_config()
+
+    assert isinstance(minilm_model_config.pooling_config, PoolingConfig)
+    assert minilm_pooling_config.normalize
+    assert isinstance(minilm_pooling_config.pooling_type, PoolingType)
+    assert minilm_pooling_config.pooling_type == PoolingType.MEAN
 
 
 def test_rope_customization():

@@ -6,13 +6,13 @@ from typing import Any, Dict, Optional, Type, Union
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
                              try_to_load_from_cache)
-from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
+from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
@@ -231,6 +231,7 @@ def get_config(
 
     return config
 
+
 def get_hf_file_to_dict(file_name, model, revision):
     """
     Downloads a file from the Hugging Face Hub and returns 
@@ -248,18 +249,19 @@ def get_hf_file_to_dict(file_name, model, revision):
     file_path = Path(model) / file_name
 
     if not file_path.is_file():
-        file_path = Path(
-            hf_hub_download(model, file_name, revision=revision))
+        file_path = Path(hf_hub_download(model, file_name, revision=revision))
 
     with open(file_path, "r") as file:
         config_dict = json.load(file)
 
     return config_dict
 
+
 def get_pooling_config(model, revision='main'):
     """
     This function gets the pooling and normalize 
-    config from the model.
+    config from the model - only applies to 
+    sentence-transformers models. 
 
     Args:
         model (str): The name of the Hugging Face model.
@@ -274,26 +276,22 @@ def get_pooling_config(model, revision='main'):
     modules_file_name = "modules.json"
     modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
 
-    pooling = next((item for item in modules_dict if 
-                    item["type"] == "sentence_transformers.models.Pooling"), 
-                    None)
-    normalize = bool(next((item for item in modules_dict if 
-                      item["type"] == 
-                      "sentence_transformers.models.Normalize"), 
-                      False))
+    pooling = next((item for item in modules_dict
+                    if item["type"] == "sentence_transformers.models.Pooling"),
+                   None)
+    normalize = bool(
+        next((item for item in modules_dict
+              if item["type"] == "sentence_transformers.models.Normalize"),
+             False))
 
-    if pooling: 
+    if pooling:
 
         pooling_file_name = "{}/config.json".format(pooling["path"])
         pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
-        pooling_type_name = next((item for item, 
-                                  val in pooling_dict.items() if val is True), 
-                                  None)
+        pooling_type_name = next(
+            (item for item, val in pooling_dict.items() if val is True), None)
 
-        return { 
-            "pooling_type": pooling_type_name,
-            "normalize": normalize
-            }
+        return {"pooling_type": pooling_type_name, "normalize": normalize}
 
     return None
 
