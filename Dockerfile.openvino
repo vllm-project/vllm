@@ -15,11 +15,11 @@ RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 # install build requirements
-RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/vllm/requirements-build.txt
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/requirements-build.txt
 # build vLLM with OpenVINO backend
-RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE="openvino" python3 -m pip install /workspace/vllm/
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE="openvino" python3 -m pip install /workspace
 
-COPY examples/ /workspace/vllm/examples
-COPY benchmarks/ /workspace/vllm/benchmarks
+COPY examples/ /workspace/examples
+COPY benchmarks/ /workspace/benchmarks
 
 CMD ["/bin/bash"]
