@@ -15,18 +15,21 @@ class Request:
         self,
         request_id: str,
         inputs: "DecoderOnlyInputs",
-        arrival_time: float,
         sampling_params: SamplingParams,
+        eos_token_id: Optional[int],
+        arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.request_id = request_id
         self.inputs = inputs
+        self.sampling_params = sampling_params
+        # Because of LoRA, the eos token id can be different for each request.
+        self.eos_token_id = eos_token_id
         self.metrics = RequestMetrics(arrival_time=arrival_time,
                                       last_token_time=arrival_time,
                                       first_scheduled_time=None,
                                       first_token_time=None,
                                       time_in_queue=None)
-        self.sampling_params = sampling_params
         self.lora_request = lora_request
 
         self.status = RequestStatus.WAITING

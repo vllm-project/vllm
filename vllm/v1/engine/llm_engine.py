@@ -252,10 +252,8 @@ class LLMEngine:
 
         # TODO(woosuk): Check max_logprobs
         # TODO(woosuk): Support encoder-decoder models.
-        req = Request(request_id,
-                      processed_inputs,
-                      arrival_time,
-                      sampling_params=params)
+        req = Request(request_id, processed_inputs, params, eos_token_id,
+                      arrival_time)
         self.requests[request_id] = req
         self.num_lagged_steps[request_id] = 0
         self.scheduler.add_request(req)
