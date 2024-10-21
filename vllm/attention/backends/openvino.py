@@ -38,7 +38,7 @@ class OpenVINOAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "openvino"
+        return "OPENVINO"
 
     @staticmethod
     def get_impl_cls():

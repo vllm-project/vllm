@@ -19,7 +19,7 @@ class IpexAttnBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ipex-attn"
+        return "IPEX"
 
     @staticmethod
     def get_impl_cls() -> Type["IpexAttnBackendImpl"]:

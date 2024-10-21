@@ -1855,7 +1855,7 @@ class CUDAGraphRunner(nn.Module):
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
 
-        if self.backend_name != "placeholder-attn":
+        if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
                 attn_metadata.slot_mapping, non_blocking=True)
 

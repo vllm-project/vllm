@@ -28,7 +28,7 @@ class ROCmFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "rocm-flash-attn"
+        return "ROCM_FLASH"
 
     @staticmethod
     def get_impl_cls() -> Type["ROCmFlashAttentionImpl"]:
