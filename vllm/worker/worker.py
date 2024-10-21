@@ -92,7 +92,7 @@ class Worker(LocalOrDistributedWorkerBase):
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:
             ModelRunnerClass = model_runner_cls
-        elif self._is_embedding_model():
+        elif model_config.task == "embedding":
             ModelRunnerClass = EmbeddingModelRunner
         elif self._is_encoder_decoder_model():
             ModelRunnerClass = EncoderDecoderModelRunner
@@ -146,9 +146,6 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _is_encoder_decoder_model(self):
         return self.model_config.is_encoder_decoder_model
-
-    def _is_embedding_model(self):
-        return self.model_config.is_embedding_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -235,10 +232,11 @@ class Worker(LocalOrDistributedWorkerBase):
         # gpu outside of `torch`. NCCL operations, for example, can use a few
         # GB during a forward pass
         torch.cuda.empty_cache()
-        # After emptying the torch cache, any other increase in gpu ram should
-        # be from non-torch allocations.
-        non_torch_allocations = free_memory_pre_profile - \
-            torch.cuda.mem_get_info()[0]
+        torch_allocated_bytes = torch.cuda.memory_stats(
+        )["allocated_bytes.all.current"]
+        total_allocated_bytes = torch.cuda.mem_get_info(
+        )[1] - torch.cuda.mem_get_info()[0]
+        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
 
@@ -262,10 +260,12 @@ class Worker(LocalOrDistributedWorkerBase):
         logger.info(
             "Memory profiling results: total_gpu_memory=%.2fGiB"
             " initial_memory_usage=%.2fGiB peak_torch_memory=%.2fGiB"
+            " memory_usage_post_profile=%.2fGib"
             " non_torch_memory=%.2fGiB kv_cache_size=%.2fGiB"
             " gpu_memory_utilization=%.2f", total_gpu_memory / (1024**3),
             (total_gpu_memory - free_memory_pre_profile) / (1024**3),
             (peak_memory - non_torch_allocations) / (1024**3),
+            total_allocated_bytes / (1024**3),
             non_torch_allocations / (1024**3),
             available_kv_cache_memory / (1024**3),
             self.cache_config.gpu_memory_utilization)

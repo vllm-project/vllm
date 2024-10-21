@@ -313,7 +313,7 @@ class Scheduler:
         self.lora_config = lora_config
 
         version = "selfattn"
-        if (self.scheduler_config.embedding_mode
+        if (self.scheduler_config.task == "embedding"
                 or self.cache_config.is_attention_free):
             version = "placeholder"
 
