@@ -42,4 +42,4 @@ WORKDIR /workspace/
 
 RUN VLLM_TARGET_DEVICE=cpu pip install -e . --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
 
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["/opt/conda/bin/python3", "-m", "vllm.entrypoints.openai.api_server"]
