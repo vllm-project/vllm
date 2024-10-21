@@ -492,6 +492,18 @@ class LLMEngine:
     def do_log_stats(self, *args, **kwargs) -> None:
         pass
 
+    def is_encoder_decoder_model(self) -> bool:
+        return False
+
+    def start_profile(self) -> None:
+        pass
+
+    def stop_profile(self) -> None:
+        pass
+
+    def get_tokenizer_group(self):
+        return self.tokenizer
+
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     config = try_get_generation_config(
