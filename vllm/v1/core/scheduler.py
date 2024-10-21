@@ -230,6 +230,7 @@ class Scheduler:
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> List[Tuple[Request, int]]:
+        # NOTE(woosuk): This method dosn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
@@ -237,13 +238,16 @@ class Scheduler:
         sampled: List[Tuple[Request, int]] = []
         for request in self.running:
             req_id = request.request_id
-            # TODO: Consider speculative decoding.
             request.num_computed_tokens += num_scheduled_tokens[req_id]
-            if request.num_computed_tokens >= request.num_prompt_tokens:
+            # When the request's num_computed_tokens catches up its num_tokens,
+            # the request generates output tokens. Otherwise, we ignore the
+            # sampler output for the request.
+            if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
+                # FIXME(woosuk): Currently, we assume that each request
+                # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
                 request.output_token_ids.append(token_id)
-                # For now, each request generates at most one output token.
                 sampled.append((request, 1))
                 # TODO: Update the KV cache manager for prefix caching.
 
