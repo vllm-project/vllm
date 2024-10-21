@@ -189,6 +189,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        # The number of original input tokens of each sequence
+        num_orig_input_tokens_list: List[int] = []
         input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
 
         slot_mapping: List[int] = []
@@ -224,7 +226,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     input_mrope_positions[idx].extend(mrope_positions[idx])
             else:
                 input_positions.extend(list(range(computed_len, seq_len)))
-
+                num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] *
+                                                  (seq_len - computed_len))
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
@@ -289,6 +292,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        # The number of original input tokens of each sequence
+        num_orig_input_tokens_list: List[int] = []
         input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
@@ -318,6 +323,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                         input_mrope_positions[idx].extend(next_pos[idx])
                 else:
                     input_positions.append(position)
+                    num_orig_input_tokens_list.append(
+                        seq_data.get_prompt_len())
 
                 seq_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
