@@ -323,7 +323,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # multi-step logic
         self._base_model_runner: GPUModelRunnerBase = base_model_runner
 
-        self.is_multi_step = self.scheduler_config.is_multi_step
+        self.is_multi_step = (
+            self.scheduler_config.engine_permits_multi_step_scheduling)
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
         # Using the PythonizationCache in Pipeline-Parallel clobbers the
@@ -469,6 +470,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # path for warm up runs
         if not model_input.is_multi_step:
+            self._base_model_runner.model.sampler.include_gpu_probs_tensor = (
+                False)
+            if frozen_model_input.sampling_metadata:
+                frozen_model_input.sampling_metadata.skip_sampler_cpu_output = (
+                    False)
             return self._base_model_runner.execute_model(
                 frozen_model_input, kv_caches, intermediate_tensors, num_steps)
 

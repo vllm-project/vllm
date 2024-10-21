@@ -164,7 +164,7 @@ async def test_multi_step_pp_smoke(
     Args:
       tp_size: degree of tensor-parallelism
       pp_size: degree of pipeline-parallelism
-      eager_mode
+      monkeypatch: fixture which we use to temporarily override backend env var
     """
 
     model = "JackFram/llama-160m"
@@ -223,3 +223,134 @@ async def test_multi_step_pp_smoke(
     test_generations = get_client_text_generations(test_completions)
 
     assert ref_generations == test_generations
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("pp_size", [1])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
+@pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
+@pytest.mark.parametrize("max_output_len", [7])
+@pytest.mark.parametrize("n,best_of", [
+    (1, 3),
+    (2, 2),
+    (2, 3),
+])
+@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("num_logprobs", [None, 5])
+@pytest.mark.asyncio
+async def test_multi_step_llm_best_of_fallback_async(
+    monkeypatch,
+    example_prompts,
+    model: str,
+    tp_size: int,
+    pp_size: int,
+    enforce_eager: int,
+    num_scheduler_steps: int,
+    num_prompts: int,
+    max_output_len: int,
+    n: int,
+    best_of: int,
+    attention_backend: str,
+    is_async: bool,
+    num_logprobs: Optional[int],
+) -> None:
+    """Test vLLM server with multi-step & best_of > 1
+
+    Currently multi-step scheduling does not support best_of > 1 or
+    beam search,
+    however the default behavior is for the engine to fall back
+    on single-step
+    scheduling rather than failing.
+
+    Args:
+      monkeypatch: fixture which we use to temporarily override backend env var
+      example_prompts: test fixture providing example prompts
+      model: model under test (same for single- and multi-step engines)
+      tp_size: degree of tensor-parallelism
+      pp_size: degree of pipeline-parallelism
+      enforce_eager
+      num_scheduler_steps: for multi-step scheduling, GPU-side steps per
+                           GPU -> CPU output transfer
+      num_prompts: number of example prompts under test
+      max_output_len
+      n: num seqs to output per :class:`SequenceGroup`
+      best_of: num seqs per :class:`SequenceGroup` from which to choose
+      attention_backend
+      is_async: if True, use async output processor
+      num_logprobs: number of logprobs to return per token
+    """
+
+    override_backend_env_variable(monkeypatch, attention_backend)
+
+    prompts = example_prompts
+    if len(prompts) < num_prompts:
+        prompts = prompts * ((num_prompts // len(prompts)) + 1)
+    prompts = prompts[:num_prompts]
+    assert len(prompts) == num_prompts
+
+    server_args = DEFAULT_SERVER_ARGS + ["--enforce-eager"]
+    ms_server_args = DEFAULT_SERVER_ARGS + \
+        ["--num-scheduler-steps", f"{num_scheduler_steps}"]
+
+    if not is_async:
+        ms_server_args += ["--disable-async-output-proc"]
+
+    if enforce_eager:
+        ms_server_args.append("--enforce-eager")
+
+    distributed_args = [
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--pipeline-parallel-size",
+        str(pp_size),
+    ]
+
+    # Requests will share a random seed
+    seed = 42
+
+    # Spin up client/server & issue completion API requests.
+    # Default `max_wait_seconds` is 240 but was empirically
+    # was raised 3x to 720 *just for this test* due to
+    # observed timeouts in GHA CI
+    ref_completions = await completions_with_server_args(
+        prompts,
+        model,
+        server_args + distributed_args,
+        num_logprobs,
+        max_wait_seconds=5 * 240,
+        best_of=best_of,
+        n=n,
+        max_tokens=max_output_len,
+        temperature=1.0,
+        seed=seed)
+    test_completions = await completions_with_server_args(
+        prompts,
+        model,
+        ms_server_args + distributed_args,
+        num_logprobs,
+        max_wait_seconds=5 * 240,
+        best_of=best_of,
+        n=n,
+        max_tokens=max_output_len,
+        temperature=1.0,
+        seed=seed)
+
+    # Assert multi-step scheduling produces identical tokens
+    # to single-step scheduling.
+    ref_generations = get_client_text_generations(ref_completions)
+    test_generations = get_client_text_generations(test_completions)
+    assert ref_generations == test_generations
+
+    # Assert multi-step scheduling produces nearly-identical logprobs
+    # to single-step scheduling.
+    ref_text_logprobs = get_client_text_logprob_generations(ref_completions)
+    test_text_logprobs = get_client_text_logprob_generations(test_completions)
+    check_logprobs_close(
+        outputs_0_lst=ref_text_logprobs,
+        outputs_1_lst=test_text_logprobs,
+        name_0="single-step",
+        name_1="multi-step",
+    )
