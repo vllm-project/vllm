@@ -1147,7 +1147,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                           lora_config, cache_config)
 
                 self._load_weights(model_config, model)
-
         return model.eval()
 
 
