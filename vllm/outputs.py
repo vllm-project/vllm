@@ -118,26 +118,27 @@ class RequestOutput:
         cls, seq_group: SequenceGroup, use_cache: bool,
         seq_id_to_seq_group: Dict[str, SequenceGroupBase]
     ) -> Optional["RequestOutput"]:
+        finished = seq_group.is_finished()
+
+        if seq_group.request_id in seq_id_to_seq_group:
+            group: SequenceGroupBase = seq_id_to_seq_group[
+                seq_group.request_id]
+            if finished:
+                group.finish_seq(seq_group)
+            assembled_seq_group = group.maybe_assemble_group()
+            if assembled_seq_group is None:
+                return None
+            return cls.from_seq_group(assembled_seq_group, use_cache,
+                                      seq_id_to_seq_group)
+
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
             raise ValueError(
                 "Sampling parameters are missing for a CompletionRequest.")
 
-        finished = seq_group.is_finished()
         if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY and (
                 not finished):
             return None
-
-        if finished and seq_group.request_id in seq_id_to_seq_group:
-            group: SequenceGroupBase = seq_id_to_seq_group[
-                seq_group.request_id]
-            group.finish_seq(seq_group)
-            assembled_seq_group = group.maybe_assemble_group()
-            # only part of the request is finished
-            if assembled_seq_group is None:
-                return None
-            return cls.from_seq_group(assembled_seq_group, use_cache,
-                                      seq_id_to_seq_group)
 
         # Init cache (if needed)
         if use_cache and seq_group.cached_request_output is None:

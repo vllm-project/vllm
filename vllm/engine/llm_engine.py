@@ -646,7 +646,10 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> None:
+    ) -> SequenceGroup:
+        """Add a processed request to the engine's request pool.
+        return the created sequence group.
+        """
         self._validate_model_inputs(processed_inputs)
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -700,6 +703,8 @@ class LLMEngine:
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
         min_cost_scheduler.add_seq_group(seq_group)
 
+        return seq_group
+
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
@@ -715,7 +720,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> None:
+    ) -> Optional[SequenceGroup]:
         ...
 
     @overload
@@ -729,7 +734,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> None:
+    ) -> Optional[SequenceGroup]:
         ...
 
     @deprecate_kwargs(
@@ -748,7 +753,7 @@ class LLMEngine:
             priority: int = 0,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
-    ) -> None:
+    ) -> Optional[SequenceGroup]:
         """Add a request to the engine's request pool.
 
         The request is added to the request pool and will be processed by the
@@ -806,7 +811,7 @@ class LLMEngine:
                 priority=priority,
                 inputs=inputs,
             )
-            return
+            return None
 
         if inputs is not None:
             prompt = inputs
@@ -838,7 +843,7 @@ class LLMEngine:
         processed_inputs["mm_processor_kwargs"] = preprocessed_inputs.get(
             "mm_processor_kwargs")
 
-        self._add_processed_request(
+        return self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
             params=params,

@@ -1407,11 +1407,13 @@ class ExecuteModelRequest(
 class SequenceGroupBase:
     group_id: str  # the original request id before splitting
 
+    assembled_seq_group: Optional[SequenceGroup] = None
+
     # seq id to a unique index inside this group
     seq_id_to_index: Dict[str, int] = field(default_factory=dict)
 
     # seq ids to be finished
-    to_be_finished: Set[str] = field(default_factory=set)
+    to_be_finished: Dict[str, SequenceGroup] = field(default_factory=dict)
 
     # seq id to finished sequences
     finished_reqs: Dict[str, SequenceGroup] = field(default_factory=dict)
@@ -1426,7 +1428,7 @@ class SequenceGroupBase:
     def finish_seq(self, seq: SequenceGroup):
         """The sequence `seq` finishes, we should record the information.
         """
-        self.to_be_finished.remove(seq.request_id)
+        del self.to_be_finished[seq.request_id]
         self.finished_reqs[seq.request_id] = seq
 
     def maybe_assemble_group(self) -> Optional[SequenceGroup]:
@@ -1440,38 +1442,44 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
 
     @staticmethod
     def add_request(request_id: str, engine, params, **kwargs):
-        params = copy.deepcopy(params)
+        original_params = params
+        params = copy.deepcopy(original_params)
         n = params.n
         params.n = 1
         group = ParallelSampleSequenceGroup(request_id)
+        seqs = []
         for i in range(n):
             request_id_i = f"{request_id}_parallel_sample_{i}"
             group.seq_id_to_index[request_id_i] = i
-            group.to_be_finished.add(request_id_i)
-            engine.add_request(
+            seq_group = engine.add_request(
                 request_id_i,
                 params=params,
                 **kwargs,
             )  # type: ignore
             engine.seq_id_to_seq_group[request_id_i] = group
+            group.to_be_finished[request_id_i] = seq_group
+            seqs.append(seq_group.seqs[0])
+
+        # for parallel sampling, the `assembled_seq_group` is always
+        # available, since we have all the sequences ready, and they
+        # will not change.
+        group.assembled_seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=seqs,
+            sampling_params=original_params,
+            **kwargs,
+        )
 
     def maybe_assemble_group(self) -> Optional[SequenceGroup]:
-        if len(self.to_be_finished) == 0:
-            finished_reqs = list(self.finished_reqs.values())
-            params = finished_reqs[0].sampling_params
-            assert params is not None
-            params.n = len(finished_reqs)
-            assembled_seq_group = copy.deepcopy(finished_reqs[0])
-            assembled_seq_group.request_id = self.group_id
-
+        assert self.assembled_seq_group is not None
+        params = self.assembled_seq_group.sampling_params
+        assert isinstance(params, SamplingParams)
+        if len(self.to_be_finished) == 0 and params._real_n is not None:
             # Get the top-n sequences.
             n = params._real_n or params.n
-            seqs = [x.seqs[0] for x in finished_reqs]
+            seqs = self.assembled_seq_group.seqs
             sorting_key = lambda seq: seq.get_cumulative_logprob()
             sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
             top_n_seqs = sorted_seqs[:n]
-            assembled_seq_group.seqs = top_n_seqs
-            assembled_seq_group.sampling_params = params
-            return assembled_seq_group
-        else:
-            return None
+            self.assembled_seq_group.seqs = top_n_seqs
+        return self.assembled_seq_group
