@@ -103,7 +103,8 @@ class PhiAttention(nn.Module):
         # Refer to:
         # https://huggingface.co/microsoft/phi-1_5/blob/d212a789620c380ff32ca1d1ee9943a777360987/modeling_phi.py#L518
         rope_theta = getattr(config, "rope_theta", 10000.0)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          2048)
         self.rotary_emb = get_rope(
             self.head_size,
             rotary_dim=rotary_dim,
