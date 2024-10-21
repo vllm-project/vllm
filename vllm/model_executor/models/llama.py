@@ -32,6 +32,8 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
+from vllm.distributed.kv_transfer.utils import (is_first_decode_pass,
+                                                is_prefill_run)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -330,7 +332,18 @@ class LlamaModel(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+
+        first_decode_pass = is_first_decode_pass(input_ids, attn_metadata)
+        prefill_pass = is_prefill_run(input_ids)
+
+        if first_decode_pass or prefill_pass:
+            if 'kv_cache_transporter' not in kwargs:
+                raise ValueError(
+                    "Missing 'kv_cache_transporter' in keyword arguments.")
+            kv_cache_transporter = kwargs['kv_cache_transporter']
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -342,11 +355,28 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        if first_decode_pass:
+            for i, kv_cache in enumerate(kv_caches):
+                kv_cache_transporter.read_kv_cache(input_ids, attn_metadata, i,
+                                                   kv_cache)
+
+            kv_cache_transporter.read_hidden_states(input_ids, attn_metadata,
+                                                    hidden_states)
+
+            kv_cache_transporter.synchronize()
+
+            return hidden_states
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i - self.start_layer],
                                             attn_metadata, residual)
+
+            if prefill_pass:
+                kv_cache_transporter.save_kv_cache(
+                    input_ids, attn_metadata, i,
+                    kv_caches[i - self.start_layer])
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -355,6 +385,12 @@ class LlamaModel(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if prefill_pass:
+            kv_cache_transporter.save_hidden_states(input_ids, attn_metadata,
+                                                    hidden_states)
+            kv_cache_transporter.synchronize()
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -554,9 +590,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, kv_caches,
-                                  attn_metadata, intermediate_tensors)
+                                  attn_metadata, intermediate_tensors,
+                                  **kwargs)
         return model_output
 
     def compute_logits(
