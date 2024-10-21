@@ -1,5 +1,3 @@
-from typing import Optional
-
 import math
 from typing import Iterable, List, Optional, Tuple
 
@@ -7,28 +5,20 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionMetadata, AttentionType
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
-from vllm.model_executor.models.bart import BartLearnedPositionalEmbedding, BartParallelLMHead, BartScaledWordEmbedding, BartEncoderLayer, BartDecoderLayer, BartEncoder, BartDecoder
+from vllm.attention import AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
+                                             BartParallelLMHead,
+                                             BartScaledWordEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+
 from .utils import AutoWeightsLoader
-
-
-class Florence2LearnedPositionalEmbedding(BartLearnedPositionalEmbedding):
-    pass
 
 
 class Florence2ScaledWordEmbedding(BartScaledWordEmbedding):
@@ -36,14 +26,6 @@ class Florence2ScaledWordEmbedding(BartScaledWordEmbedding):
 
 
 class Florence2ParallelLMHead(BartParallelLMHead):
-    pass
-
-
-class Florence2EncoderLayer(BartEncoderLayer):
-    pass
-
-
-class Florence2DecoderLayer(BartDecoderLayer):
     pass
 
 
@@ -57,6 +39,7 @@ class Florence2Decoder(BartDecoder):
 
 class Florence2LanguageModel(nn.Module):
     base_model_prefix = "language_model"
+
     def __init__(self,
                  config: PretrainedConfig,
                  cache_config: Optional[CacheConfig] = None,
@@ -65,13 +48,17 @@ class Florence2LanguageModel(nn.Module):
         self.config = config
 
         self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size 
+        self.vocab_size = config.vocab_size
 
-        self.shared = Florence2ScaledWordEmbedding(self.vocab_size, config.d_model)
-        self.encoder = Florence2Encoder(config, cache_config=cache_config, quant_config=quant_config)
-        self.decoder = Florence2Decoder(config, cache_config=cache_config, quant_config=quant_config)
+        self.shared = Florence2ScaledWordEmbedding(self.vocab_size,
+                                                   config.d_model)
+        self.encoder = Florence2Encoder(config,
+                                        cache_config=cache_config,
+                                        quant_config=quant_config)
+        self.decoder = Florence2Decoder(config,
+                                        cache_config=cache_config,
+                                        quant_config=quant_config)
 
-        print(self.config.tie_word_embeddings)
         # if self.config.tie_word_embeddings:
         #     self.encoder.embed_tokens.weight = self.shared.weight
         #     self.decoder.embed_tokens.weight = self.shared.weight
@@ -123,13 +110,16 @@ class Florence2LanguageModel(nn.Module):
 
 
 class Florence2LanguageForConditionalGeneration(nn.Module):
+
     def __init__(self,
                  config: PretrainedConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.model = Florence2LanguageModel(config, cache_config=cache_config, quant_config=quant_config)
+        self.model = Florence2LanguageModel(config,
+                                            cache_config=cache_config,
+                                            quant_config=quant_config)
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
@@ -141,7 +131,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-    
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -200,16 +190,22 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
 
 
 class Florence2ForConditionalGeneration(nn.Module):
-    def __init__(self, config: PretrainedConfig, cache_config: Optional[CacheConfig] = None,
+
+    def __init__(self,
+                 config: PretrainedConfig,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        
-        self.language_model = Florence2LanguageForConditionalGeneration(config=config.text_config, cache_config=cache_config, quant_config=quant_config)
-    
+
+        self.language_model = Florence2LanguageForConditionalGeneration(
+            config=config.text_config,
+            cache_config=cache_config,
+            quant_config=quant_config)
+
     @property
     def sampler(self):
         return self.language_model.sampler
-    
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -240,15 +236,15 @@ class Florence2ForConditionalGeneration(nn.Module):
             Output torch.Tensor
         """
         return self.language_model(input_ids, positions, encoder_input_ids,
-                          encoder_positions, kv_caches, attn_metadata)
+                                   encoder_positions, kv_caches, attn_metadata)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.language_model.logits_processor(self.language_model.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.language_model.logits_processor(
+            self.language_model.lm_head, hidden_states, sampling_metadata)
         return logits
 
     def sample(
@@ -258,8 +254,11 @@ class Florence2ForConditionalGeneration(nn.Module):
     ) -> Optional[SamplerOutput]:
         next_tokens = self.language_model.sampler(logits, sampling_metadata)
         return next_tokens
-    
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        skip_prefixes = ['image_projection', "vision_tower", "image_proj_norm", "image_pos_embed", "visual_temporal_embed"]
+        skip_prefixes = [
+            'image_projection', "vision_tower", "image_proj_norm",
+            "image_pos_embed", "visual_temporal_embed"
+        ]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         loader.load_weights(weights)

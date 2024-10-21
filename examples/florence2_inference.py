@@ -1,11 +1,8 @@
 '''
 Demonstrate prompting of text-to-text
-encoder/decoder models, specifically BART
+encoder/decoder models, specifically Florence-2
 '''
-from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
-from vllm.assets.image import ImageAsset
-
 
 dtype = "float"
 
