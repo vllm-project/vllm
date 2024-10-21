@@ -1,5 +1,3 @@
-import contextlib
-import gc
 import json
 import os
 import sys
@@ -25,10 +23,9 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TokenizerPoolConfig
+from vllm.config import TaskOption, TokenizerPoolConfig
 from vllm.connections import global_http_connection
-from vllm.distributed import (destroy_distributed_environment,
-                              destroy_model_parallel,
+from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
@@ -140,17 +137,7 @@ def dist_init():
     )
     initialize_model_parallel(1, 1)
     yield
-    cleanup()
-
-
-def cleanup():
-    destroy_model_parallel()
-    destroy_distributed_environment()
-    with contextlib.suppress(AssertionError):
-        torch.distributed.destroy_process_group()
-    gc.collect()
-    if not is_cpu():
-        torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
 
 
 @pytest.fixture()
@@ -167,7 +154,7 @@ def should_do_global_cleanup_after_test(request) -> bool:
 def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(autouse=True)
@@ -606,7 +593,7 @@ class HfRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.model
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(scope="session")
@@ -619,6 +606,7 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
+        task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
@@ -634,6 +622,7 @@ class VllmRunner:
     ) -> None:
         self.model = LLM(
             model=model_name,
+            task=task,
             tokenizer=tokenizer_name,
             trust_remote_code=True,
             dtype=dtype,
@@ -859,7 +848,7 @@ class VllmRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.model
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(scope="session")
