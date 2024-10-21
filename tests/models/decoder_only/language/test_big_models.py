@@ -21,10 +21,14 @@ MODELS = [
 ]
 
 if not current_platform.is_cpu():
-    # MiniCPM requires fused_moe which is not supported by CPU
-    MODELS.append("openbmb/MiniCPM3-4B")
+    MODELS += [
+        # fused_moe which not supported on CPU
+        "openbmb/MiniCPM3-4B",
+        # Head size isn't supported on CPU
+        "h2oai/h2o-danube3-4b-base",
+    ]
 
-#TODO: remove this after CPU float16 support ready
+# TODO: remove this after CPU float16 support ready
 target_dtype = "float" if current_platform.is_cpu() else "half"
 
 
