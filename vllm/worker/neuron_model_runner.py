@@ -1,7 +1,8 @@
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from torch import nn
@@ -35,6 +36,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     input_block_ids: Optional[torch.Tensor] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
+    async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -333,6 +335,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                                                model_input.sampling_metadata)
         else:
             logits = hidden_states
+
+        if model_input.async_callback is not None:
+            model_input.async_callback()
 
         # Sample the next token.
         output = self.model.sample(
