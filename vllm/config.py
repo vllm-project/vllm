@@ -17,8 +17,7 @@ from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        is_hip, is_neuron, is_openvino, is_xpu,
-                        print_warning_once)
+                        is_hip, is_openvino, is_xpu, print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -215,8 +214,10 @@ class ModelConfig:
         self.is_attention_free = self._init_attention_free()
         self.has_inner_state = self._init_has_inner_state()
 
-        self.override_neuron_config = override_neuron_config if is_neuron(
-        ) else None
+        if current_platform.is_neuron():
+            self.override_neuron_config = override_neuron_config
+        else:
+            self.override_neuron_config = None
 
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
@@ -368,7 +369,7 @@ class ModelConfig:
                     "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
                     " is not set, enabling VLLM_USE_TRITON_AWQ.")
                 envs.VLLM_USE_TRITON_AWQ = True
-            if is_neuron(
+            if current_platform.is_neuron(
             ) and self.quantization not in neuron_supported_quantization:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
@@ -1112,7 +1113,7 @@ class DeviceConfig:
             # Automated device type detection
             if current_platform.is_cuda_alike():
                 self.device_type = "cuda"
-            elif is_neuron():
+            elif current_platform.is_neuron():
                 self.device_type = "neuron"
             elif is_openvino():
                 self.device_type = "openvino"
