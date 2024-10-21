@@ -661,8 +661,16 @@ def _sdpa_attention(
 def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                      block_size: int, gqa_ratio: int,
                                      max_seq_len: int) -> bool:
+    # Custom paged attention is only supported on MI250/MI300 GPUs
+    gpu_arch = torch.cuda.get_device_properties("cuda").gcnArchName.split(":")[0]
+
+    ON_MI250_MI300 = any(s in gpu_arch for s in ["gfx90a", "gfx940", "gfx941", "gfx942"])
+
+    if not ON_MI250_MI300:
+        logger.warning(f"Custom Paged Attention is not currently supported on {gpu_arch}.")
+      
     # rocm custom page attention not support on navi (gfx1*)
-    return (not _ON_NAVI and (qtype == torch.half or qtype == torch.bfloat16)
+    return (ON_MI250_MI300 and not _ON_NAVI and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)
