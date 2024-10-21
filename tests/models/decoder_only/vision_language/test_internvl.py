@@ -18,7 +18,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "cherry_blossom":
     "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
 })
-HF_MULTIIMAGE_IMAGE_PROMPT = "<|im_start|>User\nImage-1: <image>\nImage-2: <image>\nDescribe the two images in detail.<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
+HF_MULTIIMAGE_IMAGE_PROMPT = "<|im_start|>User\nImage-1: <image>\nImage-2: <image>\nDescribe the two images in short.<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
 
 models = [
     "OpenGVLab/InternVL2-1B",
