@@ -662,9 +662,6 @@ def _sdpa_attention(
 def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                      block_size: int, gqa_ratio: int,
                                      max_seq_len: int) -> bool:
-    if not _ON_MI250_MI300:
-        logger.warning(f"Custom Paged Attention is not currently supported on {gpu_arch}.")
-      
     # rocm custom page attention not support on navi (gfx1*)
     return (_ON_MI250_MI300 and not _ON_NAVI and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
