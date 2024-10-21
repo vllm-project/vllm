@@ -40,6 +40,11 @@ steps:
   # Check API reference (if it fails, you may have missing mock imports)
   - grep \"sig sig-object py\" build/html/dev/sampling_params.html
 
+- label: Python-only Development Script Test
+  fast_check: true
+  commands:
+  - bash run-code-dev-test.sh
+
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   fast_check: true
   source_file_dependencies:
