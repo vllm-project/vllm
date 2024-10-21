@@ -52,6 +52,7 @@ find_isa(${CPUINFO} "avx2" AVX2_FOUND)
 find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
 find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
+find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -71,9 +72,11 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     else()
         message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
     endif()
+    
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
+    
 elseif (POWER9_FOUND OR POWER10_FOUND)
     message(STATUS "PowerPC detected")
     # Check for PowerPC VSX support
@@ -81,8 +84,16 @@ elseif (POWER9_FOUND OR POWER10_FOUND)
         "-mvsx"
         "-mcpu=native"
         "-mtune=native")
+
+elseif (ASIMD_FOUND)
+    message(STATUS "ARMv8 architecture detected")
+    list(APPEND CXX_COMPILE_FLAGS
+        "-mcpu=native"
+        "-march=armv8.6-a"
+        )
+        
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 or Power9+ ISA support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA or ARMv8 support.")
 endif()
 
 #
