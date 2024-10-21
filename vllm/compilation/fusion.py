@@ -128,11 +128,6 @@ def get_patterns():
 def process_matches(matches, graph: torch.fx.Graph):
     for match in matches:
         nodes = list(graph.nodes)
-        # TODO this is an expensive check
-        if not all(node in nodes for node in match.nodes):
-            raise ValueError(
-                f"Broken match: not all nodes in graph: "
-                f"{[node for node in match.nodes if node not in nodes]}")
         last_node_in_match = max(match.nodes, key=lambda x: nodes.index(x))
         with graph.inserting_after(last_node_in_match):
             kwargs = match.kwargs
