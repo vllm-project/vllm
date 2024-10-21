@@ -176,7 +176,7 @@ class OpenAIServingChat(OpenAIServing):
                 "\"auto\" tool choice requires "
                 "--enable-auto-tool-choice and --tool-call-parser to be set")
 
-        request_id = f"chat-{random_uuid()}"
+        request_id = f"chat-{request.request_id}" if request.request_id is not None else f"chat-{random_uuid()}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
