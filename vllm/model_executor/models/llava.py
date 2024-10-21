@@ -308,9 +308,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
                 def flatten_to_3d_tensors(item):
                     if isinstance(item, torch.Tensor):
-                        if item.dim() == 3:
-                            return [item]
-                        elif item.dim() > 3:
+                        if item.dim() >= 3:
                             return [t for t in item.view(-1, *item.shape[-3:])]
                         else:
                             raise ValueError(
