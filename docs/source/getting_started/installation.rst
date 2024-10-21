@@ -116,7 +116,7 @@ The script will:
 
 Now, you can edit the Python code in the current directory, and the changes will be reflected when you run vLLM.
 
-Once you have finished editing or want to install another vLLM wheel, you should exit the development environment using `the same script <https://github.com/vllm-project/vllm/blob/main/python_only_dev.py>`_ with the ``--quit-dev``(or ``-q`` for short) flag:
+Once you have finished editing or want to install another vLLM wheel, you should exit the development environment using `the same script <https://github.com/vllm-project/vllm/blob/main/python_only_dev.py>`_ with the ``--quit-dev`` (or ``-q`` for short) flag:
 
 .. code-block:: console
 
