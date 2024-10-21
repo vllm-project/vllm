@@ -440,6 +440,7 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
 
 def _next_task(iterator: AsyncGenerator[T, None],
                loop: AbstractEventLoop) -> Task:
+    # Can use anext() in python >= 3.10
     return loop.create_task(iterator.__anext__())  # type: ignore[arg-type]
 
 
@@ -453,7 +454,6 @@ async def iterate_with_cancellation(
 
     loop = asyncio.get_running_loop()
 
-    # Can use anext() in python >= 3.10
     awaits: List[Future[T]] = [_next_task(iterator, loop)]
     next_cancel_check: float = 0
     while True:
@@ -495,7 +495,6 @@ async def merge_async_iterators(
 
     loop = asyncio.get_running_loop()
 
-    # Can use anext() in python >= 3.10
     awaits = {_next_task(pair[1], loop): pair for pair in enumerate(iterators)}
     timeout = None if is_cancelled is None else 1.5
     next_cancel_check: float = 0
