@@ -56,13 +56,11 @@ class CPUCacheEngine:
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
-            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             cache_config.cache_dtype,
             self.block_size,
+            self.model_config.is_attention_free,
         )
 
         # Initialize the cache.
@@ -215,7 +213,8 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def init_device(self) -> None:
         if self.local_omp_cpuid != "all":
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
-            logger.info(ret)
+            if ret:
+                logger.info(ret)
 
         self.init_distributed_environment()
         # Set random seed.

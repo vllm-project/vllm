@@ -9,11 +9,11 @@ from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionConfig,
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -21,7 +21,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (group_weights_with_prefix, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 # We use this internally as placeholders since there is no image token
@@ -422,7 +422,7 @@ def dummy_seq_data_for_blip2(
     else:
         image_feature_size = image_feature_size_override
 
-    return SequenceData.from_token_counts(
+    return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
     )
@@ -450,10 +450,10 @@ def dummy_data_for_blip2(ctx: InputContext, seq_len: int,
     raise NotImplementedError(msg)
 
 
-def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+def input_processor_for_blip2(ctx: InputContext, inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     hf_config = ctx.get_hf_config(Blip2Config)
     image_feature_size = get_blip2_image_feature_size(hf_config)
@@ -461,15 +461,15 @@ def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
     # The original model places image tokens at the front
     # https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/blip_2/modeling_blip_2.py#L1514
     new_token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
-    new_token_ids += llm_inputs["prompt_token_ids"]
+    new_token_ids += inputs["prompt_token_ids"]
 
-    new_prompt = llm_inputs.get("prompt")
+    new_prompt = inputs.get("prompt")
     if new_prompt is not None:
         new_prompt = BLIP2_IMAGE_TOKEN * image_feature_size + new_prompt
 
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
@@ -687,35 +687,5 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(weights)
-
-        # load vision encoder
-        self.vision_model.load_weights(weights_group["vision_model"])
-
-        # load query tokens
-        for name, loaded_weight in weights_group["query_tokens"]:
-            assert name == ""
-            param = self.query_tokens
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load qformer
-        qformer_params_dict = dict(self.qformer.named_parameters())
-        for name, loaded_weight in weights_group["qformer"]:
-            param = qformer_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load mlp projector
-        mlp_params_dict = dict(self.language_projection.named_parameters())
-        for name, loaded_weight in weights_group["language_projection"]:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load llm backbone
-        self.language_model.load_weights(weights_group["language_model"])
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(weights)
