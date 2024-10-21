@@ -277,10 +277,10 @@ def get_pooling_config(model, revision='main'):
     pooling = next((item for item in modules_dict if 
                     item["type"] == "sentence_transformers.models.Pooling"), 
                     None)
-    normalize = next((item for item in modules_dict if 
+    normalize = bool(next((item for item in modules_dict if 
                       item["type"] == 
                       "sentence_transformers.models.Normalize"), 
-                      False)
+                      False))
 
     if pooling: 
 
