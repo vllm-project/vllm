@@ -14,6 +14,7 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -23,7 +24,6 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.outputs import CompletionOutput, RequestOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.tokenizer.detokenizer import Detokenizer, DetokenizerInputs
 from vllm.version import __version__ as VLLM_VERSION
@@ -399,6 +399,7 @@ class LLMEngine:
                 logprobs=None,  # TODO
                 finish_reason=None,
                 stop_reason=None,
+                lora_request=None,
             )
             req_output = RequestOutput(
                 request_id=request.request_id,
@@ -407,6 +408,10 @@ class LLMEngine:
                 prompt_logprobs=None,  # TODO
                 outputs=[completion_output],
                 finished=False,
+                metrics=None,
+                lora_request=None,
+                encoder_prompt=None,
+                encoder_prompt_token_ids=None,
             )
             self.request_outputs[request.request_id] = req_output
 

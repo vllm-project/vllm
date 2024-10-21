@@ -20,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest, LLMGuidedOptions)
-from vllm.outputs import EmbeddingRequestOutput
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -33,10 +33,8 @@ from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 if envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
-    from vllm.v1.outputs import RequestOutput  # type: ignore
 else:
     from vllm.engine.llm_engine import LLMEngine  # type: ignore
-    from vllm.outputs import RequestOutput  # type: ignore
 
 logger = init_logger(__name__)
 

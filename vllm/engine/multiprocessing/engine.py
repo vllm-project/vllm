@@ -24,14 +24,13 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
 from vllm.envs import VLLM_RPC_TIMEOUT, VLLM_USE_V1
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
+from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 
 if VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine
-    from vllm.v1.outputs import RequestOutput
 else:
     from vllm.engine.llm_engine import LLMEngine
-    from vllm.outputs import RequestOutput
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
                     SchedulerConfig, LoRAConfig]

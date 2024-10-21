@@ -1,11 +1,7 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 import torch
-
-from vllm.lora.request import LoRARequest
-from vllm.sequence import PromptLogprobs, SampleLogprobs
-from vllm.v1.request import RequestMetrics
 
 
 @dataclass
@@ -39,34 +35,3 @@ class ModelRunnerOutput:
     logprob_token_ids_cpu: Optional[torch.Tensor]
     # [num_reqs, max_num_logprobs + 1]
     logprobs_cpu: Optional[torch.Tensor]
-
-
-@dataclass
-class CompletionOutput:
-
-    index: int
-    text: str
-    token_ids: List[int]
-    cumulative_logprob: Optional[float]  # Do we need this?
-    logprobs: Optional[SampleLogprobs]
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
-    lora_request: Optional[LoRARequest] = None
-
-    def finished(self) -> bool:
-        return self.finish_reason is not None
-
-
-@dataclass
-class RequestOutput:
-
-    request_id: str
-    prompt: Optional[str]
-    prompt_token_ids: List[int]
-    prompt_logprobs: Optional[PromptLogprobs]
-    outputs: List[CompletionOutput]
-    finished: bool
-    metrics: Optional[RequestMetrics] = None
-    lora_request: Optional[LoRARequest] = None
-    encoder_prompt: Optional[str] = None
-    encoder_prompt_token_ids: Optional[List[int]] = None
