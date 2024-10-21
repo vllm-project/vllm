@@ -568,6 +568,14 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return image_embeds
 
+    def _get_visual_token_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.is_mono:
+            visual_token_mask = (
+                input_ids == self.img_context_token_id).reshape(-1, 1)
+        else:
+            visual_token_mask = None
+        return visual_token_mask
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -590,8 +598,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, vision_embeddings,
                     self.img_context_token_id)
-                visual_token_mask = (
-                    input_ids == self.img_context_token_id).reshape(-1, 1)
+                visual_token_mask = self._get_visual_token_mask(input_ids)
                 input_ids = None
             else:
                 inputs_embeds = None

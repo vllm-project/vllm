@@ -371,7 +371,7 @@ Text Generation
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
-    - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
+    - :code:`OpenGVLab/Mono-InternVL-2B`, :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
     - 
     - ✅︎
   * - :code:`LlavaForConditionalGeneration`
