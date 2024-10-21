@@ -243,32 +243,40 @@ class Scheduler:
                 req_index = model_runner_output.req_id_to_index[req_id]
                 token_id = sampled_token_ids[req_index]
                 request.output_token_ids.append(token_id)
+                # For now, each request generates at most one output token.
                 sampled.append((request, 1))
                 # TODO: Update the KV cache manager for prefix caching.
 
                 # Check if the request is finished.
-                if (request.num_tokens >= self.max_model_len
-                        or request.num_output_tokens >= request.max_tokens):
-                    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-                    self._free_request(request)
+                stopped = self._check_stop(request)
+                if stopped:
                     continue
 
-                sampling_params = request.sampling_params
-                last_token_id = request.output_token_ids[-1]
-                if (not sampling_params.ignore_eos
-                        and last_token_id == request.eos_token_id):
-                    request.status = RequestStatus.FINISHED_STOPPED
-                    self._free_request(request)
-                    continue
-
-                if last_token_id in (sampling_params.stop_token_ids or ()):
-                    request.status = RequestStatus.FINISHED_STOPPED
-                    request.stop_reason = last_token_id
-                    self._free_request(request)
-                    continue
             new_running.append(request)
         self.running = new_running
         return sampled
+
+    def _check_stop(self, request: Request) -> bool:
+        if (request.num_tokens >= self.max_model_len
+                or request.num_output_tokens >= request.max_tokens):
+            request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+            self._free_request(request)
+            return True
+
+        sampling_params = request.sampling_params
+        last_token_id = request.output_token_ids[-1]
+        if (not sampling_params.ignore_eos
+                and last_token_id == request.eos_token_id):
+            request.status = RequestStatus.FINISHED_STOPPED
+            self._free_request(request)
+            return True
+
+        if last_token_id in (sampling_params.stop_token_ids or ()):
+            request.status = RequestStatus.FINISHED_STOPPED
+            request.stop_reason = last_token_id
+            self._free_request(request)
+            return True
+        return False
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
