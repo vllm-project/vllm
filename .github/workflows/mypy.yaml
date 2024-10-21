@@ -11,15 +11,15 @@ on:
       - main
 
 jobs:
-  ruff:
+  mypy:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871 # v4.2.1
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
@@ -32,15 +32,5 @@ jobs:
         pip install types-setuptools
     - name: Mypy
       run: |
-        mypy
-        mypy tests --follow-imports skip
-        mypy vllm/attention --follow-imports skip
-        mypy vllm/distributed --follow-imports skip
-        mypy vllm/engine  --follow-imports skip
-        mypy vllm/executor --follow-imports skip
-        mypy vllm/lora --follow-imports skip
-        mypy vllm/model_executor  --follow-imports skip
-        mypy vllm/prompt_adapter --follow-imports skip
-        mypy vllm/spec_decode --follow-imports skip
-        mypy vllm/worker --follow-imports skip
-
+        echo "::add-matcher::.github/workflows/matchers/mypy.json"
+        tools/mypy.sh 1

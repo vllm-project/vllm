@@ -11,8 +11,38 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import LazyDict
 
 
+@CustomOp.register("fatrelu_and_mul")
+class FatreluAndMul(CustomOp):
+    """An activation function for FATReLU.
+
+    The function computes x -> FATReLU(x[:d]) * x[d:] where
+    d = x.shape[-1] // 2.
+    This is used in openbmb/MiniCPM-S-1B-sft.
+
+    Shapes:
+        x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
+    """
+
+    def __init__(self, threshold: float = 0.):
+        super().__init__()
+        self.threshold = threshold
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        x1 = x[..., :d]
+        x2 = x[..., d:]
+        x1 = F.threshold(x1, self.threshold, 0.0)
+        return x1 * x2
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+
+@CustomOp.register("silu_and_mul")
 class SiluAndMul(CustomOp):
     """An activation function for SwiGLU.
 
@@ -47,6 +77,7 @@ class SiluAndMul(CustomOp):
         return out
 
 
+@CustomOp.register("gelu_and_mul")
 class GeluAndMul(CustomOp):
     """An activation function for GeGLU.
 
@@ -96,6 +127,7 @@ class GeluAndMul(CustomOp):
         return f'approximate={repr(self.approximate)}'
 
 
+@CustomOp.register("gelu_new")
 class NewGELU(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
@@ -117,6 +149,7 @@ class NewGELU(CustomOp):
         return ops.gelu_new(x)
 
 
+@CustomOp.register("gelu_fast")
 class FastGELU(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
@@ -137,8 +170,8 @@ class FastGELU(CustomOp):
         return ops.gelu_fast(x)
 
 
+@CustomOp.register("quick_gelu")
 class QuickGELU(CustomOp):
-
     # https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py#L90
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -162,6 +195,7 @@ class QuickGELU(CustomOp):
     # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
 
 
+@CustomOp.register("relu2")
 class ReLUSquaredActivation(CustomOp):
     """
     Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
@@ -217,15 +251,24 @@ class ScaledActivation(nn.Module):
         param_data.copy_(loaded_weight)
 
 
-_ACTIVATION_REGISTRY = {
-    "gelu": nn.GELU(),
-    "gelu_fast": FastGELU(),
-    "gelu_new": NewGELU(),
-    "gelu_pytorch_tanh": nn.GELU(approximate="tanh"),
-    "relu": nn.ReLU(),
-    "relu2": ReLUSquaredActivation(),
-    "quick_gelu": QuickGELU(),
-}
+_ACTIVATION_REGISTRY = LazyDict({
+    "gelu":
+    lambda: nn.GELU(),
+    "gelu_fast":
+    lambda: FastGELU(),
+    "gelu_new":
+    lambda: NewGELU(),
+    "gelu_pytorch_tanh":
+    lambda: nn.GELU(approximate="tanh"),
+    "relu":
+    lambda: nn.ReLU(),
+    "relu2":
+    lambda: ReLUSquaredActivation(),
+    "silu":
+    lambda: nn.SiLU(),
+    "quick_gelu":
+    lambda: QuickGELU(),
+})
 
 
 def get_act_fn(
