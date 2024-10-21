@@ -11,7 +11,7 @@ from typing import List, Optional, Sequence, Union
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import validate_chat_template
-from vllm.entrypoints.openai.fim.fim_encoder import FIMEncoderManager
+from vllm.entrypoints.openai.fim.fim_encoder import get_supported_fim_encoders
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
@@ -214,7 +214,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         " into OpenAI API format, the name register in this plugin can be used "
         "in --tool-call-parser.")
 
-    valid_fim_encoders = FIMEncoderManager.fim_encoders.keys()
+    valid_fim_encoders = get_supported_fim_encoders()
     parser.add_argument(
         "--fim",
         type=str,

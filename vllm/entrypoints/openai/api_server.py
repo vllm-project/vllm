@@ -14,7 +14,6 @@ from http import HTTPStatus
 from typing import AsyncIterator, Set
 
 import uvloop
-from entrypoints.openai.fim.fim_encoder import FIMEncoderManager
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +33,7 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
+from vllm.entrypoints.openai.fim.fim_encoder import get_supported_fim_encoders
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -541,11 +541,11 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                 f"(chose from {{ {','.join(valid_tool_parsers.keys())} }})")
 
     if args.fim is not None:
-        valid_fim_encoders = FIMEncoderManager.fim_encoders
+        valid_fim_encoders = get_supported_fim_encoders()
         if args.fim not in valid_fim_encoders:
             raise KeyError(
                 f"invalid FIM encoder: {args.fim} "
-                f"(chose from {{ {','.join(valid_fim_encoders.keys())} }})")
+                f"(chose from {{ {','.join(valid_fim_encoders)} }})")
 
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.

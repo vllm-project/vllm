@@ -190,8 +190,8 @@ class MistralTokenizer:
         # For chat completion use `apply_chat_template`
         return self.tokenizer.encode(prompt, bos=True, eos=False)
 
-    def encode_with_suffix(self, prompt: str, suffix: str) -> List[int]:
-        fim = FIMRequest(prompt=prompt, suffix=suffix)
+    def encode_with_suffix(self, prefix: str, suffix: str) -> List[int]:
+        fim = FIMRequest(prefix=prefix, suffix=suffix)
         return self.mistral.encode_fim(fim)
 
     def apply_chat_template(self,

@@ -12,7 +12,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.fim.fim_encoder import (FIMEncoder,
-                                                     FIMEncoderManager)
+                                                     get_fim_encoder_lookup)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -121,8 +121,8 @@ class OpenAIServing:
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
-        self.fim_class: Optional[Callable[[AnyTokenizer], FIMEncoder]] = \
-            FIMEncoderManager.get_fim_encoder_class(fim_encoder)
+        self.get_fim_encoder: Optional[Callable[[AnyTokenizer], FIMEncoder]] = \
+            get_fim_encoder_lookup(fim_encoder)
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -216,14 +216,13 @@ class OpenAIServing:
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         if suffix:
-            if not (fim_class := self.fim_class):
+            if not (get_fim_encoder := self.get_fim_encoder):
                 raise ValueError("fim support must be enabled to use suffix")
             if truncate_prompt_tokens is not None:
                 raise ValueError(
                     "truncate_prompt_tokens is not supported with suffix")
-            fim_encoder = fim_class.for_tokenizer(  # type: ignore[attr-defined]
-                tokenizer)
-            input_ids = fim_encoder.encode_with_suffix(prompt=prompt,
+            fim_encoder = get_fim_encoder(tokenizer)
+            input_ids = fim_encoder.encode_with_suffix(prefix=prompt,
                                                        suffix=suffix)
         else:
             if truncate_prompt_tokens is None:
