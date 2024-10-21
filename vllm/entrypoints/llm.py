@@ -32,11 +32,11 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 if envs.VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine
-    from vllm.v1.outputs import RequestOutput
+    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
+    from vllm.v1.outputs import RequestOutput  # type: ignore
 else:
-    from vllm.engine.llm_engine import LLMEngine
-    from vllm.outputs import RequestOutput
+    from vllm.engine.llm_engine import LLMEngine  # type: ignore
+    from vllm.outputs import RequestOutput  # type: ignore
 
 logger = init_logger(__name__)
 
