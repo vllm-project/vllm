@@ -318,15 +318,6 @@ def is_hip() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_cpu() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        return "cpu" in version("vllm")
-    except PackageNotFoundError:
-        return False
-
-
-@lru_cache(maxsize=None)
 def is_openvino() -> bool:
     from importlib.metadata import PackageNotFoundError, version
     try:
@@ -779,7 +770,7 @@ def is_pin_memory_available() -> bool:
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif is_cpu() or is_openvino():
+    elif current_platform.is_cpu() or is_openvino():
         return False
     return True
 

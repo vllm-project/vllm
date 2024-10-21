@@ -10,8 +10,9 @@ from vllm.inputs import InputContext, token_inputs
 from vllm.model_executor.models.phi3v import _IMAGE_TOKEN_ID
 from vllm.multimodal import MultiModalRegistry
 from vllm.multimodal.utils import rescale_image_size
+from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu, is_hip
+from vllm.utils import is_hip
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
@@ -49,7 +50,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 target_dtype = "half"
-if is_cpu():
+if current_platform.is_cpu():
     target_dtype = "bfloat16"
 
 # ROCm Triton FA can run into shared memory issues with these models,
