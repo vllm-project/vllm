@@ -14,6 +14,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
@@ -24,7 +25,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_disagg_group, get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
@@ -1642,6 +1643,24 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         else:
             model_executable = self.model
 
+        # Receive KV cache in distributed KV cache transfer setting
+        # In disagg prefill setting, it will also recv hidden states and bypass
+        # model forwarding
+        # In KV cache database setting, it will change the model input so that
+        # we can skip prefilling on tokens that successfully received KV caches
+        # NOTE: The receive operation is blocking
+        bypass_model_exec = False
+        if self.need_recv_kv(model_input, kv_caches):
+            hidden_or_intermediate_states, bypass_model_exec, model_input = \
+                get_disagg_group().recv_kv_caches_and_hidden_states(
+                    # model is used to know which layer the current worker
+                    # is working on, so that we can receive KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches=kv_caches
+                )
+
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
@@ -1653,20 +1672,34 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-        with set_forward_context(model_input.attn_metadata):
-            hidden_or_intermediate_states = model_executable(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
-                intermediate_tensors=intermediate_tensors,
-                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device),
-                **seqlen_agnostic_kwargs)
+        if not bypass_model_exec:
+            with set_forward_context(model_input.attn_metadata):
+                hidden_or_intermediate_states = model_executable(
+                    input_ids=model_input.input_tokens,
+                    positions=model_input.input_positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=model_input.attn_metadata,
+                    intermediate_tensors=intermediate_tensors,
+                    **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                                 device=self.device),
+                    **seqlen_agnostic_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end.record()
+
+        # Sending KV cache in distributed KV cache transfer setting
+        # NOTE: the send operation is non-blocking
+        if self.need_send_kv(model_input, kv_caches):
+            get_disagg_group().send_kv_caches_and_hidden_states(
+                # model_executable is used to know which layer the current
+                # worker is working on, so that we can send KV for only those
+                # layers.
+                model_executable,
+                model_input,
+                kv_caches,
+                hidden_or_intermediate_states,
+            )
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
@@ -1734,6 +1767,50 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.hidden_states = hidden_states
 
         return [output]
+
+    def need_recv_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to receive kv-cache from the other worker.
+        We need to receive KV when
+            1. current vLLM instance is KV cache consumer/decode vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+            
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches[0].numel() == 0)
+        # check if the current run is prefill
+        is_prefill_run = prefill_meta is not None
+
+        return dist_kv.IS_KV_CONSUMER and (
+            not is_profile_run) and is_prefill_run
+
+    def need_send_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to send kv-cache to the other worker.
+        We need to send KV when
+            1. current vLLM instance is KV cache producer/prefill vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+            
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches[0].numel() == 0)
+        # check if the current run is prefill
+        is_prefill_run = prefill_meta is not None
+
+        return dist_kv.IS_KV_PRODUCER and (
+            not is_profile_run) and is_prefill_run
 
 
 # NOTE: this is nn.Module so the profiler can properly capture/group
