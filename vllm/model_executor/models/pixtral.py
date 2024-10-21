@@ -908,9 +908,9 @@ class PixtralHFVisionModel(nn.Module):
         """
         Args:
             pixel_values: Each image to be processed will be a separate tensor
-                in pixel_values. This means it can be a list of tensors, or
-                even a list of lists of tensors in the case of multiple
-                requests batched that have multiple images each
+                in pixel_values. This means it will be a list of tensors
+                because multiple requests batched can have multiple images,
+                each with their own shape potentially
 
         Returns:
             image_features: tensor of token features for
