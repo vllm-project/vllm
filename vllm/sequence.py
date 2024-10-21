@@ -1435,7 +1435,8 @@ class SequenceGroupBase:
         del self.to_be_finished[seq.request_id]
         self.finished_reqs[seq.request_id] = seq
 
-    def maybe_assemble_group(self) -> Optional[SequenceGroup]:
+    def maybe_assemble_group(
+            self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
         """Assemble the sequence group, for producing the final
         output, or adding request in the engine again.
         """
@@ -1484,13 +1485,16 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         group.streaming = params.output_kind == RequestOutputKind.DELTA
         group.output_produced = False
 
-    def maybe_assemble_group(self) -> Optional[SequenceGroup]:
+    def maybe_assemble_group(
+            self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
 
-        # in the streaming mode, we will always return the assembled sequence
-        # this is because streaming will flatten the responses into a single
-        # stream
+        # in the streaming mode, we will return the assembled sequence
+        # for the first sequence, and then return None for the rest of
+        # sequences
         if self.streaming:
-            return self.assembled_seq_group
+            if self.seq_id_to_index[seq_group.request_id] == 0:
+                return self.assembled_seq_group
+            return None
 
         # in the non-streaming mode, we will return the assembled sequence
         # once after all sequences finish, and then return None for the
