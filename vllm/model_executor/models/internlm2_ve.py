@@ -86,12 +86,14 @@ class InternLM2VEDecoderLayer(nn.Module):
         if visual_token_mask is not None and visual_token_mask.any():
             visual_token_mask = visual_token_mask.repeat(
                 1, self.hidden_size).bool()
+            text_token_mask = ~visual_token_mask
             hidden_states[visual_token_mask] = self.feed_forward_ve(
                 hidden_states[visual_token_mask].reshape(
                     -1, self.hidden_size)).flatten()
-            hidden_states[~visual_token_mask] = self.feed_forward(
-                hidden_states[~visual_token_mask].reshape(
-                    -1, self.hidden_size)).flatten()
+            if text_token_mask.any():
+                hidden_states[text_token_mask] = self.feed_forward(
+                    hidden_states[text_token_mask].reshape(
+                        -1, self.hidden_size)).flatten()
         else:
             hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual

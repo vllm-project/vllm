@@ -7,7 +7,6 @@ from PIL.Image import Image
 from transformers import AutoConfig
 
 from vllm.multimodal.utils import rescale_image_size
-from vllm.utils import is_cpu
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
@@ -24,11 +23,15 @@ HF_MULTIIMAGE_IMAGE_PROMPT = "<|im_start|>User\nImage-1: <image>\nImage-2: <imag
 models = [
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL2-2B",
+    # NOTE: Mono-InternVL-2B doesn't work with fp16,
+    # it will result NaN during inference.
+    # See: https://huggingface.co/OpenGVLab/Mono-InternVL-2B/discussions/9
     "OpenGVLab/Mono-InternVL-2B",
     # Broken due to outdated implementation of Phi-3
     # See: https://huggingface.co/OpenGVLab/InternVL2-4B/discussions/3
     # "OpenGVLab/InternVL2-4B",
 ]
+target_dtype = "bfloat16"
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py
@@ -248,11 +251,6 @@ def run_awq_test(
             name_0="source",
             name_1="awq",
         )
-
-
-target_dtype = "half"
-if is_cpu():
-    target_dtype = "bfloat16"
 
 
 @pytest.mark.parametrize("model", models)
