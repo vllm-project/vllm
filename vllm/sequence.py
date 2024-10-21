@@ -17,7 +17,7 @@ from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
@@ -1418,6 +1418,10 @@ class SequenceGroupBase:
     # seq id to finished sequences
     finished_reqs: Dict[str, SequenceGroup] = field(default_factory=dict)
 
+    streaming: bool = False
+
+    output_produced: bool = False
+
     @staticmethod
     def add_request(request_id: str, engine, params, *args, **kwargs):
         """When we are ready to add a request with request_id and params
@@ -1478,16 +1482,37 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             priority=seq_group.priority,
         )
 
+        group.streaming = params.output_kind == RequestOutputKind.DELTA
+        group.output_produced = False
+
     def maybe_assemble_group(self) -> Optional[SequenceGroup]:
+
+        # in the streaming mode, we will always return the assembled sequence
+        # this is because streaming will flatten the responses into a single
+        # stream
+        if self.streaming:
+            return self.assembled_seq_group
+
+        # in the non-streaming mode, we will return the assembled sequence
+        # once after all sequences finish, and then return None for the
+        # rest of the time
+
+        if len(self.to_be_finished) > 0:
+            return None
+
         assert self.assembled_seq_group is not None
         params = self.assembled_seq_group.sampling_params
         assert isinstance(params, SamplingParams)
-        if len(self.to_be_finished) == 0 and params._real_n is not None:
-            # Get the top-n sequences.
-            n = params._real_n or params.n
-            seqs = self.assembled_seq_group.seqs
-            sorting_key = lambda seq: seq.get_cumulative_logprob()
-            sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
-            top_n_seqs = sorted_seqs[:n]
-            self.assembled_seq_group.seqs = top_n_seqs
-        return self.assembled_seq_group
+        if not self.output_produced:
+            self.output_produced = True
+            if params._real_n is not None:
+                # Get the top-n sequences.
+                n = params._real_n or params.n
+                seqs = self.assembled_seq_group.seqs
+                sorting_key = lambda seq: seq.get_cumulative_logprob()
+                sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
+                top_n_seqs = sorted_seqs[:n]
+                self.assembled_seq_group.seqs = top_n_seqs
+            return self.assembled_seq_group
+        if self.output_produced:
+            return None
