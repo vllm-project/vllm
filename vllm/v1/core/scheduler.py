@@ -244,7 +244,7 @@ class Scheduler:
             # sampler output for the request.
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
-                # FIXME(woosuk): Currently, we assume that each request
+                # NOTE(woosuk): Currently, we assume that each request
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
                 request.output_token_ids.append(token_id)
