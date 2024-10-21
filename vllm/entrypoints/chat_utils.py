@@ -482,6 +482,7 @@ def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
+    chat_template_text_format: str,
 ) -> List[ConversationMessage]:
     texts: List[str] = []
 
@@ -517,7 +518,6 @@ def _parse_chat_message_content_parts(
 
     text_prompt = "\n".join(texts)
     if keep_multimodal_content:
-        text_prompt = "\n".join(texts)
         role_content = [{'type': 'text', 'text': text_prompt}]
 
         if has_image:
@@ -529,6 +529,13 @@ def _parse_chat_message_content_parts(
         if mm_placeholder_counts:
             text_prompt = _get_full_multimodal_text_prompt(
                 mm_placeholder_counts, text_prompt)
+        if chat_template_text_format == "openai":
+            role_content = [
+                ChatCompletionContentPartTextParam(type="text",
+                                                   text=text_prompt)
+            ]
+            return [ConversationMessage(role=role,
+                                        content=role_content)]  # type: ignore
         return [ConversationMessage(role=role, content=text_prompt)]
 
 
@@ -540,6 +547,7 @@ _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
+    chat_template_text_format: str,
 ) -> List[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
@@ -555,6 +563,7 @@ def _parse_chat_message_content(
         role,
         content,  # type: ignore
         mm_tracker,
+        chat_template_text_format,
     )
 
     for result_msg in result:
@@ -598,7 +607,11 @@ def parse_chat_messages(
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
-        sub_messages = _parse_chat_message_content(msg, mm_tracker)
+        sub_messages = _parse_chat_message_content(
+            msg,
+            mm_tracker,
+            model_config.chat_template_text_format,
+        )
 
         conversation.extend(sub_messages)
 
@@ -616,7 +629,11 @@ def parse_chat_messages_futures(
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
-        sub_messages = _parse_chat_message_content(msg, mm_tracker)
+        sub_messages = _parse_chat_message_content(
+            msg,
+            mm_tracker,
+            model_config.chat_template_text_format,
+        )
 
         conversation.extend(sub_messages)
 
