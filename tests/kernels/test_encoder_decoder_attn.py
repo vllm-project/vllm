@@ -21,7 +21,7 @@ from vllm.attention.selector import (_Backend,
 from vllm.utils import is_hip
 
 # List of support backends for encoder/decoder models
-LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS]
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
 
 HEAD_SIZES = [64, 256]
 
@@ -129,6 +129,7 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
 
     scale = float(1.0 / (test_pt.head_size**0.5))
     attn_backend = make_backend(test_pt.backend_name)
+    print('attn_backend ' + str(attn_backend))
     attn = Attention(
         test_pt.num_heads,
         test_pt.head_size,
@@ -774,6 +775,7 @@ def test_encoder_only(
 
     # Force Attention wrapper backend
     with global_force_attn_backend_context_manager(attn_backend):
+        torch.set_default_dtype(torch.bfloat16)
 
         # Note: KV cache size of 4096 is arbitrary & chosen intentionally
         # to be more than necessary, since exceeding the kv cache size

@@ -13,7 +13,7 @@ from torch._prims_common import TensorLikeType
 
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL, STR_FLASH_ATTN_VAL,
                         make_tensor_with_pad)
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
@@ -525,8 +525,12 @@ def make_backend(backend_name: str) -> AttentionBackend:
     if backend_name == STR_XFORMERS_ATTN_VAL:
         # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
         from vllm.attention.backends.xformers import XFormersBackend
-
         return XFormersBackend()
+    elif backend_name == STR_FLASH_ATTN_VAL:
+        print('Hello')
+        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+        return FlashAttentionBackend()
+
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
 
