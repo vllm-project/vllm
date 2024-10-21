@@ -213,13 +213,9 @@ class RequestOutput:
                 output.stop_reason = seq.stop_reason
 
             else:
-                index = i
-                if not finished and seq_group.request_id in seq_id_to_seq_group:
-                    group = seq_id_to_seq_group[seq_group.request_id]
-                    index = group.seq_id_to_index[seq_group.request_id]
                 output = CompletionOutput(
-                    index, output_text, [output_token_ids] if isinstance(
-                        output_token_ids, int) else output_token_ids,
+                    top_n_seqs.index(seq), output_text, [output_token_ids]
+                    if isinstance(output_token_ids, int) else output_token_ids,
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
                     SequenceStatus.get_finished_reason(seq.status),
