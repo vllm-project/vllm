@@ -171,8 +171,6 @@ class Scheduler:
                 len(scheduled_running_reqs) == len(self.running))
 
         # Construct the scheduler output.
-        # NOTE(woosuk): When the batch size is large, creating these objects
-        # can be expensive. We may need to optimize this.
         new_reqs_data = [
             NewRequestData.from_request(req,
                                         req_to_new_block_ids[req.request_id],
