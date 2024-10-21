@@ -1448,11 +1448,10 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
     def add_request(request_id: str, engine, params, **kwargs):
         original_params = params
         params = copy.deepcopy(original_params)
-        n = params.n
         params.n = 1
         group = ParallelSampleSequenceGroup(request_id)
         seqs = []
-        for i in range(n):
+        for i in range(original_params.n):
             request_id_i = f"{request_id}_parallel_sample_{i}"
             group.seq_id_to_index[request_id_i] = i
             seq_group = engine.add_request(
