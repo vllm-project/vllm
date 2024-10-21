@@ -27,7 +27,6 @@ class RMSNorm(CustomOp):
         self.variance_epsilon = eps
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
-
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
     def forward_native(
