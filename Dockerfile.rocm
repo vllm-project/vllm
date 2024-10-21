@@ -173,7 +173,7 @@ RUN cd vllm \
     && python3 -m pip install -r requirements-rocm.txt \
     && python3 setup.py clean --all  \
     && if [ ${USE_CYTHON} -eq "1" ]; then python3 setup_cython.py build_ext --inplace; fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist
+    && SCCACHE_IDLE_TIMEOUT=1800 python3 setup.py bdist_wheel --dist-dir=dist
 # Build gradlib
 RUN cd vllm/gradlib \
     && python3 setup.py clean --all && python3 setup.py bdist_wheel --dist-dir=dist

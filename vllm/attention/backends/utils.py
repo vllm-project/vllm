@@ -7,7 +7,7 @@ import torch
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
-from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.utils import async_tensor_h2d, is_hip, make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase
@@ -218,9 +218,18 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.runner.graph_block_tables[:batch_size]
+            max_blocks = input_block_tables.shape[1]
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
-                    input_block_tables[i, :len(block_table)] = block_table
+                    num_blocks = len(block_table)
+                    if num_blocks <= max_blocks:
+                        input_block_tables[i, :num_blocks] = block_table
+                    else:
+                        # It may be possible to have more blocks allocated due
+                        # to lookahead slots of multi-step, however, they are
+                        # not used anyway, so can be safely ignored.
+                        input_block_tables[
+                            i, :max_blocks] = block_table[:max_blocks]
             block_tables = torch.from_numpy(input_block_tables).to(
                 device, non_blocking=True)
         else:
@@ -325,11 +334,19 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
-            assert self.runner.attn_backend.get_name() == "xformers", \
-            f"Expected attn_backend name to be 'xformers', but "\
-            f" got '{self.runner.attn_backend.get_name()}'"
-            self._update_captured_metadata_for_enc_dec_model(
-                batch_size=batch_size, attn_metadata=attn_metadata)
+            if is_hip():
+                assert (
+                    self.runner.attn_backend.get_name() == "rocm-flash-attn"
+                ), (f"Expected attn_backend name to be 'rocm-flash-attn', but "
+                    f" got '{self.runner.attn_backend.get_name()}'")
+                self._update_captured_metadata_for_enc_dec_model(
+                    batch_size=batch_size, attn_metadata=attn_metadata)
+            else:
+                assert self.runner.attn_backend.get_name() == "xformers", \
+                f"Expected attn_backend name to be 'xformers', but "\
+                f" got '{self.runner.attn_backend.get_name()}'"
+                self._update_captured_metadata_for_enc_dec_model(
+                    batch_size=batch_size, attn_metadata=attn_metadata)
 
         return attn_metadata
 
@@ -345,11 +362,19 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
-            assert self.runner.attn_backend.get_name() == "xformers", \
-            f"Expected attn_backend name to be 'xformers', but "\
-            f" got '{self.runner.attn_backend.get_name()}'"
-            self._add_additonal_input_buffers_for_enc_dec_model(
-                attn_metadata=attn_metadata, input_buffers=input_buffers)
+            if is_hip():
+                assert (
+                    self.runner.attn_backend.get_name() == "rocm-flash-attn"
+                ), (f"Expected attn_backend name to be 'rocm-flash-attn', but "
+                    f" got '{self.runner.attn_backend.get_name()}'")
+                self._add_additonal_input_buffers_for_enc_dec_model(
+                    attn_metadata=attn_metadata, input_buffers=input_buffers)
+            else:
+                assert self.runner.attn_backend.get_name() == "xformers", \
+                f"Expected attn_backend name to be 'xformers', but "\
+                f" got '{self.runner.attn_backend.get_name()}'"
+                self._add_additonal_input_buffers_for_enc_dec_model(
+                    attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
 
     def prepare_graph_input_buffers(
@@ -364,11 +389,20 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
-            assert self.runner.attn_backend.get_name() == "xformers", \
-            f"Expected attn_backend name to be 'xformers', but "\
-            f" got '{self.runner.attn_backend.get_name()}'"
-            self._prepare_input_buffers_for_enc_dec_model(
-                attn_metadata, input_buffers)
+
+            if is_hip():
+                assert (
+                    self.runner.attn_backend.get_name() == "rocm-flash-attn"
+                ), (f"Expected attn_backend name to be 'rocm-flash-attn', but "
+                    f" got '{self.runner.attn_backend.get_name()}'")
+                self._prepare_input_buffers_for_enc_dec_model(
+                    attn_metadata, input_buffers)
+            else:
+                assert self.runner.attn_backend.get_name() == "xformers", \
+                f"Expected attn_backend name to be 'xformers', but "\
+                f" got '{self.runner.attn_backend.get_name()}'"
+                self._prepare_input_buffers_for_enc_dec_model(
+                    attn_metadata, input_buffers)
 
     def begin_forward(self, model_input) -> None:
         return
