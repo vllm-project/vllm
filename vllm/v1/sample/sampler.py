@@ -127,7 +127,7 @@ class Sampler(nn.Module):
         return sampled
 
 
-# This function can be replaced by a custom kernel.
+# TODO(woosuk): Optimize this with a custom kernel.
 def _apply_top_k_top_p(
     logits: torch.Tensor,
     no_top_k: bool,
