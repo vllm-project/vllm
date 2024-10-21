@@ -4,7 +4,7 @@ import enum
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property, reduce
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
@@ -1401,3 +1401,77 @@ class ExecuteModelRequest(
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
             async_callback=self.async_callback)
+
+
+@dataclass
+class SequenceGroupBase:
+    group_id: str  # the original request id before splitting
+
+    # seq id to a unique index inside this group
+    seq_id_to_index: Dict[str, int] = field(default_factory=dict)
+
+    # seq ids to be finished
+    to_be_finished: Set[str] = field(default_factory=set)
+
+    # seq id to finished sequences
+    finished_reqs: Dict[str, SequenceGroup] = field(default_factory=dict)
+
+    @staticmethod
+    def add_request(request_id: str, engine, params, *args, **kwargs):
+        """When we are ready to add a request with request_id and params
+        into the engine, we can split the request into multiple requests.
+        """
+        raise NotImplementedError
+
+    def finish_seq(self, seq: SequenceGroup):
+        """The sequence `seq` finishes, we should record the information.
+        """
+        self.to_be_finished.remove(seq.request_id)
+        self.finished_reqs[seq.request_id] = seq
+
+    def maybe_assemble_group(self) -> Optional[SequenceGroup]:
+        """Assemble the sequence group, for producing the final
+        output, or adding request in the engine again.
+        """
+        raise NotImplementedError
+
+
+class ParallelSampleSequenceGroup(SequenceGroupBase):
+
+    @staticmethod
+    def add_request(request_id: str, engine, params, **kwargs):
+        params = copy.deepcopy(params)
+        n = params.n
+        params.n = 1
+        group = ParallelSampleSequenceGroup(request_id)
+        for i in range(n):
+            request_id_i = f"{request_id}_parallel_sample_{i}"
+            group.seq_id_to_index[request_id_i] = i
+            group.to_be_finished.add(request_id_i)
+            engine.add_request(
+                request_id_i,
+                params=params,
+                **kwargs,
+            )  # type: ignore
+            engine.seq_id_to_seq_group[request_id_i] = group
+
+    def maybe_assemble_group(self) -> Optional[SequenceGroup]:
+        if len(self.to_be_finished) == 0:
+            finished_reqs = list(self.finished_reqs.values())
+            params = finished_reqs[0].sampling_params
+            assert params is not None
+            params.n = len(finished_reqs)
+            assembled_seq_group = copy.deepcopy(finished_reqs[0])
+            assembled_seq_group.request_id = self.group_id
+
+            # Get the top-n sequences.
+            n = params._real_n or params.n
+            seqs = [x.seqs[0] for x in finished_reqs]
+            sorting_key = lambda seq: seq.get_cumulative_logprob()
+            sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
+            top_n_seqs = sorted_seqs[:n]
+            assembled_seq_group.seqs = top_n_seqs
+            assembled_seq_group.sampling_params = params
+            return assembled_seq_group
+        else:
+            return None
