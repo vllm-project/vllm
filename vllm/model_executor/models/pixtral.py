@@ -907,17 +907,18 @@ class PixtralHFVisionModel(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            pixel_values: tensor of token features for
-                all tokens of all images of shape (N_toks, D)
+            pixel_values: Each image to be processed will be a separate tensor
+                in pixel_values. This means it will be a list of tensors
+                because multiple requests batched can have multiple images,
+                each with their own shape potentially
+
         Returns:
             image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
         patch_embeds_list = [
-            self.patch_conv(
-                img.reshape(-1, img.shape[-3], img.shape[-2],
-                            img.shape[-1]).to(self.dtype))
+            self.patch_conv(img.unsqueeze(0).to(self.dtype))
             for img in pixel_values
         ]
 
