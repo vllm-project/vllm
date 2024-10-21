@@ -3,7 +3,7 @@
 Supported Models
 ================
 
-vLLM supports a variety of generative Transformer models in `HuggingFace Transformers <https://huggingface.co/models>`_.
+vLLM supports a variety of generative Transformer models in `HuggingFace (HF) Transformers <https://huggingface.co/models>`_.
 The following is the list of model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
 
@@ -19,7 +19,7 @@ Text Generation
 
   * - Architecture
     - Models
-    - Example HuggingFace Models
+    - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
   * - :code:`AquilaForCausalLM`
@@ -87,6 +87,11 @@ Text Generation
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
     -
     - ✅︎
+  * - :code:`FalconMambaForCausalLM`
+    - FalconMamba
+    - :code:`tiiuae/falcon-mamba-7b`, :code:`tiiuae/falcon-mamba-7b-instruct`, etc.
+    - ✅︎
+    -  
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
@@ -155,11 +160,11 @@ Text Generation
   * - :code:`MambaForCausalLM`
     - Mamba
     - :code:`state-spaces/mamba-130m-hf`, :code:`state-spaces/mamba-790m-hf`, :code:`state-spaces/mamba-2.8b-hf`, etc.
-    - ✅︎
+    -
     -
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
-    - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
+    - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, :code:`openbmb/MiniCPM-S-1B-sft`, etc.
     - ✅︎
     - ✅︎
   * - :code:`MiniCPM3ForCausalLM`
@@ -280,7 +285,7 @@ Text Embedding
 
   * - Architecture
     - Models
-    - Example HuggingFace Models
+    - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
   * - :code:`Gemma2Model`
@@ -294,6 +299,10 @@ Text Embedding
     - 
     - ✅︎
 
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
 Reward Modeling
 ---------------
 
@@ -303,7 +312,7 @@ Reward Modeling
 
   * - Architecture
     - Models
-    - Example HuggingFace Models
+    - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
   * - :code:`Qwen2ForRewardModel`
@@ -316,7 +325,14 @@ Reward Modeling
     As an interim measure, these models are supported via Embeddings API. See `this RFC <https://github.com/vllm-project/vllm/issues/8967>`_ for upcoming changes.
 
 Multimodal Language Models
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following modalities are supported depending on the model:
+
+- **T**\ ext
+- **I**\ mage
+- **V**\ ideo
+- **A**\ udio
 
 .. _supported_vlms:
 
@@ -324,120 +340,126 @@ Text Generation
 ---------------
 
 .. list-table::
-  :widths: 25 25 25 25 5 5
+  :widths: 25 25 15 25 5 5
   :header-rows: 1
 
   * - Architecture
     - Models
-    - Modalities
-    - Example HuggingFace Models
+    - Inputs
+    - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
-    - Image\ :sup:`E`
+    - T + I\ :sup:`E`
     - :code:`Salesforce/blip2-opt-2.7b`, :code:`Salesforce/blip2-opt-6.7b`, etc.
     -
     - ✅︎
   * - :code:`ChameleonForConditionalGeneration`
     - Chameleon
-    - Image
+    - T + I
     - :code:`facebook/chameleon-7b` etc.
     - 
     - ✅︎
   * - :code:`FuyuForCausalLM`
     - Fuyu
-    - Image
+    - T + I
     - :code:`adept/fuyu-8b` etc.
     - 
     - ✅︎
   * - :code:`ChatGLMModel`
     - GLM-4V
-    - Image
+    - T + I
     - :code:`THUDM/glm-4v-9b` etc.
     - 
     - ✅︎
   * - :code:`InternVLChatModel`
     - InternVL2
-    - Image\ :sup:`E+`
+    - T + I\ :sup:`E+`
     - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
     - 
     - ✅︎
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
-    - Image\ :sup:`E+`
+    - T + I\ :sup:`E+`
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
     -
     - ✅︎
   * - :code:`LlavaNextForConditionalGeneration`
     - LLaVA-NeXT
-    - Image\ :sup:`E+`
+    - T + I\ :sup:`E+`
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
     - ✅︎
   * - :code:`LlavaNextVideoForConditionalGeneration`
     - LLaVA-NeXT-Video
-    - Video
+    - T + V
     - :code:`llava-hf/LLaVA-NeXT-Video-7B-hf`, etc.
     -
     - ✅︎
   * - :code:`LlavaOnevisionForConditionalGeneration`
     - LLaVA-Onevision
-    - Image\ :sup:`+` / Video
+    - T + I\ :sup:`+` + V
     - :code:`llava-hf/llava-onevision-qwen2-7b-ov-hf`, :code:`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
     -
     - ✅︎
   * - :code:`MiniCPMV`
     - MiniCPM-V
-    - Image\ :sup:`E+`
+    - T + I\ :sup:`E+`
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     - ✅︎
     - ✅︎
   * - :code:`MllamaForConditionalGeneration`
     - Llama 3.2
-    - Image
+    - T + I
     - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
     -
     -
+  * - :code:`MolmoForCausalLM`
+    - Molmo
+    - Image
+    - :code:`allenai/Molmo-7B-D-0924`, :code:`allenai/Molmo-72B-0924`, etc.
+    -
+    - ✅︎
   * - :code:`NVLM_D_Model`
     - NVLM-D 1.0
-    - Image\ :sup:`E+`
+    - T + I\ :sup:`E+`
     - :code:`nvidia/NVLM-D-72B`, etc.
     - 
     - ✅︎
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
-    - Image\ :sup:`E`
+    - T + I\ :sup:`E`
     - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
     - 
     - ✅︎
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision, Phi-3.5-Vision
-    - Image\ :sup:`E+`
+    - T + I\ :sup:`E+`
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
     - ✅︎
   * - :code:`PixtralForConditionalGeneration`
     - Pixtral
-    - Image\ :sup:`+`
-    - :code:`mistralai/Pixtral-12B-2409`
+    - T + I\ :sup:`+`
+    - :code:`mistralai/Pixtral-12B-2409`, :code:`mistral-community/pixtral-12b` etc.
     -
     - ✅︎
   * - :code:`QWenLMHeadModel`
     - Qwen-VL
-    - Image\ :sup:`E+`
+    - T + I\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     -
     - ✅︎
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
-    - Image\ :sup:`E+` / Video\ :sup:`+`
+    - T + I\ :sup:`E+` + V\ :sup:`+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
     - ✅︎
   * - :code:`UltravoxModel`
     - Ultravox
-    - Audio\ :sup:`E+`
+    - T + A\ :sup:`E+`
     - :code:`fixie-ai/ultravox-v0_3`
     -
     - ✅︎
@@ -448,6 +470,30 @@ Text Generation
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+
+Multimodal Embedding
+--------------------
+
+.. list-table::
+  :widths: 25 25 15 25 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Inputs
+    - Example HF Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`Phi3VForCausalLM`
+    - Phi-3-Vision-based
+    - T + I
+    - :code:`TIGER-Lab/VLM2Vec-Full`
+    - 🚧
+    - ✅︎
+
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
 
 ----
 
