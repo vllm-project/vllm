@@ -24,7 +24,7 @@ class XFormersBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "xformers"
+        return "XFORMERS"
 
     @staticmethod
     def get_impl_cls() -> Type["XFormersImpl"]:

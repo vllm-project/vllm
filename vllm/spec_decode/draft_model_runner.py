@@ -179,7 +179,7 @@ class TP1DraftModelRunner(ModelRunner):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() != "flash-attn":
+        if self.attn_backend.get_name() != "FLASH_ATTN":
             return False
 
         # TODO: Add support for LORA

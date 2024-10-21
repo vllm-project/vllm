@@ -184,7 +184,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         if not disable_mqa_scorer:
             if scorer_worker.model_runner.attn_backend.get_name(
-            ) != "flash-attn":
+            ) != "FLASH_ATTN":
                 disable_mqa_scorer = True
                 logger.info(
                     "[Speculative Decoding] Disabling MQA scorer as the "
