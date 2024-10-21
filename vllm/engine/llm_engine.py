@@ -46,7 +46,8 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            ParallelSampleSequenceGroup, Sequence,
                            SequenceGroup, SequenceGroupBase,
-                           SequenceGroupOutput, SequenceGroupMetadata, SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupOutput,
+                           SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
