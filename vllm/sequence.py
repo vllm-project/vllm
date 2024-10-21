@@ -1400,12 +1400,6 @@ class SequenceGroupBase:
         """
         raise NotImplementedError
 
-    def dealta_output(self, seq: SequenceGroup):
-        """The sequence `seq` needs to produce delta output.
-        We need to restore the `index` information.
-        """
-        raise NotImplementedError
-
     def finish_seq(self, seq: SequenceGroup):
         """The sequence `seq` finishes, we should record the information.
         """
@@ -1426,7 +1420,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         params = copy.deepcopy(params)
         n = params.n
         params.n = 1
-        group = SequenceGroupBase(request_id)
+        group = ParallelSampleSequenceGroup(request_id)
         for i in range(n):
             request_id_i = f"{request_id}_parallel_sample_{i}"
             group.seq_id_to_index[request_id_i] = i
