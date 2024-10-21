@@ -81,12 +81,12 @@
         {{- "<|eot_id|>" }}
     {%- elif message.role == "tool" or message.role == "ipython" %}
         {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
-        {%- if message.content is mapping or message.content is iterable %}
+        {%- if message.content is mapping %}
             {{- message.content | tojson }}
         {%- else %}
             {%- set content = message.content.strip() %}
             {%- if content.startswith('{') and content.endswith('}') or content.startswith('[') and content.endswith(']') %}
-                {{- content | tojson }}
+                {{- content }}
             {%- else %}
                 {{- {"output": message.content} | tojson }}
             {%- endif %}
