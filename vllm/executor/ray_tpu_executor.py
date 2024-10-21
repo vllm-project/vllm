@@ -48,14 +48,20 @@ class RayTPUExecutor(TPUExecutor):
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
         # Create the parallel TPU workers.
+        self.driver_dummy_worker = self._create_worker()
         self._init_workers_ray(placement_group)
+
+    def _create_worker(self,
+                       local_rank: int = 0,
+                       rank: int = 0,
+                       distributed_init_method: Optional[str] = None):
+        # The driver dummy worker does not actually use any resources.
+        # It holds the resource for the driver worker.
+        return None
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        # The driver dummy worker does not actually use any resources.
-        # It holds the resource for the driver worker.
-        self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
-        # The remaining workers are the actual ray actors.
+        # The workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
 
         # Create the workers.
