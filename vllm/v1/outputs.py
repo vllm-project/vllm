@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Union
 import torch
 
 from vllm.lora.request import LoRARequest
+from vllm.sequence import PromptLogprobs, SampleLogprobs
 from vllm.v1.request import RequestMetrics
 
 
@@ -47,7 +48,7 @@ class CompletionOutput:
     text: str
     token_ids: List[int]
     cumulative_logprob: Optional[float]  # Do we need this?
-    logprobs: Optional[List[Dict[int, float]]]
+    logprobs: Optional[SampleLogprobs]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
@@ -62,7 +63,7 @@ class RequestOutput:
     request_id: str
     prompt: Optional[str]
     prompt_token_ids: List[int]
-    prompt_logprobs: Optional[List[Optional[Dict[int, float]]]]
+    prompt_logprobs: Optional[PromptLogprobs]
     outputs: List[CompletionOutput]
     finished: bool
     metrics: Optional[RequestMetrics] = None
