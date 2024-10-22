@@ -312,10 +312,8 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        version = "v1"
-        if self.scheduler_config.use_v2_block_manager:
-            version = "v2"
-        if (self.scheduler_config.embedding_mode
+        version = "selfattn"
+        if (self.scheduler_config.task == "embedding"
                 or self.cache_config.is_attention_free):
             version = "placeholder"
 

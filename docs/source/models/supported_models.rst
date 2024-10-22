@@ -87,6 +87,11 @@ Text Generation
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
     -
     - ✅︎
+  * - :code:`FalconMambaForCausalLM`
+    - FalconMamba
+    - :code:`tiiuae/falcon-mamba-7b`, :code:`tiiuae/falcon-mamba-7b-instruct`, etc.
+    - ✅︎
+    -  
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
@@ -294,6 +299,10 @@ Text Embedding
     - 
     - ✅︎
 
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
 Reward Modeling
 ---------------
 
@@ -433,7 +442,7 @@ Text Generation
   * - :code:`PixtralForConditionalGeneration`
     - Pixtral
     - T + I\ :sup:`+`
-    - :code:`mistralai/Pixtral-12B-2409`
+    - :code:`mistralai/Pixtral-12B-2409`, :code:`mistral-community/pixtral-12b` etc.
     -
     - ✅︎
   * - :code:`QWenLMHeadModel`
@@ -481,6 +490,10 @@ Multimodal Embedding
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
+
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
 
 ----
 
