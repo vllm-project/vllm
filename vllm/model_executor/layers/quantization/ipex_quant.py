@@ -6,17 +6,18 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 from vllm.platforms import current_platform
 
 
 class IPEXConfig(QuantizationConfig):
-    """INT8 quantization config class using IPEX for the CPU backend,
-    including AWQ.
+    """INT8 quantization config class using IPEX for the CPU/XPU backend,
+    including AWQ, GPTQ.
     """
 
     IPEX_QUANT_METHOD_MAP = {
         "awq": 1,
-        "gptq": 2,
+        "gptq": 0,
     }
 
     def __init__(
@@ -24,10 +25,14 @@ class IPEXConfig(QuantizationConfig):
         method: str,
         weight_bits: int,
         group_size: int,
+        desc_act: Optional[bool] = None,
+        lm_head_quantized: Optional[bool] = None,
     ) -> None:
         self.method = method
         self.weight_bits = weight_bits
         self.group_size = group_size
+        self.desc_act = desc_act
+        self.lm_head_quantized = lm_head_quantized
         self.pack_factor = 32 // self.weight_bits
 
         if self.weight_bits not in [4]:
@@ -36,8 +41,10 @@ class IPEXConfig(QuantizationConfig):
 
         if self.method == "awq":
             self.quant_method = IPEXAWQLinearMethod
+        elif self.method == "gptq":
+            self.quant_method = IPEXGPTQLinearMethod
         else:
-            raise ValueError(f"IPEX quantization supports [awq], "
+            raise ValueError(f"IPEX quantization supports [awq, gptq], "
                              f"but got {self.method}.")
 
     def __repr__(self) -> str:
@@ -70,19 +77,32 @@ class IPEXConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "IPEXConfig":
         method = cls.get_from_keys(config, ["quant_method"]).lower()
-        weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
-        group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
-        return cls(method, weight_bits, group_size)
+        if method == "awq":
+            weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
+            group_size = cls.get_from_keys(config,
+                                           ["q_group_size", "group_size"])
+            return cls(method, weight_bits, group_size, False, False)
+        if method == "gptq":
+            weight_bits = cls.get_from_keys(config, ["bits"])
+            group_size = cls.get_from_keys(config, ["group_size"])
+            lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
+                                                     default=False)
+            try:
+                desc_act = cls.get_from_keys(config, ["desc_act"])
+            except Exception:
+                desc_act = False
+        return cls(method, weight_bits, group_size, desc_act,
+                   lm_head_quantized)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        if not current_platform.is_cpu():
+        if not current_platform.is_cpu() and not current_platform.is_xpu():
             return None
 
         quant_method = hf_quant_cfg.get("quant_method", "").lower()
 
-        if quant_method in ["awq"]:
+        if quant_method in ["awq", "gptq"]:
             return cls.get_name()
 
         return None
@@ -94,8 +114,73 @@ class IPEXConfig(QuantizationConfig):
         return None
 
 
+class IPEXGPTQLinearMethod(GPTQLinearMethod):
+    """GPTQ linear method using IPEX for the CPU/XPU backend.
+    """
+
+    def __init__(self, quant_config: IPEXConfig):
+        self.quant_config = quant_config  # type: ignore
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        bias = layer.bias if not layer.skip_bias_add else None
+
+        try:
+            import intel_extension_for_pytorch as ipex
+            if ipex.__version__ < "2.5.0":
+                raise ImportError("intel_extension_for_pytorch version is "
+                                  "wrong. Please install "
+                                  "intel_extension_for_pytorch>=2.5.0.")
+        except ImportError as err:
+            raise ImportError(
+                "Please install "
+                "intel_extension_for_pytorch>=2.5.0 via "
+                "`pip install intel_extension_for_pytorch>=2.5.0`"
+                " to use IPEX-AWQ linear method.") from err
+        # TODO: remove qconfig as it's not actually used
+        # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
+        # with better performance.
+        lowp_mode = ipex.quantization.WoqLowpMode.INT8
+        # The weight will be de-packed from INT4 to INT8.
+        weight_dtype = ipex.quantization.WoqWeightDtype.INT4
+        # The float activation will be quantized (dynamic, per-token) to INT8.
+        act_quant_mode = ipex.quantization.WoqActQuantMode.PER_BATCH_IC_BLOCK
+
+        qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
+            weight_dtype=weight_dtype,
+            lowp_mode=lowp_mode,
+            act_quant_mode=act_quant_mode,
+            group_size=self.quant_config.group_size,
+        )
+        layer.ipex_output_size = layer.qweight.shape[-1]
+        g_idx = layer.g_idx if self.quant_config.desc_act else None
+        layer.ipex_qlinear = ipex.llm.quantization.woq_linear.\
+            IPEXWeightOnlyQuantizedLinear.from_weight(
+            layer.qweight,
+            layer.scales,
+            layer.qzeros,
+            layer.qweight.size(0),
+            layer.ipex_output_size,
+            qconfig=qconfig,
+            g_idx=g_idx,
+            bias=bias,
+            group_size=self.quant_config.group_size,
+            quant_method=self.quant_config.get_ipex_quant_method_id(
+            )  # type: ignore
+        )
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        reshaped_x = x.reshape(-1, x.shape[-1])
+        out = layer.ipex_qlinear(reshaped_x)
+        if bias is not None:
+            out.add_(bias)
+        return out.reshape(x.shape[:-1] + (layer.ipex_output_size, ))
+
+
 class IPEXAWQLinearMethod(AWQLinearMethod):
-    """AWQ linear method using IPEX for the CPU backend.
+    """AWQ linear method using IPEX for the CPU/XPU backend.
     """
 
     def __init__(self, quant_config: IPEXConfig):
@@ -108,15 +193,15 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 
         try:
             import intel_extension_for_pytorch as ipex
-            if ipex.__version__ < "2.4.0":
+            if ipex.__version__ < "2.5.0":
                 raise ImportError("intel_extension_for_pytorch version is "
                                   "wrong. Please install "
-                                  "intel_extension_for_pytorch>=2.4.0.")
+                                  "intel_extension_for_pytorch>=2.5.0.")
         except ImportError as err:
             raise ImportError(
                 "Please install "
-                "intel_extension_for_pytorch>=2.4.0 via "
-                "`pip install intel_extension_for_pytorch>=2.4.0`"
+                "intel_extension_for_pytorch>=2.5.0 via "
+                "`pip install intel_extension_for_pytorch>=2.5.0`"
                 " to use IPEX-AWQ linear method.") from err
 
         # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
@@ -136,19 +221,19 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 
         layer.ipex_output_size = layer.qweight.size(
             1) * self.quant_config.pack_factor
-        layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.\
-            WeightOnlyQuantizedLinear.from_weight(
-                layer.qweight,
-                layer.scales,
-                layer.qzeros,
-                layer.qweight.size(0),
-                layer.ipex_output_size,
-                qconfig=qconfig,
-                bias=bias,
-                group_size=self.quant_config.group_size,
-                quant_method=
-                    self.quant_config.get_ipex_quant_method_id() # type: ignore
-            )
+        layer.ipex_qlinear = ipex.llm.quantization.woq_linear.\
+            IPEXWeightOnlyQuantizedLinear.from_weight(
+            layer.qweight,
+            layer.scales,
+            layer.qzeros,
+            layer.qweight.size(0),
+            layer.ipex_output_size,
+            qconfig=qconfig,
+            bias=bias,
+            group_size=self.quant_config.group_size,
+            quant_method=self.quant_config.get_ipex_quant_method_id(
+            )  # type: ignore
+        )
 
     def apply(self,
               layer: torch.nn.Module,
@@ -156,5 +241,4 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
         out = layer.ipex_qlinear(reshaped_x)
-
         return out.reshape(x.shape[:-1] + (layer.ipex_output_size, ))
