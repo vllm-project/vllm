@@ -1239,11 +1239,6 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
-        if not use_v2_block_manager:
-            raise ValueError(
-                "Speculative decoding requires usage of the V2 "
-                "block manager. Enable it with --use-v2-block-manager.")
-
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
         draft_revision = None
