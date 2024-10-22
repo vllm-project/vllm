@@ -39,8 +39,8 @@ def test_models(
 ) -> None:
     input_texts_images = [
         *((text, None) for text in HF_TEXT_PROMPTS),
-        *((text, image)
-          for text, image in zip(HF_IMAGE_PROMPTS, image_assets)),
+        *((text, asset.pil_image)
+          for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)),
     ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
