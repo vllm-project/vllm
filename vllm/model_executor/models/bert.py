@@ -12,7 +12,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import Pooler, PoolingConfig
+from vllm.model_executor.layers.pooler import Pooler, PoolingConfig # noqa: F401
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (

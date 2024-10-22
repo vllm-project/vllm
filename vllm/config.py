@@ -9,7 +9,7 @@ import torch
 import vllm.envs as envs
 from transformers import PretrainedConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingConfig
+from vllm.model_executor.layers.pooler import PoolingConfig # noqa: F401
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
@@ -17,7 +17,7 @@ from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config,
-                                            get_pooling_config)
+                                            get_pooling_config) # noqa: F401
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         is_hip, is_openvino, is_xpu, print_warning_once)
 
