@@ -16,9 +16,6 @@ from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-# technically this needs Mistral-7B-v0.1 as base, but we're not testing
-# generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 
 @pytest.fixture(scope="module")
