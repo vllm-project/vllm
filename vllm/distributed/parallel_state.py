@@ -7,7 +7,7 @@ It takes over the control of the distributed environment from PyTorch.
 The typical workflow is:
 
 - call `init_distributed_environment` to initialize the distributed environment.
-- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
+- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to
  initialize the model parallel groups.
 
 - any code dealing with the distributed stuff
@@ -37,7 +37,7 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_cpu, supports_custom_op
+from vllm.utils import supports_custom_op
 
 
 @dataclass
@@ -1139,7 +1139,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         import ray  # Lazy import Ray
         ray.shutdown()
     gc.collect()
-    if not is_cpu():
+    if not current_platform.is_cpu():
         torch.cuda.empty_cache()
 
 
