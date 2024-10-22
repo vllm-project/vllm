@@ -260,7 +260,8 @@ def get_hf_file_to_dict(file_name, model, revision):
 def get_pooling_config(model, revision='main'):
     """
     This function gets the pooling and normalize 
-    config from the model.
+    config from the model - only applies to 
+    sentence-transformers models. 
 
     Args:
         model (str): The name of the Hugging Face model.
