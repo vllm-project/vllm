@@ -94,6 +94,8 @@ class FusionPass(InductorPass):
         self.my_patterns = PatternMatcherPass(pass_name="fusion_pass")
         self.matches = []
 
+        # Fuse rms_norm + static_scaled_fp8_quant into
+        # rms_norm_static_fp8_quant
         inputs = [
             empty_fp8(5, 4),
             empty_bf16(5, 4),
@@ -104,7 +106,10 @@ class FusionPass(InductorPass):
         register_replacement(rms_pattern_static, rms_replacement_static,
                              inputs, fwd_only, self.my_patterns)
 
-        # with residual
+        # Fuse fused_add_rms_norm + static_scaled_fp8_quant into
+        # fused_add_rms_norm_static_fp8_quant
+        # Because pattern has 2 outputs, we need to manually process the match
+        # (see process_matches)
         inputs = [
             empty_fp8(5, 4),
             empty_bf16(5, 4),
@@ -120,12 +125,19 @@ class FusionPass(InductorPass):
                              extra_check=lambda m: self.record_match(m))
 
     def record_match(self, match: Match) -> bool:
-        # TODO(luka): add better comment
+        # Hijack the extra_check to record the match and
+        # save it for post-processing.
         self.matches.append(match)
+
+        # Return False to prevent automatic replacement.
         return False
 
     def process_matches(self, graph: torch.fx.Graph):
-        # TODO(luka): add better comments (whole function)
+        """
+        Manually process multi-output matches and replace them with fused nodes.
+        This is necessary because the automatic replacement for multi-output
+        matches is broken: https://github.com/pytorch/pytorch/issues/137280
+        """
         for match in self.matches:
             nodes = list(graph.nodes)
             last_node_in_match = max(match.nodes, key=lambda x: nodes.index(x))
@@ -151,14 +163,13 @@ class FusionPass(InductorPass):
             # find the output and the residual
             def find_auto_fn(match: Match, op):
                 for node in match.nodes:
-                    if is_func(node,
-                               auto_functionalized) and node.args[0] == op:
+                    if is_func(node, auto_functionalized) and node.args[0] == op:  # noqa
                         return node
                 return None
 
             def find_getitem(node, idx):
                 for user in node.users:
-                    if is_func(node, operator.getitem) and user.args[1] == idx:
+                    if is_func(user, operator.getitem) and user.args[1] == idx:
                         return user
                 return None
 
