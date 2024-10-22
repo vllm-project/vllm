@@ -32,9 +32,10 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        identity, is_cpu)
+                        identity)
 
 logger = init_logger(__name__)
 
@@ -236,7 +237,8 @@ class HfRunner:
 
     def wrap_device(self, input: _T, device: Optional[str] = None) -> _T:
         if device is None:
-            return self.wrap_device(input, "cpu" if is_cpu() else "cuda")
+            return self.wrap_device(
+                input, "cpu" if current_platform.is_cpu() else "cuda")
 
         if hasattr(input, "device") and input.device.type == device:
             return input
