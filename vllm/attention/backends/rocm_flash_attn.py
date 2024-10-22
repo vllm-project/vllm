@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_PARTITION_SIZE_ROCM = 512
+_PARTITION_SIZE_ROCM = 256
 _ON_NAVI = "gfx1" in torch.cuda.get_device_properties("cuda").gcnArchName
 
 
@@ -798,6 +798,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     k_scale,
                     v_scale,
                     fp8_out_scale if cpa_fp8_out else None,
+                    _PARTITION_SIZE_ROCM,
                 )
                 if cpa_fp8_out:
                     return out.view(num_seqs, num_heads * head_size)
