@@ -168,6 +168,7 @@ RUN --mount=type=bind,from=export_pytorch,src=/,target=/install \
 if ls /install/*.whl; then \
     pip install /install/*.whl; \
 fi
+
 # Build vLLM
 RUN cd vllm \
     && python3 -m pip install -r requirements-rocm.txt \
@@ -246,7 +247,7 @@ RUN --mount=type=bind,from=export_pytorch,src=/,target=/install \
         && pip install /install/*.whl; \
     fi
 
-RUN python3 -m pip install --upgrade numba scipy huggingface-hub[cli]
+RUN python3 -m pip install --upgrade huggingface-hub[cli]
 
 RUN git clone -b nvtx_enabled https://github.com/ROCm/rocmProfileData.git \
     && cd rocmProfileData/rpd_tracer \

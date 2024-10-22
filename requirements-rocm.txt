@@ -2,6 +2,7 @@
 -r requirements-common.txt
 
 # Dependencies for AMD GPUs
+numpy==1.26.4
 awscli
 boto3
 botocore
