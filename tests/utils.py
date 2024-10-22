@@ -587,7 +587,7 @@ def large_gpu_test(*, min_gb: int):
     )
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_skipif(fork_new_process_for_each_test(f))
+        return test_skipif(f)
 
     return wrapper
 
