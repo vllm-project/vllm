@@ -825,8 +825,7 @@ class SequenceGroup:
         if status is None:
             return self.seqs
 
-        if self.is_single_seq:
-            return self.seqs if self.first_seq.status == status else []
+        return self.seqs if self.first_seq.status == status else []
 
     def is_encoder_decoder(self) -> bool:
         return self.encoder_seq is not None
@@ -862,10 +861,7 @@ class SequenceGroup:
         return len(self.get_seqs(status))
 
     def num_finished_seqs(self) -> int:
-        if self.is_single_seq:
-            return 1 if self.seqs[0].is_finished() else 0
-
-        return len(self.get_finished_seqs())
+        return 1 if self.first_seq.is_finished() else 0
 
     def is_finished(self) -> bool:
         return self.first_seq.is_finished()
