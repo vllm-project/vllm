@@ -90,6 +90,10 @@ def run_vllm(
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
+    weights_load_device: str = None,
+    use_padding_aware_scheduling: bool = False,
+    max_num_seqs: int = 256,
+    max_num_prefill_seqs: int = None,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -115,6 +119,10 @@ def run_vllm(
         num_scheduler_steps=num_scheduler_steps,
         use_v2_block_manager=use_v2_block_manager,
         disable_async_output_proc=disable_async_output_proc,
+        weights_load_device=weights_load_device,
+        use_padding_aware_scheduling=use_padding_aware_scheduling,
+        max_num_seqs=max_num_seqs,
+        max_num_prefill_seqs=max_num_prefill_seqs,
     )
 
     # Add the requests to the engine.
@@ -181,6 +189,10 @@ async def run_vllm_async(
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
     disable_frontend_multiprocessing: bool = False,
+    weights_load_device: str = None,
+    use_padding_aware_scheduling: bool = False,
+    max_num_seqs: int = 256,
+    max_num_prefill_seqs: int = None,
 ) -> float:
     from vllm import SamplingParams
     engine_args = AsyncEngineArgs(
@@ -208,6 +220,9 @@ async def run_vllm_async(
         disable_async_output_proc=disable_async_output_proc,
         worker_use_ray=False,
         disable_log_requests=True,
+        weights_load_device=weights_load_device,
+        use_padding_aware_scheduling=use_padding_aware_scheduling,
+        max_num_prefill_seqs=max_num_prefill_seqs,
     )
 
     async with build_async_engine_client_from_engine_args(
@@ -342,7 +357,9 @@ def main(args: argparse.Namespace):
             args.max_num_batched_tokens, args.distributed_executor_backend,
             args.gpu_memory_utilization, args.num_scheduler_steps,
             args.use_v2_block_manager, args.download_dir, args.load_format,
-            args.disable_async_output_proc
+            args.disable_async_output_proc, args.weights_load_device,
+            args.use_padding_aware_scheduling, args.max_num_seqs,
+            args.max_num_prefill_seqs
         ]
 
         if args.async_engine:
@@ -446,7 +463,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--kv-cache-dtype',
         type=str,
-        choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
+        choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3', 'fp8_inc'],
         default="auto",
         help='Data type for kv cache storage. If "auto", will use model '
         'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
@@ -540,6 +557,23 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Disable decoupled async engine frontend.")
+    parser.add_argument("--weights-load-device",
+                        type=str,
+                        default=None,
+                        choices=DEVICE_OPTIONS,
+                        help='Device on which weights are loaded.')
+    parser.add_argument("--use-padding-aware-scheduling",
+                        action='store_true',
+                        default=False,
+                        help="Enable padding-aware scheduling.")
+    parser.add_argument("--max-num-seqs",
+                        type=int,
+                        default=256,
+                        help="Maximum number of requests for single decode.")
+    parser.add_argument("--max-num-prefill-seqs",
+                        type=int,
+                        default=None,
+                        help="Maximum number of requests for single prefill.")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
