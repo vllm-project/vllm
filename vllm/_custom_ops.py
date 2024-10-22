@@ -323,7 +323,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                size_k: int,
                                is_k_full: bool,
                                has_zp: bool = False,
-                               use_fp32_reduce: bool = False) -> torch.Tensor:
+                               use_fp32_reduce: bool = False,
+                               is_float_zp: bool = False) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
     @torch.library.register_fake("_C::ggml_dequantize")

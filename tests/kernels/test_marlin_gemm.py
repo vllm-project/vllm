@@ -226,7 +226,7 @@ def test_gptq_marlin_gemm(
         torch.ops._C.gptq_marlin_gemm,
         (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
          workspace.scratch, quant_type, a_input.shape[0], b_weight.shape[1],
-         a_input.shape[1], is_k_full, False, use_fp32_reduce),
+         a_input.shape[1], is_k_full, False, use_fp32_reduce, False),
         test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
     output = ops.gptq_marlin_gemm(
@@ -244,6 +244,7 @@ def test_gptq_marlin_gemm(
         is_k_full=is_k_full,
         has_zp=False,
         use_fp32_reduce=use_fp32_reduce,
+        is_float_zp=False,
     )
     output_ref = torch.matmul(a_input, w_ref)
 
@@ -431,6 +432,7 @@ def test_awq_marlin_gemm(
         is_k_full=is_k_full,
         has_zp=has_zp,
         use_fp32_reduce=use_fp32_reduce,
+        is_float_zp=False,
     )
     output_ref = torch.matmul(a_input, w_ref)
 

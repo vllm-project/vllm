@@ -407,8 +407,8 @@ class LlamaModel(nn.Module):
                             loaded = loaded_weight[k].reshape(
                                 -1, to_shape[1] // group_size)
                         else:
-                            # TODO we should unpack inside the quantization
-                            # method / kernel
+                            # TODO should we unpack inside the quantization
+                            # method / kernel?
                             loaded = unpack_4bit_u8(
                                 loaded_weight[k],
                                 dtype=torch.bfloat16).reshape(to_shape).to(

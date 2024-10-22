@@ -387,7 +387,7 @@ __device__ inline void sub_zp(typename ScalarType<scalar_t>::FragB& frag_b,
   using scalar_t2 = typename ScalarType<scalar_t>::scalar_t2;
   scalar_t2 zp =
       ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_zp)[i]);
-  frag_b[0] = (frag_b[0], zp);
+  frag_b[0] = __hsub2(frag_b[0], zp);
   frag_b[1] = __hsub2(frag_b[1], zp);
 }
 
@@ -1742,8 +1742,6 @@ __global__ void Marlin(
         }
       }
 
-      // TODO also this code block below
-
       // For 8-bit channelwise, we apply the scale before the global reduction
       // that converts the fp32 results to fp16 (so that we avoid possible
       // overflow in fp16)
@@ -2133,41 +2131,15 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
               false)                                                       \
     __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS, false)
 
-  #define HQQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS, \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS,  \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS,  \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS,  \
-              true)                                                        \
-                                                                           \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS, \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS,  \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS,  \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS,  \
-              true)                                                        \
-                                                                           \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS, \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS,  \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS,  \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS,  \
-              true)                                                        \
-                                                                           \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS, \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS,  \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS,  \
-              true)                                                        \
-    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS, true)
+  // We currently have 4-bit models only with group_blocks == 4
+  #define HQQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)            \
+    __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, \
+              true)                                                       \
+    __CALL_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, \
+              true)                                                       \
+    __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, \
+              true)                                                       \
+    __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, true)
 
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
