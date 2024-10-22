@@ -85,7 +85,7 @@ class RayTPUExecutor(TPUExecutor):
                 "TPU_CHIPS_PER_HOST_BOUNDS",
                 "TPU_HOST_BOUNDS",
                 "TPU_SKIP_MDS_QUERY",
-                "ACCELERATOR_TYPE",
+                "TPU_ACCELERATOR_TYPE",
             ]
             for var in OVERRIDE_VARS:
                 if var in os.environ:
