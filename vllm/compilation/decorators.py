@@ -45,10 +45,11 @@ def support_torch_compile(
     of the `forward` method, based on the following default rules:
 
     - if the argument is annotated as `torch.Tensor` or
-         `Optional[torch.Tensor]`, the first dimension will be
-         marked as dynamic.
-    - if the argument is annotated as `IntermediateTensors`, all the tensors
-        in the intermediate tensors will be marked as dynamic.
+        `Optional[torch.Tensor]`, the first dimension will be
+        marked as dynamic.
+    - if the argument is annotated as `IntermediateTensors`, the first
+        dimension of all the tensors in the intermediate tensors
+        will be marked as dynamic.
 
     During runtime, when we actually mark dimensions of tensors,
      it depends on the value of arguments:
