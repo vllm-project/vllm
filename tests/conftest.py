@@ -657,15 +657,18 @@ class VllmRunner:
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = {"image": image}
+                if image is not None:
+                    inputs[i]["multi_modal_data"] = {"image": image}
 
         if videos is not None:
             for i, video in enumerate(videos):
-                inputs[i]["multi_modal_data"] = {"video": video}
+                if video is not None:
+                    inputs[i]["multi_modal_data"] = {"video": video}
 
         if audios is not None:
             for i, audio in enumerate(audios):
-                inputs[i]["multi_modal_data"] = {"audio": audio}
+                if audio is not None:
+                    inputs[i]["multi_modal_data"] = {"audio": audio}
 
         return inputs
 
