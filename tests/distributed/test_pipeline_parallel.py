@@ -28,19 +28,25 @@ class ParallelSetup(NamedTuple):
     chunked_prefill: bool
 
 
+class PPTestOptions(NamedTuple):
+    multi_node_only: bool
+    trust_remote_code: bool
+    tokenizer_mode: Optional[str]
+
+
 @dataclass
 class PPTestSettings:
     parallel_setups: List[ParallelSetup]
     distributed_backends: List[str]
     task: TaskOption
-    trust_remote_code: bool
-    tokenizer_mode: Optional[str]
+    test_options: PPTestOptions
 
     @staticmethod
     def detailed(
         *,
         tp_base: int = 1,
         pp_base: int = 2,
+        multi_node_only: bool = False,
         task: TaskOption = "auto",
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
@@ -70,8 +76,9 @@ class PPTestSettings:
             ],
             distributed_backends=["mp", "ray"],
             task=task,
-            trust_remote_code=trust_remote_code,
-            tokenizer_mode=tokenizer_mode,
+            test_options=PPTestOptions(multi_node_only=multi_node_only,
+                                       trust_remote_code=trust_remote_code,
+                                       tokenizer_mode=tokenizer_mode),
         )
 
     @staticmethod
@@ -80,6 +87,7 @@ class PPTestSettings:
         tp_base: int = 1,
         pp_base: int = 2,
         task: TaskOption = "auto",
+        multi_node_only: bool = False,
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
     ):
@@ -92,15 +100,18 @@ class PPTestSettings:
             ],
             distributed_backends=["mp"],
             task=task,
-            trust_remote_code=trust_remote_code,
-            tokenizer_mode=tokenizer_mode,
+            test_options=PPTestOptions(multi_node_only=multi_node_only,
+                                       trust_remote_code=trust_remote_code,
+                                       tokenizer_mode=tokenizer_mode),
         )
 
     def iter_params(self, model_name: str):
+        opts = self.test_options
+
         for parallel_setup in self.parallel_setups:
             for distributed_backend in self.distributed_backends:
                 yield (model_name, parallel_setup, distributed_backend,
-                       self.task, self.trust_remote_code, self.tokenizer_mode)
+                       self.task, opts)
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -110,6 +121,7 @@ class PPTestSettings:
 GENERATION_MODEL_SETTINGS = {
     # [DETAILED TESTS]
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
+    "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True),  # noqa: E501
     # [FAST TESTS]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
@@ -151,10 +163,8 @@ GENERATION_MODEL_SETTINGS = {
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "microsoft/phi-2": PPTestSettings.fast(),
-    "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    # FIXME: https://github.com/vllm-project/vllm/issues/8553
-    # "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "Qwen/Qwen2-beta-7B-Chat": PPTestSettings.fast(),
@@ -205,6 +215,7 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "meta-llama/Meta-Llama-3-8B",
     "ibm/PowerLM-3b",
+    "microsoft/Phi-3-mini-4k-instruct",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
@@ -220,19 +231,21 @@ def _compare_tp(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     task: TaskOption,
-    trust_remote_code: bool,
-    tokenizer_mode: Optional[str],
+    test_options: PPTestOptions,
     num_gpus_available: int,
     *,
-    method: Literal["generate", "encode"] = "encode",
+    method: Literal["generate", "encode"],
 ):
     tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
+    multi_node_only, trust_remote_code, tokenizer_mode = test_options
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
+    if multi_node_only and not VLLM_MULTI_NODE:
+        pytest.skip("Not in multi-node setting")
 
     common_args = [
         # use half precision for speed and memory savings in CI environment
@@ -307,7 +320,7 @@ def _compare_tp(
 
 @pytest.mark.parametrize(
     ("model_name", "parallel_setup", "distributed_backend", "task",
-     "trust_remote_code", "tokenizer_mode"),
+     "test_options"),
     [
         params for model_name, settings in GENERATION_MODEL_SETTINGS.items()
         for params in settings.iter_params(model_name)
@@ -320,23 +333,21 @@ def test_tp_language_generation(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     task: TaskOption,
-    trust_remote_code: bool,
-    tokenizer_mode: Optional[str],
+    test_options: PPTestOptions,
     num_gpus_available,
 ):
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
                 task,
-                trust_remote_code,
-                tokenizer_mode,
+                test_options,
                 num_gpus_available,
                 method="generate")
 
 
 @pytest.mark.parametrize(
     ("model_name", "parallel_setup", "distributed_backend", "task",
-     "trust_remote_code", "tokenizer_mode"),
+     "test_options"),
     [
         params for model_name, settings in EMBEDDING_MODEL_SETTINGS.items()
         for params in settings.iter_params(model_name)
@@ -349,23 +360,21 @@ def test_tp_language_embedding(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     task: TaskOption,
-    trust_remote_code: bool,
-    tokenizer_mode: Optional[str],
+    test_options: PPTestOptions,
     num_gpus_available,
 ):
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
                 task,
-                trust_remote_code,
-                tokenizer_mode,
+                test_options,
                 num_gpus_available,
                 method="encode")
 
 
 @pytest.mark.parametrize(
     ("model_name", "parallel_setup", "distributed_backend", "task",
-     "trust_remote_code", "tokenizer_mode"),
+     "test_options"),
     [
         params for model_name, settings in MULTIMODAL_MODEL_SETTINGS.items()
         for params in settings.iter_params(model_name)
@@ -378,15 +387,13 @@ def test_tp_multimodal_generation(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     task: TaskOption,
-    trust_remote_code: bool,
-    tokenizer_mode: Optional[str],
+    test_options: PPTestOptions,
     num_gpus_available,
 ):
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
                 task,
-                trust_remote_code,
-                tokenizer_mode,
+                test_options,
                 num_gpus_available,
                 method="generate")
