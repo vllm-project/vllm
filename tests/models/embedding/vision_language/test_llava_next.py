@@ -4,19 +4,24 @@ import torch.nn.functional as F
 from ....conftest import IMAGE_ASSETS
 from ..utils import check_embeddings_close
 
+llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
+
 HF_TEXT_PROMPTS = [
-    "Find me an everyday image that matches the given caption: The label of the object is stop sign",  # noqa: E501
-    "Retrieve an image of this caption: cherry blossom",
+    llama3_template.format(
+        "The label of the object is stop sign\nSummary above sentence in one word: "  # noqa: E501
+    ),
+    llama3_template.format(
+        "cherry blossom\nSummary above sentence in one word: "),
 ]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "<|image_1|> Select the portion of the image that isolates the object of the given label: The label of the object is stop sign",  # noqa: E501
+    llama3_template.format("<image>\nSummary above image in one word: "),
     "cherry_blossom":
-    "<|image_1|> Represent the given image with the following question: What is in the image",  # noqa: E501
+    llama3_template.format("<image>\nSummary above image in one word: "),
 })
 
-MODELS = ["TIGER-Lab/VLM2Vec-Full"]
+MODELS = ["royokong/e5-v-2"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -49,16 +54,15 @@ def test_models(
 
         all_outputs = []
         for inputs in all_inputs:
-            # Based on: https://github.com/TIGER-AI-Lab/VLM2Vec/blob/db3b951bccabba220c1f53ab46a734e50dd2fc08/src/model.py
+            # Based on: https://huggingface.co/royokong/e5-v
             outputs = hf_model.model(
                 **hf_model.wrap_device(inputs,
                                        device=hf_model.model.device.type),
                 return_dict=True,
                 output_hidden_states=True,
             )
-            last_hidden_state = outputs.hidden_states[-1][0]
-            reps = last_hidden_state[inputs.attention_mask[0].sum() - 1]
-            pooled_output = F.normalize(reps, p=2, dim=-1)
+            pooled_output = F.normalize(outputs.hidden_states[-1][:, -1, :],
+                                        dim=-1)
 
             all_outputs.append(pooled_output.tolist())
 
