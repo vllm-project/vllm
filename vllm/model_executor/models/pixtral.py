@@ -896,15 +896,21 @@ class PixtralHFTransformer(nn.Module):
         config: PixtralVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         *,
+        num_hidden_layers_override: Optional[int] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
 
         self.layers = nn.ModuleList([
             PixtralHFTransformerBlock(config=config,
                                       quant_config=quant_config,
                                       prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(config.num_hidden_layers)
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
@@ -925,6 +931,8 @@ class PixtralHFVisionModel(nn.Module):
         config: PixtralVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -941,8 +949,21 @@ class PixtralHFVisionModel(nn.Module):
         self.transformer = PixtralHFTransformer(
             config,
             quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.transformer",
         )
+
+        num_hidden_layers = config.num_hidden_layers
+        if len(self.transformer.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {num_hidden_layers} "
+                f"layers, but you requested {len(self.transformer.layers)} "
+                "layers.")
+
+        if require_post_norm is True:
+            msg = "PixtralHFVisionModel does not have post-layernorm"
+            raise ValueError(msg)
+
         self.dtype = next(self.parameters()).dtype
         self.device = next(self.parameters()).device
         self.patch_positional_embedding = PixtralRotaryEmbedding(

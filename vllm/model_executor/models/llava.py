@@ -236,10 +236,11 @@ def init_vision_tower_for_llava(
             require_post_norm=require_post_norm,
         )
     elif isinstance(vision_config, PixtralVisionConfig):
-        # TODO: allow layer override?
         return PixtralHFVisionModel(
             vision_config,
             quant_config,
+            num_hidden_layers_override=num_hidden_layers,
+            require_post_norm=require_post_norm,
         )
 
     msg = f"Unsupported vision config: {type(vision_config)}"
