@@ -263,6 +263,7 @@ class HfRunner:
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
+        skip_tokenizer_init: bool = False,
         auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
@@ -290,11 +291,12 @@ class HfRunner:
                     **model_kwargs,
                 ))
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            torch_dtype=torch_dtype,
-            trust_remote_code=True,
-        )
+        if not skip_tokenizer_init:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+            )
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
@@ -304,6 +306,8 @@ class HfRunner:
             torch_dtype=torch_dtype,
             trust_remote_code=True,
         )
+        if skip_tokenizer_init:
+            self.tokenizer = self.processor.tokenizer
 
         self.postprocess_inputs = postprocess_inputs
 
@@ -529,6 +533,7 @@ class HfRunner:
         encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
         num_logprobs: int,
+        images: Optional[PromptImageInput] = None,
         **kwargs: Any,
     ) -> List[TokensTextLogprobs]:
         '''
@@ -539,11 +544,17 @@ class HfRunner:
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
 
-        for (encoder_prompt,
-             decoder_prompt) in to_enc_dec_tuple_list(encoder_decoder_prompts):
+        for i, (encoder_prompt,
+             decoder_prompt) in enumerate(to_enc_dec_tuple_list(encoder_decoder_prompts)):
+            processor_kwargs: Dict[str, Any] = {
+                "text": encoder_prompt,
+                "return_tensors": "pt",
+            }
+            if images is not None and images[i] is not None:
+                processor_kwargs["images"] = images[i]
 
             encoder_input_ids = self.wrap_device(
-                self.tokenizer(encoder_prompt, return_tensors="pt").input_ids,
+                self.processor(**processor_kwargs).input_ids,
                 device=self.model.device.type,
             )
 
