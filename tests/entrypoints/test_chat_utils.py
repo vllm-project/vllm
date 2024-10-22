@@ -6,6 +6,7 @@ from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
+from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.entrypoints.chat_utils import (parse_chat_messages,
                                          parse_chat_messages_futures)
 from vllm.multimodal import MultiModalDataDict
@@ -13,6 +14,7 @@ from vllm.multimodal.utils import encode_image_base64
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
+MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 
 
 @pytest.fixture(scope="module")
@@ -33,6 +35,30 @@ def phi3v_model_config():
 def phi3v_tokenizer():
     return TokenizerGroup(
         tokenizer_id=PHI3V_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+
+
+@pytest.fixture(scope="module")
+def mllama_model_config():
+    return ModelConfig(MLLAMA_MODEL_ID,
+                       task="generate",
+                       tokenizer=MLLAMA_MODEL_ID,
+                       tokenizer_mode="auto",
+                       trust_remote_code=True,
+                       dtype="bfloat16",
+                       seed=0,
+                       limit_mm_per_prompt={
+                           "image": 2,
+                       })
+
+
+@pytest.fixture(scope="module")
+def mllama_tokenizer():
+    return TokenizerGroup(
+        MLLAMA_MODEL_ID,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
@@ -414,3 +440,124 @@ def test_parse_chat_messages_multiple_images_uncommon_input(
         "<|image_1|>\n<|image_2|>\nWhat's in these images?"
     }]
     _assert_mm_data_is_image_input(mm_data, 2)
+
+
+### Mllama currently wraps images / texts as interleaved dictionaries
+def test_mllama_single_image(
+    mllama_model_config,
+    mllama_tokenizer,
+    image_url,
+):
+    """Ensures that a single image is parsed correctly mllama."""
+    conversation, mm_data = parse_chat_messages([{
+        "role":
+        "user",
+        "content": [{
+            'type': 'text',
+            'text': 'The content of this image is:'
+        }, {
+            "image_url": image_url
+        }]
+    }], mllama_model_config, mllama_tokenizer)
+    _assert_mm_data_is_image_input(mm_data, 1)
+    assert conversation == [{
+        'role':
+        'user',
+        'content': [{
+            'type': 'text',
+            'text': 'The content of this image is:'
+        }, {
+            'type': 'image'
+        }]
+    }]
+
+
+def test_mllama_interleaved_images(
+    mllama_model_config,
+    mllama_tokenizer,
+    image_url,
+):
+    """Ensures that multiple image are parsed as interleaved dicts."""
+    conversation, mm_data = parse_chat_messages([{
+        "role":
+        "user",
+        "content": [
+            {
+                'type': 'text',
+                'text': 'The content of the first image is:'
+            },
+            {
+                "image_url": image_url
+            },
+            {
+                'type': 'text',
+                'text': 'The content of the second image is:'
+            },
+            {
+                "image_url": image_url
+            },
+        ]
+    }], mllama_model_config, mllama_tokenizer)
+    _assert_mm_data_is_image_input(mm_data, 2)
+    assert conversation == [{
+        'role':
+        'user',
+        'content': [{
+            'type': 'text',
+            'text': 'The content of the first image is:'
+        }, {
+            'type': 'image'
+        }, {
+            'type': 'text',
+            'text': 'The content of the second image is:'
+        }, {
+            'type': 'image'
+        }]
+    }]
+
+def test_mllama_parse_matches_hf(
+    mllama_model_config,
+    mllama_tokenizer,
+    image_url,
+):
+    """Checks end to end correctness of hf allignment for mllama parsing."""
+    def get_conversation(is_hf: bool):
+        img_part = {"type": "image_url", "image_url": {"url": image_url}}
+        if is_hf:
+            img_part = {'type': 'image'}
+        return [
+                {
+                    'role': 'user', 'content': [
+                        {'type': 'text', 'text': 'The content of the first image is:'},
+                        img_part,
+                        {'type': 'text', 'text': 'The content of the second image is:'},
+                        img_part,
+                        {'type': 'text', 'text': 'What animal is in the first image?'},
+                    ]
+                }
+            ]
+
+    tokenizer = mllama_tokenizer.tokenizer
+    # Build and parse a conversation with {"type": "image"} using the tokenizer
+    hf_conversation = get_conversation(is_hf=True)
+    hf_result = tokenizer.apply_chat_template(
+        hf_conversation,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    # Now parse with vLLMs chat utils & apply the template
+    vllm_conversation = get_conversation(is_hf=False)
+    conversation, _ = parse_chat_messages(
+        vllm_conversation,
+        mllama_model_config,
+        mllama_tokenizer,
+    )
+    vllm_result = apply_hf_chat_template(
+        tokenizer,
+        conversation=conversation,
+        chat_template=None,
+        add_generation_prompt=True,
+    )
+
+    assert hf_result == vllm_result
