@@ -3,9 +3,11 @@ from abc import ABC, abstractmethod
 import torch
 
 from vllm import envs
+# yapf: disable
 from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
     get_tensor_model_parallel_world_size as get_tp_world_size)
+# yapf: enable
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
