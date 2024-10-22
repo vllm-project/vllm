@@ -968,6 +968,8 @@ def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     return [item for sublist in lists for item in sublist]
 
 
+# TODO: This function can be removed if transformer_modules classes are
+# serialized by value when communicating between processes
 def init_cached_hf_modules() -> None:
     """
     Lazy initialization of the Hugging Face modules.
