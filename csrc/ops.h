@@ -115,6 +115,9 @@ void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& azp_adj,
                            c10::optional<torch::Tensor> const& azp,
                            c10::optional<torch::Tensor> const& bias);
+
+void cutlass_semi_structured_mm(torch::Tensor& out, torch::Tensor const& a,
+                                torch::Tensor const& b);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

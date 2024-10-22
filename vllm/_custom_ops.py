@@ -509,6 +509,21 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     return out
 
 
+def cutlass_semi_structured_mm(a: torch.Tensor,
+                      b: torch.Tensor,
+                      out_dtype: torch.dtype) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_semi_structured_mm(out, a, b)
+
+    return out
+
+
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,

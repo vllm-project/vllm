@@ -264,6 +264,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
 
+  // CUTLASS sparse GEMM, supporting semi-structured sparsity
+  ops.def(
+      "cutlass_semi_structured_mm(Tensor! out, Tensor a,"
+      "                  Tensor b) -> ()");
+  ops.impl("cutlass_semi_structured_mm", torch::kCUDA,
+    &cutlass_semi_structured_mm);
+
   // Mamba selective scan kernel
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"
