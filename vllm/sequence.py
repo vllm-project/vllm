@@ -826,9 +826,7 @@ class SequenceGroup:
             return self.seqs
 
         if self.is_single_seq:
-            return self.seqs if self.seqs[0].status == status else []
-
-        return [seq for seq in self.seqs if seq.status == status]
+            return self.seqs if self.first_seq.status == status else []
 
     def is_encoder_decoder(self) -> bool:
         return self.encoder_seq is not None
