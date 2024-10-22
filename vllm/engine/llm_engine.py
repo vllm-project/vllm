@@ -648,6 +648,7 @@ class LLMEngine:
 
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
+                       #lora_request, prompt_adapter_request, use_dattn=self.use_dattn)
 
         encoder_seq = None
         if 'encoder_prompt_token_ids' in processed_inputs:
@@ -1250,8 +1251,11 @@ class LLMEngine:
                     virtual_engine]
 
             if self.use_dattn:
-                execute_model_req.allocated_blocks = scheduler_outputs.allocated_blocks
-                execute_model_req.free_kv_caches = scheduler_outputs.free_kv_caches
+                # let's update cache blocks here to avoid unnecessary passing
+                if scheduler_outputs.free_kv_caches or scheduler_outputs.allocated_blocks: 
+                    self.model_executor.update_cache_blocks(virtual_engine, scheduler_outputs.num_prefill_groups > 0,  scheduler_outputs.free_kv_caches, scheduler_outputs.allocated_blocks) 
+                #execute_model_req.allocated_blocks = scheduler_outputs.allocated_blocks
+                #execute_model_req.free_kv_caches = scheduler_outputs.free_kv_caches
                 
             if self.profile == True:
                 T2 = time.time()

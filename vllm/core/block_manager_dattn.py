@@ -69,6 +69,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # Mapping from cache buffer ID to the number of allocated blocks.
         self.allocated_blocks: Dict[int, int] = {} # Maintains the state of every used kv_cache 
         self.free_kv_caches: Dict[int, int] = {}
+        
         self.cached_free_blocks: int = 0
         self.to_allocate_blocks: Dict[int, int] = {} # Temporary for each step
         self.step_index = 0
@@ -79,7 +80,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         return 1
 
     def _get_seq_num_required_blocks(self, seq: Sequence) -> int:
-        return 0 if seq is None else seq.n_blocks
+        return 0 if seq is None else seq.predict_n_blocks
 
     # This will be invoked in the prefill phase
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
@@ -212,7 +213,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # If the sequence is allocated, its cache_id must >= 0.
         assert cache_id >= 0
         
-        logical_blocks_num = seq.n_blocks
+        logical_blocks_num = seq.predict_n_blocks
         allocated_num = self.allocated_blocks[cache_id]
         
         # If we need to allocate a new physical block
@@ -309,7 +310,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         to_allocate_blocks = self.to_allocate_blocks
 
-        #print(f"self.free_kv_caches has length:{len(self.free_kv_caches)}, cached_free_blocks:{self.cached_free_blocks}, total_available:{self.num_free_gpu_blocks}")
+        #print(f"self.free_kv_caches has length:{len(self.free_kv_caches)}, cached_free_blocks:{self.cached_free_blocks}, total_available:{self.num_free_gpu_blocks}", file=sys.stderr)
         
         to_free_kv_caches = []
 
@@ -339,10 +340,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             self.cached_free_blocks -= num_blocks
             self.num_free_gpu_blocks += num_blocks
             to_free_blocks += num_blocks
+            #print(f"free cache_id:{cache_id}")
             self.free_kv_caches.pop(cache_id)
-
-        #if to_free_blocks != 0:
-        #print(f"NNOOOO to_free_blocks:{to_free_blocks}, cached_free_blocks:{self.cached_free_blocks}, self.free_kv_caches has length:{len(self.free_kv_caches)}, available_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
 
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         # We actually uses self.free_kv_caches and self.to_allocate_blocks to track all requests 

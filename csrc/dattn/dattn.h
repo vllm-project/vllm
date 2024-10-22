@@ -70,12 +70,15 @@ private:
   // live region that already has many allocated physical pages. 
   uint64_t used_pages;
  
+  uint64_t alignedSize; 
+
   // virtual address of the next page that needs to be mapped. 
   // Typically, (nextUnmapedAddr - dptr)/page_size == total_pagees 
   char * nextUnmapedAddr; 
 
+
   // The difference between the used address (the end of invoking allocBlocks) and the starting pointer of the region
-  uint64_t offset;   
+  uint64_t offset; 
 
 public:
 
@@ -98,6 +101,8 @@ public:
 // kvCacheAllocator class, used for memory allocation of kv-cachemanager, memory allocation is based on page granularity,
 class kvCacheAllocator : public torch::CustomClassHolder{
 private:
+
+  CUcontext origContext;   
 
   /*
     The following information are about physical blocks. 
@@ -135,6 +140,10 @@ private:
   // Allocate physical memory, map to the reserved virtual address space of dptr, and set access permission
   int64_t _allocCacheBlocksForRequest(int64_t region_id, int64_t blocks = 1);
 
+  std::atomic<bool> manager_running;
+
+  void wait_kvcache_manage_sync(void); 
+  void do_kvcache_manage(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks);
 
 public:
 
@@ -161,6 +170,9 @@ public:
   void releaseRegions(std::vector<int64_t> regions);
 
   int64_t allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks);
+
+  void updateCacheBlocks(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_caches);
+
 
   // Allow the python code to know the physical memory used for the whole 
   // kv cache or the memory for the specified request (when region_id is not 0). 

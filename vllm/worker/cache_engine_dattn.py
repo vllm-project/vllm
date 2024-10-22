@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_pin_memory_available, get_dtype_size
 
 from vllm import _dattn_ops as dattn
+import sys
 
 logger = init_logger(__name__)
 
@@ -175,14 +176,14 @@ class CacheEngineDAttn:
         in this function. Let's utilize the same mechanism at the first step. 
         TODO: we may change this later. To my understanding, it is better to track the number of blocks at sequence 
     """
-    def alloc_seqs(self, allocated_blocks: Dict[int, int]):
+    def alloc_seqs(self, to_allocate: Dict[int, int]):
         to_alloc_blocks = []
 
         """Allocate cache handles for the given number of blocks."""
-        for buffer_id, num_blocks in allocated_blocks.items():
+        for buffer_id, num_blocks in to_allocate.items():
             allocated_blocks = self.allocated_blocks[buffer_id]
+            #print(f"CacheEngineDAttn: buffer_id-{buffer_id}, num_blocks:{num_blocks}, allocated_blocks:{allocated_blocks}", file=sys.stderr)
             num_blocks -= allocated_blocks
-            #print(f"CacheEngineDAttn: buffer_id-{buffer_id}, num_blocks:{num_blocks}")
             if num_blocks > 0:
                 to_alloc_blocks.append([buffer_id, num_blocks])
                 self.allocated_blocks[buffer_id] += num_blocks
@@ -196,6 +197,22 @@ class CacheEngineDAttn:
         #for cache_id in free_kv_caches:
         #    print(f"free_seqs with cache_id:{cache_id}")
         self.device_cache_allocator.release_cache_regions(free_kv_caches)
+    
+    def update_cache_blocks(self, is_prefill_phase: bool, free_kv_caches: List[int], to_allocate: Dict[int, int]):
+        to_alloc_blocks = []
+
+        """Allocate cache handles for the given number of blocks."""
+        for buffer_id, num_blocks in to_allocate.items():
+            allocated_blocks = self.allocated_blocks[buffer_id]
+            #print(f"CacheEngineDAttn: buffer_id-{buffer_id}, num_blocks:{num_blocks}, allocated_blocks:{allocated_blocks}", file=sys.stderr)
+            num_blocks -= allocated_blocks
+            if num_blocks > 0:
+                to_alloc_blocks.append([buffer_id, num_blocks])
+                self.allocated_blocks[buffer_id] += num_blocks
+
+        #print(f"update_cache_blocks NOW: with free_kv_caches:{len(free_kv_caches)}, to_allocate:{len(to_alloc_blocks)}", file=sys.stderr)
+        self.device_cache_allocator.update_cache_blocks(is_prefill_phase, free_kv_caches, to_alloc_blocks)
+ 
 
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()

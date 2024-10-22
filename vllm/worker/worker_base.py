@@ -135,8 +135,10 @@ class WorkerInput:
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
-    
-    allocated_blocks : Optional[Dict[int, int]] = None    # new add for vmm
+
+    # new add for dattn
+    is_prefill_phase: bool = False
+    allocated_blocks: Optional[Dict[int, int]] = None    
     free_kv_caches: Optional[List[int]] = None
     
     num_steps: int = 1
@@ -234,6 +236,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def update_cache_blocks(self, virtual_engine: int, is_prefill_phase: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
+        """
+        Process an execution request.
+        """
+        raise NotImplementedError
+    
     def _get_worker_input_from_broadcast(
         self
     ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[

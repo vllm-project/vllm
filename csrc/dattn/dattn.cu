@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <string>
 #include <cuda_runtime.h>
+#include <Python.h>
 #include "dattn.h"
 
 
@@ -47,7 +48,7 @@ static int allocatePhyPages(void * ptr, uint64_t size) {
       fprintf(stderr, "cuMemRelease failed, err code: %d\n", status);
     } 
   } else {
-    fprintf(stderr, "cuMemCreate %ld failed!, err code: %d\n", size, status);
+    fprintf(stderr, "cuMemCreate %lx failed!, err code: %d\n", size, status);
   }
   return status == CUDA_SUCCESS ? 0 : -1;
 }
@@ -55,6 +56,10 @@ static int allocatePhyPages(void * ptr, uint64_t size) {
 // Free the physical memory [ptr, ptr + size]
 static void freePhysicalMemory(void* ptr, size_t size) {
   CUdeviceptr dptr = (CUdeviceptr)ptr;
+  CUresult res = cuMemUnmap(dptr, size); 
+  if(res != CUDA_SUCCESS) {
+    fprintf(stderr, "cuMemUnmap failed when deallocating ptr %p and size %lx\n", ptr, size);
+  } 
   CHECK_DRV(cuMemUnmap(dptr, size));
 }
 
@@ -76,9 +81,7 @@ kvCacheRegion::kvCacheRegion(uint64_t region_size, uint64_t block_size, uint64_t
 
 // Decontructor: release all physical pages of this region
 kvCacheRegion::~kvCacheRegion() {
-  uint64_t size = this->total_pages * this->page_size; 
-  freePhysicalMemory(this->dptr, size); 
-
+  freeAllPhyMemory(); 
   // Note that since the region is detroyed, 
   // no need to clear other counters. 
 }
@@ -113,12 +116,16 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
   int64_t toallocPages = -1; 
 
   // Align the new offset to page_size
-  uint64_t alignedOffset = roundup(this->offset + size, this->page_size); 
+  uint64_t alignedSize = roundup(this->offset + size, this->page_size); 
 
-  this->total_pages = alignedOffset/this->page_size; 
+  this->total_pages = alignedSize/this->page_size; 
+  this->alignedSize = alignedSize; 
 
+  if((uint64_t)this->dptr == 0xa02000000) {
+    //fprintf(stderr, "region 0 at %p with size %lx\n", this->dptr, this->alignedSize); 
+  }
   // Check how many pages should we allocated this time
-  char * alignedAddr = this->dptr + alignedOffset; 
+  char * alignedAddr = this->dptr + alignedSize; 
   if( alignedAddr > this->nextUnmapedAddr) {
 
     // Check whether alignedAddr is actually aligned well
@@ -139,7 +146,7 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
 
       // Update the offset after allocating these blocks. 
       this->offset += size; 
-      assert(this->offset <= alignedOffset);
+      assert(this->offset <= alignedSize);
     }
   }
  
@@ -147,9 +154,7 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
 }
 
 void kvCacheRegion::freeAllPhyMemory(void) {
-  char * startAddr = this->dptr; 
-  uint64_t size = this->total_pages * this->page_size;
-  freePhysicalMemory(startAddr, size);
+  freePhysicalMemory(this->dptr, this->alignedSize);
 }
 
 // freeUnusedPages from a region, and return freed pages
@@ -161,10 +166,10 @@ int kvCacheRegion::freeUnusedPages(void) {
     assert(this->nextUnmapedAddr > (this->dptr + offset));
 
     // Get the offset of next page, since we can't collect a page if its partialy used
-    uint64_t alignedOffset = roundup(offset, this->page_size);
+    uint64_t alignedSize = roundup(offset, this->page_size);
     
     // startAddr points to the beginning of the next page
-    char * startAddr = this->dptr + alignedOffset; 
+    char * startAddr = this->dptr + alignedSize; 
 
     uint64_t size = this->nextUnmapedAddr - startAddr; 
     assert((size % this->page_size) == 0); 
@@ -207,7 +212,7 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, i
   CHECK_DRV(cuMemGetAllocationGranularity(&aligned_sz, &_prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
   
   uint64_t max_blocks = roundup(max_seq_length, tokens_per_block)/tokens_per_block; 
-  uint64_t region_size = max_blocks * cache_block_size; 
+  uint64_t region_size = max_blocks * cache_block_size * 2; 
 
   this->page_size = aligned_sz;
   this->region_size = ((region_size + aligned_sz - 1) / aligned_sz) * aligned_sz;
@@ -226,6 +231,9 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, i
   this->total_pages = 0;
   this->used_pages = 0;
   this->active_regions = 0;
+
+  this->manager_running = false;
+  cuCtxGetCurrent(&origContext);
 }
 
 int64_t kvCacheAllocator::getPageSize() {
@@ -244,13 +252,13 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
     region = _getLastCachedRegion();  
   }
   else {
-    //printf("region_size == %d bytes == %d MB\n", this->region_size, this->region_size%2097152); 
+    //printf("region_size == %lx pages == %lx\n", this->region_size, this->region_size%2097152); 
     // The expensive way to get a new region. Only invoked when no cached regions
     // Allocate the virtual address for this region
     CHECK_DRV(cuMemAddressReserve(&ptr, this->region_size, 0ULL, 0ULL, 0ULL));
 
     // Create a new region from the scratch
-    region = new kvCacheRegion(this->region_size, this->block_size, this->page_size, ptr); 
+    region = new kvCacheRegion(this->region_size, this->block_size, this->page_size, ptr);
   }
 
   std::lock_guard<std::mutex> lock(this->mutex);
@@ -278,6 +286,7 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
   this->active_regions--; 
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
+  //fprintf(stderr, "NPPPPPP release region %d\n", region_id);
   region->freeAllPhyMemory(); 
 
   // Cache the given region, as it can be used for the future ideally. 
@@ -360,6 +369,12 @@ void kvCacheAllocator::_gcPhyPages(int64_t toCollectPages) {
 int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t blocks) {
   int64_t pages = -1;
 
+  CUresult result = cuCtxSetCurrent(origContext);
+  if (result != CUDA_SUCCESS) {
+      std::cerr << "Failed to set CUDA context in new thread: " << result << std::endl;
+      return -1;
+  }
+
   // Find the region corresponding to the given region_id, which should reserveRegion before
   // If the region_id doesn't exist at all, it is the bug that should be fixed.  
   if(this->active_regions_map.count(region_id) == 0) {
@@ -390,19 +405,49 @@ int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t
 
 // Allocate cache blocks for a range of requests. Each request information will be an vector, with
 // the request id as the first, and then number of blocks as the second. 
-int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_blocks) {
+int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_cache_blocks) {
   int64_t pages = 0; 
 
-  for(auto row : req_blocks) {
+  for(auto row : req_cache_blocks) {
     uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
 
-    //fprintf(stderr, "allocating region_id-%d and blocks-%d\n", region_id, blocks);
     pages += _allocCacheBlocksForRequest(region_id, blocks); 
   }
 
   return pages; 
 }
+
+void kvCacheAllocator::wait_kvcache_manage_sync(void) {
+  while(this->manager_running) ;
+  // fprintf(stderr, "waiting for release\n"); 
+}
+
+void kvCacheAllocator::do_kvcache_manage(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
+  std::thread([this, free_caches, req_cache_blocks]() {
+    this->manager_running = true;
+    this->releaseRegions(free_caches);
+
+    this->allocCacheBlocks(req_cache_blocks);
+    this->manager_running = false;
+  }).detach();
+}
+
+void kvCacheAllocator::updateCacheBlocks(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
+  //Py_BEGIN_ALLOW_THREADS
+  //fprintf(stderr, "NNNNNNN is_prefill_phase is %d\n", is_prefill_phase); 
+
+  if(is_prefill_phase) {
+    this->releaseRegions(free_caches);
+    this->allocCacheBlocks(req_cache_blocks);
+  }
+  else {
+    wait_kvcache_manage_sync();
+    do_kvcache_manage(is_prefill_phase, free_caches, req_cache_blocks);
+  }
+  //Py_END_ALLOW_THREADS
+}
+
 // Release regions specified in the vector
 void kvCacheAllocator::releaseRegions(std::vector<int64_t> regions) {
   for(auto region : regions) {

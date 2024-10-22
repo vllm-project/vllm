@@ -77,13 +77,16 @@ class kvCacheAllocator:
     #def free_cache_ptr(self, ptr:CacheDevicePtr):
     #def release_cache_ptr(self, ptr:CacheDevicePtr, page_num: int = 0, offset: int = 0):
    
-    def release_cache_regions(self, req_ids: List[int]):
-        self._allocator.releaseRegions(req_ids)
+    def release_cache_regions(self, free_caches: List[int]):
+        self._allocator.releaseRegions(free_caches)
         return 
 
-    def alloc_cache_blocks(self, req_blocks:List[List[int]]): 
-       return self._allocator.allocCacheBlocks(req_blocks)  
+    def alloc_cache_blocks(self, req_cache_blocks:List[List[int]]): 
+       return self._allocator.allocCacheBlocks(req_cache_blocks)  
 
+    def update_cache_blocks(self, is_prefill_phase: bool, free_caches: List[int], req_cache_blocks:List[List[int]]):
+       return self._allocator.updateCacheBlocks(is_prefill_phase, free_caches, req_cache_blocks)
+     
     # If the memory is not sufficient, then the python code (as the major control part)
     # can instruct the native library to release some memory. If pages is not specified, 
     # then the library will collect as much as possible (based on the predefined watermark)

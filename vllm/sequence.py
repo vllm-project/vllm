@@ -422,12 +422,19 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
 
+        #self.use_dattn = use_dattn
         # support dattn
         self.cache_id = -1
 
     @property
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
+
+    @property
+    def predict_n_blocks(self) -> int:
+        # Adding one more token for the predicted mode (used in dattn)
+        return (self.get_len() + self.block_size + 2) // self.block_size
+
 
     @property
     def prompt(self) -> Optional[str]:
