@@ -161,7 +161,7 @@ class cmake_build_ext(build_ext):
         # This allows sharing dependencies between profiles,
         # and plays more nicely with sccache.
         # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
-        fc_base_dir = os.path.join(ext.cmake_lists_dir, ".deps")
+        fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
         cmake_args += ['-DFETCHCONTENT_BASE_DIR={}'.format(fc_base_dir)]
 
