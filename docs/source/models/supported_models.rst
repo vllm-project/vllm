@@ -444,7 +444,7 @@ Text Generation
     - ✅︎
   * - :code:`Qwen2AudioForConditionalGeneration`
     - Qwen2-Audio
-    - T + A\ :sup:`E+`
+    - T + A\ :sup:`+`
     - :code:`Qwen/Qwen2-Audio-7B-Instruct`
     -
     - ✅︎
