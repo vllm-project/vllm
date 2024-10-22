@@ -6,7 +6,7 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 from argparse import Namespace
-from typing import List, NamedTuple, Optional, Union
+from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
 
 from PIL.Image import Image
 
@@ -15,45 +15,75 @@ from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
 
+class TextQuery(TypedDict):
+    modality: Literal["text"]
+    text: str
+
+
+class ImageQuery(TypedDict):
+    modality: Literal["image"]
+    image: Image
+
+
+class TextImageQuery(TypedDict):
+    modality: Literal["text+image"]
+    text: str
+    image: Image
+
+
+QueryModality = Literal["text", "image", "text+image"]
+Query = Union[TextQuery, ImageQuery, TextImageQuery]
+
+
 class ModelRequestData(NamedTuple):
     llm: LLM
     prompt: str
-    stop_token_ids: Optional[List[str]]
     image: Optional[Image]
 
 
-def run_e5_v(text_or_image: Union[str, Image]):
+def run_e5_v(query: Query):
     llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
 
-    if isinstance(text_or_image, str):
+    if query["modality"] == "text":
+        text = query["text"]
         prompt = llama3_template.format(
-            f"{text_or_image}\nSummary above sentence in one word: ")
+            f"{text}\nSummary above sentence in one word: ")
         image = None
-    else:
+    elif query["modality"] == "image":
         prompt = llama3_template.format(
             "<image>\nSummary above image in one word: ")
-        image = text_or_image
+        image = query["image"]
+    else:
+        modality = query['modality']
+        raise ValueError(f"Unsupported query modality: '{modality}'")
 
     llm = LLM(
-        model="royokong/e5-v-2",
+        model="royokong/e5-v",
         task="embedding",
     )
 
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
-        stop_token_ids=None,
         image=image,
     )
 
 
-def run_vlm2vec(text_or_image: Union[str, Image]):
-    if isinstance(text_or_image, str):
-        prompt = f"Find me an everyday image that matches the given caption: {text_or_image}"  # noqa: E501
+def run_vlm2vec(query: Query):
+    if query["modality"] == "text":
+        text = query["text"]
+        prompt = f"Find me an everyday image that matches the given caption: {text}"  # noqa: E501
         image = None
+    elif query["modality"] == "image":
+        prompt = "<|image_1|> Find a day-to-day image that looks similar to the provided image."  # noqa: E501
+        image = query["image"]
+    elif query["modality"] == "text+image":
+        text = query["text"]
+        prompt = f"<|image_1|> Represent the given image with the following question: {text}"  # noqa: E501
+        image = query["image"]
     else:
-        prompt = "<|image_1|> Represent the given image with the following question: What is in the image"  # noqa: E501
-        image = text_or_image
+        modality = query['modality']
+        raise ValueError(f"Unsupported query modality: '{modality}'")
 
     llm = LLM(
         model="TIGER-Lab/VLM2Vec-Full",
@@ -65,26 +95,38 @@ def run_vlm2vec(text_or_image: Union[str, Image]):
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
-        stop_token_ids=None,
         image=image,
     )
 
 
-def get_text_or_image(modality: str):
+def get_query(modality: QueryModality):
     if modality == "text":
-        return "A dog sitting in the grass"
+        return TextQuery(modality="text", text="A dog sitting in the grass")
 
     if modality == "image":
-        image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/American_Eskimo_Dog.jpg/360px-American_Eskimo_Dog.jpg"
-        return fetch_image(image_url)
+        return ImageQuery(
+            modality="image",
+            image=fetch_image(
+                "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/American_Eskimo_Dog.jpg/360px-American_Eskimo_Dog.jpg"  # noqa: E501
+            ),
+        )
+
+    if modality == "text+image":
+        return TextImageQuery(
+            modality="text+image",
+            text="A cat standing in the snow.",
+            image=fetch_image(
+                "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b6/Felis_catus-cat_on_snow.jpg/179px-Felis_catus-cat_on_snow.jpg"  # noqa: E501
+            ),
+        )
 
     msg = f"Modality {modality} is not supported."
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: str):
-    text_or_image = get_text_or_image(modality)
-    req_data = model_example_map[model](text_or_image)
+def run_encode(model: str, modality: QueryModality):
+    query = get_query(modality)
+    req_data = model_example_map[model](query)
 
     # Generate embedding. The output is a list of EmbeddingRequestOutputs.
     outputs = req_data.llm.encode(
@@ -112,7 +154,7 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models for multimodal embedding')
-    parser.add_argument('--model-type',
+    parser.add_argument('--model-name',
                         '-m',
                         type=str,
                         default="vlm2vec",
@@ -121,7 +163,7 @@ if __name__ == "__main__":
     parser.add_argument('--modality',
                         type=str,
                         default="image",
-                        choices=['text', 'image'],
+                        choices=get_args(QueryModality),
                         help='Modality of the input.')
     args = parser.parse_args()
     main(args)

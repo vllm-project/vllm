@@ -7,21 +7,25 @@ from ..utils import check_embeddings_close
 llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
 
 HF_TEXT_PROMPTS = [
+    # T -> X
     llama3_template.format(
         "The label of the object is stop sign\nSummary above sentence in one word: "  # noqa: E501
     ),
+    # T -> X
     llama3_template.format(
         "cherry blossom\nSummary above sentence in one word: "),
 ]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    # I -> X
     "stop_sign":
     llama3_template.format("<image>\nSummary above image in one word: "),
+    # I -> X
     "cherry_blossom":
     llama3_template.format("<image>\nSummary above image in one word: "),
 })
 
-MODELS = ["royokong/e5-v-2"]
+MODELS = ["royokong/e5-v"]
 
 
 @pytest.mark.parametrize("model", MODELS)

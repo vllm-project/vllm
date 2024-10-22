@@ -5,15 +5,19 @@ from ....conftest import IMAGE_ASSETS
 from ..utils import check_embeddings_close
 
 HF_TEXT_PROMPTS = [
+    # T -> X
     "Find me an everyday image that matches the given caption: The label of the object is stop sign",  # noqa: E501
+    # T -> X
     "Retrieve an image of this caption: cherry blossom",
 ]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    # T + I -> X
     "stop_sign":
     "<|image_1|> Select the portion of the image that isolates the object of the given label: The label of the object is stop sign",  # noqa: E501
+    # I -> X
     "cherry_blossom":
-    "<|image_1|> Represent the given image with the following question: What is in the image",  # noqa: E501
+    "<|image_1|> Represent the given image for classification",  # noqa: E501
 })
 
 MODELS = ["TIGER-Lab/VLM2Vec-Full"]

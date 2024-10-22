@@ -486,13 +486,13 @@ Multimodal Embedding
     - :ref:`PP <distributed_serving>`
   * - :code:`LlavaNextForConditionalGeneration`
     - LLaVA-NeXT-based
-    - T + I
-    - :code:`royokong/e5-v-2`, :code:`royokong/e5-v`
+    - T / I
+    - :code:`royokong/e5-v`
     - 
     - ✅︎
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision-based
-    - T + I
+    - T / I / T + I
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
