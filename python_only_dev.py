@@ -39,7 +39,6 @@ assert cwd != package_path, "should not import from the current directory"
 
 files_to_copy = [
     "vllm/_C.abi3.so",
-    "vllm/_core_C.abi3.so",
     "vllm/_moe_C.abi3.so",
     "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
     "vllm/vllm_flash_attn/flash_attn_interface.py",

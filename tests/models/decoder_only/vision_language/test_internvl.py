@@ -7,7 +7,7 @@ from PIL.Image import Image
 from transformers import AutoConfig
 
 from vllm.multimodal.utils import rescale_image_size
-from vllm.utils import is_cpu
+from vllm.platforms import current_platform
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
@@ -78,7 +78,7 @@ def run_test(
 
     All the image fixtures for the test are from IMAGE_ASSETS.
     For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalDataDict objects 
+    For vllm runner, we provide MultiModalDataDict objects
     and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
@@ -244,7 +244,7 @@ def run_awq_test(
 
 
 target_dtype = "half"
-if is_cpu():
+if current_platform.is_cpu():
     target_dtype = "bfloat16"
 
 

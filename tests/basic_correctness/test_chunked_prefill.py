@@ -12,18 +12,12 @@ from contextlib import nullcontext
 import pytest
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
-from ..utils import check_deprecated_block_manager_usage, multi_gpu_test
+from ..utils import multi_gpu_test
 
 MODELS = [
     "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Llama-3.2-1B",
 ]
-
-
-@pytest.fixture(scope="module", autouse=True)
-def check_deprecated_block_manager():
-    check_deprecated_block_manager_usage(
-        'tests/basic_correctness/test_chunked_prefill.py')
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -197,7 +191,6 @@ def test_models_with_fp8_kv_cache(
 @pytest.mark.parametrize("max_tokens", [16])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("chunk_size", [30, 32])
-@pytest.mark.parametrize("use_v2_block_manager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
@@ -206,7 +199,6 @@ def test_with_prefix_caching(
     max_tokens: int,
     enforce_eager: bool,
     chunk_size: int,
-    use_v2_block_manager: bool,
     tensor_parallel_size: int,
 ) -> None:
     """
@@ -234,7 +226,6 @@ def test_with_prefix_caching(
                 enable_chunked_prefill=True,
                 enable_prefix_caching=enable,
                 tensor_parallel_size=tensor_parallel_size,
-                use_v2_block_manager=use_v2_block_manager,
                 enforce_eager=enforce_eager,
                 max_num_seqs=max_num_seqs,
         ) as vllm_model:
