@@ -3,10 +3,17 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn.functional as F
 
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
+    marlin_make_empty_g_idx, marlin_permute_scales)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
+    MarlinWorkspace)
+from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.scalar_type import scalar_types
@@ -138,11 +145,38 @@ class HQQMarlinMethod(LinearMethodBase):
         layer.register_parameter("zeros", zeros)
         layer.register_parameter("scales", scales)
 
-        # self.kernel = '.' #TODO
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # TODO marlin format
-        return
+        dev = layer.qweight.device
+        qweight_t = layer.qweight.transpose(1, 0)
+
+        gptq_w_q = gptq_pack(qweight_t, 4, self.input_size_per_partition,
+                             self.output_size_per_partition)
+
+        sort_indices = torch.empty(0, dtype=torch.int, device=gptq_w_q.device)
+        marlin_w_q = ops.gptq_marlin_repack(
+            gptq_w_q,
+            sort_indices,
+            self.input_size_per_partition,
+            self.output_size_per_partition,
+            4,
+        ).to(dev)
+        marlin_s = marlin_permute_scales(layer.scales.transpose(1, 0),
+                                         self.input_size_per_partition,
+                                         self.output_size_per_partition,
+                                         64).to(dev)
+        marlin_zp = marlin_permute_scales(layer.zeros.transpose(1, 0),
+                                          self.input_size_per_partition,
+                                          self.output_size_per_partition,
+                                          64).to(dev)
+        # print(layer.zeros)
+        # print(marlin_zp)
+
+        layer.g_idx = marlin_make_empty_g_idx(dev)
+        layer.g_idx_sort_indices = marlin_make_empty_g_idx(dev)
+
+        layer.marlin_qweight = marlin_w_q
+        layer.marlin_zeros = marlin_zp
+        layer.marlin_scales = marlin_s
 
     def apply(
         self,
@@ -150,11 +184,54 @@ class HQQMarlinMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # TODO marlin kernel
-        unpacked = layer.qweight.reshape(-1, 64)
-        scales = layer.scales.reshape(-1, 1)
-        zeros = layer.zeros.reshape(-1, 1)
-        b = (unpacked - zeros) * scales
-        b = b.reshape(self.output_size_per_partition,
-                      self.input_size_per_partition)
-        return F.linear(x, b, bias)
+        # unpacked = layer.qweight.reshape(-1, 64)
+        # scales = layer.scales.reshape(-1, 1)
+        # zeros = layer.zeros.reshape(-1, 1)
+        # b = (unpacked - zeros) * scales
+        # b = b.reshape(self.output_size_per_partition,
+        #               self.input_size_per_partition)
+
+        workspace = MarlinWorkspace(self.output_size_per_partition,
+                                    GPTQ_MARLIN_MIN_THREAD_N,
+                                    GPTQ_MARLIN_MAX_PARALLEL)
+
+        # print(x)
+        # print(layer.marlin_qweight)
+        # print(layer.marlin_scales)
+        # print(layer.marlin_zeros)
+        # print(layer.g_idx)
+        # print(layer.g_idx_sort_indices)
+        # print(workspace.scratch)
+
+        # print(x.shape, layer.marlin_qweight.shape, layer.marlin_scales.shape,
+        #       layer.marlin_zeros.shape)
+
+        marlin_out = ops.gptq_marlin_gemm(
+            x,
+            layer.marlin_qweight,
+            layer.marlin_scales,
+            layer.marlin_zeros,
+            layer.g_idx,
+            layer.g_idx_sort_indices,
+            workspace.scratch,
+            scalar_types.uint4,
+            x.shape[0],
+            self.output_size_per_partition,
+            self.input_size_per_partition,
+            True,  # is_k_full
+            True,  # has_zp
+            False,  # use 32-bit reduce
+            True,  # use float zp
+        )
+
+        # deq_out = F.linear(x, b, bias)
+
+        # print("gptq:", gptq_out)
+        # print("marlin:", marlin_out.shape, marlin_out)
+        # print("deq:", deq_out.shape, deq_out)
+        # print("***")
+
+        if bias is not None:
+            marlin_out.add_(bias)
+
+        return marlin_out

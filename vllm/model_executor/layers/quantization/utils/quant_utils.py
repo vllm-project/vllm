@@ -132,6 +132,8 @@ def quantize_weights(w: torch.Tensor,
     assert quant_type.is_integer(), \
         "Floating point quantization may work but has not been tested"
 
+    torch.set_printoptions(sci_mode="False")
+
     orig_device = w.device
     orig_type = w.dtype
     size_k, size_n = w.shape
@@ -142,11 +144,17 @@ def quantize_weights(w: torch.Tensor,
         group_size = size_k
     assert group_size <= size_k
 
+    # print("orig w:", w.shape, w)
+
     # Reshape to [groupsize, -1]
     if group_size < size_k:
         w = w.reshape((-1, group_size, size_n))
+        # print("reshape1 w:", w.shape, w)
         w = w.permute(1, 0, 2)
+        # print("permute w:", w.shape, w)
         w = w.reshape((group_size, -1))
+
+    # print("reshape2 w:", w.shape, w)
 
     # Compute scale for each group
     max_val = torch.max(w, 0, keepdim=True).values
@@ -168,9 +176,16 @@ def quantize_weights(w: torch.Tensor,
             abs(min_val / (min_q_val if min_q_val != 0 else torch.inf)))
         maybe_w_zp = None
 
+    # print("w_s:", w_s.shape, w_s)
+
     # Quantize
     w_q = torch.round(w / w_s).int() + (maybe_w_zp if zero_points else 0)
     w_q = torch.clamp(w_q, min_q_val, max_q_val)
+
+    # print("w_q:", w_q.shape, w_q)
+
+    # TODO hqq has shape of w_s and w_q as in up to now in this code (also zp)
+    # but we need to transpose them first
 
     # Compute ref (dequantized)
     # For some kernels (namely Machete) the zero-points are applied after the
@@ -197,6 +212,9 @@ def quantize_weights(w: torch.Tensor,
         w_ref = reshape_w(w_ref)
 
     w_s = w_s.reshape((-1, size_n)).contiguous()
+
+    # print("final w_s:", w_s.shape, w_s)
+    # print("final w_q:", w_q.shape, w_q)
 
     if zero_points:
         maybe_w_zp = maybe_w_zp.reshape((-1, size_n)).contiguous()

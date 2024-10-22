@@ -43,21 +43,27 @@ def marlin_permute_weights(q_w, size_k, size_n, perm, tile=GPTQ_MARLIN_TILE):
 
 
 def marlin_weights(q_w, size_k, size_n, num_bits, perm):
+    # print("before permute:", q_w)
     # Permute
     q_w = marlin_permute_weights(q_w, size_k, size_n, perm)
+    # print("after permute:", q_w)
 
     # Pack
     pack_factor = get_pack_factor(num_bits)
     orig_device = q_w.device
 
     q_w = q_w.cpu().numpy().astype(np.uint32)
+    # print("astype:", q_w)
 
     q_packed = np.zeros((q_w.shape[0], q_w.shape[1] // pack_factor),
                         dtype=np.uint32)
     for i in range(pack_factor):
         q_packed |= q_w[:, i::pack_factor] << num_bits * i
+    # print("packed:", q_packed)
 
     q_packed = torch.from_numpy(q_packed.astype(np.int32)).to(orig_device)
+
+    # print("packed2:", q_packed)
 
     return q_packed
 
