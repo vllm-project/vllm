@@ -59,9 +59,9 @@ class Florence2LanguageModel(nn.Module):
                                         cache_config=cache_config,
                                         quant_config=quant_config)
 
-        # if self.config.tie_word_embeddings:
-        #     self.encoder.embed_tokens.weight = self.shared.weight
-        #     self.decoder.embed_tokens.weight = self.shared.weight
+        if self.config.tie_word_embeddings:
+            self.encoder.embed_tokens.weight = self.shared.weight
+            self.decoder.embed_tokens.weight = self.shared.weight
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 encoder_input_ids: torch.Tensor,
@@ -123,12 +123,12 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
-        self.unpadded_vocab_size = config.vocab_size
-        self.lm_head = Florence2ParallelLMHead(self.unpadded_vocab_size,
+        self.vocab_size = config.vocab_size
+        self.lm_head = Florence2ParallelLMHead(self.vocab_size,
                                                config.d_model,
                                                embed_scale=embed_scale)
 
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+        self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
 
@@ -183,6 +183,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
             else:
                 if "final_logits_bias" in name:
                     continue
+                if self.config.tie_word_embeddings and "embed_tokens" in name:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
@@ -197,6 +199,7 @@ class Florence2ForConditionalGeneration(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
+        # TODO(Isotr0py): Add vision backbone
         self.language_model = Florence2LanguageForConditionalGeneration(
             config=config.text_config,
             cache_config=cache_config,

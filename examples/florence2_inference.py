@@ -8,13 +8,17 @@ dtype = "float"
 
 # Create a BART encoder/decoder model instance
 llm = LLM(
-    model="/data/LLM-model/Florence-2-base",
-    tokenizer="/data/LLM-model/bart-base",
+    model="microsoft/Florence-2-base",
+    tokenizer="facebook/bart-base",
     dtype=dtype,
     trust_remote_code=True,
 )
 
-prompts = "<OD>"
+prompts = [
+    "<CAPTION>", "<DETAILED_CAPTION>", "<MORE_DETAILED_CAPTION>",
+    "<CAPTION_TO_PHRASE_GROUNDING>", "<OD>", "<DENSE_REGION_CAPTION>",
+    "<REGION_PROPOSAL>", "<OCR>", "<OCR_WITH_REGION>"
+]
 # Create a sampling params object.
 sampling_params = SamplingParams(
     temperature=0,
