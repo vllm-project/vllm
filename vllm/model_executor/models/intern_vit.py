@@ -431,10 +431,6 @@ class InternVisionModel(nn.Module):
         num_dummy_heads: int = 0,
         prefix: str = "",
     ) -> None:
-        # NOTE: Vision tower is not quantized by any of the supported methods
-        if quant_config is not None:
-            quant_config = None
-
         super().__init__()
 
         self.config = config
