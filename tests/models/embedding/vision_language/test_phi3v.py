@@ -48,7 +48,10 @@ def test_models(
                      enforce_eager=True) as vllm_model:
         vllm_outputs = vllm_model.encode(input_texts, images=input_images)
 
-    with hf_runner(model, dtype=dtype) as hf_model:
+    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
+    hf_model_kwargs = {"_attn_implementation": "eager"}
+    with hf_runner(model, dtype=dtype,
+                   model_kwargs=hf_model_kwargs) as hf_model:
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []

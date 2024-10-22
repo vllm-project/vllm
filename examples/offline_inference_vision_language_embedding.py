@@ -60,6 +60,7 @@ def run_e5_v(query: Query):
     llm = LLM(
         model="royokong/e5-v",
         task="embedding",
+        max_model_len=4096,
     )
 
     return ModelRequestData(
