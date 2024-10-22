@@ -252,7 +252,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
   else()
     message(STATUS "Not building Marlin kernels as no compatible archs found"
-                   "in CUDA target architectures")
+                   " in CUDA target architectures")
   endif()
 
   #
@@ -432,7 +432,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
-                   "in CUDA target architectures")
+                   " in CUDA target architectures")
   endif()
 endif()
 
