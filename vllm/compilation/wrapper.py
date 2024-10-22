@@ -73,7 +73,7 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
         # code borrowed from https://github.com/thuml/depyf/blob/f4ad79fadee27ea113b4c75202db1eb1a11c0dbc/depyf/explain/enable_debugging.py#L25
         frame = sys._getframe()
-        while True:
+        while frame and frame.f_back:
             frame = frame.f_back
             code_name = frame.f_code.co_name
             file_name = frame.f_code.co_filename.split(os.path.sep)[-1]

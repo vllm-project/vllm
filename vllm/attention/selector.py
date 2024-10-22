@@ -10,13 +10,14 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino, is_xpu
+from vllm.utils import STR_BACKEND_ENV_VAR, is_hip, is_openvino, is_xpu
 
 logger = init_logger(__name__)
 
 
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
+    FLASH_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
@@ -90,7 +91,6 @@ def get_global_forced_attn_backend() -> Optional[_Backend]:
 @lru_cache(maxsize=None)
 def get_attn_backend(
     head_size: int,
-    sliding_window: Optional[int],
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
@@ -105,12 +105,16 @@ def get_attn_backend(
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
 
-    backend = which_attn_to_use(head_size, sliding_window, dtype,
-                                kv_cache_dtype, block_size, is_attention_free)
+    backend = which_attn_to_use(head_size, dtype, kv_cache_dtype, block_size,
+                                is_attention_free)
     if backend == _Backend.FLASH_ATTN:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
         return FlashAttentionBackend
+    if backend == _Backend.FLASH_ATTN_VLLM_V1:
+        from vllm.v1.attention.backends.flash_attn import (  # noqa: F401
+            FlashAttentionBackend as FlashAttentionBackendV1)
+        return FlashAttentionBackendV1
     if backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
@@ -122,7 +126,7 @@ def get_attn_backend(
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
-        assert is_cpu(), RuntimeError(
+        assert current_platform.is_cpu(), RuntimeError(
             "Torch SDPA backend is only used for the CPU device.")
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
@@ -155,7 +159,6 @@ def get_attn_backend(
 
 def which_attn_to_use(
     head_size: int,
-    sliding_window: Optional[int],
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
@@ -185,7 +188,7 @@ def which_attn_to_use(
         if backend_by_env_var is not None:
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
-    if is_cpu():
+    if current_platform.is_cpu():
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA
@@ -217,6 +220,9 @@ def which_attn_to_use(
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         return _Backend.ROCM_FLASH
 
+    if envs.VLLM_USE_V1:
+        return _Backend.FLASH_ATTN_VLLM_V1
+
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
         if not current_platform.has_device_capability(80):
@@ -242,10 +248,6 @@ def which_attn_to_use(
             logger.info(
                 "Cannot use FlashAttention-2 backend for block size not "
                 "divisible by 16.")
-            selected_backend = _Backend.XFORMERS
-        elif sliding_window is not None:
-            logger.info(
-                "Cannot use FlashAttention-2 backend due to sliding window.")
             selected_backend = _Backend.XFORMERS
 
     # FlashAttn is valid for the model, checking if the package is installed.

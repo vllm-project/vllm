@@ -3,7 +3,7 @@ import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
-                    Optional, Union, overload)
+                    Optional, Union, cast, overload)
 
 import cloudpickle
 import zmq
@@ -204,8 +204,20 @@ class MQLLMEngineClient(EngineClient):
                     # (and record only the first one)
                     if is_engine_errored and not self._errored_with:
                         self._errored_with = exception
+                        # If engine is errored, no matter the type of exception
+                        # it will no longer be able to receive new requests,
+                        # therefore we have to inform that the current
+                        # processed requests failed as well. Send back a dead
+                        # engine error give this feedback and also give a
+                        # 'hint' to the server to shutdown next.
+                        exception = self.dead_error
 
                     if request_id is None:
+                        # If request_id is None, then the engine raised an
+                        # exception for a batch, and we may not know the
+                        # request that caused it, neither if it was actually
+                        # caused by any of them (e.g. CUDA OOM). Therefore we
+                        # broadcast the same exception for all requests.
                         for queue_i in tuple(self.output_queues.values()):
                             queue_i.put_nowait(exception)
                     else:
@@ -513,9 +525,14 @@ class MQLLMEngineClient(EngineClient):
         assert (prompt is not None and pooling_params is not None
                 and request_id is not None)
 
-        return self._process_request(prompt, pooling_params, request_id,
-                                     lora_request, trace_headers, None,
-                                     priority)
+        return cast(
+            AsyncGenerator[EmbeddingRequestOutput, None],
+            self._process_request(prompt,
+                                  pooling_params,
+                                  request_id,
+                                  lora_request,
+                                  trace_headers,
+                                  priority=priority))
 
     async def _process_request(
         self,
@@ -543,7 +560,9 @@ class MQLLMEngineClient(EngineClient):
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,
                     tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=self.decoding_config.guided_decoding_backend
+                    default_guided_backend=(self.decoding_config.guided_decoding_backend
+                        if self.decoding_config
+                        else DecodingConfig.guided_decoding_backend),
                 )
 
         # 1) Create output queue for this requests.

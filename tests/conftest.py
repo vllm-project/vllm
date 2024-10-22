@@ -1,5 +1,3 @@
-import contextlib
-import gc
 import json
 import os
 import sys
@@ -25,10 +23,9 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TokenizerPoolConfig
+from vllm.config import TaskOption, TokenizerPoolConfig
 from vllm.connections import global_http_connection
-from vllm.distributed import (destroy_distributed_environment,
-                              destroy_model_parallel,
+from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
 from vllm.inputs import (EmbedsPrompt, ExplicitEncoderDecoderPrompt,
@@ -36,9 +33,10 @@ from vllm.inputs import (EmbedsPrompt, ExplicitEncoderDecoderPrompt,
                          zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        identity, is_cpu)
+                        identity)
 
 logger = init_logger(__name__)
 
@@ -141,17 +139,7 @@ def dist_init():
     )
     initialize_model_parallel(1, 1)
     yield
-    cleanup()
-
-
-def cleanup():
-    destroy_model_parallel()
-    destroy_distributed_environment()
-    with contextlib.suppress(AssertionError):
-        torch.distributed.destroy_process_group()
-    gc.collect()
-    if not is_cpu():
-        torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
 
 
 @pytest.fixture()
@@ -168,7 +156,7 @@ def should_do_global_cleanup_after_test(request) -> bool:
 def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(autouse=True)
@@ -250,7 +238,8 @@ class HfRunner:
 
     def wrap_device(self, input: _T, device: Optional[str] = None) -> _T:
         if device is None:
-            return self.wrap_device(input, "cpu" if is_cpu() else "cuda")
+            return self.wrap_device(
+                input, "cpu" if current_platform.is_cpu() else "cuda")
 
         if hasattr(input, "device") and input.device.type == device:
             return input
@@ -607,7 +596,7 @@ class HfRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.model
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(scope="session")
@@ -620,6 +609,7 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
+        task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
@@ -635,6 +625,7 @@ class VllmRunner:
     ) -> None:
         self.model = LLM(
             model=model_name,
+            task=task,
             tokenizer=tokenizer_name,
             trust_remote_code=True,
             dtype=dtype,
@@ -865,7 +856,7 @@ class VllmRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.model
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(scope="session")
