@@ -334,6 +334,14 @@ The following modalities are supported depending on the model:
 - **V**\ ideo
 - **A**\ udio
 
+Any combination of modalities joined by :code:`+` are supported.
+
+- e.g.: :code:`T + I` means that the model supports text-only, image-only, and text-with-image inputs.
+
+On the other hand, modalities separated by :code:`/` are mutually exclusive.
+
+- e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
+
 .. _supported_vlms:
 
 Text Generation
@@ -492,7 +500,7 @@ Multimodal Embedding
     - ✅︎
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision-based
-    - T / I / T + I
+    - T + I
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
