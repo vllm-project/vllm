@@ -1,5 +1,6 @@
 import pytest
 import torch.nn.functional as F
+from transformers import AutoModelForVision2Seq
 
 from ....conftest import IMAGE_ASSETS
 from ..utils import check_embeddings_close
@@ -56,7 +57,8 @@ def test_models(
                      enforce_eager=True) as vllm_model:
         vllm_outputs = vllm_model.encode(input_texts, images=input_images)
 
-    with hf_runner(model, dtype=dtype) as hf_model:
+    with hf_runner(model, dtype=dtype,
+                   auto_cls=AutoModelForVision2Seq) as hf_model:
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []
