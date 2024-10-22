@@ -81,17 +81,15 @@ class RayTPUExecutor(TPUExecutor):
             # and instead sets these from within the Ray process. Therefore we
             # need to override the Ray environment variables manually.
             override_env = {}
-            if "TPU_CHIPS_PER_HOST_BOUNDS" in os.environ:
-                override_env.update({
-                    "TPU_CHIPS_PER_HOST_BOUNDS":
-                    os.environ["TPU_CHIPS_PER_HOST_BOUNDS"]
-                })
-            if "TPU_HOST_BOUNDS" in os.environ:
-                override_env.update(
-                    {"TPU_HOST_BOUNDS": os.environ["TPU_HOST_BOUNDS"]})
-            if "TPU_SKIP_MDS_QUERY" in os.environ:
-                override_env.update(
-                    {"TPU_SKIP_MDS_QUERY": os.environ["TPU_SKIP_MDS_QUERY"]})
+            OVERRIDE_VARS = [
+                "TPU_CHIPS_PER_HOST_BOUNDS",
+                "TPU_HOST_BOUNDS",
+                "TPU_SKIP_MDS_QUERY",
+                "ACCELERATOR_TYPE",
+            ]
+            for var in OVERRIDE_VARS:
+                if var in os.environ:
+                    override_env.update({var: os.environ[var]}) 
 
             worker = ray.remote(
                 num_cpus=0,
