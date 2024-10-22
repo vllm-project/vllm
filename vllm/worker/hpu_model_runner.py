@@ -202,8 +202,6 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     last_bucket = round_up(max_blocks, bstep)
     for bs in bs_buckets:
         for blocks in block_buckets:
-            if blocks < bs:
-                continue
             if blocks > last_bucket:
                 break
             buckets.append((bs, blocks))
