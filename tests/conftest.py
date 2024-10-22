@@ -549,8 +549,8 @@ class HfRunner:
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
 
-        for i, (encoder_prompt,
-             decoder_prompt) in enumerate(to_enc_dec_tuple_list(encoder_decoder_prompts)):
+        for i, (encoder_prompt, decoder_prompt) in enumerate(
+                to_enc_dec_tuple_list(encoder_decoder_prompts)):
             processor_kwargs: Dict[str, Any] = {
                 "text": encoder_prompt,
                 "return_tensors": "pt",
