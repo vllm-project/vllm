@@ -170,18 +170,12 @@ def input_processor_for_qwen2_audio(
             and isinstance(multi_modal_data['audio'][0], tuple))
 
     processor = cached_get_processor(ctx.model_config.model)
-    audios = [_[0] for _ in multi_modal_data['audio']]
 
-    audio_inputs = processor.feature_extractor(audios,
-                                               sampling_rate=16000,
-                                               return_attention_mask=True,
-                                               padding="max_length")
-
-    feature_attention_mask = audio_inputs.pop("attention_mask")
-    input_features = audio_inputs['input_features']
+    audio_input_lengths = np.array([_[0].shape[0] // 160 + 1 
+                                for _ in multi_modal_data['audio']])
 
     audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
-        feature_attention_mask.sum(-1))
+        audio_input_lengths)
 
     audio_token_index = ctx.model_config.hf_config.audio_token_index
 
@@ -189,9 +183,9 @@ def input_processor_for_qwen2_audio(
 
     new_input_ids = []
     audio_num = input_ids.count(audio_token_index)
-    assert len(input_features) == audio_num, \
+    assert len(audio_input_lengths) == audio_num, \
         (f'The text input contains {audio_num} audio tokens, '
-         f'but {len(input_features)} audios provided')
+         f'but {len(audio_input_lengths)} audios provided')
     start = 0
     for audio_idx in range(audio_num):
         end = input_ids.index(audio_token_index, start)
@@ -234,6 +228,7 @@ def input_mapper_for_qwen2_audio(
                                              return_attention_mask=True,
                                              padding="max_length",
                                              return_tensors="pt").data
+        print(f"{batch_data.keys()=}")
         batch_data["feature_attention_mask"] = batch_data.pop("attention_mask")
     except Exception:
         logger.error("Failed to process audio (%s)", audios)
