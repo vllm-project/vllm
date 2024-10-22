@@ -226,7 +226,6 @@ def input_mapper_for_qwen2_audio(
                                              return_attention_mask=True,
                                              padding="max_length",
                                              return_tensors="pt").data
-        print(f"{batch_data.keys()=}")
         batch_data["feature_attention_mask"] = batch_data.pop("attention_mask")
     except Exception:
         logger.error("Failed to process audio (%s)", audios)
