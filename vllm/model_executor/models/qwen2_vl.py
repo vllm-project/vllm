@@ -78,7 +78,7 @@ logger = init_logger(__name__)
 class Qwen2VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: 
+    """Shape:
     `(num_patches, num_channels * patch_size * patch_size)`
     """
 
@@ -102,14 +102,14 @@ Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
 
 class Qwen2VLVideoInputs(TypedDict):
     pixel_values_videos: torch.Tensor
-    """Shape: 
-    `(num_patches, 
+    """Shape:
+    `(num_patches,
       num_channels * temporal_patch_size * patch_size * patch_size)`
     """
 
     video_grid_thw: torch.Tensor
     """Shape: `(num_videos, 3)`
-    
+
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 

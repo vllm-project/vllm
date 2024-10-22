@@ -19,7 +19,8 @@ def test_env(name: str, device: str, monkeypatch):
     override_backend_env_variable(monkeypatch, name)
 
     if device == "cpu":
-        with patch("vllm.attention.selector.is_cpu", return_value=True):
+        with patch("vllm.attention.selector.current_platform.is_cpu",
+                   return_value=True):
             backend = which_attn_to_use(16, torch.float16, torch.float16, 16,
                                         False)
         assert backend.name == "TORCH_SDPA"

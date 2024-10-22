@@ -7,7 +7,7 @@ import vllm.envs as envs
 from vllm.compilation.levels import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_cpu, is_hip, is_xpu, print_warning_once
+from vllm.utils import is_hip, is_xpu, print_warning_once
 
 logger = init_logger(__name__)
 
@@ -74,7 +74,7 @@ class CustomOp(nn.Module):
 
         if is_hip():
             return self.forward_hip
-        elif is_cpu():
+        elif current_platform.is_cpu():
             return self.forward_cpu
         elif current_platform.is_tpu():
             return self.forward_tpu
