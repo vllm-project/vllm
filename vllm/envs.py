@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: bool = False
     VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
+    VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     VLLM_TORCH_COMPILE_DUMP: List[str] = []
     VLLM_CUSTOM_OPS: List[str] = []
     VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_USE_V1: bool = False
 
 
 def get_default_cache_root():
@@ -298,6 +300,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_SAMPLER":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
 
+    # If set, vllm will force flashinfer to use tensor cores;
+    # otherwise will use heuristic based on model architecture.
+    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
+    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
+
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -456,6 +463,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_DISABLED_KERNELS":
     lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
         "VLLM_DISABLED_KERNELS"].split(","),
+
+    # If set, use the V1 code path.
+    "VLLM_USE_V1":
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 }
 
 # end-env-vars-definition
