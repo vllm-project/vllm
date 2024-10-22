@@ -105,7 +105,8 @@ def fix_functionalization(graph: fx.Graph):
                 result = kwargs['result']
                 residual = kwargs['residual']
 
-                # Create a new call to torch.ops._C.rotary_embedding.default
+                # Create a new call to
+                # torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
                 with graph.inserting_before(node):
                     # just insert the call to the custom op
                     # NOTE: don't run dead code elimination,
@@ -132,8 +133,7 @@ def fix_functionalization(graph: fx.Graph):
                 kwargs = node.kwargs
 
                 replace_node = kwargs['result']
-                # Create a new call to torch.ops._C.rotary_embedding.default
-                # cannot use kwargs, because we have an `out`, see https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351 # noqa
+                # Create a new call to torch.ops._C.rms_norm.default
                 with graph.inserting_before(node):
                     # just insert the call to the custom op
                     # NOTE: don't run dead code elimination,
@@ -148,14 +148,13 @@ def fix_functionalization(graph: fx.Graph):
                 nodes_to_remove.append(node)
 
             elif node.args[
-                    0] == torch.ops._C.rms_norm_static_fp8_quant.default:
-                # manual replace for rms_norm
+                    0] == torch.ops._C.rms_norm_static_fp8_quant.default:  # noqa
+                # manual replace for rms_norm_static_fp8_quant
 
                 kwargs = node.kwargs
 
                 replace_node = kwargs['result']
-                # Create a new call to torch.ops._C.rotary_embedding.default
-                # cannot use kwargs, because we have an `out`, see https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351 # noqa
+                # Create a new call to torch.ops._C.rms_norm_static_fp8_quant.default  # noqa
                 with graph.inserting_before(node):
                     # just insert the call to the custom op
                     # NOTE: don't run dead code elimination,
@@ -178,7 +177,7 @@ def fix_functionalization(graph: fx.Graph):
                 input = kwargs['input']
                 out = kwargs['out']
 
-                # Create a new call to torch.ops._C.rotary_embedding.default
+                # Create a new call to torch.ops._C.silu_and_mul.default
                 # cannot use kwargs, because we have an `out`, see https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351 # noqa
                 with graph.inserting_before(node):
                     # just insert the call to the custom op
@@ -208,7 +207,7 @@ def fix_functionalization(graph: fx.Graph):
 fusion_pass = FusionPass()
 
 
-def post_grad_post_passes(graph: fx.Graph):
+def default_post_grad_post_passes(graph: fx.Graph):
     fusion_pass(graph)
     fix_functionalization(graph)
 
@@ -220,11 +219,20 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
 
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
+
+    # If a custom post pass is given in config,
+    # run it after the default post passes.
     if current_config['post_grad_custom_post_pass'] is not None:
-        logger.warning(
-            "post_grad_custom_post_pass is already set in the config. "
-            "Overwriting it with the post_grad_post_passes")  # TODO combine
-    current_config['post_grad_custom_post_pass'] = post_grad_post_passes
+        config_pass = current_config['post_grad_custom_post_pass']
+
+        def combined_pass(graph):
+            default_post_grad_post_passes(graph)
+            config_pass(graph)
+
+        current_config['post_grad_custom_post_pass'] = combined_pass
+
+    current_config[
+        'post_grad_custom_post_pass'] = default_post_grad_post_passes  # noqa
     return compile_fx(graph, example_inputs, config_patches=current_config)
 
 
@@ -232,7 +240,6 @@ def vllm_backend(
         graph,
         example_inputs,
         additional_inductor_config: Optional[Dict] = None) -> Callable:
-
     context = get_compile_context()
     context = copy.deepcopy(context) if context is not None else []
     sizes_to_specialize: List[int] = context
