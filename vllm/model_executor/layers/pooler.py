@@ -16,6 +16,7 @@ class PoolingType(IntEnum):
     CLS = 2
     MEAN = 3
 
+
 @dataclass
 class PoolingConfig:
     """A class that configures the pooling operation which
