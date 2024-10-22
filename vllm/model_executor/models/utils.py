@@ -477,6 +477,7 @@ def get_inputs_embeds(
 
         hidden_states = embeddings_module(input_ids)
 
+    assert hidden_states is not None
     return hidden_states
 
 
