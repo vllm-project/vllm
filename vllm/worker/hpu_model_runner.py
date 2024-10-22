@@ -1354,12 +1354,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 ]
         self.profiler.start('internal', scenario_name)
         times = 3 if use_graphs or is_pt_profiler_run else 1
-        if self.lora_config and not is_lora_profile_run:
-            lora_mapping = LoRAMapping(
-                **dict(index_mapping=[0] * batch_size * seq_len,
-                       prompt_mapping=[0] * batch_size * seq_len,
-                       is_prefill=is_prompt))
-            self.set_active_loras(set(), lora_mapping)
         if is_prompt:
             seqs = [
                 self.create_dummy_seq_group_metadata(
