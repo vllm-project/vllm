@@ -1,5 +1,5 @@
-from enum import IntEnum
 from dataclasses import dataclass
+from enum import IntEnum
 
 import torch
 import torch.nn as nn

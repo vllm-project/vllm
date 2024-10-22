@@ -1,7 +1,7 @@
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.model_executor.layers.pooler import (PoolingConfig, PoolingType)
+from vllm.model_executor.layers.pooler import PoolingConfig, PoolingType
 
 
 @pytest.mark.parametrize(("model_id", "expected_task"), [
