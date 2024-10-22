@@ -169,8 +169,8 @@ def input_processor_for_qwen2_audio(
     assert (isinstance(multi_modal_data['audio'], list)
             and isinstance(multi_modal_data['audio'][0], tuple))
 
-    audio_input_lengths = np.array([_[0].shape[0] // 160 + 1 
-                                for _ in multi_modal_data['audio']])
+    audio_input_lengths = np.array(
+        [_[0].shape[0] // 160 + 1 for _ in multi_modal_data['audio']])
 
     audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
         audio_input_lengths)
