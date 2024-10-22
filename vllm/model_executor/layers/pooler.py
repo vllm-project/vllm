@@ -1,4 +1,5 @@
 from enum import IntEnum
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -15,9 +16,11 @@ class PoolingType(IntEnum):
     CLS = 2
     MEAN = 3
 
-
-class PoolingConfig():
-    """A class that configures the pooling operation.
+@dataclass
+class PoolingConfig:
+    """A class that configures the pooling operation which
+      only applies to sentence-transformers models. 
+      More at: https://www.sbert.net/
 
     Attributes:
         pooling_type (str): The type of pooling to use. 
