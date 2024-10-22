@@ -200,13 +200,13 @@ class Sampler(nn.Module):
         self._do_penalties = do_penalties
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
-        self._top_p_scalar = sampling_tensors.top_ps[0].item()
-        self._top_k_scalar = sampling_tensors.top_ks[0].item()
+        self._top_p_scalar = sampling_tensors.top_ps[0]
+        self._top_k_scalar = sampling_tensors.top_ks[0]
         scalar_p = torch.all(sampling_tensors.top_ps == self._top_p_scalar)
         scalar_k = torch.all(sampling_tensors.top_ks == self._top_k_scalar)
-        self._scalar_p_and_k = (scalar_p and scalar_k).item()
-        if self._scalar_p_and_k and self._do_top_p_top_k:
-            self._apply_top_k_top_p_opt = ApplyToppTopkScalar(5)
+        self._scalar_p_and_k = torch.logical_and(scalar_p, scalar_k)
+
+        self._apply_top_k_top_p_opt = ApplyToppTopkScalar(5)
 
     def forward(
         self,
@@ -266,13 +266,13 @@ class Sampler(nn.Module):
         logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
 
         if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
-            if self._scalar_p_and_k:
-                logits = self._apply_top_k_top_p_opt(logits,
-                                                     self._top_p_scalar,
-                                                     self._top_k_scalar)
-            else:
-                logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
-                                            sampling_tensors.top_ks)
+            # If we have a scalar p and k, we can use the optimized version.
+            logits = torch.where(
+                self._scalar_p_and_k,
+                self._apply_top_k_top_p_opt(logits, self._top_p_scalar,
+                                            self._top_k_scalar),
+                _apply_top_k_top_p(logits, sampling_tensors.top_ps,
+                                   sampling_tensors.top_ks))
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
