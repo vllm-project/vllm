@@ -16,6 +16,8 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser
 
@@ -428,7 +430,11 @@ class EngineArgs:
             help='The fraction of GPU memory to be used for the model '
             'executor, which can range from 0 to 1. For example, a value of '
             '0.5 would imply 50%% GPU memory utilization. If unspecified, '
-            'will use the default value of 0.9.')
+            'will use the default value of 0.9. This is a global gpu memory '
+            'utilization limit, for example if 50%% of the gpu memory is '
+            'already used before vLLM starts and --gpu-memory-utilization is '
+            'set to 0.9, then only 40%% of the gpu memory will be allocated '
+            'to the model executor.')
         parser.add_argument(
             '--num-gpu-blocks-override',
             type=int,
@@ -919,6 +925,8 @@ class EngineArgs:
                     "--enable-prefix-caching is currently not "
                     "supported for multimodal models and has been disabled.")
             self.enable_prefix_caching = False
+
+        maybe_register_config_serialize_by_value(self.trust_remote_code)
 
         cache_config = CacheConfig(
             # neuron needs block_size = max_model_len
