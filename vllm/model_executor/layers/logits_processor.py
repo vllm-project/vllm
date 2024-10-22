@@ -1,12 +1,13 @@
 """A layer that compute logits from hidden_stats."""
 import inspect
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -46,7 +47,7 @@ class LogitsProcessor(nn.Module):
 
     def forward(
         self,
-        lm_head: VocabParallelEmbedding,
+        lm_head: Union[VocabParallelEmbedding, LinearBase],
         hidden_states: torch.Tensor,
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
@@ -78,13 +79,19 @@ class LogitsProcessor(nn.Module):
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
-        lm_head: VocabParallelEmbedding,
+        lm_head: Union[VocabParallelEmbedding, LinearBase],
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.linear_method.apply(lm_head,
-                                             hidden_states,
-                                             bias=embedding_bias)
+        linear_method = None
+        if isinstance(lm_head, LinearBase):
+            linear_method = lm_head.quant_method
+        elif isinstance(lm_head, VocabParallelEmbedding):
+            linear_method = lm_head.linear_method
+        assert linear_method is not None
+        logits = linear_method.apply(lm_head,
+                                     hidden_states,
+                                     bias=embedding_bias)
         if self.use_gather:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
