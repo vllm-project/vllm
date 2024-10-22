@@ -1521,6 +1521,122 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
 
+    @torch.inference_mode()
+    def lazy_capture_model_for_batch(
+        self,
+        kv_caches: List[torch.Tensor],
+        batch_size: int,
+        virtual_engine: int,
+    ) -> None:
+        """Cuda graph capture a model for a specific batch size and virtual engine.
+
+        If the CUDA graph has been captured for the given batch size and virtual engine before,
+        this function will early return.
+        """
+        # The CUDA graph for this batch has been captured before.
+        if batch_size in self.graph_runners[virtual_engine]:
+            return
+        assert not self.model_config.enforce_eager
+        start_time = time.perf_counter()
+
+        input_tokens = torch.zeros(batch_size, dtype=torch.long).cuda()
+        input_positions = torch.zeros(batch_size, dtype=torch.long).cuda()
+        if self.model_is_mrope:
+            input_positions = torch.tile(input_positions, (3, 1))
+        # Prepare dummy previous_hidden_states only if needed by the model.
+        # This is used by draft models such as EAGLE.
+        previous_hidden_states = None
+        if "previous_hidden_states" in inspect.signature(
+                self.model.forward).parameters:
+            previous_hidden_states = torch.empty(
+                [batch_size,
+                 self.model_config.get_hidden_size()],
+                dtype=self.model_config.dtype,
+                device=self.device)
+
+        intermediate_inputs = None
+        if not get_pp_group().is_first_rank:
+            intermediate_inputs = self.model.make_empty_intermediate_tensors(
+                batch_size=batch_size,
+                dtype=self.model_config.dtype,
+                device=self.device)
+
+        with self.attn_state.graph_capture(
+                batch_size), graph_capture() as graph_capture_context:
+            # NOTE: Capturing the largest batch size first may help reduce the
+            # memory usage of CUDA graph.
+            for virtual_engine in range(
+                    self.parallel_config.pipeline_parallel_size):
+                attn_metadata = (
+                    self.attn_state.graph_capture_get_metadata_for_batch(
+                        batch_size,
+                        is_encoder_decoder_model=self.model_config.
+                        is_encoder_decoder_model))
+
+                if self.lora_config:
+                    lora_mapping = LoRAMapping(
+                        **dict(index_mapping=[0] * batch_size,
+                                prompt_mapping=[0] * batch_size,
+                                is_prefill=False))
+                    self.set_active_loras(set(), lora_mapping)
+
+                if self.prompt_adapter_config:
+                    prompt_adapter_mapping = PromptAdapterMapping(
+                        [-1] * batch_size,
+                        [-1] * batch_size,
+                    )
+                    self.set_active_prompt_adapters(
+                        set(), prompt_adapter_mapping)
+                graph_runner = CUDAGraphRunner(
+                    self.model, self.attn_backend.get_name(),
+                    self.attn_state.graph_clone(batch_size),
+                    self.model_config.is_encoder_decoder_model)
+
+                capture_inputs = {
+                    "input_ids":
+                    input_tokens,
+                    "positions":
+                    input_positions,
+                    "hidden_or_intermediate_states":
+                    None,
+                    "intermediate_inputs":
+                    intermediate_inputs,
+                    "kv_caches":
+                    kv_caches,
+                    "attn_metadata":
+                    attn_metadata,
+                    "memory_pool":
+                    self.graph_memory_pool,
+                    "stream":
+                    graph_capture_context.stream
+                }
+                if previous_hidden_states is not None:
+                    capture_inputs[
+                        "previous_hidden_states"] = previous_hidden_states
+
+                if self.has_seqlen_agnostic:
+                    # Only used by Mamba-based models CUDA graph atm (Jamba)
+                    capture_inputs.update({
+                        "seqlen_agnostic_capture_inputs":
+                        self.model.get_seqlen_agnostic_capture_inputs(
+                            batch_size)
+                    })
+                if self.model_config.is_encoder_decoder_model:
+                    # add the additional inputs to capture for
+                    # encoder-decoder models.
+                    self._update_inputs_to_capture_for_enc_dec_model(
+                        capture_inputs)
+
+                graph_runner.capture(**capture_inputs)
+                self.graph_memory_pool = graph_runner.graph.pool()
+                self.graph_runners[virtual_engine][batch_size] = (
+                    graph_runner)
+
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        # This usually takes < 1 seconds.
+        logger.info(f"Graph capturing for virtual engine {virtual_engine} batch size {batch_size} finished in {elapsed_time:.1f} secs.")
+
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
                                                                          Any]):
@@ -1637,6 +1753,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
+            if self.model_config.lazy_capture_cuda_graph:
+                self.lazy_capture_model_for_batch(
+                    kv_caches=kv_caches,
+                    batch_size=graph_batch_size,
+                    virtual_engine=virtual_engine,
+                )
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
         else:
