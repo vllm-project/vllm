@@ -129,21 +129,21 @@ def run_encode(model: str, modality: QueryModality):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
-    # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-    outputs = req_data.llm.encode(
-        {
-            "prompt": req_data.prompt,
-            "multi_modal_data": {
-                "image": req_data.image
-            },
-        }, )
+    mm_data = {}
+    if req_data.image is not None:
+        mm_data["image"] = req_data.image
+
+    outputs = req_data.llm.encode({
+        "prompt": req_data.prompt,
+        "multi_modal_data": mm_data,
+    })
 
     for output in outputs:
         print(output.outputs.embedding)
 
 
 def main(args: Namespace):
-    run_encode(args.model, args.modality)
+    run_encode(args.model_name, args.modality)
 
 
 model_example_map = {
