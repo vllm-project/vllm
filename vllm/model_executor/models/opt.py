@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only OPT model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -41,6 +41,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
+from vllm.sequence import IntermediateTensors
+from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from vllm.model_executor.layers.layernorm import RMSNorm
 
 class OPTLearnedPositionalEmbedding(nn.Embedding):
 
@@ -64,6 +69,7 @@ class OPTAttention(nn.Module):
         bias: bool = True,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
@@ -81,12 +87,14 @@ class OPTAttention(nn.Module):
             total_num_heads,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.out_proj = RowParallelLinear(
             embed_dim,
             embed_dim,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -114,6 +122,8 @@ class OPTDecoderLayer(nn.Module):
         config: OPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = ""
+        
     ):
         super().__init__()
         self.config = config
@@ -124,6 +134,7 @@ class OPTDecoderLayer(nn.Module):
             bias=config.enable_bias,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.do_layer_norm_before = config.do_layer_norm_before
 
@@ -150,9 +161,11 @@ class OPTDecoderLayer(nn.Module):
 
     def forward(
         self,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
@@ -179,7 +192,8 @@ class OPTDecoderLayer(nn.Module):
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
             hidden_states = self.final_layer_norm(hidden_states)
-        return hidden_states
+        return hidden_states, residual
+
 
 
 class OPTDecoder(nn.Module):
@@ -189,6 +203,7 @@ class OPTDecoder(nn.Module):
         config: OPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = ""
     ):
         super().__init__()
         self.config = config
@@ -196,10 +211,14 @@ class OPTDecoder(nn.Module):
         self.max_target_positions = config.max_position_embeddings
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.word_embed_proj_dim,
-        )
+        if get_pp_group().is_first_rank or (config.tie_word_embeddings
+                                            and get_pp_group().is_last_rank):
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.word_embed_proj_dim,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
         # Positional embeddings are replicated (not sharded).
         self.embed_positions = OPTLearnedPositionalEmbedding(
             config.max_position_embeddings, config.hidden_size)
@@ -232,10 +251,15 @@ class OPTDecoder(nn.Module):
         else:
             self.final_layer_norm = None
 
-        self.layers = nn.ModuleList([
-            OPTDecoderLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: OPTDecoderLayer(config=config,
+                                             cache_config=cache_config,
+                                             quant_config=quant_config,
+                                             prefix=prefix),
+            prefix=f"{prefix}.layers")
+    
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -246,24 +270,44 @@ class OPTDecoder(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors]=None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings(input_ids)
-        pos_embeds = self.embed_positions(positions)
-        if self.project_in is not None:
-            inputs_embeds, _ = self.project_in(inputs_embeds)
-        hidden_states = inputs_embeds + pos_embeds
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is None:
+                inputs_embeds = self.get_input_embeddings(input_ids)
+            pos_embeds = self.embed_positions(positions)
+            if self.project_in is not None:
+                inputs_embeds, _ = self.project_in(inputs_embeds)
+            hidden_states = inputs_embeds + pos_embeds
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
 
-        for i in range(len(self.layers)):
+        for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                kv_caches[i - self.start_layer],
+                attn_metadata,
+                residual,
+            )
 
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
+    
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
         if self.project_out is not None:
             hidden_states, _ = self.project_out(hidden_states)
         return hidden_states
+    
 
 
 class OPTModel(nn.Module):
@@ -273,6 +317,7 @@ class OPTModel(nn.Module):
         config: OPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = ""
     ):
         super().__init__()
         self.decoder = OPTDecoder(config, cache_config, quant_config)
@@ -286,13 +331,16 @@ class OPTModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors]=None,
         inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         return self.decoder(input_ids,
                             positions,
                             kv_caches,
                             attn_metadata,
-                            inputs_embeds=inputs_embeds)
+                            inputs_embeds=inputs_embeds,
+                            intermediate_tensors=intermediate_tensors)
 
 
 class OPTForCausalLM(nn.Module):
@@ -306,14 +354,15 @@ class OPTForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = OPTModel(config, cache_config, quant_config)
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.model.decoder.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.word_embed_proj_dim)
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.model = OPTModel(config, cache_config, quant_config,prefix="model")
+        if get_pp_group().is_last_rank:
+            if self.config.tie_word_embeddings:
+                self.lm_head = self.model.decoder.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(config.vocab_size,
+                                            config.word_embed_proj_dim)
+            self.logits_processor = LogitsProcessor(config.vocab_size)
+            self.sampler = Sampler()
 
     def forward(
         self,
@@ -322,10 +371,10 @@ class OPTForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
-        return hidden_states
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        model_output = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata,intermediate_tensors)
+        return model_output
 
     def compute_logits(
         self,
@@ -343,6 +392,20 @@ class OPTForCausalLM(nn.Module):
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
+
+    def make_empty_intermediate_tensors(
+            self, batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            "hidden_states":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+            "residual":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+        })
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -365,6 +428,8 @@ class OPTForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -373,7 +438,10 @@ class OPTForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+    
