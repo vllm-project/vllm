@@ -135,6 +135,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Encoder sequence lengths representation
     encoder_seq_lens: Optional[List[int]] = None
     encoder_seq_lens_tensor: Optional[torch.Tensor] = None
+    # FIXME: It is for flash attn.
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
+    # the batch, used to index into sequence. E.g., if the sequence length is
+    # [4, 6], it is [0, 4, 10].
+    encoder_seq_start_loc: Optional[torch.Tensor] = None
 
     # Maximum sequence length among encoder sequences
     max_encoder_seq_len: Optional[int] = None

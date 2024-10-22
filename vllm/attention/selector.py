@@ -87,7 +87,7 @@ def get_global_forced_attn_backend() -> Optional[_Backend]:
     return forced_attn_backend
 
 
-@lru_cache(maxsize=None)
+#@lru_cache(maxsize=None)
 def get_attn_backend(
     head_size: int,
     sliding_window: Optional[int],
@@ -98,13 +98,14 @@ def get_attn_backend(
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-
+    print('In get_attn_backend1')
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")
         from vllm.attention.backends.blocksparse_attn import (
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
-
+    
+    print('In get_attn_backend2')
     backend = which_attn_to_use(head_size, sliding_window, dtype,
                                 kv_cache_dtype, block_size, is_attention_free)
     if backend == _Backend.FLASH_ATTN:
@@ -177,6 +178,7 @@ def which_attn_to_use(
     # ENVIRONMENT VARIABLE.
     backend_by_global_setting: Optional[_Backend] = (
         get_global_forced_attn_backend())
+    print('backend_by_global_setting ' + str(backend_by_global_setting))
     if backend_by_global_setting is not None:
         selected_backend = backend_by_global_setting
     else:
@@ -295,6 +297,9 @@ def global_force_attn_backend_context_manager(
 
     # Globally force the new backend override
     global_force_attn_backend(attn_backend)
+
+    print('original value ' + str(original_value))
+    print('new value ' + str(attn_backend))
 
     # Yield control back to the enclosed code block
     try:

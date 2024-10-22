@@ -11,6 +11,7 @@ from typing import NamedTuple, Optional
 
 import pytest
 import torch
+from vllm.forward_context import get_forward_context, set_forward_context
 
 from tests.kernels.utils import *
 from vllm.attention import (Attention, AttentionBackend, AttentionMetadata,
@@ -620,14 +621,15 @@ def _run_encoder_attention_test(
     attn_type = AttentionType.ENCODER
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
-    return attn.forward(packed_qkv.query,
-                        packed_qkv.key,
-                        packed_qkv.value,
-                        torch.tensor([],
-                                     dtype=torch.float32,
-                                     device=packed_qkv.query.device),
-                        attn_metadata,
-                        attn_type=attn_type)
+    with set_forward_context(attn_metadata):
+        return attn.forward(packed_qkv.query,
+                            packed_qkv.key,
+                            packed_qkv.value,
+                            torch.tensor([],
+                                        dtype=torch.float32,
+                                        device=packed_qkv.query.device),
+                            attn_metadata,
+                            attn_type=attn_type)
 
 
 def _run_decoder_self_attention_test(
@@ -661,12 +663,13 @@ def _run_decoder_self_attention_test(
     kv_cache = test_rsrcs.kv_cache
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
-    return attn.forward(packed_qkv.query,
-                        packed_qkv.key,
-                        packed_qkv.value,
-                        kv_cache,
-                        attn_metadata,
-                        attn_type=attn_type)
+    with set_forward_context(attn_metadata):
+        return attn.forward(packed_qkv.query,
+                            packed_qkv.key,
+                            packed_qkv.value,
+                            kv_cache,
+                            attn_metadata,
+                            attn_type=attn_type)
 
 
 def _run_encoder_decoder_cross_attention_test(
@@ -719,12 +722,13 @@ def _run_encoder_decoder_cross_attention_test(
         cross_pckd_qkv = cross_test_params.packed_qkvo.packed_qkv
         key = (None if cross_pckd_qkv is None else cross_pckd_qkv.key)
         value = (None if cross_pckd_qkv is None else cross_pckd_qkv.value)
-    return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query,
-                        key,
-                        value,
-                        kv_cache,
-                        attn_metadata,
-                        attn_type=attn_type)
+    with set_forward_context(attn_metadata):
+        return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query,
+                            key,
+                            value,
+                            kv_cache,
+                            attn_metadata,
+                            attn_type=attn_type)
 
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
@@ -787,6 +791,7 @@ def test_encoder_only(
         # Attention scale factor, attention backend instance, attention wrapper
         # instance, KV cache init
         test_rsrcs = _make_test_resources(test_pt)
+        print('test_rsrcs.attn_backend ' + str(test_rsrcs.attn_backend))
 
         # Construct encoder attention test params (only used
         # during prefill)
@@ -803,6 +808,8 @@ def test_encoder_only(
             encoder_test_params=enc_test_params,
             cross_test_params=None,
             device=CUDA_DEVICE)
+        
+        print('prephase_attn_metadata ' + str(prephase_attn_metadata))
 
         # PREFILL: encoder attention
 
@@ -893,7 +900,7 @@ def test_e2e_enc_dec_attn(
 
     # Force Attention wrapper backend
     with global_force_attn_backend_context_manager(attn_backend):
-
+        torch.set_default_dtype(torch.bfloat16)
         # Note: KV cache size of 4096 is arbitrary & chosen intentionally
         # to be more than necessary, since exceeding the kv cache size
         # is not part of this test

@@ -539,7 +539,7 @@ def _make_metadata_tensors(
     seq_lens: Optional[List[int]], context_lens: Optional[List[int]],
     encoder_seq_lens: Optional[List[int]], device: Union[torch.device, str]
 ) -> Tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[List[int]],
-           torch.Tensor, Optional[int]]:
+           torch.Tensor, torch.Tensor, Optional[int]]:
     '''
     Build scalar & tensor values required to build attention metadata structure.
 
@@ -569,9 +569,18 @@ def _make_metadata_tensors(
                            max(encoder_seq_lens))
 
     seq_start_loc = None
+    encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
+                                        1,
+                                        dtype=torch.int32,
+                                        device=encoder_seq_lens_tensor.device)
+    torch.cumsum(
+        encoder_seq_lens_tensor, dim=0,
+        dtype=encoder_seq_start_loc.dtype,
+        out=encoder_seq_start_loc[1:])
+    print('encoder_seq_start_loc ' + str(encoder_seq_start_loc))
 
     return (seq_lens_tensor, context_lens_tensor, max_context_len, max_seq_len,
-            seq_start_loc, encoder_seq_lens_tensor, max_encoder_seq_len)
+            seq_start_loc, encoder_seq_lens_tensor, encoder_seq_start_loc, max_encoder_seq_len)
 
 
 def make_kv_cache(num_blocks: int,
@@ -805,6 +814,7 @@ def make_test_metadata(
     * AttentionMetadata structure
     '''
 
+    print('Here for metadata!!!')
     # Decoder self-attention memory mapping
     # decoder_test_params is None signals encoder-only
     # scenario, so kv_mmap is None
@@ -850,6 +860,8 @@ def make_test_metadata(
         #   (kv_mmap)
         cross_kv_mmap = cross_test_params.kv_mmap
 
+    print('Here for metadata!!')
+
     if is_prompt:
         # Prefill-phase scenario
 
@@ -864,6 +876,7 @@ def make_test_metadata(
             _,
             _,
             encoder_seq_lens_tensor,
+            encoder_seq_start_loc,
             max_encoder_seq_len,
         ) = _make_metadata_tensors(seq_lens,
                                    context_lens,
@@ -885,6 +898,7 @@ def make_test_metadata(
             num_encoder_tokens=num_encoder_tokens,
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
+            encoder_seq_start_loc=encoder_seq_start_loc,
             max_encoder_seq_len=max_encoder_seq_len,
             cross_slot_mapping=(None if cross_kv_mmap is None else
                                 cross_kv_mmap.slot_mapping),
@@ -909,6 +923,7 @@ def make_test_metadata(
             _,
             _,
             encoder_seq_lens_tensor,
+            encoder_seq_start_loc,
             max_encoder_seq_len,
         ) = _make_metadata_tensors(seq_lens,
                                    context_lens,
@@ -930,6 +945,7 @@ def make_test_metadata(
             num_encoder_tokens=num_encoder_tokens,
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
+            encoder_seq_start_loc=encoder_seq_start_loc,
             max_encoder_seq_len=max_encoder_seq_len,
             cross_slot_mapping=(None if cross_kv_mmap is None else
                                 cross_kv_mmap.slot_mapping),
