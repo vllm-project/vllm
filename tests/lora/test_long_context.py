@@ -28,9 +28,15 @@ sampling_params = SamplingParams(
 def _create_lora_request(lora_id, long_context_infos):
     context_len = long_context_infos[lora_id]["context_length"]
     scaling_factor = context_len_to_scaling_factor[context_len]
-    return LoRARequest(context_len, lora_id,
-                       long_context_infos[lora_id]["lora"], None,
-                       4096 * scaling_factor)
+    return LoRARequest(
+        # There are 2 LoRAs for 16K, we need to add lora_id to indicate
+        # they are different LoRAs.
+        context_len + str(lora_id),
+        lora_id,
+        long_context_infos[lora_id]["lora"],
+        None,
+        4096 * scaling_factor,
+    )
 
 
 def evaluate_json_response(model_response, golden_response):
