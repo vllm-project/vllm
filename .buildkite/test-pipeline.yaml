@@ -448,6 +448,18 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
 
+- label: Disaggregated Prefill Test # 4min
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/distributed/parallel_state.py
+  - vllm/distributed/kv_transfer
+  - vllm/worker/worker_base.py
+  - vllm/worker/model_runner.py
+  commands:
+  - pytest -v -s kv_transfer/module_test.py
+  - pytest -v -s kv_transfer/disagg_test.py
+
 - label: LoRA Long Context (Distributed) # 11min
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   num_gpus: 4
