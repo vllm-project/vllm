@@ -41,7 +41,9 @@ steps:
   - grep \"sig sig-object py\" build/html/dev/sampling_params.html
 
 - label: Python-only Development Script Test
+  working_dir: "/vllm-workspace/.buildkite"
   fast_check: true
+  no_gpu: True
   commands:
   - bash run-code-dev-test.sh
 
