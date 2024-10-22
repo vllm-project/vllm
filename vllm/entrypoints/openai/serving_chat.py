@@ -38,7 +38,7 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import iterate_with_cancellation, random_uuid
+from vllm.utils import iterate_with_cancellation
 
 logger = init_logger(__name__)
 
