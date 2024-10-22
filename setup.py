@@ -157,6 +157,14 @@ class cmake_build_ext(build_ext):
         # on subsequent calls to python.
         cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
 
+        # Override the base directory for FetchContent downloads to $ROOT/.deps
+        # This allows sharing dependencies between profiles,
+        # and plays more nicely with sccache.
+        # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
+        fc_base_dir = os.path.join(ext.cmake_lists_dir, ".deps")
+        fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
+        cmake_args += ['-DFETCHCONTENT_BASE_DIR={}'.format(fc_base_dir)]
+
         #
         # Setup parallelism and build tool
         #

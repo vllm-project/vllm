@@ -169,12 +169,10 @@ endif()
 
 #
 # Use FetchContent for C++ dependencies that are compiled as part of vLLM's build process.
-# Configure it to place files in vllm/.deps, in order to play nicely with sccache.
+# setup.py will override FETCHCONTENT_BASE_DIR to play nicely with sccache.
 #
 include(FetchContent)
-get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
-file(MAKE_DIRECTORY "${FETCHCONTENT_BASE_DIR}")
-set(FETCHCONTENT_BASE_DIR "${PROJECT_ROOT_DIR}/.deps")
+file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 #
