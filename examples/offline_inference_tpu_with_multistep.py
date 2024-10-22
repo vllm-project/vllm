@@ -12,14 +12,14 @@ answers = [
 ]
 N = 1
 # Currently, top-p sampling is disabled. `top_p` should be 1.0.
-sampling_params = SamplingParams(temperature=0.0,
+sampling_params = SamplingParams(temperature=0.7,
                                  top_p=1.0,
                                  n=N,
                                  max_tokens=16)
 
 # Set `enforce_eager=True` to avoid ahead-of-time compilation.
 # In real workloads, `enforce_eager` should be `False`.
-llm = LLM(model="google/gemma-2b", enforce_eager=True)
+llm = LLM(model="google/gemma-2b", enforce_eager=True, num_scheduler_steps=2)
 outputs = llm.generate(prompts, sampling_params)
 for output, answer in zip(outputs, answers):
     prompt = output.prompt
