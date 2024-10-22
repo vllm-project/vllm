@@ -389,8 +389,6 @@ class BertEmbeddingModel(nn.Module):
                  pooling_config: Optional[PoolingConfig] = None) -> None:
         super().__init__()
         self.model = BertModel(config, cache_config, quant_config)
-        print(pooling_config.pooling_type)
-        print(pooling_config.normalize)
         self._pooler = Pooler(pooling_config.pooling_type,
                               pooling_config.normalize)
 
