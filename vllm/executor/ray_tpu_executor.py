@@ -83,8 +83,10 @@ class RayTPUExecutor(TPUExecutor):
             override_env = {}
             OVERRIDE_VARS = [
                 "TPU_CHIPS_PER_HOST_BOUNDS",
+                "TPU_CHIPS_PER_PROCESS_BOUNDS",
                 "TPU_HOST_BOUNDS",
                 "TPU_SKIP_MDS_QUERY",
+                "TPU_PROCESS_BOUNDS",
                 "TPU_ACCELERATOR_TYPE",
             ]
             for var in OVERRIDE_VARS:
