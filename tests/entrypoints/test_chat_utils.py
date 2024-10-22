@@ -6,9 +6,9 @@ from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.entrypoints.chat_utils import (parse_chat_messages,
                                          parse_chat_messages_futures)
+from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import encode_image_base64
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -515,27 +515,38 @@ def test_mllama_interleaved_images(
         }]
     }]
 
+
 def test_mllama_parse_matches_hf(
     mllama_model_config,
     mllama_tokenizer,
     image_url,
 ):
-    """Checks end to end correctness of hf allignment for mllama parsing."""
+    """Checks end to end correctness of hf alignment for mllama parsing."""
+
     def get_conversation(is_hf: bool):
         img_part = {"type": "image_url", "image_url": {"url": image_url}}
         if is_hf:
             img_part = {'type': 'image'}
-        return [
+        return [{
+            'role':
+            'user',
+            'content': [
                 {
-                    'role': 'user', 'content': [
-                        {'type': 'text', 'text': 'The content of the first image is:'},
-                        img_part,
-                        {'type': 'text', 'text': 'The content of the second image is:'},
-                        img_part,
-                        {'type': 'text', 'text': 'What animal is in the first image?'},
-                    ]
-                }
+                    'type': 'text',
+                    'text': 'The content of the first image is:'
+                },
+                img_part,
+                {
+                    'type': 'text',
+                    'text': 'The content of the second image is:'
+                },
+                img_part,
+                {
+                    'type': 'text',
+                    'text': 'What animal is in the first image?'
+                },
             ]
+        }]
 
     tokenizer = mllama_tokenizer.tokenizer
     # Build and parse a conversation with {"type": "image"} using the tokenizer
