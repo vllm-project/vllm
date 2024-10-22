@@ -1,7 +1,10 @@
+from typing import List, Type
+
 import pytest
 import torch.nn.functional as F
 
-from ....conftest import IMAGE_ASSETS
+from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
+from ....utils import large_gpu_test
 from ..utils import check_embeddings_close
 
 HF_TEXT_PROMPTS = [
@@ -23,23 +26,15 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 MODELS = ["TIGER-Lab/VLM2Vec-Full"]
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    image_assets,
+def _run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    input_texts: List[str],
+    input_images: PromptImageInput,
     model: str,
+    *,
     dtype: str,
 ) -> None:
-    input_texts_images = [
-        *((text, None) for text in HF_TEXT_PROMPTS),
-        *((text, asset.pil_image)
-          for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)),
-    ]
-    input_texts = [text for text, _ in input_texts_images]
-    input_images = [image for _, image in input_texts_images]
-
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -76,4 +71,54 @@ def test_models(
         embeddings_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
+    )
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+def test_models_text(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model: str,
+    dtype: str,
+) -> None:
+    input_texts_images = [(text, None) for text in HF_TEXT_PROMPTS]
+    input_texts = [text for text, _ in input_texts_images]
+    input_images = [image for _, image in input_texts_images]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        input_texts,
+        input_images,  # type: ignore
+        model,
+        dtype=dtype,
+    )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+def test_models_image(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model: str,
+    dtype: str,
+) -> None:
+    input_texts_images = [
+        (text, asset.pil_image)
+        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
+    ]
+    input_texts = [text for text, _ in input_texts_images]
+    input_images = [image for _, image in input_texts_images]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        input_texts,
+        input_images,
+        model,
+        dtype=dtype,
     )
