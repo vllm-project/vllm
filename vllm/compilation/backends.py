@@ -5,7 +5,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.fx as fx
 
-from vllm.compilation.fusion import get_fusion_pass
+from vllm.compilation.fusion import FusionPass
 from vllm.logger import init_logger
 
 from .compile_context import get_compile_context
@@ -205,7 +205,7 @@ def fix_functionalization(graph: fx.Graph):
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
 
-fusion_pass = get_fusion_pass()
+fusion_pass = FusionPass()
 
 
 def post_grad_post_passes(graph: fx.Graph):

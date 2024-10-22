@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_TORCH_COMPILE_LEVEL: int = 0
     VLLM_TORCH_COMPILE_FUSION: bool = True
-    VLLM_TORCH_COMPILE_FUSION_DUMP: List[str] = []
+    VLLM_TORCH_COMPILE_DUMP: List[str] = []
     VLLM_CUSTOM_OPS: List[str] = []
     VLLM_DISABLED_KERNELS: List[str] = []
 
@@ -220,14 +220,14 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_CUSTOM_OPS":
     lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
 
-    # Internal flag to enable fusion in torch.compile
+    # Internal flag to enable fusion in torch.compile (default on)
     "VLLM_TORCH_COMPILE_FUSION":
     lambda: bool(os.environ.get("VLLM_TORCH_COMPILE_FUSION", "1") != "0"),
 
-    # Internal flag for dumping the model graph before and after fusion
-    "VLLM_TORCH_COMPILE_FUSION_DUMP":
-    lambda: list(
-        os.environ.get("VLLM_TORCH_COMPILE_FUSION_DUMP", "").split(",")),
+    # Internal flag for dumping the model graph at different stages of
+    # custom pass compilation
+    "VLLM_TORCH_COMPILE_DUMP":
+    lambda: list(os.environ.get("VLLM_TORCH_COMPILE_DUMP", "").split(",")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
