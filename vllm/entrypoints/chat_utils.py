@@ -121,7 +121,7 @@ class ConversationMessage(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
 
-    content: Optional[str]
+    content: Union[Optional[str], List[Dict[str, str]]]
     """The contents of the message"""
 
     tool_call_id: Optional[str]
@@ -523,19 +523,16 @@ def _parse_chat_message_content_parts(
         if has_image:
             role_content = [{'type': 'image'}] + role_content
         return [ConversationMessage(role=role,
-                                    content=role_content)]  # type: ignore
+                                    content=role_content)]
     else:
         mm_placeholder_counts = mm_parser.mm_placeholder_counts()
         if mm_placeholder_counts:
             text_prompt = _get_full_multimodal_text_prompt(
                 mm_placeholder_counts, text_prompt)
         if chat_template_text_format == "openai":
-            role_content = [
-                ChatCompletionContentPartTextParam(type="text",
-                                                   text=text_prompt)
-            ]
+            role_content = [{'type': 'text', 'text': text_prompt}]
             return [ConversationMessage(role=role,
-                                        content=role_content)]  # type: ignore
+                                        content=role_content)]
         return [ConversationMessage(role=role, content=text_prompt)]
 
 
