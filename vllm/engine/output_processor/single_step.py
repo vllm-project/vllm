@@ -113,22 +113,22 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                                         outputs: SequenceGroupOutput,
                                         is_async: bool) -> None:
         sampling_params = seq_group.sampling_params
-        for i in range(sampling_params.n):
-            sample = outputs.samples[i]
-            seq = seq_group.seqs[i]
-            if not is_async:
-                seq.append_token_id(sample.output_token, sample.logprobs)
-            if sampling_params.detokenize and self.detokenizer:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
-            else:
-                new_char_count = 0
-            self.stop_checker.maybe_stop_sequence(
-                seq,
-                new_char_count,
-                sampling_params,
-                lora_req=seq_group.lora_request,
-            )
-            if seq.is_finished():
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(seq)
+
+        sample = outputs.samples[0]
+        seq = seq_group.seqs[0]
+        if not is_async:
+            seq.append_token_id(sample.output_token, sample.logprobs)
+        if sampling_params.detokenize and self.detokenizer:
+            new_char_count = self.detokenizer.decode_sequence_inplace(
+                seq, sampling_params)
+        else:
+            new_char_count = 0
+        self.stop_checker.maybe_stop_sequence(
+            seq,
+            new_char_count,
+            sampling_params,
+            lora_req=seq_group.lora_request,
+        )
+        if seq.is_finished():
+            for scheduler in self.scheduler:
+                scheduler.free_seq(seq)
