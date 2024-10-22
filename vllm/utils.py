@@ -13,10 +13,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import warnings
 import weakref
-from asyncio import FIRST_COMPLETED, ensure_future
+from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import Mapping
 from functools import lru_cache, partial, wraps
 from platform import uname
@@ -318,30 +319,12 @@ def is_hip() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_cpu() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        return "cpu" in version("vllm")
-    except PackageNotFoundError:
-        return False
-
-
-@lru_cache(maxsize=None)
 def is_openvino() -> bool:
     from importlib.metadata import PackageNotFoundError, version
     try:
         return "openvino" in version("vllm")
     except PackageNotFoundError:
         return False
-
-
-@lru_cache(maxsize=None)
-def is_neuron() -> bool:
-    try:
-        import transformers_neuronx
-    except ImportError:
-        transformers_neuronx = None
-    return transformers_neuronx is not None
 
 
 @lru_cache(maxsize=None)
@@ -437,6 +420,12 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     return _async_wrapper
 
 
+def _next_task(iterator: AsyncGenerator[T, None],
+               loop: AbstractEventLoop) -> Task:
+    # Can use anext() in python >= 3.10
+    return loop.create_task(iterator.__anext__())  # type: ignore[arg-type]
+
+
 async def iterate_with_cancellation(
     iterator: AsyncGenerator[T, None],
     is_cancelled: Callable[[], Awaitable[bool]],
@@ -445,19 +434,27 @@ async def iterate_with_cancellation(
     at least once per second to check for client cancellation.
     """
 
-    # Can use anext() in python >= 3.10
-    awaits = [ensure_future(iterator.__anext__())]
+    loop = asyncio.get_running_loop()
+
+    awaits: List[Future[T]] = [_next_task(iterator, loop)]
+    next_cancel_check: float = 0
     while True:
-        done, pending = await asyncio.wait(awaits, timeout=1)
-        if await is_cancelled():
-            with contextlib.suppress(BaseException):
-                awaits[0].cancel()
-                await iterator.aclose()
-            raise asyncio.CancelledError("client cancelled")
+        done, pending = await asyncio.wait(awaits, timeout=1.5)
+
+        # Check for cancellation at most once per second
+        time_now = time.time()
+        if time_now >= next_cancel_check:
+            if await is_cancelled():
+                with contextlib.suppress(BaseException):
+                    awaits[0].cancel()
+                    await iterator.aclose()
+                raise asyncio.CancelledError("client cancelled")
+            next_cancel_check = time_now + 1
+
         if done:
             try:
                 item = await awaits[0]
-                awaits[0] = ensure_future(iterator.__anext__())
+                awaits[0] = _next_task(iterator, loop)
                 yield item
             except StopAsyncIteration:
                 # we are done
@@ -478,25 +475,29 @@ async def merge_async_iterators(
     to check for client cancellation.
     """
 
-    # Can use anext() in python >= 3.10
-    awaits = {
-        ensure_future(pair[1].__anext__()): pair
-        for pair in enumerate(iterators)
-    }
-    timeout = None if is_cancelled is None else 1
+    loop = asyncio.get_running_loop()
+
+    awaits = {_next_task(pair[1], loop): pair for pair in enumerate(iterators)}
+    timeout = None if is_cancelled is None else 1.5
+    next_cancel_check: float = 0
     try:
         while awaits:
             done, pending = await asyncio.wait(awaits.keys(),
                                                return_when=FIRST_COMPLETED,
                                                timeout=timeout)
-            if is_cancelled is not None and await is_cancelled():
-                raise asyncio.CancelledError("client cancelled")
+            if is_cancelled is not None:
+                # Check for cancellation at most once per second
+                time_now = time.time()
+                if time_now >= next_cancel_check:
+                    if await is_cancelled():
+                        raise asyncio.CancelledError("client cancelled")
+                    next_cancel_check = time_now + 1
             for d in done:
                 pair = awaits.pop(d)
                 try:
                     item = await d
                     i, it = pair
-                    awaits[ensure_future(it.__anext__())] = pair
+                    awaits[_next_task(it, loop)] = pair
                     yield i, item
                 except StopAsyncIteration:
                     pass
@@ -776,10 +777,10 @@ def is_pin_memory_available() -> bool:
     elif is_xpu():
         print_warning_once("Pin memory is not supported on XPU.")
         return False
-    elif is_neuron():
+    elif current_platform.is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif is_cpu() or is_openvino():
+    elif current_platform.is_cpu() or is_openvino():
         return False
     return True
 
@@ -949,6 +950,8 @@ def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     return [item for sublist in lists for item in sublist]
 
 
+# TODO: This function can be removed if transformer_modules classes are
+# serialized by value when communicating between processes
 def init_cached_hf_modules() -> None:
     """
     Lazy initialization of the Hugging Face modules.

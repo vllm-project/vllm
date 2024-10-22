@@ -6,10 +6,10 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
 
 from tqdm import tqdm
 
+from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.engine.arg_utils import EngineArgs, TaskOption
-from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
@@ -30,6 +30,11 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
+else:
+    from vllm.engine.llm_engine import LLMEngine  # type: ignore
 
 logger = init_logger(__name__)
 
