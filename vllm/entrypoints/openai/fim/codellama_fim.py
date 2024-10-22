@@ -31,11 +31,11 @@ class CodeLlamaFIMEncoder(FIMEncoder):
                 "tokenizer incompatible with 'codellama' FIM encoder")
 
     def encode_with_suffix(self, prefix: str, suffix: str) -> List[int]:
-        return ([self.bos_id, self.prefix_id] +
-                self.tokenizer(prefix, add_special_tokens=False) +
-                [self.suffix_id] + self._encode_infilling(suffix) +
-                [self.middle_id])
+        prefix_tokens = self.tokenizer(prefix,
+                                       add_special_tokens=False).input_ids
+        # Encode a string without an implicit leading space.
+        suffix_tokens = self.tokenizer("☺" + suffix,
+                                       add_special_tokens=False).input_ids[2:]
 
-    def _encode_infilling(self, s: str) -> List[int]:
-        """Encode a string without an implicit leading space."""
-        return self.tokenizer("☺" + s, add_special_tokens=False)[2:]
+        return ([self.bos_id, self.prefix_id] + prefix_tokens[self.suffix_id] +
+                suffix_tokens + [self.middle_id])

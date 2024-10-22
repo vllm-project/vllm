@@ -11,8 +11,7 @@ from typing_extensions import Annotated
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.fim.fim_encoder import (FIMEncoder,
-                                                     get_fim_encoder_lookup)
+from vllm.entrypoints.openai.fim import FIMEncoder, get_fim_encoder_lookup
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
