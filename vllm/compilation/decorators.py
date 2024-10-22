@@ -75,12 +75,14 @@ def support_torch_compile(
         if inferred_dynamic_arg_dims is None:
             inferred_dynamic_arg_dims = {}
             for k, v in sig.parameters.items():
-                if v.annotation is torch.Tensor or v.annotation is Optional[
-                        torch.Tensor] or v.annotation is IntermediateTensors:
+                if v.annotation in [
+                        torch.Tensor, Optional[torch.Tensor],
+                        IntermediateTensors, Optional[IntermediateTensors]
+                ]:
                     inferred_dynamic_arg_dims[k] = 0
 
             logger.debug(("Inferred dynamic dimensions for "
-                          "forward method of class %s: %s"), cls,
+                          "forward method of %s: %s"), cls,
                          list(inferred_dynamic_arg_dims.keys()))
 
         if len(inferred_dynamic_arg_dims) == 0:
