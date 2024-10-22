@@ -32,7 +32,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "flash-attn"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashAttentionImpl"]:
@@ -524,8 +524,8 @@ class FlashAttentionImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        self.sliding_window = ((sliding_window, sliding_window)
-                               if sliding_window is not None else (-1, -1))
+        self.sliding_window = ((sliding_window - 1,
+                                0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -534,12 +534,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        if sliding_window is not None:
-            # NOTE(woosuk): flash-attn's sliding window does not work with
-            # paged KV cache.
-            raise ValueError(
-                "Sliding window is not supported in FlashAttention.")
 
         support_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
         if head_size not in support_head_sizes:
@@ -704,6 +698,7 @@ def unified_flash_attention(
                 max_seqlen_k=max_seq_len,
                 softmax_scale=softmax_scale,
                 causal=True,
+                window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 block_table=prefill_meta.block_tables,
                 softcap=logits_soft_cap,
@@ -725,6 +720,7 @@ def unified_flash_attention(
                 max_seqlen_k=decode_meta.max_decode_seq_len,
                 softmax_scale=softmax_scale,
                 causal=True,
+                window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
                 block_table=decode_meta.block_tables,
@@ -739,6 +735,7 @@ def unified_flash_attention(
                 cache_seqlens=decode_meta.seq_lens_tensor,
                 softmax_scale=softmax_scale,
                 causal=True,
+                window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
             ).squeeze(1)
