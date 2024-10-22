@@ -522,8 +522,7 @@ def _parse_chat_message_content_parts(
 
         if has_image:
             role_content = [{'type': 'image'}] + role_content
-        return [ConversationMessage(role=role,
-                                    content=role_content)]
+        return [ConversationMessage(role=role, content=role_content)]
     else:
         mm_placeholder_counts = mm_parser.mm_placeholder_counts()
         if mm_placeholder_counts:
@@ -531,8 +530,7 @@ def _parse_chat_message_content_parts(
                 mm_placeholder_counts, text_prompt)
         if chat_template_text_format == "openai":
             role_content = [{'type': 'text', 'text': text_prompt}]
-            return [ConversationMessage(role=role,
-                                        content=role_content)]
+            return [ConversationMessage(role=role, content=role_content)]
         return [ConversationMessage(role=role, content=text_prompt)]
 
 
