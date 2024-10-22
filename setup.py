@@ -403,6 +403,8 @@ def get_vllm_version() -> str:
             # skip this for source tarball, required for pypi
             if "sdist" not in sys.argv:
                 version += f"{sep}cu{cuda_version_str}"
+        if envs.VLLM_USE_PRECOMPILED:
+            version += ".precompiled"
     elif _is_hip():
         # Get the HIP version
         hipcc_version = get_hipcc_rocm_version()
@@ -514,9 +516,41 @@ if _build_custom_ops():
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
+
 if envs.VLLM_USE_PRECOMPILED:
+    assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+
+    import zipfile
+
     ext_modules = []
-    package_data["vllm"].append("*.so")
+
+    wheel_location = os.getenv(
+        "VLLM_PRECOMPILED_WHEEL_LOCATION",
+        "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+    )
+
+    if os.path.exists(wheel_filename := os.path.basename(wheel_location)):
+        print(f"Using existing wheel={wheel_filename}")
+    else:
+        try:
+            subprocess.check_call(
+                f"pip download --no-deps {wheel_location}".split(" "))
+        except subprocess.CalledProcessError as exc:
+            from setuptools.errors import SetupError
+
+            raise SetupError(
+                f"Failed to get vLLM wheel from {wheel_location}") from exc
+
+    with zipfile.ZipFile(wheel_filename) as wheel:
+        for lib in filter(lambda file: file.filename.endswith(".so"),
+                          wheel.filelist):
+            package_name = os.path.dirname(lib.filename).replace("/", ".")
+            if package_name not in package_data:
+                package_data[package_name] = []
+
+            wheel.extract(lib)
+            package_data[package_name].append(lib.filename)
+            print(f"Added {lib.filename} to package_data[\"{package_name}\"]")
 
 if _no_device():
     ext_modules = []
