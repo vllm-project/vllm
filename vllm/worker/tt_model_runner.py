@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
@@ -42,6 +43,8 @@ class TTModelInput(ModelRunnerInputBase):
     block_tables: Optional[torch.Tensor] = None
     unpadded_batch_size: Optional[int] = None
     tt_sampling_params: Optional[TTSamplingParams] = None
+    is_first_multi_step: bool = True
+    is_last_step: bool = True
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -53,6 +56,8 @@ class TTModelInput(ModelRunnerInputBase):
             "block_tables": self.block_tables,
             "unpadded_batch_size": self.unpadded_batch_size,
             "tt_sampling_params": self.tt_sampling_params,
+            "is_first_multi_step": self.is_first_multi_step,
+            "is_last_step": self.is_last_step,
         }
         
         return tensor_dict
@@ -108,6 +113,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         self.trace_mode = trace_mode  # whether to use ttnn tracing for model execution
         self.execute_trace_kwargs = None  # kw args for trace execution (populated during first decode execution)
+
+        self.cached_step_outputs: List[torch.Tensor] = []  # Only used for multi-step execution
 
     def load_model(self) -> None:
         # Note: using custom TT loader instead of selecting from default vllm loaders
@@ -256,10 +263,71 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
-        if num_steps > 1:
-            raise ValueError(
-                "TT worker does not support multi-step execution.")
+        is_decode = model_input.prompt_lens is None
+        if not is_decode:
+            assert num_steps == 1, "Num steps must be 1 for prefill"
+
+        if model_input.is_first_multi_step:  # always true if not using multi-step
+            self.cached_step_outputs = []
+            for i in range(num_steps):
+                next_token_ids = self._execute_model_single_step(model_input, kv_caches, is_decode)
+                self.cached_step_outputs.append(next_token_ids)
+                
+                if i < num_steps - 1:
+                    # Prepare the inputs for the next step
+                    new_input_tokens = next_token_ids.unsqueeze(dim=1).int()
+                    if new_input_tokens.shape[0] < self.scheduler_config.max_num_seqs:
+                        # Pad batch to max_num_seqs
+                        batch_pad_len = model_input.input_tokens.shape[0] - new_input_tokens.shape[0]
+                        new_input_tokens = torch.cat([
+                            new_input_tokens,
+                            torch.zeros(batch_pad_len, 1, dtype=torch.int32, device="cpu")
+                        ])
+                    
+                    # Update input positions for all except those that are -1 (padding)
+                    new_input_positions = torch.where(
+                        model_input.input_positions == -1,
+                        model_input.input_positions,
+                        model_input.input_positions + 1
+                    )
+
+                    model_input = dataclasses.replace(
+                        model_input,
+                        input_tokens=new_input_tokens,
+                        input_positions=new_input_positions
+                    )
         
+        sampler_outputs = []  # no outputs unless last step
+        if model_input.is_last_step:  # always true if not using multi-step
+            num_outputs = len(self.cached_step_outputs)
+            for i in range(num_outputs):
+                next_token_ids = self.cached_step_outputs.pop(0)
+                sampler_output = self._make_sampler_output(
+                    next_token_ids,
+                    model_input.seq_groups
+                )
+                sampler_outputs.append(sampler_output)
+        
+        return sampler_outputs
+    
+    def _make_sampler_output(
+        self,
+        next_token_ids: List[int],
+        seq_groups: List[int],
+    ) -> SamplerOutput:
+        # Minimal code to construct the sampler outputs, based on tpu_model_runner.py
+        # TT backend does not support the advanced sampling parameters such as logprobs.
+        zero_logprob = Logprob(0.0)
+        sampler_outputs = []
+        for batch_idx, seq_id in enumerate(seq_groups):
+            next_token_id = next_token_ids[batch_idx]
+            seq_outputs = [SequenceOutput(seq_id, next_token_id,
+                                {next_token_id: zero_logprob})]
+            sampler_outputs.append(
+                CompletionSequenceGroupOutput(seq_outputs, None))
+        return SamplerOutput(sampler_outputs)
+    
+    def _execute_model_single_step(self, model_input: TTModelInput, kv_caches: List[torch.Tensor], is_decode):
         execute_model_kwargs = {
             "tokens": model_input.input_tokens,
             "start_pos": model_input.input_positions,
@@ -267,8 +335,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             "kv_cache": kv_caches,
             "prompt_lens": model_input.prompt_lens,
         }
-        
-        is_decode = model_input.prompt_lens is None
         
         if self.trace_mode and is_decode:  # Trace mode for decode
             # Remove prompt_lens from execute_model_kwargs since it's not used for decode
@@ -302,18 +368,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # Note: for other devices, vLLM applies vllm.model_executor.layers.sampler::Sampler for sampling tokens, we don't use this
         next_logits = logits[:model_input.unpadded_batch_size, -1, :]  # unpadded batch, vocab of last token
         next_token_ids = self._sample_tokens(next_logits, model_input.tt_sampling_params)
-
-        # Minimal code to construct the sampler outputs, based on tpu_model_runner.py
-        # TT backend does not support the advanced sampling parameters such as logprobs.
-        zero_logprob = Logprob(0.0)
-        sampler_outputs = []
-        for batch_idx, seq_id in enumerate(model_input.seq_groups):
-            next_token_id = next_token_ids[batch_idx]
-            seq_outputs = [SequenceOutput(seq_id, next_token_id,
-                                {next_token_id: zero_logprob})]
-            sampler_outputs.append(
-                CompletionSequenceGroupOutput(seq_outputs, None))
-        return [SamplerOutput(sampler_outputs)]
+        
+        return next_token_ids
 
     def _sample_tokens(self, logits, tt_sampling_params : TTSamplingParams):
         if tt_sampling_params.temperature == 0:  # greedy decoding

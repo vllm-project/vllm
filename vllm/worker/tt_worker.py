@@ -1,3 +1,4 @@
+import dataclasses
 import os
 from typing import List, Optional, Tuple
 import time
@@ -12,7 +13,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, is_pin_memory_available
 from vllm.worker.worker import raise_if_cache_size_invalid
-from vllm.worker.tt_model_runner import TTModelRunner
+from vllm.worker.tt_model_runner import TTModelRunner, TTModelInput
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
 
@@ -197,6 +198,8 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.tt_cache: List[List]
         
         self.mesh_device = None  # initialized by init_device
+        
+        self.cached_model_input: Optional[TTModelInput] = None  # Only used for multi-step execution
 
         
     @property
@@ -324,17 +327,37 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         sequences are provided."""
         start_time = time.perf_counter()
 
-        inputs = self.prepare_input(execute_model_req)
-        if inputs is None:
-            return None
+        is_first_multi_step = execute_model_req.is_first_multi_step
 
-        model_input, worker_input, kwargs = inputs
+        if not self.scheduler_config.is_multi_step or is_first_multi_step:
+            inputs = self.prepare_input(execute_model_req)
+            if inputs is None:
+                return None
+            model_input, worker_input, _ = inputs
+            
+        if self.scheduler_config.is_multi_step:
+            if is_first_multi_step:
+                self.cached_model_input = model_input
+                worker_input = dataclasses.replace(
+                    worker_input,
+                    num_steps=execute_model_req.num_lookahead_slots + 1
+                )
+            else:
+                assert self.cached_model_input is not None
+                model_input = self.cached_model_input
+                worker_input = WorkerInput()  # no worker input needed for subsequent steps
+            model_input = dataclasses.replace(
+                model_input,
+                is_first_multi_step=is_first_multi_step,
+                is_last_step=execute_model_req.is_last_step
+            )
+
         num_steps = worker_input.num_steps
 
         self.execute_worker(worker_input)
 
         # If there is no input, we don't need to execute the model.
-        if worker_input.num_seq_groups == 0:
+        if len(execute_model_req.seq_group_metadata_list) == 0:
             return []
 
         intermediate_tensors = None
@@ -346,7 +369,6 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             if self.kv_cache is not None else None,
             intermediate_tensors=intermediate_tensors,
             num_steps=num_steps,
-            **kwargs,
         )
 
         model_execute_time = time.perf_counter() - start_time
