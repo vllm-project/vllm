@@ -115,6 +115,7 @@ def lora_llm(long_context_infos):
                    long_lora_scaling_factors=tuple(scaling_factors),
                    max_num_batched_tokens=4096 * 8,
                    tensor_parallel_size=4,
+                   disable_async_output_proc=True,
                    distributed_executor_backend="mp")
     yield llm
     del llm
