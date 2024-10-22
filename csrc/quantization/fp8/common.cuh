@@ -1,21 +1,7 @@
 #pragma once
 
-// TODO(luka) remove unnecessary includes
-#include "cuda_compat.h"
-#include "dispatch_utils.h"
-
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/util/Float8_e4m3fn.h>
 #include <cmath>
-
-#ifndef USE_ROCM
-  #include <cub/util_type.cuh>
-  #include <cub/cub.cuh>
-#else
-  #include <hipcub/util_type.hpp>
-  #include <hipcub/hipcub.hpp>
-#endif
 
 #ifndef USE_ROCM
 using FP8_TYPE = c10::Float8_e4m3fn;

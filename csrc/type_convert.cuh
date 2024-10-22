@@ -5,11 +5,9 @@
 #ifndef USE_ROCM
   #include <cuda_bf16.h>
   #include <cuda_fp16.h>
-//  #include <cub/util_type.cuh>
 #else
   #include <hip/hip_bf16.h>
   #include <hip/hip_fp16.h>
-  #include <hipcub/util_type.hpp>
 
 using __nv_bfloat16 = __hip_bfloat16;
 using __nv_bfloat162 = __hip_bfloat162;

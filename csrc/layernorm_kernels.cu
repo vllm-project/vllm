@@ -1,11 +1,8 @@
 #include "type_convert.cuh"
-#include "quantization/fp8/common.cuh"
-
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include "dispatch_utils.h"
+
+#include <torch/cuda.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>

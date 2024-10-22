@@ -1,11 +1,16 @@
+/*
+ * This file contains the CUDA kernels for the fused quantized layernorm.
+ * The kernels correspond to the kernels in layernorm_kernels.cu, except they
+ * also produce quantized output directly.
+ * Currently, only static fp8 quantization is supported.
+ */
+
 #include "type_convert.cuh"
 #include "quantization/fp8/common.cuh"
-
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include "dispatch_utils.h"
+
+#include <torch/cuda.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>

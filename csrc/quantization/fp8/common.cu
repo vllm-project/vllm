@@ -1,10 +1,13 @@
 #include "common.cuh"
-
-#include "cuda_compat.h"
 #include "dispatch_utils.h"
 
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+
+#ifndef USE_ROCM
+  #include <cub/cub.cuh>
+#else
+  #include <hipcub/hipcub.hpp>
+#endif
 
 namespace vllm {
 
