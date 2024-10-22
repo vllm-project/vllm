@@ -1670,6 +1670,11 @@ class LLMEngine:
                 else:
                     # TPOTs.
                     latency = seq_group.get_last_latency(now)
+                    
+                    # Divide by the number of outputs for the multi-step case
+                    num_outputs = scheduler_outputs.num_lookahead_slots + 1
+                    latency /= num_outputs
+                    
                     time_per_output_tokens_iter.append(latency)
 
                 # Because of chunked prefill, we can have a single sequence

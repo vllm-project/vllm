@@ -31,7 +31,15 @@ def run_inference(
 
     # Create an LLM.
     ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-70B", block_size=64, max_num_seqs=max_seqs_in_batch, max_model_len=131072, disable_log_stats=False, max_num_batched_tokens=131072)
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-70B", 
+        block_size=64, 
+        max_num_seqs=max_seqs_in_batch, 
+        max_model_len=131072, 
+        disable_log_stats=False, 
+        max_num_batched_tokens=131072,
+        num_scheduler_steps=10,
+    )
 
     if not measure_perf:
         # Load prompts from a JSON file
