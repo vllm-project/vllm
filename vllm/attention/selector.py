@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino, is_xpu
+from vllm.utils import STR_BACKEND_ENV_VAR, is_hip, is_openvino, is_xpu
 
 logger = init_logger(__name__)
 
@@ -126,7 +126,7 @@ def get_attn_backend(
             ROCmFlashAttentionBackend)
         return ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
-        assert is_cpu(), RuntimeError(
+        assert current_platform.is_cpu(), RuntimeError(
             "Torch SDPA backend is only used for the CPU device.")
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
@@ -188,7 +188,7 @@ def which_attn_to_use(
         if backend_by_env_var is not None:
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
-    if is_cpu():
+    if current_platform.is_cpu():
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA
