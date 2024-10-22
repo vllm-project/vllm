@@ -89,6 +89,9 @@ class RayTPUExecutor(TPUExecutor):
             if "TPU_HOST_BOUNDS" in os.environ:
                 override_env.update(
                     {"TPU_HOST_BOUNDS": os.environ["TPU_HOST_BOUNDS"]})
+            if "TPU_SKIP_MDS_QUERY" in os.environ:
+                override_env.update(
+                    {"TPU_SKIP_MDS_QUERY": os.environ["TPU_SKIP_MDS_QUERY"]})
 
             worker = ray.remote(
                 num_cpus=0,
