@@ -18,9 +18,9 @@ import numpy as np
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
+from transformers import AutoModelForCausalLM, PretrainedConfig
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from transformers import AutoModelForCausalLM, PretrainedConfig
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
@@ -28,7 +28,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingConfig  # noqa: F401
+from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -148,18 +148,17 @@ def _get_model_initialization_kwargs(
     return extra_kwargs
 
 
-def build_model(model_class: Type[nn.Module],
-                hf_config: PretrainedConfig,
+def build_model(model_class: Type[nn.Module], hf_config: PretrainedConfig,
                 cache_config: Optional[CacheConfig],
-                quant_config: Optional[QuantizationConfig],
-                *,
+                quant_config: Optional[QuantizationConfig], *,
                 lora_config: Optional[LoRAConfig],
                 multimodal_config: Optional[MultiModalConfig],
                 scheduler_config: Optional[SchedulerConfig],
                 pooling_config: Optional[PoolingConfig] = None) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
-                                                    scheduler_config)
+                                                    scheduler_config
+                                                    )
 
     return model_class(config=hf_config,
                        cache_config=cache_config,
@@ -177,15 +176,16 @@ def _initialize_model(
     """Initialize a model with the given configurations."""
     model_class, _ = get_model_architecture(model_config)
 
-    return build_model(model_class,
-                       model_config.hf_config,
-                       cache_config=cache_config,
-                       quant_config=_get_quantization_config(
-                           model_config, load_config),
-                       lora_config=lora_config,
-                       multimodal_config=model_config.multimodal_config,
-                       scheduler_config=scheduler_config,
-                       pooling_config=model_config.pooling_config)
+    return build_model(
+        model_class,
+        model_config.hf_config,
+        cache_config=cache_config,
+        quant_config=_get_quantization_config(model_config, load_config),
+        lora_config=lora_config,
+        multimodal_config=model_config.multimodal_config,
+        scheduler_config=scheduler_config,
+        pooling_config=model_config.pooling_config
+    )
 
 
 class BaseModelLoader(ABC):

@@ -5,19 +5,19 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
 import torch
+from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from transformers import PretrainedConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingConfig  # noqa: F401
+from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import get_pooling_config  # noqa: F401
-from vllm.transformers_utils.config import (ConfigFormat, get_config,
-                                            get_hf_image_processor_config,
-                                            get_hf_text_config)
+from vllm.transformers_utils.config import (
+    ConfigFormat, get_config, get_hf_image_processor_config,
+    get_hf_text_config, get_pooling_config,
+    get_sentence_transformer_bert_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         is_hip, is_openvino, print_warning_once)
 
@@ -176,6 +176,8 @@ class ModelConfig:
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.pooling_config = self.get_pooling_config()
+        self.bert_config = self._get_bert_config()
+        self.do_lower_case = self._get_bert_tokenization_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -208,7 +210,8 @@ class ModelConfig:
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_hf_config_sliding_window(),
-            spec_target_max_model_len=spec_target_max_model_len)
+            spec_target_max_model_len=spec_target_max_model_len,
+            bert_config=self.bert_config)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
@@ -244,6 +247,17 @@ class ModelConfig:
                              "multimodal models.")
 
         return None
+
+    def _get_bert_config(self):
+        bert_config = get_sentence_transformer_bert_config(
+            self.model, self.revision)
+        if bert_config is not None:
+            return bert_config
+        return None
+
+    def _get_bert_tokenization_config(self):
+        if self.bert_config:
+            return self.bert_config.get("do_lower_case")
 
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
@@ -1723,6 +1737,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, List[Optional[int]]]],
     spec_target_max_model_len: Optional[int] = None,
+    bert_config: Optional[Any] = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1805,6 +1820,9 @@ def _get_and_verify_max_len(
                     "original_max_position_embeddings"]
             derived_max_model_len *= scaling_factor
 
+    if bert_config and "max_seq_lenght" in bert_config:
+        derived_max_model_len = bert_config["max_seq_length"]
+
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     if max_model_len is None:
@@ -1837,6 +1855,7 @@ def _get_and_verify_max_len(
                 raise ValueError(
                     f"{msg} To allow overriding this maximum, set "
                     "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
+
     return int(max_model_len)
 
 

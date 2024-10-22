@@ -40,7 +40,7 @@ class PoolingConfig:
         pooling_types = PoolingType.__dict__.items()
         return PoolingType(
             next((value for key, value in pooling_types
-                  if key.lower() in pooling_type_name), 2))
+                  if key.lower() in pooling_type_name), PoolingType.CLS))
 
 
 class Pooler(nn.Module):

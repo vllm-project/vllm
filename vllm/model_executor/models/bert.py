@@ -2,8 +2,8 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
-
 from transformers import BertConfig
+
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.backends.xformers import XFormersImpl
 from vllm.config import CacheConfig
@@ -12,8 +12,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import (Pooler,  # noqa: F401
-                                               PoolingConfig)
+from vllm.model_executor.layers.pooler import Pooler, PoolingConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (

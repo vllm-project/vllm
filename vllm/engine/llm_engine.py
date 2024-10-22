@@ -254,6 +254,7 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
+            "pooling_config_type=%s, normalize=%s, "
             "chat_template_text_format=%s, mm_processor_kwargs=%s)",
             VLLM_VERSION,
             model_config.model,
@@ -274,16 +275,23 @@ class LLMEngine:
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size,
             parallel_config.disable_custom_all_reduce,
-            model_config.quantization, model_config.enforce_eager,
-            cache_config.cache_dtype, model_config.quantization_param_path,
-            device_config.device, decoding_config, observability_config,
-            model_config.seed, model_config.served_model_name,
+            model_config.quantization,
+            model_config.enforce_eager,
+            cache_config.cache_dtype,
+            model_config.quantization_param_path,
+            device_config.device,
+            decoding_config,
+            observability_config,
+            model_config.seed,
+            model_config.served_model_name,
             scheduler_config.num_scheduler_steps,
             scheduler_config.chunked_prefill_enabled,
             scheduler_config.multi_step_stream_outputs,
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
             use_cached_outputs,
+            model_config.pooling_config.pooling_type,
+            model_config.pooling_config.normalize,
             model_config.chat_template_text_format,
             model_config.mm_processor_kwargs
         )
