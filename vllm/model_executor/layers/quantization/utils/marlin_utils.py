@@ -304,7 +304,7 @@ def apply_gptq_marlin_linear(
                                   is_k_full=is_k_full,
                                   has_zp=False,
                                   use_fp32_reduce=use_fp32_reduce,
-                                  is_float_zp=False)
+                                  is_zp_float=False)
 
     if bias is not None:
         output.add_(bias)  # In-place add
@@ -342,7 +342,7 @@ def apply_awq_marlin_linear(
                                   is_k_full=True,
                                   has_zp=True,
                                   use_fp32_reduce=use_fp32_reduce,
-                                  is_float_zp=False)
+                                  is_zp_float=False)
 
     if bias is not None:
         output.add_(bias)  # In-place add

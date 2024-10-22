@@ -244,7 +244,7 @@ def test_gptq_marlin_gemm(
         is_k_full=is_k_full,
         has_zp=False,
         use_fp32_reduce=use_fp32_reduce,
-        is_float_zp=False,
+        is_zp_float=False,
     )
     output_ref = torch.matmul(a_input, w_ref)
 
@@ -432,7 +432,7 @@ def test_awq_marlin_gemm(
         is_k_full=is_k_full,
         has_zp=has_zp,
         use_fp32_reduce=use_fp32_reduce,
-        is_float_zp=False,
+        is_zp_float=False,
     )
     output_ref = torch.matmul(a_input, w_ref)
 
