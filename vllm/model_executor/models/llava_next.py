@@ -30,8 +30,8 @@ from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
+                    init_vllm_registered_model)
 
 # Result in the max possible feature size (2x2 grid of 336x336px tiles)
 MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
@@ -611,14 +611,12 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_input = self._parse_and_validate_image_input(**kwargs)
 
             if image_input is not None:
-                vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
-
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
-                    self.config.image_token_index)
-
+                inputs_embeds = embed_multimodal(
+                    input_ids,
+                    self.config.image_token_index,
+                    self.language_model.model.get_input_embeddings,
+                    lambda _: self._process_image_input(image_input),
+                )
                 input_ids = None
             else:
                 inputs_embeds = None
