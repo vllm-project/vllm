@@ -58,12 +58,31 @@ class NVLM_D_Model(InternVLChatModel):
             nn.Linear(llm_intermediate_size, llm_hidden_size, bias=False),
         )
 
-    def _init_vision_model(self, config: PretrainedConfig,
-                           quant_config: Optional[QuantizationConfig],
-                           num_hidden_layers: int):
-        # We added additional dummy heads to the original num of heads to make
-        # the number of heads divisible by 8.
-        return InternVisionModel(config.vision_config,
-                                 quant_config=quant_config,
-                                 num_hidden_layers_override=num_hidden_layers,
-                                 num_dummy_heads=7)
+    def _init_vision_model(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig],
+        *,
+        is_mono: bool,
+        prefix: str,
+    ):
+        if is_mono:
+            vision_feature_layer = config.select_layer
+            if vision_feature_layer < 0:
+                num_hidden_layers = config.vision_config.num_hidden_layers \
+                    + vision_feature_layer + 1
+            else:
+                num_hidden_layers = vision_feature_layer + 1
+
+            # We added additional dummy heads to the original num of heads to
+            # make the number of heads divisible by 8.
+            return InternVisionModel(
+                config.vision_config,
+                quant_config=quant_config,
+                num_hidden_layers_override=num_hidden_layers,
+                num_dummy_heads=7,
+                prefix=prefix,
+            )
+        else:
+            msg = "Monolith mode is not applicable to NVLM_D"
+            raise NotImplementedError(msg)
