@@ -36,15 +36,17 @@ def parse_timestamp(timestamp):
 
     for fmt in formats:
         try:
-            return int(datetime.strptime(timestamp, fmt).timestamp() * 1_000_000)  # Convert to microseconds
+            # Convert to microseconds
+            return int(datetime.strptime(timestamp, fmt).timestamp() * 1000000)
         except ValueError:
             continue  # Try the next format if parsing fails
 
-    raise ValueError(f"Timestamp '{timestamp}' does not match any expected format.")
+    raise ValueError(f"Timestamp '{timestamp}' does not match expected format.")
 
 
 def process_trace_file(file_path):
-    """Process a single trace file and return a list of events in Chrome Trace Event format."""
+    """Process a single trace file and return a list of events in Chrome Trace
+    Event format."""
     events = []
 
     try:
@@ -56,7 +58,8 @@ def process_trace_file(file_path):
         with open(file_path, 'r') as trace_file:
             total_lines = sum(1 for _ in trace_file)
             trace_file.seek(0)
-            for line in tqdm(trace_file, total=total_lines, desc="Processing trace file"):
+            for line in tqdm(trace_file, total=total_lines,
+                             desc="Processing trace file"):
                 # Ensure the line has the expected format, and skip empty lines
                 if len(line.strip()) == 0:
                     continue
@@ -104,7 +107,8 @@ def write_to_gzip(data, output_file_path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Process multiple trace files line by line and output the results to a JSON file in Chrome Trace Event format.")
+        description=("Process multiple trace files line by line and output the"
+                     " results to a JSON file in Chrome Trace Event format."))
 
     # Add a positional argument to accept multiple trace files
     parser.add_argument(
@@ -119,7 +123,8 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        help="Path to the output file where results will be written. If not provided, a default file will be created."
+        help=("Path to the output file where results will be written."
+              " If not provided, a default file will be created.")
     )
 
     args = parser.parse_args()
@@ -132,7 +137,7 @@ def main():
             output_file_path = args.output + ".json.gz"
     else:
         output_file_path = generate_default_output_filename()
-        print(f"No output file provided. Using default output file: {output_file_path}")
+        print(f"No output file provided. Use default file: {output_file_path}")
 
     all_events = []
 

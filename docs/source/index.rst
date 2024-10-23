@@ -140,7 +140,7 @@ Documentation
    dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
    dev/profiling/profiling_index
-   dev/tracing/tracing_index
+   dev/function_tracing/function_tracing_index
 
 .. toctree::
    :maxdepth: 1
