@@ -87,6 +87,11 @@ Text Generation
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
     -
     - ✅︎
+  * - :code:`FalconMambaForCausalLM`
+    - FalconMamba
+    - :code:`tiiuae/falcon-mamba-7b`, :code:`tiiuae/falcon-mamba-7b-instruct`, etc.
+    - ✅︎
+    -  
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
@@ -294,6 +299,10 @@ Text Embedding
     - 
     - ✅︎
 
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
 Reward Modeling
 ---------------
 
@@ -324,6 +333,14 @@ The following modalities are supported depending on the model:
 - **I**\ mage
 - **V**\ ideo
 - **A**\ udio
+
+Any combination of modalities joined by :code:`+` are supported.
+
+- e.g.: :code:`T + I` means that the model supports text-only, image-only, and text-with-image inputs.
+
+On the other hand, modalities separated by :code:`/` are mutually exclusive.
+
+- e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
 .. _supported_vlms:
 
@@ -367,7 +384,7 @@ Text Generation
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
-    - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
+    - :code:`OpenGVLab/Mono-InternVL-2B`, :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
     - 
     - ✅︎
   * - :code:`LlavaForConditionalGeneration`
@@ -433,7 +450,7 @@ Text Generation
   * - :code:`PixtralForConditionalGeneration`
     - Pixtral
     - T + I\ :sup:`+`
-    - :code:`mistralai/Pixtral-12B-2409`
+    - :code:`mistralai/Pixtral-12B-2409`, :code:`mistral-community/pixtral-12b` etc.
     -
     - ✅︎
   * - :code:`QWenLMHeadModel`
@@ -475,12 +492,22 @@ Multimodal Embedding
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`LlavaNextForConditionalGeneration`
+    - LLaVA-NeXT-based
+    - T / I
+    - :code:`royokong/e5-v`
+    - 
+    - ✅︎
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision-based
     - T + I
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
+
+.. important::
+  Some model architectures support both generation and embedding tasks.
+  In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
 
 ----
 

@@ -8,7 +8,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 
 import openai
 import pytest
@@ -454,13 +454,13 @@ def multi_process_parallel(
 
 
 @contextmanager
-def error_on_warning():
+def error_on_warning(category: Type[Warning] = Warning):
     """
     Within the scope of this context manager, tests will fail if any warning
-    is emitted.
+    of the given category is emitted.
     """
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        warnings.filterwarnings("error", category=category)
 
         yield
 
@@ -587,7 +587,7 @@ def large_gpu_test(*, min_gb: int):
     )
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_skipif(fork_new_process_for_each_test(f))
+        return test_skipif(f)
 
     return wrapper
 
