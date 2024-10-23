@@ -5,7 +5,7 @@ tensor parallelism.
 import pytest
 import torch
 
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 from .conftest import run_equality_correctness_test_tp
 
@@ -51,7 +51,7 @@ def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
                               batch_size: int, output_len: int, seed: int):
     """Verify greedy equality when tensor parallelism is used.
     """
-    if is_hip():
+    if current_platform.is_rocm():
         pytest.skip("hip is not well-supported yet")
     run_equality_correctness_test_tp("JackFram/llama-68m",
                                      common_llm_kwargs,

@@ -5,7 +5,7 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.compilation.levels import CompilationLevel
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 TEST_MODELS = [
     ("facebook/opt-125m", {}),
@@ -55,7 +55,7 @@ if is_quant_method_supported("marlin"):
         "quantization": "marlin"
     }))
 
-if not is_hip() and is_quant_method_supported("awq"):
+if not current_platform.is_rocm() and is_quant_method_supported("awq"):
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
         "quantization": "AWQ"
     }))

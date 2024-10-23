@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter)
 from vllm.platforms import current_platform
-from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -127,7 +126,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
 
         weight = layer.weight
 
-        if is_hip():
+        if current_platform.is_rocm():
             weight, weight_scale, input_scale = \
                 normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,

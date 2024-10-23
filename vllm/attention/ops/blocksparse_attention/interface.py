@@ -3,7 +3,6 @@ import math
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import is_hip
 
 from .utils import (dense_to_crow_col, get_head_sliding_step,
                     get_sparse_attn_mask)
@@ -32,8 +31,9 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
     ):
         super().__init__()
         if use_spda is None:
-            use_spda = is_hip() or current_platform.is_cpu() or not \
-                       IS_COMPUTE_8_OR_ABOVE
+            use_spda = current_platform.is_rocm() or \
+                        current_platform.is_cpu() or not \
+                        IS_COMPUTE_8_OR_ABOVE
         device = device or (torch.cuda.current_device()
                             if current_platform.is_cuda_alike() else "cpu")
         device = torch.device(device)
