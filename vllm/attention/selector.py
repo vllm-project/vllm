@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import STR_BACKEND_ENV_VAR, is_hip, is_openvino, is_xpu
+from vllm.utils import STR_BACKEND_ENV_VAR, is_hip, is_openvino
 
 logger = init_logger(__name__)
 
@@ -136,7 +136,7 @@ def get_attn_backend(
         from vllm.attention.backends.openvino import OpenVINOAttentionBackend
         return OpenVINOAttentionBackend
     elif backend == _Backend.IPEX:
-        assert is_xpu(), RuntimeError(
+        assert current_platform.is_xpu(), RuntimeError(
             "IPEX attention backend is only used for the XPU device.")
         logger.info("Using IPEX attention backend.")
         from vllm.attention.backends.ipex_attn import IpexAttnBackend
@@ -198,7 +198,7 @@ def which_attn_to_use(
             logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
         return _Backend.OPENVINO
 
-    if is_xpu():
+    if current_platform.is_xpu():
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         return _Backend.IPEX
