@@ -20,7 +20,7 @@ Installation
 
 You can install vLLM using pip. It's recommended to use `conda <https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html>`_ to create and manage Python environments.
 
-.. code-block:: shell
+.. code-block:: console
 
     $ conda create -n myenv python=3.10 -y
     $ conda activate myenv
