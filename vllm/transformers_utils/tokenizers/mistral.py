@@ -16,8 +16,12 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -217,14 +221,20 @@ class MistralTokenizer:
             if any(isinstance(t, bytes) for t in tokens):
                 # we need to encode and decode all tokens again
                 shift = self.tokenizer.num_special_tokens
-                byte_tokens = [
-                    t.encode("utf-8") if not isinstance(t, bytes) else t
-                    for t in tokens
-                ]
-                ids = [
-                    self.tokenizer._tekken_token2id_nospecial[t] + shift
-                    for t in byte_tokens
-                ]
+
+                def _token_to_id(t: str):
+                    t_bytes = t.encode("utf-8") \
+                        if not isinstance(t, bytes) else t
+                    try:
+                        return shift + \
+                            self.tokenizer._tekken_token2id_nospecial[t_bytes]
+                    except KeyError:
+                        logger.warning(
+                            "Failed to convert token %s to id,"
+                            " replacing with <unk>", t_bytes)
+                        return self.tokenizer.unk_id
+
+                ids = [_token_to_id(t) for t in tokens]
                 decoded = self.tokenizer.decode(ids)
             else:
                 decoded = "".join(tokens)
