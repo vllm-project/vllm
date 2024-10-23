@@ -22,6 +22,7 @@ QUANTIZATION_METHODS: List[str] = [
     "gptq_marlin",
     "awq_marlin",
     "gptq",
+    "gptq_hpu",
     "compressed-tensors",
     "bitsandbytes",
     "qqq",
@@ -103,6 +104,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
+    from vllm_hpu_extension.gptq_hpu import GPTQHPUConfig
 
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
@@ -120,6 +122,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "gptq_marlin": GPTQMarlinConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
+        "gptq_hpu": GPTQHPUConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,

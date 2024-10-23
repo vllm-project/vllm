@@ -14,6 +14,13 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
+if current_platform.is_hpu():
+    try:
+        import habana_frameworks.torch.core as htcore
+        convert_from_uint4 = torch.ops.hpu.convert_from_uint4
+    except Exception as e:
+        hpu_import_exception = e
+
 if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
         import vllm._C
@@ -232,13 +239,20 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
-# gptq
+def gptq_hpu_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+              b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
+              b_g_idx: torch.Tensor, use_exllama: bool,
+              bit: int) -> torch.Tensor:
+
+    weight = convert_from_uint4(b_q_weight, b_gptq_scales, b_gptq_qzeros, a.dtype)
+    return torch.matmul(a, weight)
+
 def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
               b_g_idx: torch.Tensor, use_exllama: bool,
               bit: int) -> torch.Tensor:
     return torch.ops._C.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
-                                  b_g_idx, use_exllama, bit)
+                                 b_g_idx, use_exllama, bit)
 
 
 if hasattr(torch.ops._C, "gptq_gemm"):
