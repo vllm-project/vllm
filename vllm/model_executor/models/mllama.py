@@ -36,8 +36,7 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderInputs, InputContext)
+from vllm.inputs import INPUT_REGISTRY, EncoderDecoderInputs, InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -52,6 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SequenceData
+from vllm.utils import is_list_of
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal
@@ -87,34 +87,37 @@ def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
 
 
 def input_processor_for_mllama(ctx: InputContext,
-                               inputs: Union[DecoderOnlyInputs,
-                                             EncoderDecoderInputs]):
-    # move encoder_prompt to prompt
-    if inputs.get("prompt") is None:
-        inputs["prompt"] = inputs["encoder_prompt"]
-        inputs["prompt_token_ids"] = inputs["encoder_prompt_token_ids"]
+                               inputs: EncoderDecoderInputs):
+    enc_inputs = inputs["encoder"]
+    dec_inputs = inputs["decoder"]
 
-    # process multi-modal data
-    multi_modal_data = inputs.get("encoder_multi_modal_data")
+    # move encoder prompt to decoder
+    if dec_inputs.get("prompt") is None:
+        dec_inputs["prompt"] = enc_inputs["prompt"]
+        dec_inputs["prompt_token_ids"] = enc_inputs["prompt_token_ids"]
 
-    if multi_modal_data is None or "image" not in multi_modal_data \
-        or multi_modal_data["image"] is None:
+    multi_modal_data = enc_inputs.get("multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
         # text-only
-        inputs["encoder_prompt"] = ""
-        inputs["encoder_prompt_token_ids"] = []
-        inputs["encoder_multi_modal_data"] = {}
+        enc_inputs["prompt"] = ""
+        enc_inputs["prompt_token_ids"] = []
+        enc_inputs["multi_modal_data"] = {}
         return inputs
 
-    if isinstance(multi_modal_data['image'], Image.Image):
-        multi_modal_data['image'] = [multi_modal_data['image']]
+    image_data = multi_modal_data["image"]
+    if isinstance(image_data, Image.Image):
+        image_data = [image_data]
+
+    assert is_list_of(image_data, Image.Image)
+
     # Since only the last group of consecutive images
     # are attended by the decoded tokens, we only need to
     # get the number of tiles for those images.
     num_decode_images = _get_num_image_in_last_group(
-        inputs["prompt_token_ids"])
+        dec_inputs["prompt_token_ids"])
     hf_config = ctx.model_config.hf_config
     num_tiles = 0
-    for image in multi_modal_data["image"][::-1]:
+    for image in image_data[::-1]:
         width, height = image.size
         tile_size = hf_config.vision_config.image_size
         canvas_height, canvas_width = get_optimal_tiled_canvas(
@@ -129,7 +132,6 @@ def input_processor_for_mllama(ctx: InputContext,
         num_decode_images -= 1
         if num_decode_images == 0:
             break
-
     # Set encoder prompt length based on the number of tiles.
     # This tells the block manager to allocate correct number
     # of slots for encoder tokens.
@@ -137,8 +139,9 @@ def input_processor_for_mllama(ctx: InputContext,
         "chunk size should be multiple of 14"
     token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
     num_tokens = num_tiles * token_per_chunk
-    inputs["encoder_prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
-    inputs["encoder_prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID] * num_tokens
+
+    enc_inputs["prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
+    enc_inputs["prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID] * num_tokens
 
     return inputs
 

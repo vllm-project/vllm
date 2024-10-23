@@ -30,8 +30,9 @@ from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderInputs, InputRegistry, PromptType)
+from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
+                         PromptType)
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -639,7 +640,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
+        processed_inputs: ProcessorInputs,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -656,18 +657,19 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+        if is_encoder_decoder_inputs(processed_inputs):
+            decoder_inputs = processed_inputs["decoder"]
+            encoder_inputs = processed_inputs["encoder"]
+        else:
+            decoder_inputs = processed_inputs
+            encoder_inputs = None
+
+        seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
 
-        encoder_seq = None
-        if 'encoder_prompt_token_ids' in processed_inputs:
-            encoder_seq = Sequence(seq_id,
-                                   processed_inputs,
-                                   block_size,
-                                   eos_token_id,
-                                   lora_request,
-                                   prompt_adapter_request,
-                                   from_decoder_prompt=False)
+        encoder_seq = (None if encoder_inputs is None else Sequence(
+            seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
+            prompt_adapter_request))
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -1909,16 +1911,16 @@ class LLMEngine:
     def is_encoder_decoder_model(self):
         return self.input_preprocessor.is_encoder_decoder_model()
 
-    def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
-                                                   EncoderDecoderInputs]):
-        if self.model_config.is_multimodal_model:
+    def _validate_model_inputs(self, inputs: ProcessorInputs):
+        if is_encoder_decoder_inputs(inputs):
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
-            prompt_ids = inputs.get("prompt_token_ids")
-        elif self.is_encoder_decoder_model():
-            prompt_ids = inputs.get("encoder_prompt_token_ids")
+            prompt_inputs = inputs["decoder" if self.model_config.
+                                   is_multimodal_model else "encoder"]
         else:
-            prompt_ids = inputs.get("prompt_token_ids")
+            prompt_inputs = inputs
+
+        prompt_ids = prompt_inputs.get("prompt_token_ids")
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
