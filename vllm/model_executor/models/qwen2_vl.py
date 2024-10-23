@@ -648,8 +648,7 @@ def _get_max_image_info(
     min_pixels: Optional[int] = None,
     max_pixels: Optional[int] = None,
 ):
-    # Limit min / max pixels
-    # Fallback order: kwargs -> image_processor values -> reasonable defaults
+    # Limit min / max pixels unless they're explicitly provided
     if min_pixels is None:
         min_pixels = max(image_processor.min_pixels, 28 * 28)
     if max_pixels is None:
