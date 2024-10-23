@@ -213,6 +213,12 @@ def input_mapper_for_qwen2_audio(
     multi_modal_data: Union[np.ndarray, List[np.ndarray]],
 ) -> MultiModalInputs:
     """Input mapper for Qwen2-Audio."""
+    if not isinstance(multi_modal_data, list):
+        multi_modal_data = [multi_modal_data]
+
+    if len(multi_modal_data) == 0:
+        return MultiModalInputs()
+
     processor = cached_get_processor(ctx.model_config.model)
     audio_feature_extractor = processor.feature_extractor
     if audio_feature_extractor is None:
@@ -220,12 +226,6 @@ def input_mapper_for_qwen2_audio(
             "No HuggingFace audio_feature_extractor is available "
             "to process the audio object")
 
-    if len(multi_modal_data) == 0:
-        batch_data = {
-            'input_features': torch.tensor([]),
-            'feature_attention_mask': torch.tensor([])
-        }
-        return batch_data
     try:
         resampled_audios = [
             librosa.resample(

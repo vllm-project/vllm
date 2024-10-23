@@ -12,14 +12,15 @@ from vllm.assets.audio import AudioAsset
 from vllm.utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
-question_per_audio_count = [
-    "What is recited in the audio?",
-    "What sport and what nursery rhyme are referenced?"
-]
+question_per_audio_count = {
+    0: "What is 1+1?",
+    1: "What is recited in the audio?",
+    2: "What sport and what nursery rhyme are referenced?"
+}
 
 
 # Ultravox 0.3
-def run_ultravox(question, audio_count):
+def run_ultravox(question: str, audio_count: int):
     model_name = "fixie-ai/ultravox-v0_3"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -43,7 +44,7 @@ def run_ultravox(question, audio_count):
 
 
 # Qwen2-Audio
-def run_qwen2_audio(question, audio_count):
+def run_qwen2_audio(question: str, audio_count: int):
     model_name = "Qwen/Qwen2-Audio-7B-Instruct"
 
     llm = LLM(model=model_name,
@@ -74,7 +75,7 @@ def main(args):
 
     audio_count = args.num_audios
     llm, prompt, stop_token_ids = model_example_map[model](
-        question_per_audio_count[audio_count - 1], audio_count)
+        question_per_audio_count[audio_count], audio_count)
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
@@ -82,16 +83,17 @@ def main(args):
                                      max_tokens=64,
                                      stop_token_ids=stop_token_ids)
 
-    assert args.num_prompts > 0
-    inputs = {
-        "prompt": prompt,
-        "multi_modal_data": {
+    mm_data = {}
+    if audio_count > 0:
+        mm_data = {
             "audio": [
                 asset.audio_and_sample_rate
                 for asset in audio_assets[:audio_count]
             ]
-        },
-    }
+        }
+
+    assert args.num_prompts > 0
+    inputs = {"prompt": prompt, "multi_modal_data": mm_data}
     if args.num_prompts > 1:
         # Batch inference
         inputs = [inputs] * args.num_prompts
@@ -120,7 +122,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-audios",
                         type=int,
                         default=1,
-                        choices=[1, 2],
+                        choices=[0, 1, 2],
                         help="Number of audio items per prompt.")
 
     args = parser.parse_args()
