@@ -1306,10 +1306,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def profile_run(self) -> None:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        max_batch_size = self.bucketing_global_state.prompt_bs_bucket_cfg[-1]
-        max_seq_len = min(
-            self.bucketing_global_state.prompt_seq_bucket_cfg[-1],
-            self.max_num_batched_tokens // max_batch_size)
+        max_seq_len = self.bucketing_global_state.prompt_seq_bucket_cfg[-1]
+        max_batch_size = self.max_num_batched_tokens // max_seq_len
 
         self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches,
                              False, True)
