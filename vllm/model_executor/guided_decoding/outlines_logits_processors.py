@@ -79,6 +79,10 @@ class BaseLogitsProcessor:
         mask = torch.full((scores.shape[-1], ),
                           -math.inf,
                           device=scores.device)
+        # the tokenizer may support more token ids than the model can generate,
+        # eg. Llama 3.2 Vision models have an `<|image|>` token with id 128256
+        # but scores.shape == torch.Size([128256])
+        allowed_tokens = [t for t in allowed_tokens if t < scores.shape[-1]]
         mask[allowed_tokens] = 0
         scores.add_(mask)
         return scores
