@@ -22,7 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
-from functools import lru_cache, partial
+from functools import partial
 from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
                     Tuple, Type, TypedDict, Union)
 
@@ -63,7 +63,7 @@ from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.config import uses_mrope
-from vllm.transformers_utils.processor import get_processor
+from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (PPMissingLayer, get_vit_attn_backend,
@@ -78,7 +78,7 @@ logger = init_logger(__name__)
 class Qwen2VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: 
+    """Shape:
     `(num_patches, num_channels * patch_size * patch_size)`
     """
 
@@ -102,14 +102,14 @@ Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
 
 class Qwen2VLVideoInputs(TypedDict):
     pixel_values_videos: torch.Tensor
-    """Shape: 
-    `(num_patches, 
+    """Shape:
+    `(num_patches,
       num_channels * temporal_patch_size * patch_size * patch_size)`
     """
 
     video_grid_thw: torch.Tensor
     """Shape: `(num_videos, 3)`
-    
+
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
@@ -543,8 +543,6 @@ class Qwen2VisionTransformer(nn.Module):
 
 
 # === Vision input helpers === #
-
-cached_get_processor = lru_cache(get_processor)
 
 
 def mm_input_mapper_for_qwen2_vl(
