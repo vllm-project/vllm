@@ -89,9 +89,8 @@ def test_decode_streaming(tokenizer, truth, with_prompt, skip_special_tokens):
         generated_input_ids = truth_tokens[len(truth) // 2:]
         all_input_ids = prompt_input_ids + generated_input_ids
         starting_index = len(prompt_input_ids)
-        prompt = (tokenizer.decode(prompt_input_ids) if isinstance(
-            tokenizer, MistralTokenizer) else tokenizer.decode(
-                prompt_input_ids, skip_special_tokens=skip_special_tokens))
+        prompt = tokenizer.decode(prompt_input_ids,
+                                  skip_special_tokens=skip_special_tokens)
         generated = truth[len(prompt):]
     else:
         generated = truth
@@ -236,12 +235,8 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: List[int],
     # decoded_prompt_logprobs doesn't contain the first token.
     token_ids = complete_sequence_token_ids
     tokenizer = detokenizer.get_tokenizer_for_seq(seq)
-    text_full = (tokenizer.decode(token_ids) if isinstance(
-        tokenizer, MistralTokenizer) else tokenizer.decode(
-            token_ids, skip_special_tokens=True))
-    text_first = (tokenizer.decode(token_ids[0]) if isinstance(
-        tokenizer, MistralTokenizer) else tokenizer.decode(
-            token_ids[0], skip_special_tokens=True))
+    text_full = tokenizer.decode(token_ids, skip_special_tokens=True)
+    text_first = tokenizer.decode(token_ids[0], skip_special_tokens=True)
     text = text_full[len(text_first):]
 
     # Text for logprobs for the chosen token should be the same as the
