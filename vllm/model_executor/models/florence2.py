@@ -229,9 +229,8 @@ class Florence2ForConditionalGeneration(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.language_model.logits_processor(
-            self.language_model.lm_head, hidden_states, sampling_metadata)
-        return logits
+        return self.language_model.compute_logits(hidden_states,
+                                                  sampling_metadata)
 
     def sample(
         self,
