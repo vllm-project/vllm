@@ -777,8 +777,8 @@ def _expand_pad_tokens(inputs: list, token_id: int, make_batched_fn: Callable,
         data_type_key (str): The type of the multi-modal input.
         image_processor (Any): The image processor used to process the inputs.
         prompt_token_ids (List[int]): The list of token IDs in the prompt.
-        min_pixels int: min pixels to used for img processing
-        max_pixels int: max pixels to be used for img processing
+        min_pixels (int): min pixels to used for img processing
+        max_pixels (int): max pixels to be used for img processing
 
     Returns:
         List[int]: The list of token IDs for the multi-modal inputs.
