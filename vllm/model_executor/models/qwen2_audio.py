@@ -172,9 +172,9 @@ def input_processor_for_qwen2_audio(
     processor = cached_get_processor(ctx.model_config.model)
     resampled_audios = [
         librosa.resample(
-            _[0], orig_sr=_[1],
+            audio, orig_sr=sampling_rate,
             target_sr=processor.feature_extractor.sampling_rate) 
-        for _ in multi_modal_data['audio']
+        for audio, sampling_rate in multi_modal_data['audio']
     ]
     audio_input_lengths = np.array(
         [min(3000, _.shape[0] // 160 + 1) for _ in resampled_audios])
