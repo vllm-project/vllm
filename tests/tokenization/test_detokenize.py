@@ -13,6 +13,7 @@ TRUTH = [
     "Hello here, this is a simple test",
     "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be used in production environments, where inference and serving",  # noqa
     "我很感谢你的热情",
+    # see https://github.com/vllm-project/vllm/pull/9625
     "THIS IS AN URGENCY",
 ]
 TOKENIZERS = [
@@ -57,6 +58,14 @@ def tokenizer(tokenizer_name):
     return (MistralTokenizer.from_pretrained(tokenizer_name)
             if "mistral" in tokenizer_name else
             AutoTokenizer.from_pretrained(tokenizer_name))
+
+
+# see https://github.com/vllm-project/vllm/pull/9625
+@pytest.mark.parametrize("tokenizer_name", ["mistralai/Pixtral-12B-2409"])
+def test_mistral_edge_case(tokenizer):
+    assert (_run_incremental_decode(tokenizer, [1492, 1176, 115679],
+                                    skip_special_tokens=True,
+                                    starting_index=0) == " ð")
 
 
 @pytest.fixture
