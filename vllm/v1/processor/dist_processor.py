@@ -1,4 +1,5 @@
 import multiprocessing
+from abc import ABC, abstractmethod
 from typing import Optional, Type
 
 import msgspec
@@ -16,11 +17,18 @@ class ProcessorOutputs(msgspec.Struct):
     pass
 
 
+class ProcessorImpl(ABC):
+
+    @abstractmethod
+    def process_inputs(self, inputs: ProcessorInputs) -> ProcessorOutputs:
+        raise NotImplementedError
+
+
 class Processor:
 
     def __init__(
         self,
-        proc_cls: Type["ProcessorProc"],
+        proc_cls: Type[ProcessorImpl],
         input_cls: Type[ProcessorInputs],
         output_cls: Type[ProcessorOutputs],
         *args,
@@ -28,8 +36,8 @@ class Processor:
     ):
         self.push_port = get_open_port()
         self.pull_port = get_open_port()
-        self.worker = proc_cls(self.push_port, self.pull_port, input_cls,
-                               output_cls, *args, **kwargs)
+        self.worker = ProcessorWorker(self.push_port, self.pull_port, proc_cls,
+                                      input_cls, output_cls, *args, **kwargs)
         self.worker.start()
 
         self.zmq_context = zmq.Context()
@@ -58,7 +66,7 @@ class Processor:
         self.worker.join()
 
 
-class ProcessorProc(multiprocessing.Process):
+class ProcessorWorker(multiprocessing.Process):
 
     TERMINATE_SIGNAL = b""
 
@@ -66,6 +74,7 @@ class ProcessorProc(multiprocessing.Process):
         self,
         pull_port: int,
         push_port: int,
+        proc_cls: Type[ProcessorImpl],
         input_cls: Type[ProcessorInputs],
         output_cls: Type[ProcessorOutputs],
         *args,
@@ -74,6 +83,7 @@ class ProcessorProc(multiprocessing.Process):
         super().__init__()
         self.pull_port = pull_port
         self.push_port = push_port
+        self.proc_cls = proc_cls
         self.input_cls = input_cls
         self.output_cls = output_cls
         self.args = args
@@ -89,8 +99,8 @@ class ProcessorProc(multiprocessing.Process):
         self.pull_socket.bind(f"tcp://*:{self.pull_port}")
         self.push_socket = self.zmq_context.socket(zmq.PUSH)
         self.push_socket.bind(f"tcp://*:{self.push_port}")
-
-        self.init_states(*self.args, **self.kwargs)
+        # Initialize the processor.
+        self.processor = self.proc_cls(*self.args, **self.kwargs)
 
         while True:
             message = self.pull_socket.recv()
@@ -98,12 +108,6 @@ class ProcessorProc(multiprocessing.Process):
                 # Terminate signal.
                 break
             inputs = self.msgpack_decoder.decode(message)
-            outputs = self.process_inputs(inputs)
+            outputs = self.processor.process_inputs(inputs)
             self.push_socket.send(self.msgpack_encoder.encode(outputs),
                                   flags=zmq.NOBLOCK)
-
-    def init_states(self, *args, **kwargs) -> None:
-        raise NotImplementedError
-
-    def process_inputs(self, inputs: ProcessorInputs) -> ProcessorOutputs:
-        raise NotImplementedError

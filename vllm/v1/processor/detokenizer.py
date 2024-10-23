@@ -4,8 +4,9 @@ from typing import Dict, List
 from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.v1.processor.dist_processor import (Processor, ProcessorInputs,
-                                              ProcessorOutputs, ProcessorProc)
+from vllm.v1.processor.dist_processor import (Processor, ProcessorImpl,
+                                              ProcessorInputs,
+                                              ProcessorOutputs)
 
 
 class DetokenizerInputs(ProcessorInputs):
@@ -39,13 +40,13 @@ class DetokenizerOutputs(ProcessorOutputs):
 class Detokenizer(Processor):
 
     def __init__(self, tokenizer_name: str):
-        super().__init__(DetokenizerProc, DetokenizerInputs,
+        super().__init__(DetokenizerImpl, DetokenizerInputs,
                          DetokenizerOutputs, tokenizer_name)
 
 
-class DetokenizerProc(ProcessorProc):
+class DetokenizerImpl(ProcessorImpl):
 
-    def init_states(self, tokenizer_name: str) -> None:
+    def __init__(self, tokenizer_name: str):
         self.tokenizer = get_tokenizer(tokenizer_name)
         # req_id -> RequestState
         self.request_states: Dict[str, RequestState] = {}
