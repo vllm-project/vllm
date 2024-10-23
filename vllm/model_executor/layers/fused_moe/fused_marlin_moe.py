@@ -18,6 +18,7 @@ def get_scalar_type(num_bits: int, has_zp: bool):
         return scalar_types.uint4b8 if num_bits == 4 else scalar_types.uint8b128
 
 
+@torch.library.custom_op("vllm::single_marlin_moe", mutates_args=[])
 def single_marlin_moe(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
@@ -118,6 +119,24 @@ def single_marlin_moe(
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
 
+@single_marlin_moe.register_fake
+def _(
+    hidden_states: torch.Tensor,
+    w: torch.Tensor,
+    scales: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    g_idx: Optional[torch.Tensor] = None,
+    sort_indices: Optional[torch.Tensor] = None,
+    w_zeros: Optional[torch.Tensor] = None,
+    num_bits: int = 8,
+    is_k_full: bool = True,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+@torch.library.custom_op("vllm::fused_marlin_moe", mutates_args=[])
 def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -303,3 +322,25 @@ def fused_marlin_moe(
 
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)
+
+
+@fused_marlin_moe.register_fake
+def _(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    g_idx1: Optional[torch.Tensor] = None,
+    g_idx2: Optional[torch.Tensor] = None,
+    sort_indices1: Optional[torch.Tensor] = None,
+    sort_indices2: Optional[torch.Tensor] = None,
+    w1_zeros: Optional[torch.Tensor] = None,
+    w2_zeros: Optional[torch.Tensor] = None,
+    num_bits: int = 8,
+    is_k_full: bool = True,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)

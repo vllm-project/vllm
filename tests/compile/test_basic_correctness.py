@@ -17,7 +17,7 @@ from ..utils import compare_all_settings
         ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples",
          ["--quantization", "compressed-tensors"
           ], 1, 1, "FLASH_ATTN", "generate", True),
-        ("google/gemma-2-2b-it", [], 1, 2, "FLASHINFER", "generate", True),
+        ("ibm/PowerMoE-3b", [], 1, 2, "FLASHINFER", "generate", True),
         # TODO: add multi-modality test for llava
         ("llava-hf/llava-1.5-7b-hf", [], 2, 1, "FLASHINFER", "generate", False)
     ])
