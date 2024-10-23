@@ -154,7 +154,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         return logits
 
     def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
+               sampling_metadata: SamplingMetadata) -> SamplerOutput:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
@@ -247,9 +247,9 @@ class Florence2ForConditionalGeneration(nn.Module):
 
     def sample(
         self,
-        logits: Optional[torch.Tensor],
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
+    ) -> SamplerOutput:
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
