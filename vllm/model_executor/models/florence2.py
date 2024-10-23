@@ -144,6 +144,20 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         return self.model(input_ids, positions, encoder_input_ids,
                           encoder_positions, kv_caches, attn_metadata)
 
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def sample(self, logits: torch.Tensor,
+               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
