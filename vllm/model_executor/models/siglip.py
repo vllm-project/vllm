@@ -248,8 +248,10 @@ class SiglipParallelAttention(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -266,12 +268,14 @@ class SiglipParallelAttention(nn.Module):
             head_size=self.head_dim,
             total_num_heads=self.num_heads,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.out_proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
 
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -314,8 +318,10 @@ class SiglipMLP(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
 
@@ -326,11 +332,13 @@ class SiglipMLP(nn.Module):
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config if quantizable else None,
+            prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config if quantizable else None,
+            prefix=f"{prefix}.fc2",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -346,15 +354,20 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.embed_dim = config.hidden_size
 
         num_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = SiglipParallelAttention(config,
-                                                     quant_config=quant_config)
+            self.self_attn = SiglipParallelAttention(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
         else:
             self.self_attn = SiglipSdpaAttention(config)
 
@@ -363,6 +376,7 @@ class SiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
@@ -392,8 +406,10 @@ class SiglipEncoder(nn.Module):
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         num_hidden_layers_override: Optional[int] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
 
         if num_hidden_layers_override is None:
@@ -402,8 +418,10 @@ class SiglipEncoder(nn.Module):
             num_hidden_layers = num_hidden_layers_override
 
         self.layers = nn.ModuleList([
-            SiglipEncoderLayer(config, quant_config=quant_config)
-            for _ in range(num_hidden_layers)
+            SiglipEncoderLayer(config,
+                               quant_config=quant_config,
+                               prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
@@ -424,7 +442,8 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
@@ -433,7 +452,9 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
             config.hidden_size, config.num_attention_heads, batch_first=True)
         self.layernorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(config=config, quant_config=quant_config)
+        self.mlp = SiglipMLP(config=config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.mlp")
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         batch_size = hidden_state.shape[0]
@@ -454,9 +475,13 @@ class SiglipVisionTransformer(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
         num_hidden_layers_override: Optional[int] = None,
-    ):
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         embed_dim = config.hidden_size
 
@@ -465,26 +490,34 @@ class SiglipVisionTransformer(nn.Module):
             config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            prefix=f"{prefix}.encoder",
         )
 
+        num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
-                f"The original encoder only has {config.num_hidden_layers} "
+                f"The original encoder only has {num_hidden_layers} "
                 f"layers, but you requested {len(self.encoder.layers)} layers."
             )
-        elif len(self.encoder.layers) == config.num_hidden_layers:
+
+        # If possible, skip post_layernorm to conserve memory
+        if require_post_norm is None:
+            require_post_norm = len(self.encoder.layers) == num_hidden_layers
+
+        if require_post_norm:
             self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
-            # post_layernorm is unused when we extract intermediate features
-            # In this case, we can skip it to conserve memory
             self.post_layernorm = None
 
         self.use_head = (True if not hasattr(config, "vision_use_head") else
                          config.vision_use_head)
         if self.use_head:
             self.head = SiglipMultiheadAttentionPoolingHead(
-                config=config, quant_config=quant_config)
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.head",
+            )
 
     def forward(
         self,
@@ -517,8 +550,11 @@ class SiglipVisionModel(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
         num_hidden_layers_override: Optional[int] = None,
-    ):
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         num_heads = config.num_attention_heads
@@ -529,6 +565,8 @@ class SiglipVisionModel(nn.Module):
             config,
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            require_post_norm=require_post_norm,
+            prefix=f"{prefix}.vision_model",
         )
 
     def get_input_embeddings(self) -> nn.Module:
