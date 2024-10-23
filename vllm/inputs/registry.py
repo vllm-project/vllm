@@ -2,7 +2,7 @@ import functools
 from collections import UserDict
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
-                    Protocol, Tuple, Type)
+                    Protocol, Tuple, Type, cast)
 
 from torch import nn
 from transformers import PretrainedConfig
@@ -302,7 +302,7 @@ class InputRegistry:
         # If it's empty, it'll fall back to the default kwarg values
         mm_processor_kwargs = resolve_mm_processor_kwargs(
             model_config.mm_processor_kwargs,
-            inputs.get("mm_processor_kwargs"),
+            cast(Dict[str, Any], inputs.get("mm_processor_kwargs")),
             processor,
         )
 
