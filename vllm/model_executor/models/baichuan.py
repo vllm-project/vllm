@@ -432,7 +432,9 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
 
 class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
-    """Baichuan 13B and Baichuan2 7B/13B."""
+    """Baichuan 13B and Baichuan2 7B/13B.
+    NOTE: the class name has a lower case 'c'.
+    """
 
     def __init__(
         self,
@@ -450,7 +452,9 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
 
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
-    """Baichuan 7B."""
+    """Baichuan 7B.
+    NOTE: the class name has a upper case 'C'.
+    """
 
     def __init__(
         self,
