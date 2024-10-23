@@ -125,6 +125,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
         assert self.query_start_loc is not None
         assert self.context_lens_tensor is not None
         assert self.seq_start_loc is not None
+        assert self.num_orig_input_tokens_tensor is not None
 
         # Placeholders
         slot_mapping = torch.empty(0)
@@ -137,6 +138,8 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+            num_orig_input_tokens_tensor=self.
+            num_orig_input_tokens_tensor[:self.num_prefills],
             max_decode_query_len=0,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
@@ -157,6 +160,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
         if self._cached_decode_metadata is not None:
             return self._cached_decode_metadata
         assert self.seq_lens_tensor is not None
+        assert self.num_orig_input_tokens_tensor is not None
 
         # Placeholders
         slot_mapping = torch.empty(0)
@@ -169,6 +173,8 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+            num_orig_input_tokens_tensor=self.
+            num_orig_input_tokens_tensor[:self.num_prefills],
             max_decode_query_len=self.max_decode_query_len,
             max_query_len=None,
             max_prefill_seq_len=0,
@@ -224,12 +230,15 @@ class PlaceholderAttentionMetadataBuilder(
                 self.curr_seq_lens.append(curr_seq_len)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
+              num_orig_input_tokens_list: List[int], cuda_graph_pad_size: int,
+              batch_size: int):
         """Build attention metadata with on-device tensors.
 
         Args:
             seq_lens: The maybe padded sequence lengths of the input sequences.
             query_lens: The query lengths of the input sequences.
+            num_orig_input_tokens_list (List[int]): The original number of
+                                             input tokens for each sequence.
             cuda_graph_pad_size: The padding size for cuda graph.
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
@@ -289,6 +298,10 @@ class PlaceholderAttentionMetadataBuilder(
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
+                                                    dtype=torch.long,
+                                                    device=device)
+
         # Placeholders
         slot_mapping = torch.empty(0)
         block_tables = torch.empty(0)
@@ -298,6 +311,7 @@ class PlaceholderAttentionMetadataBuilder(
             slot_mapping=slot_mapping,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
