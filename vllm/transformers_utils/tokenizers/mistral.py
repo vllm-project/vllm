@@ -72,18 +72,12 @@ class MistralTokenizer:
             # Make sure special tokens will not raise
             tokenizer_.special_token_policy = SpecialTokenPolicy.IGNORE
 
-            self._vocab = {
-                token: idx
-                for idx, token in enumerate(tokenizer_.vocab())
-            }
         elif isinstance(tokenizer_, SentencePieceTokenizer):
-            self._vocab = {
-                token: idx
-                for idx, token in enumerate(tokenizer_.vocab())
-            }
+            pass
         else:
             raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
 
+        self._vocab = tokenizer_.vocab()
         self.tokenizer = tokenizer_
         self._max_token_id = max(self._vocab.values())
 
@@ -182,7 +176,10 @@ class MistralTokenizer:
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
-        return self._vocab
+        # Convert to a Dict[str, int] to match protocol, but this is a lossy
+        # conversion. There may be multiple token ids that decode to the same
+        # string due to partial UTF-8 byte sequences being converted to �
+        return {token: idx for idx, token in enumerate(self._vocab)}
 
     def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
