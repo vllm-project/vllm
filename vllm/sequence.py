@@ -242,17 +242,9 @@ class SequenceData(msgspec.Struct,
     def prompt_token_ids(self) -> Tuple[int, ...]:
         return self._prompt_token_ids_tuple
 
-    @prompt_token_ids.setter
-    def prompt_token_ids(self, new_prompt_token_ids) -> None:
-        raise NotImplementedError
-
     @property
     def prompt_embeds(self) -> Optional[torch.Tensor]:
         return self._prompt_embeds
-
-    @prompt_embeds.setter
-    def prompt_embeds(self, new_prompt_embeds: Optional[torch.Tensor]) -> None:
-        self._prompt_embeds = new_prompt_embeds
 
     @property
     def prompt_token_ids_array(self) -> array:
@@ -297,10 +289,7 @@ class SequenceData(msgspec.Struct,
         self._cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        if self._prompt_embeds is None:
-            return len(self._output_token_ids) + len(self._prompt_token_ids)
-        else:
-            return len(self._output_token_ids) + len(self._prompt_embeds)
+        return len(self._output_token_ids) + len(self._prompt_token_ids)
 
     def get_prompt_len(self) -> int:
         return len(self._prompt_token_ids)
