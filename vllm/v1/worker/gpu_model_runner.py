@@ -7,16 +7,15 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm.inputs import INPUT_REGISTRY, InputRegistry
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
-                             MultiModalRegistry)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.forward_context import set_forward_context
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
+                             MultiModalInputs, MultiModalRegistry)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available)
@@ -154,7 +153,8 @@ class GPUModelRunner:
                 block_ids=req_data.block_ids,
                 num_computed_tokens=req_data.num_computed_tokens,
                 output_token_ids=[],
-                requires_encoder_processing=(req_data.multi_modal_data is not None),
+                requires_encoder_processing=(req_data.multi_modal_data
+                                             is not None),
             )
             req_ids_to_add.append(req_id)
 
@@ -314,7 +314,8 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return input_ids, positions, attn_metadata, batched_mm_inputs, logits_indices
+        return (input_ids, positions, attn_metadata, batched_mm_inputs,
+                logits_indices)
 
     def _prepare_multi_modal_inputs(
         self,
