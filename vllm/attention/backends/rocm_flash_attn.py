@@ -625,22 +625,17 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             assert attn_metadata.num_encoder_tokens is not None
             num_prefill_tokens = attn_metadata.num_encoder_tokens
 
+        output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
-
         # QKV for prefill.
         query = query[:num_prefill_tokens]
+
         if key is not None and value is not None:
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
 
         if prefill_meta := attn_metadata.prefill_metadata:
-            output = torch.empty_like(query)
-            (query_seq_start_loc, query_max_seq_len, key_seq_start_loc,
-             key_max_seq_len, seq_lens,
-             causal_mask) = _get_seq_len_block_table_args(
-                 prefill_meta, attn_type)
-
             # Prompt run.
             if kv_cache.numel() == 0 is None or \
                   prefill_meta.block_tables.numel() == 0:
@@ -737,7 +732,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             # Whether to use rocm custom paged attention or not
-            output = torch.empty_like(decode_query)
             num_seqs, num_heads, head_size = decode_query.shape
             block_size = value_cache.shape[3]
             gqa_ratio = num_heads // self.num_kv_heads
