@@ -483,7 +483,7 @@ def _parse_chat_message_content_parts(
     parts: Iterable[ChatCompletionContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
 ) -> List[ConversationMessage]:
-    content = []
+    content: List[Union[str, Dict[str, str]]] = []
 
     mm_parser = mm_tracker.create_parser()
     keep_multimodal_content = \
