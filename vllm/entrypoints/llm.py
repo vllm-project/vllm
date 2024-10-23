@@ -203,9 +203,8 @@ class LLM:
     def get_tokenizer(self,
                       lora_request: Optional[LoRARequest] = None
                       ) -> AnyTokenizer:
-        if lora_request:
-            return self.llm_engine.get_tokenizer(lora_request=lora_request)
-        return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
+        return self.llm_engine.get_tokenizer_group(
+            TokenizerGroup).get_lora_tokenizer(lora_request=lora_request)
 
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
         tokenizer_group = self.llm_engine.get_tokenizer_group(TokenizerGroup)
