@@ -43,10 +43,12 @@ _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
-PromptImageInput = Union[List[Image.Image], List[List[Image.Image]]]
-PromptAudioInput = Union[List[Tuple[np.ndarray, int]],
-                         List[List[Tuple[np.ndarray, int]]]]
-PromptVideoInput = Union[List[np.ndarray], List[List[np.ndarray]]]
+_M = TypeVar("_M")
+_PromptMultiModalInput = Union[List[_M], List[List[_M]]]
+
+PromptImageInput = _PromptMultiModalInput[Image.Image]
+PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
+PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -318,12 +320,12 @@ class HfRunner:
                 "text": prompt,
                 "return_tensors": "pt",
             }
-            if images is not None and images[i] is not None:
-                processor_kwargs["images"] = images[i]
-            if videos is not None and videos[i] is not None:
-                processor_kwargs["videos"] = videos[i]
-            if audios is not None and audios[i] is not None:
-                audio, sr = audios[i]
+            if images is not None and (image := images[i]) is not None:
+                processor_kwargs["images"] = image
+            if videos is not None and (video := videos[i]) is not None:
+                processor_kwargs["videos"] = video
+            if audios is not None and (audio_tuple := audios[i]) is not None:
+                audio, sr = audio_tuple
                 processor_kwargs["audio"] = audio
                 processor_kwargs["sampling_rate"] = sr
 
@@ -338,7 +340,7 @@ class HfRunner:
         self,
         prompts: List[str],
         images: Optional[PromptImageInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
+        videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[List[int]], List[str]]]:
@@ -368,7 +370,7 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
+        videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[int], str]]:
@@ -409,7 +411,7 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
+        videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[List[torch.Tensor]]:
@@ -488,7 +490,7 @@ class HfRunner:
         num_logprobs: int,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
+        videos: Optional[PromptVideoInput] = None,
         **kwargs: Any,
     ) -> List[TokensTextLogprobs]:
         all_inputs = self.get_inputs(prompts,
@@ -657,15 +659,18 @@ class VllmRunner:
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = {"image": image}
+                if image is not None:
+                    inputs[i]["multi_modal_data"] = {"image": image}
 
         if videos is not None:
             for i, video in enumerate(videos):
-                inputs[i]["multi_modal_data"] = {"video": video}
+                if video is not None:
+                    inputs[i]["multi_modal_data"] = {"video": video}
 
         if audios is not None:
             for i, audio in enumerate(audios):
-                inputs[i]["multi_modal_data"] = {"audio": audio}
+                if audio is not None:
+                    inputs[i]["multi_modal_data"] = {"audio": audio}
 
         return inputs
 
@@ -837,13 +842,20 @@ class VllmRunner:
             returned_outputs.append((token_ids, texts))
         return returned_outputs
 
-    def encode(self, prompts: List[str]) -> List[List[float]]:
-        req_outputs = self.model.encode(prompts)
-        outputs = []
-        for req_output in req_outputs:
-            embedding = req_output.outputs.embedding
-            outputs.append(embedding)
-        return outputs
+    def encode(
+        self,
+        prompts: List[str],
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> List[List[float]]:
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
+
+        req_outputs = self.model.encode(inputs)
+        return [req_output.outputs.embedding for req_output in req_outputs]
 
     def __enter__(self):
         return self

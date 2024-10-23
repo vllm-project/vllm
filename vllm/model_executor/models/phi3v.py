@@ -467,8 +467,6 @@ def input_processor_for_phi3v(ctx: InputContext,
 
     prompt_token_ids = inputs["prompt_token_ids"].copy()
 
-    print("prompt_token_ids (old)", prompt_token_ids)
-
     # masked placeholder with image token id
     for idx in image_idx:
         candidates = _get_image_placeholder_token_id_candidates(model_config,
