@@ -6,12 +6,11 @@ import ray
 from prometheus_client import REGISTRY
 
 from vllm import EngineArgs, LLMEngine
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
-
-from ..conftest import cleanup
 
 MODELS = [
     "facebook/opt-125m",
@@ -185,13 +184,14 @@ def test_metric_spec_decode(
 ) -> None:
     k = 5
 
-    with vllm_runner(model,
-                     dtype=dtype,
-                     disable_log_stats=False,
-                     gpu_memory_utilization=0.4,
-                     speculative_model=model,
-                     num_speculative_tokens=k,
-                     use_v2_block_manager=True) as vllm_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            disable_log_stats=False,
+            gpu_memory_utilization=0.4,
+            speculative_model=model,
+            num_speculative_tokens=k,
+    ) as vllm_model:
 
         # Force log interval to be 0 to catch all metrics.
         stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
@@ -242,7 +242,6 @@ def test_metric_spec_decode_interval(
                              gpu_memory_utilization=0.4,
                              speculative_model=model,
                              num_speculative_tokens=k,
-                             use_v2_block_manager=True,
                              enforce_eager=True)
 
     engine = LLMEngine.from_engine_args(engine_args)
@@ -307,7 +306,7 @@ def test_metric_spec_decode_interval(
 
     finally:
         del engine
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
@@ -326,7 +325,6 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
             "vllm:e2e_request_latency_seconds",
             "vllm:request_prompt_tokens",
             "vllm:request_generation_tokens",
-            "vllm:request_params_best_of",
             "vllm:request_params_n",
         ]
         for metric_name in request_histogram_metrics:

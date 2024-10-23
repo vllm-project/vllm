@@ -8,7 +8,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 
 import openai
 import pytest
@@ -16,6 +16,7 @@ import requests
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec, assert_never
 
+import vllm.envs as envs
 from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -352,10 +353,26 @@ def compare_all_settings(model: str,
         tokenizer_mode=tokenizer_mode,
     )
 
+    can_force_load_format = True
+
+    for args in all_args:
+        if "--load-format" in args:
+            can_force_load_format = False
+            break
+
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt).input_ids
     ref_results: List = []
     for i, (args, env) in enumerate(zip(all_args, all_envs)):
+        if can_force_load_format:
+            # we are comparing the results and
+            # usually we don't need real weights.
+            # we force to use dummy weights by default,
+            # and it should work for most of the cases.
+            # if not, we can use VLLM_TEST_FORCE_LOAD_FORMAT
+            # environment variable to force the load format,
+            # e.g. in quantization tests.
+            args = args + ["--load-format", envs.VLLM_TEST_FORCE_LOAD_FORMAT]
         compare_results: List = []
         results = ref_results if i == 0 else compare_results
         with RemoteOpenAIServer(model,
@@ -437,13 +454,13 @@ def multi_process_parallel(
 
 
 @contextmanager
-def error_on_warning():
+def error_on_warning(category: Type[Warning] = Warning):
     """
     Within the scope of this context manager, tests will fail if any warning
-    is emitted.
+    of the given category is emitted.
     """
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        warnings.filterwarnings("error", category=category)
 
         yield
 

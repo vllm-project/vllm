@@ -17,6 +17,7 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, ensure_future
+from collections.abc import Mapping
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
@@ -40,6 +41,9 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
+
+# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
@@ -1138,10 +1142,54 @@ def identity(value: T) -> T:
 F = TypeVar('F', bound=Callable[..., Any])
 
 
+def deprecate_args(
+    start_index: int,
+    is_deprecated: Union[bool, Callable[[], bool]] = True,
+    additional_message: Optional[str] = None,
+) -> Callable[[F], F]:
+
+    if not callable(is_deprecated):
+        is_deprecated = partial(identity, is_deprecated)
+
+    def wrapper(fn: F) -> F:
+
+        params = inspect.signature(fn).parameters
+        pos_types = (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        pos_kws = [
+            kw for kw, param in params.items() if param.kind in pos_types
+        ]
+
+        @wraps(fn)
+        def inner(*args, **kwargs):
+            if is_deprecated():
+                deprecated_args = pos_kws[start_index:len(args)]
+                if deprecated_args:
+                    msg = (
+                        f"The positional arguments {deprecated_args} are "
+                        "deprecated and will be removed in a future update.")
+                    if additional_message is not None:
+                        msg += f" {additional_message}"
+
+                    warnings.warn(
+                        DeprecationWarning(msg),
+                        stacklevel=3,  # The inner function takes up one level
+                    )
+
+            return fn(*args, **kwargs)
+
+        return inner  # type: ignore
+
+    return wrapper
+
+
 def deprecate_kwargs(
-        *kws: str,
-        is_deprecated: Union[bool, Callable[[], bool]] = True,
-        additional_message: Optional[str] = None) -> Callable[[F], F]:
+    *kws: str,
+    is_deprecated: Union[bool, Callable[[], bool]] = True,
+    additional_message: Optional[str] = None,
+) -> Callable[[F], F]:
     deprecated_kws = set(kws)
 
     if not callable(is_deprecated):
@@ -1547,3 +1595,24 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
+
+# Adapted from: https://stackoverflow.com/a/47212782/5082708
+class LazyDict(Mapping, Generic[T]):
+
+    def __init__(self, factory: Dict[str, Callable[[], T]]):
+        self._factory = factory
+        self._dict: Dict[str, T] = {}
+
+    def __getitem__(self, key) -> T:
+        if key not in self._dict:
+            if key not in self._factory:
+                raise KeyError(key)
+            self._dict[key] = self._factory[key]()
+        return self._dict[key]
+
+    def __iter__(self):
+        return iter(self._factory)
+
+    def __len__(self):
+        return len(self._factory)

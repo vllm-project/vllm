@@ -18,7 +18,8 @@ PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 @pytest.fixture(scope="module")
 def phi3v_model_config():
     return ModelConfig(PHI3V_MODEL_ID,
-                       PHI3V_MODEL_ID,
+                       task="generate",
+                       tokenizer=PHI3V_MODEL_ID,
                        tokenizer_mode="auto",
                        trust_remote_code=True,
                        dtype="bfloat16",
@@ -387,3 +388,29 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
                     "text": "What about these two?"
                 }]
             }], phi3v_model_config, phi3v_tokenizer)
+
+
+def test_parse_chat_messages_multiple_images_uncommon_input(
+    phi3v_model_config,
+    phi3v_tokenizer,
+    image_url,
+):
+    conversation, mm_data = parse_chat_messages([{
+        "role":
+        "user",
+        "content": [
+            "What's in these images?", {
+                "image_url": image_url
+            }, {
+                "image_url": image_url
+            }
+        ]
+    }], phi3v_model_config, phi3v_tokenizer)
+
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "<|image_1|>\n<|image_2|>\nWhat's in these images?"
+    }]
+    _assert_mm_data_is_image_input(mm_data, 2)
