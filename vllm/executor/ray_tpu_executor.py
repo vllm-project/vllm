@@ -88,6 +88,7 @@ class RayTPUExecutor(TPUExecutor):
                 "TPU_SKIP_MDS_QUERY",
                 "TPU_PROCESS_BOUNDS",
                 "TPU_ACCELERATOR_TYPE",
+                "XLA_ALWAYS_ALLREDUCE"
             ]
             for var in OVERRIDE_VARS:
                 if var in os.environ:
