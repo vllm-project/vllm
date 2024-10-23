@@ -1,7 +1,7 @@
 """
 This example shows how to use vLLM for running offline inference with
-multi-image input on vision language models, using the chat template defined
-by the model.
+multi-image input on vision language models for text generation,
+using the chat template defined by the model.
 """
 from argparse import Namespace
 from typing import List, NamedTuple, Optional
@@ -334,7 +334,8 @@ def main(args: Namespace):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
-        'vision language models that support multi-image input')
+        'vision language models that support multi-image input for text '
+        'generation')
     parser.add_argument('--model-type',
                         '-m',
                         type=str,
