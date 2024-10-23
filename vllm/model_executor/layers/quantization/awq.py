@@ -70,7 +70,7 @@ class AWQConfig(QuantizationConfig):
         return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["AWQLinearMethod"]:
+                         prefix: str) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
