@@ -95,69 +95,6 @@ class Fp8Config(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
-class Fp8Config(QuantizationConfig):
-    """Config class for FP8."""
-
-    def __init__(
-        self,
-        is_checkpoint_fp8_serialized: bool = False,
-        activation_scheme: str = "dynamic",
-        ignored_layers: Optional[List[str]] = None,
-    ) -> None:
-        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
-        if is_checkpoint_fp8_serialized:
-            logger.warning("Detected fp8 checkpoint. Please note that the "
-                           "format is experimental and subject to change.")
-        if activation_scheme not in ACTIVATION_SCHEMES:
-            raise ValueError(
-                f"Unsupported activation scheme {activation_scheme}")
-        self.activation_scheme = activation_scheme
-        self.ignored_layers = ignored_layers or []
-
-    @classmethod
-    def get_name(cls) -> str:
-        return "fp8"
-
-    @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.bfloat16, torch.half]
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return 80
-
-    @classmethod
-    def get_config_filenames(cls) -> List[str]:
-        return []
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "Fp8Config":
-        quant_method = cls.get_from_keys(config, ["quant_method"])
-        is_checkpoint_fp8_serialized = ("fp8" in quant_method)
-        activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
-        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
-        return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-                   activation_scheme=activation_scheme,
-                   ignored_layers=ignored_layers)
-
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
-        if isinstance(layer, LinearBase):
-            if is_layer_skipped(prefix, self.ignored_layers):
-                return UnquantizedLinearMethod()
-            return Fp8LinearMethod(self)
-        elif isinstance(layer, FusedMoE):
-            return Fp8MoEMethod(self)
-        elif isinstance(layer, Attention):
-            return Fp8KVCacheMethod(self)
-        return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
-
 
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
