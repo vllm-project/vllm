@@ -435,6 +435,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             config,
             quant_config=quant_config,
             is_mono=self.is_mono,
+            prefix="vision_model",
         )
 
         self.language_model = init_vllm_registered_model(
@@ -471,6 +472,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         quant_config: Optional[QuantizationConfig],
         *,
         is_mono: bool,
+        prefix: str,
     ):
         if not is_mono:
             vision_feature_layer = config.select_layer
@@ -484,7 +486,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 config.vision_config,
                 quant_config=quant_config,
                 num_hidden_layers_override=num_hidden_layers,
-                prefix="vision_model",
+                prefix=prefix,
             )
         else:
             return InternVisionPatchModel(config.vision_config)
