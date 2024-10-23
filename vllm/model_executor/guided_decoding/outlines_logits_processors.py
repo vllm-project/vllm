@@ -15,11 +15,11 @@
 # limitations under the License.
 import copy
 import json
-import math
 from collections import defaultdict
 from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Union
 
+import numpy as np
 import torch
 from lark import Lark
 from outlines import grammars
@@ -77,12 +77,14 @@ class BaseLogitsProcessor:
                 f"Unsupported instruction type {type(instruction)}")
 
         mask = torch.full((scores.shape[-1], ),
-                          -math.inf,
+                          -torch.inf,
                           device=scores.device)
-        # the tokenizer may support more token ids than the model can generate,
+        # The tokenizer may support more token ids than the model can generate,
         # eg. Llama 3.2 Vision models have an `<|image|>` token with id 128256
         # but scores.shape == torch.Size([128256])
-        allowed_tokens = [t for t in allowed_tokens if t < scores.shape[-1]]
+        # Using NumPy is faster for filtering token ids
+        allowed_tokens = np.array(allowed_tokens)
+        allowed_tokens = allowed_tokens[allowed_tokens < scores.shape[-1]]
         mask[allowed_tokens] = 0
         scores.add_(mask)
         return scores
