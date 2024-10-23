@@ -196,7 +196,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         elif modality == "audio":
             if model_type == "ultravox":
                 return "<|reserved_special_token_0|>"
-            raise TypeError(f"Unknown {modality} model type: {model_type}")
+            if model_type == "qwen2_audio":
+                return (f"Audio {current_count}: "
+                        f"<|audio_bos|><|AUDIO|><|audio_eos|>")
+            raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|video_pad|><|vision_end|>"
@@ -483,53 +486,70 @@ def _parse_chat_message_content_parts(
     parts: Iterable[ChatCompletionContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
 ) -> List[ConversationMessage]:
-    texts: List[str] = []
+    content: List[Union[str, Dict[str, str]]] = []
 
     mm_parser = mm_tracker.create_parser()
     keep_multimodal_content = \
         mm_tracker._model_config.hf_config.model_type in \
             MODEL_KEEP_MULTI_MODAL_CONTENT
 
-    has_image = False
     for part in parts:
-        if isinstance(part, str):  # Handle plain text parts
-            text = _TextParser(part)
-            texts.append(text)
-        else:  # Handle structured dictionary parts
-            part_type, content = _parse_chat_message_content_mm_part(part)
+        parse_res = _parse_chat_message_content_part(
+            part, mm_parser, wrap_dicts=keep_multimodal_content)
+        if parse_res:
+            content.append(parse_res)
 
-            # if part_type is text/refusal/image_url/audio_url but
-            # content is empty, logg a warning and skip
-            if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
-                logger.warning("Skipping multimodal part "
-                               "with empty / unparsable content.")
-                continue
-
-            if part_type in ("text", "refusal"):
-                texts.append(content)
-            elif part_type == "image_url":
-                mm_parser.parse_image(content)
-                has_image = True
-            elif part_type == "audio_url":
-                mm_parser.parse_audio(content)
-            else:
-                raise NotImplementedError(f"Unknown part type: {part_type}")
-
-    text_prompt = "\n".join(texts)
     if keep_multimodal_content:
-        text_prompt = "\n".join(texts)
-        role_content = [{'type': 'text', 'text': text_prompt}]
-
-        if has_image:
-            role_content = [{'type': 'image'}] + role_content
+        # Parsing wraps images and texts as interleaved dictionaries
         return [ConversationMessage(role=role,
-                                    content=role_content)]  # type: ignore
-    else:
-        mm_placeholder_counts = mm_parser.mm_placeholder_counts()
-        if mm_placeholder_counts:
-            text_prompt = _get_full_multimodal_text_prompt(
-                mm_placeholder_counts, text_prompt)
-        return [ConversationMessage(role=role, content=text_prompt)]
+                                    content=content)]  # type: ignore
+    texts = cast(List[str], content)
+    text_prompt = "\n".join(texts)
+    mm_placeholder_counts = mm_parser.mm_placeholder_counts()
+    if mm_placeholder_counts:
+        text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_counts,
+                                                       text_prompt)
+    return [ConversationMessage(role=role, content=text_prompt)]
+
+
+def _parse_chat_message_content_part(
+        part: ChatCompletionContentPartParam,
+        mm_parser: BaseMultiModalContentParser,
+        wrap_dicts: bool) -> Optional[Union[str, Dict[str, str]]]:
+    """Parses a single part of a conversation. If wrap_dicts is True,
+    structured dictionary pieces for texts and images will be
+    wrapped in dictionaries, i.e., {"type": "text", "text", ...} and
+    {"type": "image"}, respectively. Otherwise multimodal data will be
+    handled by mm_parser, and texts will be returned as strings to be joined
+    with multimodal placeholders.
+    """
+    if isinstance(part, str):  # Handle plain text parts
+        text = _TextParser(part)
+        return text
+
+    # Handle structured dictionary parts
+    part_type, content = _parse_chat_message_content_mm_part(part)
+
+    # if part_type is text/refusal/image_url/audio_url but
+    # content is empty, log a warning and skip
+    if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
+        logger.warning(
+            "Skipping multimodal part (type: '%s')"
+            "with empty / unparsable content.", part_type)
+        return None
+
+    if part_type in ("text", "refusal"):
+        return {'type': 'text', 'text': content} if wrap_dicts else content
+
+    if part_type == "image_url":
+        mm_parser.parse_image(content)
+        return {'type': 'image'} if wrap_dicts else None
+
+    if part_type == "audio_url":
+        mm_parser.parse_audio(content)
+        return {'type': 'audio'} if wrap_dicts else None
+
+    raise NotImplementedError(f"Unknown part type: {part_type}")
 
 
 # No need to validate using Pydantic again

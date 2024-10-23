@@ -1612,7 +1612,7 @@ class LLMEngine:
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
         gpu_cache_usage_sys = 0.
-        if num_total_gpu is not None:
+        if num_total_gpu:  # Guard against both None and 0
             num_free_gpu = sum(
                 scheduler.block_manager.get_num_free_gpu_blocks()
                 for scheduler in self.scheduler)
@@ -1620,7 +1620,7 @@ class LLMEngine:
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage_sys = 0.
-        if num_total_cpu is not None and num_total_cpu > 0:
+        if num_total_cpu:  # Guard against both None and 0
             num_free_cpu = sum(
                 scheduler.block_manager.get_num_free_cpu_blocks()
                 for scheduler in self.scheduler)
