@@ -2,7 +2,7 @@ import os
 
 MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME",
-                            "sentence-transformers/all-MiniLM-L12-v2")
+                            "BAAI/bge-base-en-v1.5")
 REVISION = os.environ.get("REVISION", "main")
 
 
