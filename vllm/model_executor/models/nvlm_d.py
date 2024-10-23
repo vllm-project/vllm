@@ -66,7 +66,7 @@ class NVLM_D_Model(InternVLChatModel):
         is_mono: bool,
         prefix: str,
     ):
-        if is_mono:
+        if not is_mono:
             vision_feature_layer = config.select_layer
             if vision_feature_layer < 0:
                 num_hidden_layers = config.vision_config.num_hidden_layers \
