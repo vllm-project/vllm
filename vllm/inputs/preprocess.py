@@ -12,7 +12,8 @@ from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_warning_once
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
-                   PromptType, SingletonInputs, SingletonPrompt, token_inputs)
+                   PromptType, SingletonInputs, SingletonPrompt, embed_inputs,
+                   token_inputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
