@@ -2,15 +2,12 @@ import functools
 from collections import UserDict
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
-                    Protocol, Tuple, Type, overload)
+                    Protocol, Tuple, Type, cast)
 
 from torch import nn
 from transformers import PretrainedConfig
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar
 
-from vllm.inputs import (EmbedInputs, EmptyInputs, EncoderDecoderInputs,
-                         SingletonInputs, TokenInputs)
-from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.logger import init_logger
 from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
                         resolve_mm_processor_kwargs)
@@ -284,50 +281,6 @@ class InputRegistry:
         return self._input_processors_by_model_type \
             .get(model_cls, self._default_input_processor)
 
-    @overload
-    def _process_singleton_input(self, model_config: "ModelConfig",
-                                 inputs: TokenInputs) -> TokenInputs:
-        ...
-
-    @overload
-    def _process_singleton_input(self, model_config: "ModelConfig",
-                                 inputs: EmbedInputs) -> EmbedInputs:
-        ...
-
-    @overload
-    def _process_singleton_input(self, model_config: "ModelConfig",
-                                 inputs: EmptyInputs) -> EmptyInputs:
-        ...
-
-    def _process_singleton_input(self, model_config: "ModelConfig",
-                                 inputs: SingletonInputs) -> SingletonInputs:
-        if inputs["type"] == "empty":
-            return inputs
-
-        if inputs["type"] == "embed":
-            return inputs
-
-        if inputs["type"] == "token":
-            # Avoid circular import
-            from vllm.model_executor.model_loader import get_model_architecture
-
-            model_cls, _ = get_model_architecture(model_config)
-            processor = self._get_model_input_processor(model_cls)
-
-            # Handle multimodal processor kwargs with priority:
-            #     Inference kwargs -> Init kwargs -> {}
-            # If it's empty, it'll fall back to the default kwarg values
-            mm_processor_kwargs = resolve_mm_processor_kwargs(
-                model_config.mm_processor_kwargs,
-                inputs.get("mm_processor_kwargs"),
-                processor,
-            )
-
-            return processor(InputContext(model_config), inputs,
-                             **mm_processor_kwargs)
-
-        assert_never(inputs)
-
     def process_input(self, model_config: "ModelConfig",
                       inputs: ProcessorInputs) -> ProcessorInputs:
         """
@@ -338,15 +291,23 @@ class InputRegistry:
         See also:
             :ref:`input_processing_pipeline`
         """
-        if is_encoder_decoder_inputs(inputs):
-            return EncoderDecoderInputs(
-                encoder=self._process_singleton_input(model_config,
-                                                      inputs["encoder"]),
-                decoder=self._process_singleton_input(model_config,
-                                                      inputs["decoder"]),
-            )
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_architecture
 
-        return self._process_singleton_input(model_config, inputs)
+        model_cls, _ = get_model_architecture(model_config)
+        processor = self._get_model_input_processor(model_cls)
+
+        # Handle multimodal processor kwargs with priority:
+        #     Inference kwargs -> Init kwargs -> {}
+        # If it's empty, it'll fall back to the default kwarg values
+        mm_processor_kwargs = resolve_mm_processor_kwargs(
+            model_config.mm_processor_kwargs,
+            cast(Dict[str, Any], inputs.get("mm_processor_kwargs")),
+            processor,
+        )
+
+        return processor(InputContext(model_config), inputs,
+                         **mm_processor_kwargs)
 
     def create_input_processor(self, model_config: "ModelConfig"):
         """
