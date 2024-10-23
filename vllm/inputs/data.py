@@ -212,18 +212,6 @@ def embed_inputs(
     return inputs
 
 
-class EmptyInputs(TypedDict):
-    """Represents empty inputs."""
-
-    type: Literal["empty"]
-    """The type of inputs."""
-
-
-def empty_inputs() -> EmptyInputs:
-    """Construct :class:`EmptyInputs` from optional values."""
-    return EmptyInputs(type="empty")
-
-
 DecoderOnlyInputs = Union[TokenInputs, EmbedInputs]
 """
 The inputs in :class:`~vllm.LLMEngine` before they are
@@ -240,15 +228,14 @@ class EncoderDecoderInputs(TypedDict):
 
     This specifies the required data for encoder-decoder models.
     """
-
     encoder: TokenInputs
     """The inputs for the encoder portion."""
 
-    decoder: Union[EmptyInputs, TokenInputs]
+    decoder: TokenInputs
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, EmbedInputs, EmptyInputs]
+SingletonInputs = Union[TokenInputs, EmbedInputs]
 """
 A processed :class:`SingletonPrompt` which can be passed to
 :class:`vllm.sequence.Sequence`.

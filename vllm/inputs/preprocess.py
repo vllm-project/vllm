@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import torch
 from typing_extensions import assert_never
@@ -11,9 +11,9 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_warning_once
 
-from .data import (DecoderOnlyInputs, EmptyInputs, EncoderDecoderInputs,
-                   ProcessorInputs, PromptType, SingletonPrompt, embed_inputs,
-                   empty_inputs, token_inputs)
+from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
+                   PromptType, SingletonInputs, SingletonPrompt, embed_inputs,
+                   token_inputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
@@ -213,7 +213,7 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-    ) -> DecoderOnlyInputs:
+    ) -> SingletonInputs:
         '''
         Extract the components of any single encoder or decoder input prompt.
 
@@ -290,7 +290,7 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-    ) -> DecoderOnlyInputs:
+    ) -> SingletonInputs:
         """Async version of :meth:`_extract_prompt_components`."""
         parsed = parse_singleton_prompt(prompt)
 
@@ -348,8 +348,8 @@ class InputPreprocessor:
 
     def _build_enc_dec_llm_inputs(
         self,
-        encoder_inputs: DecoderOnlyInputs,
-        decoder_inputs: Union[EmptyInputs, DecoderOnlyInputs],
+        encoder_inputs: SingletonInputs,
+        decoder_inputs: Optional[SingletonInputs],
     ) -> EncoderDecoderInputs:
         if encoder_inputs["type"] == "token":
             pass
@@ -361,13 +361,19 @@ class InputPreprocessor:
         else:
             assert_never(encoder_inputs)
 
-        if decoder_inputs["type"] == "token":
-            decoder_inputs["prompt_token_ids"] = (
-                self._prepare_decoder_input_ids_for_generation(
-                    decoder_inputs["prompt_token_ids"],
-                    force_bos=("multi_modal_data" not in encoder_inputs
-                               and "multi_modal_data" not in decoder_inputs),
-                ))
+        if decoder_inputs is None:
+            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
+                None,
+                force_bos="multi_modal_data" not in encoder_inputs,
+            )
+            decoder_inputs = token_inputs(dec_token_ids)
+        elif decoder_inputs["type"] == "token":
+            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
+                decoder_inputs["prompt_token_ids"],
+                force_bos=("multi_modal_data" not in encoder_inputs
+                           and "multi_modal_data" not in decoder_inputs),
+            )
+            decoder_inputs["prompt_token_ids"] = dec_token_ids
 
             if "multi_modal_data" in decoder_inputs:
                 raise ValueError("Multi-modal decoder inputs of encoder-"
@@ -377,8 +383,6 @@ class InputPreprocessor:
                                       "encoder-decoder models yet")
             decoder_inputs["prompt_embeds"] = self._validate_embed_inputs(
                 decoder_inputs["prompt_embeds"])
-        elif decoder_inputs["type"] == "empty":
-            pass
         else:
             assert_never(encoder_inputs)
 
@@ -424,8 +428,8 @@ class InputPreprocessor:
         * :class:`EncoderDecoderInputs` instance
         '''
 
-        encoder_inputs: DecoderOnlyInputs
-        decoder_inputs: Union[EmptyInputs, DecoderOnlyInputs]
+        encoder_inputs: SingletonInputs
+        decoder_inputs: Optional[SingletonInputs]
 
         if is_explicit_encoder_decoder_prompt(prompt):
             encoder_inputs = self._prompt_to_llm_inputs(
@@ -434,7 +438,7 @@ class InputPreprocessor:
             )
 
             if (decoder_input := prompt["decoder_prompt"]) is None:
-                decoder_inputs = empty_inputs()
+                decoder_inputs = None
             else:
                 decoder_inputs = self._prompt_to_llm_inputs(
                     decoder_input,
@@ -446,7 +450,7 @@ class InputPreprocessor:
                 request_id=request_id,
             )
 
-            decoder_inputs = empty_inputs()
+            decoder_inputs = None
 
         return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 
@@ -456,8 +460,8 @@ class InputPreprocessor:
         request_id: str,
     ) -> EncoderDecoderInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
-        encoder_inputs: DecoderOnlyInputs
-        decoder_inputs: Union[EmptyInputs, DecoderOnlyInputs]
+        encoder_inputs: SingletonInputs
+        decoder_inputs: Optional[SingletonInputs]
 
         if is_explicit_encoder_decoder_prompt(prompt):
             encoder_task = self._prompt_to_llm_inputs_async(
@@ -467,7 +471,7 @@ class InputPreprocessor:
 
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 encoder_inputs = await encoder_task
-                decoder_inputs = empty_inputs()
+                decoder_inputs = None
             else:
                 decoder_task = self._prompt_to_llm_inputs_async(
                     decoder_input,
@@ -482,7 +486,7 @@ class InputPreprocessor:
                 request_id=request_id,
             )
 
-            decoder_inputs = empty_inputs()
+            decoder_inputs = None
 
         return self._build_enc_dec_llm_inputs(encoder_inputs, decoder_inputs)
 

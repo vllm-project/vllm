@@ -248,8 +248,11 @@ class InputRegistry:
 
         return seq_data, mm_data
 
-    def _default_input_processor(self, ctx: InputContext,
-                                 inputs: ProcessorInputs) -> ProcessorInputs:
+    def _default_input_processor(
+        self,
+        ctx: InputContext,
+        inputs: ProcessorInputs,
+    ) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
 

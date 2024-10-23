@@ -391,10 +391,10 @@ class SequenceData(msgspec.Struct,
 
 class Sequence:
     """Stores the data, status, and block information of a sequence.
-
-    The sequence is constructed from the DecoderOnlyInputs (for decoder-only) or
-    EncoderDecoderInputs (for encoder-decoder) instance passed
-    in through the `inputs` constructor argument.
+    
+    The sequence is constructed from the :data:`DecoderOnlyInputs`
+    (for decoder-only) or :data:`EncoderDecoderInputs` (for encoder-decoder)
+    instance passed in through the :code:`inputs` constructor argument.
 
     Args:
         seq_id: The ID of the sequence.
@@ -404,7 +404,6 @@ class Sequence:
         eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
         lora_request: LoRA request.
         prompt_adapter_request: Prompt Adapter request.
-
     """
 
     def __init__(
@@ -462,9 +461,6 @@ class Sequence:
         if inputs["type"] == "embed":
             return None
 
-        if inputs["type"] == "empty":
-            return None
-
         assert_never(inputs)
 
     @cached_property
@@ -475,9 +471,6 @@ class Sequence:
             return inputs.get("prompt_token_ids", [])
 
         if inputs["type"] == "embed":
-            return []
-
-        if inputs["type"] == "empty":
             return []
 
         assert_never(inputs)
@@ -492,9 +485,6 @@ class Sequence:
         if inputs["type"] == "embed":
             return inputs.get("prompt_embeds", [])
 
-        if inputs["type"] == "empty":
-            return None
-
         assert_never(inputs)
 
     @cached_property
@@ -507,9 +497,6 @@ class Sequence:
         if inputs["type"] == "embed":
             return inputs.get("multi_modal_data", {})
 
-        if inputs["type"] == "empty":
-            return {}
-
         assert_never(inputs)
 
     @cached_property
@@ -520,9 +507,6 @@ class Sequence:
             return inputs.get("mm_processor_kwargs", {})
 
         if inputs["type"] == "embed":
-            return {}
-
-        if inputs["type"] == "empty":
             return {}
 
         assert_never(inputs)

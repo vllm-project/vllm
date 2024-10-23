@@ -659,14 +659,19 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+        if is_encoder_decoder_inputs(processed_inputs):
+            decoder_inputs = processed_inputs["decoder"]
+            encoder_inputs = processed_inputs["encoder"]
+        else:
+            decoder_inputs = processed_inputs
+            encoder_inputs = None
+
+        seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
 
-        encoder_seq = None
-        if is_encoder_decoder_inputs(processed_inputs):
-            encoder_seq = Sequence(seq_id, processed_inputs, block_size,
-                                   eos_token_id, lora_request,
-                                   prompt_adapter_request)
+        encoder_seq = (None if encoder_inputs is None else Sequence(
+            seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
+            prompt_adapter_request))
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -1244,7 +1249,7 @@ class LLMEngine:
                               skip)
 
             # Tracing
-            self.do_tracing(scheduler_outputs)
+            self.do_tracing(scheduler_outputs, finished_before)
 
         return None
 
@@ -1717,6 +1722,15 @@ class LLMEngine:
                     # TPOTs.
                     latency = seq_group.get_last_latency(now)
                     time_per_output_tokens_iter.append(latency)
+                    if seq_group.state.current_step == 0:
+                        # For async_output_proc, the do_log_stats()
+                        # is called following init_multi_step(), which
+                        # sets the current_step to zero.
+                        actual_num_batched_tokens +=\
+                            seq_group.state.num_steps - 1
+                    else:
+                        actual_num_batched_tokens +=\
+                            seq_group.state.current_step - 1
 
                 # Because of chunked prefill, we can have a single sequence
                 # group that does multiple prompt_runs. To prevent logging
@@ -1839,11 +1853,18 @@ class LLMEngine:
     def is_tracing_enabled(self) -> bool:
         return self.tracer is not None
 
-    def do_tracing(self, scheduler_outputs: SchedulerOutputs) -> None:
+    def do_tracing(self,
+                   scheduler_outputs: SchedulerOutputs,
+                   finished_before: Optional[List[int]] = None) -> None:
         if self.tracer is None:
             return
 
-        for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+        for idx, scheduled_seq_group in enumerate(
+                scheduler_outputs.scheduled_seq_groups):
+            # Skip double tracing when using async output proc
+            if finished_before and idx in finished_before:
+                continue
+
             seq_group = scheduled_seq_group.seq_group
             if seq_group.is_finished():
                 self.create_trace_span(seq_group)
@@ -1921,16 +1942,15 @@ class LLMEngine:
 
     def _validate_model_inputs(self, inputs: ProcessorInputs):
         if is_encoder_decoder_inputs(inputs):
-            prompt_ids = inputs["encoder"].get("prompt_token_ids")
-            prompt_embeds = inputs["encoder"].get("prompt_embeds")
-        else:
-            prompt_ids = inputs.get("prompt_token_ids")
-            prompt_embeds = inputs.get("prompt_embeds")
-
-        if self.model_config.is_multimodal_model:
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
-            prompt_ids = inputs.get("prompt_token_ids")
+            prompt_inputs = inputs["decoder" if self.model_config.
+                                   is_multimodal_model else "encoder"]
+        else:
+            prompt_inputs = inputs
+
+        prompt_ids = prompt_inputs.get("prompt_token_ids")
+        prompt_embeds = prompt_inputs.get("prompt_embeds")
 
         if prompt_ids is None:
             if prompt_embeds is None:
