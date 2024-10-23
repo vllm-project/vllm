@@ -38,8 +38,8 @@ class AWQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"AWQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"zero_point={self.zero_point}), "
-                f"modules_to_not_convert={self.modules_to_not_convert}")
+                f"zero_point={self.zero_point}, "
+                f"modules_to_not_convert={self.modules_to_not_convert})")
 
     def get_name(self) -> str:
         return "awq"
