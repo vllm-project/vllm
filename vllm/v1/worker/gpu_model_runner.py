@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 from unittest.mock import patch
 
 import numpy as np
@@ -7,6 +7,9 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
+                             MultiModalRegistry)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -42,6 +45,8 @@ class GPUModelRunner:
         lora_config: Optional[LoRAConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         observability_config: Optional[ObservabilityConfig] = None,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -73,6 +78,13 @@ class GPUModelRunner:
             parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
+
+        # Multi-modal data support
+        self.input_registry = input_registry
+        self.mm_registry = mm_registry
+        self.multi_modal_input_mapper = mm_registry.create_input_mapper(
+            model_config)
+        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -136,11 +148,13 @@ class GPUModelRunner:
                 prompt_token_ids=req_data.prompt_token_ids,
                 prompt=req_data.prompt,
                 multi_modal_data=req_data.multi_modal_data,
+                mm_processor_kwargs=req_data.mm_processor_kwargs,
                 sampling_params=req_data.sampling_params,
                 generator=None,  # TODO
                 block_ids=req_data.block_ids,
                 num_computed_tokens=req_data.num_computed_tokens,
                 output_token_ids=[],
+                needs_encoder_to_process=req_data.multi_modal_data is not None,
             )
             req_ids_to_add.append(req_id)
 
@@ -193,6 +207,23 @@ class GPUModelRunner:
                                            num_tokens)
         num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
         assert max_num_scheduled_tokens > 0
+
+        mm_inputs: List[MultiModalInputs] = []
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            req_state = self.requests[req_id]
+            if not req_state.needs_encoder_to_process:
+                continue
+
+            # print("DATA", req_state.multi_modal_data)
+            # print("KWARGS", req_state.mm_processor_kwargs)
+            mm_kwargs = self._prepare_multi_modal_inputs(req_state)
+            if mm_kwargs is not None:
+                mm_inputs.append(mm_kwargs)
+                # print("MM_KWARGS", mm_kwargs["pixel_values"].shape)
+            req_state.needs_encoder_to_process = False
+        batched_mm_inputs = MultiModalInputs.batch(mm_inputs)
+        batched_mm_inputs = MultiModalInputs.as_kwargs(batched_mm_inputs,
+                                                       device=self.device)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -283,7 +314,20 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return input_ids, positions, attn_metadata, logits_indices
+        return input_ids, positions, attn_metadata, batched_mm_inputs, logits_indices
+
+    def _prepare_multi_modal_inputs(
+        self,
+        request_state: "CachedRequestState",
+    ) -> Optional[MultiModalInputs]:
+        mm_data = request_state.multi_modal_data
+        if mm_data is None:
+            return None
+        mm_kwargs = self.multi_modal_input_mapper(
+            mm_data,
+            mm_processor_kwargs=request_state.mm_processor_kwargs,
+        )
+        return mm_kwargs
 
     def _prepare_sampling(
         self,
@@ -307,7 +351,8 @@ class GPUModelRunner:
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
         inputs = self._prepare_inputs(scheduler_output)
-        input_ids, positions, attn_metadata, logits_indices = inputs
+        (input_ids, positions, attn_metadata, batched_mm_inputs,
+         logits_indices) = inputs
 
         with set_forward_context(attn_metadata):
             hidden_states = self.model(
@@ -315,6 +360,7 @@ class GPUModelRunner:
                 positions=positions,
                 kv_caches=self.kv_caches,
                 attn_metadata=attn_metadata,
+                **batched_mm_inputs,
             )
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)
@@ -424,12 +470,16 @@ class CachedRequestState:
     prompt_token_ids: List[int]
     prompt: Optional[str]
     multi_modal_data: Optional["MultiModalDataDict"]
+    mm_processor_kwargs: Optional[Dict[str, Any]]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
     block_ids: List[int]
     num_computed_tokens: int
     output_token_ids: List[int]
+
+    needs_encoder_to_process: bool
+    # encoder_outputs: Any
 
     @property
     def num_tokens(self) -> int:
