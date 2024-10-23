@@ -1,7 +1,3 @@
-"""Compare the outputs of HF and vLLM for BART models using greedy sampling.
-
-Run `pytest tests/models/encoder_decoder/language/test_bart.py`.
-"""
 from functools import partial
 from typing import List, Optional, Tuple, Type
 
@@ -19,6 +15,8 @@ Florence2Prompt = partial(ExplicitEncoderDecoderPrompt,
                           mm_processor_kwargs=None)
 
 MODELS = ["microsoft/Florence-2-base"]
+# Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
+# Therefore, we borrow the BartTokenizer from the original Bart model
 TOKENIZER = "facebook/bart-base"
 PROMPTS = [
     Florence2Prompt(encoder_prompt="<CAPTION>"),

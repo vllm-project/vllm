@@ -2,11 +2,13 @@
 Demonstrate prompting of text-to-text
 encoder/decoder models, specifically Florence-2
 '''
+# TODO(Isotr0py):
+# Move to offline_inference_vision_language.py after porting vision backbone
 from vllm import LLM, SamplingParams
 
 dtype = "float"
 
-# Create a BART encoder/decoder model instance
+# Create a Florence-2 encoder/decoder model instance
 llm = LLM(
     model="microsoft/Florence-2-base",
     tokenizer="facebook/bart-base",

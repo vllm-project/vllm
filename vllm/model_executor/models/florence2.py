@@ -21,22 +21,6 @@ from vllm.sequence import IntermediateTensors
 from .utils import AutoWeightsLoader
 
 
-class Florence2ScaledWordEmbedding(BartScaledWordEmbedding):
-    pass
-
-
-class Florence2ParallelLMHead(BartParallelLMHead):
-    pass
-
-
-class Florence2Encoder(BartEncoder):
-    pass
-
-
-class Florence2Decoder(BartDecoder):
-    pass
-
-
 class Florence2LanguageModel(nn.Module):
     base_model_prefix = "language_model"
 
@@ -50,14 +34,13 @@ class Florence2LanguageModel(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.shared = Florence2ScaledWordEmbedding(self.vocab_size,
-                                                   config.d_model)
-        self.encoder = Florence2Encoder(config,
-                                        cache_config=cache_config,
-                                        quant_config=quant_config)
-        self.decoder = Florence2Decoder(config,
-                                        cache_config=cache_config,
-                                        quant_config=quant_config)
+        self.shared = BartScaledWordEmbedding(self.vocab_size, config.d_model)
+        self.encoder = BartEncoder(config,
+                                   cache_config=cache_config,
+                                   quant_config=quant_config)
+        self.decoder = BartDecoder(config,
+                                   cache_config=cache_config,
+                                   quant_config=quant_config)
 
         if self.config.tie_word_embeddings:
             self.encoder.embed_tokens.weight = self.shared.weight
@@ -124,9 +107,9 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
             config.d_model) if config.scale_embedding else 1.0
 
         self.vocab_size = config.vocab_size
-        self.lm_head = Florence2ParallelLMHead(self.vocab_size,
-                                               config.d_model,
-                                               embed_scale=embed_scale)
+        self.lm_head = BartParallelLMHead(self.vocab_size,
+                                          config.d_model,
+                                          embed_scale=embed_scale)
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
