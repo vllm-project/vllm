@@ -121,6 +121,7 @@ _MULTIMODAL_MODELS = {
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501

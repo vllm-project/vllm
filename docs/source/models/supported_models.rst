@@ -459,6 +459,12 @@ Text Generation
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     -
     - ✅︎
+  * - :code:`Qwen2AudioForConditionalGeneration`
+    - Qwen2-Audio
+    - T + A\ :sup:`+`
+    - :code:`Qwen/Qwen2-Audio-7B-Instruct`
+    -
+    - ✅︎
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
     - T + I\ :sup:`E+` + V\ :sup:`+`
