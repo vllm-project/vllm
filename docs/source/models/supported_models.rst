@@ -334,6 +334,14 @@ The following modalities are supported depending on the model:
 - **V**\ ideo
 - **A**\ udio
 
+Any combination of modalities joined by :code:`+` are supported.
+
+- e.g.: :code:`T + I` means that the model supports text-only, image-only, and text-with-image inputs.
+
+On the other hand, modalities separated by :code:`/` are mutually exclusive.
+
+- e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
+
 .. _supported_vlms:
 
 Text Generation
@@ -376,7 +384,7 @@ Text Generation
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
-    - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
+    - :code:`OpenGVLab/Mono-InternVL-2B`, :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
     - 
     - ✅︎
   * - :code:`LlavaForConditionalGeneration`
@@ -484,6 +492,12 @@ Multimodal Embedding
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`LlavaNextForConditionalGeneration`
+    - LLaVA-NeXT-based
+    - T / I
+    - :code:`royokong/e5-v`
+    - 
+    - ✅︎
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision-based
     - T + I
