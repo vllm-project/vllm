@@ -53,7 +53,8 @@ def test_phi2_lora(phi2_lora_files):
                    max_model_len=1024,
                    enable_lora=True,
                    max_loras=2,
-                   enforce_eager=True)
+                   enforce_eager=True,
+                   enable_chunked_prefill=True)
 
     expected_lora_output = [
         "SELECT catalog_publisher, COUNT(*) as num_catalogs FROM catalogs GROUP BY catalog_publisher ORDER BY num_catalogs DESC LIMIT 1;",  # noqa: E501
