@@ -169,12 +169,12 @@ endif()
 
 #
 # Use FetchContent for C++ dependencies that are compiled as part of vLLM's build process.
-# Configure it to place files in vllm/.deps, in order to play nicely with sccache.
+# setup.py will override FETCHCONTENT_BASE_DIR to play nicely with sccache.
+# Each dependency that produces build artifacts should override its BINARY_DIR to avoid
+# conflicts between build types. It should instead be set to ${CMAKE_BINARY_DIR}/<dependency>.
 #
 include(FetchContent)
-get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
-file(MAKE_DIRECTORY "${FETCHCONTENT_BASE_DIR}")
-set(FETCHCONTENT_BASE_DIR "${PROJECT_ROOT_DIR}/.deps")
+file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 #
@@ -253,7 +253,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
   else()
     message(STATUS "Not building Marlin kernels as no compatible archs found"
-                   "in CUDA target architectures")
+                   " in CUDA target architectures")
   endif()
 
   #
@@ -433,7 +433,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
-                   "in CUDA target architectures")
+                   " in CUDA target architectures")
   endif()
 endif()
 
@@ -510,6 +510,8 @@ else()
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
           GIT_TAG 013f0c4fc47e6574060879d9734c1df8c5c273bd
           GIT_PROGRESS TRUE
+          # Don't share the vllm-flash-attn build between build types
+          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
   )
 endif()
 
