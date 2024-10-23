@@ -453,7 +453,7 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
     """Baichuan 7B.
-    NOTE: the class name has a upper case 'C'.
+    NOTE: the class name has an upper case 'C'.
     """
 
     def __init__(
