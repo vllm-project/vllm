@@ -4,7 +4,7 @@ import enum
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property, reduce
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
@@ -13,20 +13,25 @@ from typing import Set, Tuple, Union, cast
 import msgspec
 import torch
 
-from vllm.inputs import EncoderDecoderLLMInputs, LLMInputs
-from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
+    from vllm.inputs import SingletonInputs
     from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
 VLLM_INVALID_TOKEN_ID = -1
+
+
+def array_full(token_id: int, count: int):
+    """:class:`array` equivalent of :func:`numpy.full`."""
+    return array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
 
 
 # We use dataclass for now because it is used for
@@ -173,22 +178,34 @@ class SequenceData(msgspec.Struct,
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
+    def from_prompt_token_counts(
+            *token_counts: Tuple[int, int]) -> "SequenceData":
+        """
+        Construct a :class:`SequenceData` instance by concatenating
+        prompt token sequences.
+
+        Each tuple represents one token sequence, expressed in the form
+        :code:`(token_id, count)`.
+        """
         if len(token_counts) == 0:
             return SequenceData.from_seqs([])
 
-        arrs = [
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
-            for token_id, count in token_counts
-        ]
+        prompt_token_ids_arr = reduce(
+            array.__iadd__,
+            (array_full(token_id, count) for token_id, count in token_counts),
+        )
 
-        return SequenceData(reduce(array.__add__, arrs))
+        return SequenceData(prompt_token_ids_arr)
 
     @staticmethod
     def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
     ) -> "SequenceData":
+        """
+        Construct a :class:`SequenceData` instance from prompt and output
+        token sequences.
+        """
         prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      prompt_token_ids)
 
@@ -362,14 +379,14 @@ class SequenceData(msgspec.Struct,
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
-    The sequence is constructed from the LLMInputs instance passed
-    in through the `inputs` constructor argument.
+    The sequence is constructed from the :code:`SingletonInputs` instance
+    passed in through the :code:`inputs` constructor argument.
 
-    For encoder/decoder models, LLMInputs encapsulates both a
+    For encoder/decoder models, SingletonInputs encapsulates both a
     decoder and encoder prompt, creating an ambiguity about which
     prompt to construct the sequence from. The `from_decoder_prompt`
     constructor argument signals whether to construct the Sequence
-    from the LLMInputs decoder prompt, or encoder prompt.
+    from the SingletonInputs decoder prompt, or encoder prompt.
 
     Args:
         seq_id: The ID of the sequence.
@@ -379,16 +396,16 @@ class Sequence:
         eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
         lora_request: LoRA request.
         prompt_adapter_request: Prompt Adapter request.
-        from_decoder_prompt: Construct Sequence from LLMInputs decoder prompt
-                             (True) or encoder prompt (False.) Must be True
-                             for decoder-only model.
+        from_decoder_prompt: Construct Sequence from SingletonInputs decoder
+                             prompt (True) or encoder prompt (False.) Must be
+                             True for decoder-only model.
 
     """
 
     def __init__(
         self,
         seq_id: int,
-        inputs: "LLMInputs",
+        inputs: "SingletonInputs",
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -404,19 +421,19 @@ class Sequence:
         self.from_decoder_prompt = from_decoder_prompt
 
         # For decoder-only models, a Sequence is constructed
-        # from an LLMInputs instance (the `inputs` arg.)
+        # from an DecoderOnlyInputs instance (the `inputs` arg.)
         #
         # For encoder/decoder models the same `inputs`
         # instance could be utilized to construct either an
         # encoder sequence or a decoder sequence, because
-        # `LLMInputs` has both decoder- and encoder-oriented
+        # `DecoderOnlyInputs` has both decoder- and encoder-oriented
         # member variables (i.e. it encapsulates both an encoder
         # and a decoder prompt.) The decision of which type of sequence
         # to generate is determined by the `from_decoder_prompt` argument.
         #
         # When constructing a encoder sequence
         # (`from_decoder_prompt` False) it matters that
-        # the `LLMInputs` instance stored in `inputs` is valid
+        # the `DecoderOnlyInputs` instance stored in `inputs` is valid
         # in the sense that its encoder-related member variables are
         # populated; below, an exception is raised if this is
         # not the case.
@@ -424,8 +441,7 @@ class Sequence:
         # When constructing a decoder sequence (`from_decoder_prompt` True)
         # it does not matter whether `inputs` has its encoder-related
         # member variables populated.
-        if not (from_decoder_prompt
-                or is_valid_encoder_decoder_llm_inputs(inputs)):
+        if not (from_decoder_prompt or is_encoder_decoder_inputs(inputs)):
             raise ValueError("Cannot extract encoder input prompt from "
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
@@ -471,15 +487,19 @@ class Sequence:
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        if self.inputs.get("multi_modal_data") and self.inputs.get(
-                "encoder_multi_modal_data"):
+        inputs = self.inputs
+
+        if (inputs.get("multi_modal_data")
+                and inputs.get("encoder_multi_modal_data")):
             raise ValueError(
                 "Multi-modal data in both encoder and decoder is not supported."
             )
-        inputs = self.inputs
-        return self.inputs.get("multi_modal_data") or (cast(
-            EncoderDecoderLLMInputs,
-            inputs).get("encoder_multi_modal_data")) or {}
+
+        return cast(
+            "MultiModalDataDict",
+            (inputs.get("multi_modal_data")
+             or inputs.get("encoder_multi_modal_data") or {}),
+        )
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
@@ -531,6 +551,9 @@ class Sequence:
             # Optimization for single decode token case
             # (which is what we have most of the time)
             return self.data._cached_all_token_ids[-1]
+
+        if num_new_tokens == 0:
+            return []
 
         return self.data._cached_all_token_ids[-num_new_tokens:]
 
@@ -765,7 +788,7 @@ class SequenceGroup:
             assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
             self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
-    def get_last_latency(self, now: float) -> Optional[float]:
+    def get_last_latency(self, now: float) -> float:
         """Sets the last token time for Request level timings."""
         # If still in prefill phase, raise Error.
         if self.is_prefill():
@@ -1175,7 +1198,7 @@ class PoolerOutput(
 
     spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> EmbeddingSequenceGroupOutput:
         return self.outputs[idx]
 
     def __setitem__(self, idx: int, value):
@@ -1378,3 +1401,121 @@ class ExecuteModelRequest(
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
             async_callback=self.async_callback)
+
+
+@dataclass
+class SequenceGroupBase:
+    group_id: str  # the original request id before splitting
+
+    assembled_seq_group: Optional[SequenceGroup] = None
+
+    # seq id to a unique index inside this group
+    seq_id_to_index: Dict[str, int] = field(default_factory=dict)
+
+    # seq ids to be finished
+    to_be_finished: Dict[str, SequenceGroup] = field(default_factory=dict)
+
+    # seq id to finished sequences
+    finished_reqs: Dict[str, SequenceGroup] = field(default_factory=dict)
+
+    streaming: bool = False
+
+    output_produced: bool = False
+
+    @staticmethod
+    def add_request(request_id: str, engine, params, *args, **kwargs):
+        """When we are ready to add a request with request_id and params
+        into the engine, we can split the request into multiple requests.
+        """
+        raise NotImplementedError
+
+    def finish_seq(self, seq: SequenceGroup):
+        """The sequence `seq` finishes, we should record the information.
+        """
+        del self.to_be_finished[seq.request_id]
+        self.finished_reqs[seq.request_id] = seq
+
+    def maybe_assemble_group(
+            self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
+        """Assemble the sequence group, for producing the final
+        output, or adding request in the engine again.
+        """
+        raise NotImplementedError
+
+
+class ParallelSampleSequenceGroup(SequenceGroupBase):
+
+    @staticmethod
+    def add_request(request_id: str, engine, params, **kwargs):
+        original_params = params
+        params = copy.deepcopy(original_params)
+        params.n = 1
+        group = ParallelSampleSequenceGroup(request_id)
+        seqs = []
+        for i in range(original_params.n):
+            request_id_i = f"{request_id}_parallel_sample_{i}"
+            group.seq_id_to_index[request_id_i] = i
+            seq_group = engine.add_request(
+                request_id_i,
+                params=params,
+                **kwargs,
+            )  # type: ignore
+            assert seq_group is not None
+            engine.seq_id_to_seq_group[request_id_i] = group
+            group.to_be_finished[request_id_i] = seq_group
+            seqs.append(seq_group.seqs[0])
+
+        # for parallel sampling, the `assembled_seq_group` is always
+        # available, since we have all the sequences ready, and they
+        # will not change.
+        group.assembled_seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=seqs,
+            arrival_time=seq_group.arrival_time,
+            sampling_params=original_params,
+            lora_request=seq_group.lora_request,
+            embeddings=seq_group.embeddings,
+            pooling_params=seq_group.pooling_params,
+            encoder_seq=seq_group.encoder_seq,
+            trace_headers=seq_group.trace_headers,
+            prompt_adapter_request=seq_group.prompt_adapter_request,
+            priority=seq_group.priority,
+        )
+
+        group.streaming = params.output_kind == RequestOutputKind.DELTA
+        group.output_produced = False
+
+    def maybe_assemble_group(
+            self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
+
+        # in the streaming mode, we will return the assembled sequence
+        # for the first sequence, and then return None for the rest of
+        # sequences
+        if self.streaming:
+            if self.seq_id_to_index[seq_group.request_id] == 0:
+                return self.assembled_seq_group
+            return None
+
+        # in the non-streaming mode, we will return the assembled sequence
+        # once after all sequences finish, and then return None for the
+        # rest of the time
+
+        if len(self.to_be_finished) > 0:
+            return None
+
+        assert self.assembled_seq_group is not None
+        params = self.assembled_seq_group.sampling_params
+        assert isinstance(params, SamplingParams)
+        if not self.output_produced:
+            self.output_produced = True
+            if params._real_n is not None:
+                # Get the top-n sequences.
+                n = params._real_n or params.n
+                seqs = self.assembled_seq_group.seqs
+                sorting_key = lambda seq: seq.get_cumulative_logprob()
+                sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
+                top_n_seqs = sorted_seqs[:n]
+                self.assembled_seq_group.seqs = top_n_seqs
+            return self.assembled_seq_group
+        if self.output_produced:
+            return None

@@ -30,7 +30,6 @@ The following code configures vLLM in an offline mode to use speculative decodin
         tensor_parallel_size=1,
         speculative_model="facebook/opt-125m",
         num_speculative_tokens=5,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 
@@ -44,10 +43,10 @@ To perform the same with an online mode launch the server:
 .. code-block:: bash
 
     python -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8000 --model facebook/opt-6.7b \
-    --seed 42 -tp 1 --speculative_model facebook/opt-125m --use-v2-block-manager \
-    --num_speculative_tokens 5 --gpu_memory_utilization 0.8
+        --seed 42 -tp 1 --speculative_model facebook/opt-125m --use-v2-block-manager \
+        --num_speculative_tokens 5 --gpu_memory_utilization 0.8
 
- Then use a client:
+Then use a client:
 
 .. code-block:: python
 
@@ -104,7 +103,6 @@ matching n-grams in the prompt. For more information read `this thread. <https:/
         speculative_model="[ngram]",
         num_speculative_tokens=5,
         ngram_prompt_lookup_max=4,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 
@@ -135,7 +133,6 @@ For more information see `this blog <https://pytorch.org/blog/hitchhikers-guide-
         tensor_parallel_size=4,
         speculative_model="ibm-fms/llama3-70b-accelerator",
         speculative_draft_tensor_parallel_size=1,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 

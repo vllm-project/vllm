@@ -152,21 +152,23 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const c10::optional<torch::Tensor>& query_start_loc,
                         const c10::optional<torch::Tensor>& cache_indices,
                         const c10::optional<torch::Tensor>& has_initial_state,
-                        const torch::Tensor& ssm_states);
+                        const torch::Tensor& ssm_states, int64_t pad_slot_id);
 
-at::Tensor causal_conv1d_update(
-    const at::Tensor& x, const at::Tensor& conv_state, const at::Tensor& weight,
-    const c10::optional<at::Tensor>& bias_, bool silu_activation,
-    const c10::optional<at::Tensor>& cache_seqlens_,
-    const c10::optional<at::Tensor>& conv_state_indices_);
+void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
+                          const at::Tensor& weight,
+                          const c10::optional<at::Tensor>& bias_,
+                          bool silu_activation,
+                          const c10::optional<at::Tensor>& cache_seqlens_,
+                          const c10::optional<at::Tensor>& conv_state_indices_,
+                          int64_t pad_slot_id);
 
-at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                             const c10::optional<at::Tensor>& bias_,
-                             const c10::optional<at::Tensor>& conv_states,
-                             const c10::optional<at::Tensor>& query_start_loc,
-                             const c10::optional<at::Tensor>& cache_indices,
-                             const c10::optional<at::Tensor>& has_initial_state,
-                             bool silu_activation);
+void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
+                       const c10::optional<at::Tensor>& bias_,
+                       const c10::optional<at::Tensor>& conv_states,
+                       const c10::optional<at::Tensor>& query_start_loc,
+                       const c10::optional<at::Tensor>& cache_indices,
+                       const c10::optional<at::Tensor>& has_initial_state,
+                       bool silu_activation, int64_t pad_slot_id);
 
 #ifndef USE_ROCM
 using fptr_t = int64_t;

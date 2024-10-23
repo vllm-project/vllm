@@ -3,7 +3,7 @@ import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
-                    Optional, Union, overload)
+                    Optional, Union, cast, overload)
 
 import cloudpickle
 import zmq
@@ -12,8 +12,8 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
-from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, EngineConfig, ModelConfig
+from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -26,18 +26,18 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCError, RPCProcessRequest,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
+from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
-from vllm.inputs import PromptType, TokensPrompt
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
-                          RequestOutput)
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
-                        random_uuid)
+from vllm.utils import deprecate_kwargs
 
 logger = init_logger(__name__)
 
@@ -53,7 +53,7 @@ class MQClientClosedError(Exception):
     """
 
 
-class MQLLMEngineClient:
+class MQLLMEngineClient(EngineClient):
     """A client wrapper for MQLLMEngine that conforms to the
     EngineClient protocol.
 
@@ -204,8 +204,20 @@ class MQLLMEngineClient:
                     # (and record only the first one)
                     if is_engine_errored and not self._errored_with:
                         self._errored_with = exception
+                        # If engine is errored, no matter the type of exception
+                        # it will no longer be able to receive new requests,
+                        # therefore we have to inform that the current
+                        # processed requests failed as well. Send back a dead
+                        # engine error give this feedback and also give a
+                        # 'hint' to the server to shutdown next.
+                        exception = self.dead_error
 
                     if request_id is None:
+                        # If request_id is None, then the engine raised an
+                        # exception for a batch, and we may not know the
+                        # request that caused it, neither if it was actually
+                        # caused by any of them (e.g. CUDA OOM). Therefore we
+                        # broadcast the same exception for all requests.
                         for queue_i in tuple(self.output_queues.values()):
                             queue_i.put_nowait(exception)
                     else:
@@ -316,7 +328,7 @@ class MQLLMEngineClient:
               or response != VLLM_RPC_SUCCESS_STR):
             raise ValueError(error_message)
 
-    async def get_tokenizer(self, lora_request: LoRARequest):
+    async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
     async def get_decoding_config(self) -> DecodingConfig:
@@ -344,8 +356,14 @@ class MQLLMEngineClient:
             await self._send_one_way_rpc_request(
                 request=RPCAbortRequest(request_id), socket=self.input_socket)
 
-    async def do_log_stats(self):
-        """Ignore do_log_stats (handled on MQLLMEngine polling)"""
+    async def do_log_stats(
+        self,
+        scheduler_outputs: Optional[SchedulerOutputs] = None,
+        model_output: Optional[List[SamplerOutput]] = None,
+    ) -> None:
+        """
+        Ignore do_log_stats (handled on MQLLMEngine polling)
+        """
         pass
 
     async def check_health(self):
@@ -444,104 +462,6 @@ class MQLLMEngineClient:
                                      lora_request, trace_headers,
                                      prompt_adapter_request, priority)
 
-    async def beam_search(
-        self,
-        prompt: Union[PromptType, List[int]],
-        request_id: str,
-        params: BeamSearchParams,
-    ) -> AsyncGenerator[RequestOutput, None]:
-
-        beam_width = params.beam_width
-        max_tokens = params.max_tokens
-        ignore_eos = params.ignore_eos
-        temperature = params.temperature
-        length_penalty = params.length_penalty
-
-        tokenizer = await self.get_tokenizer(lora_request=None)
-        tokenizedPrompt = prompt if isinstance(
-            prompt, list) else tokenizer.encode(prompt)
-        tokenizedLength = len(tokenizedPrompt)
-
-        sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id, length_penalty)
-
-        beam_search_params = SamplingParams(logprobs=2 * beam_width,
-                                            max_tokens=1,
-                                            temperature=temperature)
-        all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
-        completed = []
-
-        for _ in range(max_tokens):
-            prompts_batch = [
-                TokensPrompt(prompt_token_ids=beam.tokens)
-                for beam in all_beams
-            ]
-
-            tasks = []
-
-            request_id = f"beam_search-{random_uuid()}"
-            for i, individual_prompt in enumerate(prompts_batch):
-                request_id_item = f"{request_id}-{i}"
-                task = asyncio.create_task(
-                    collect_from_async_generator(
-                        self.generate(individual_prompt, beam_search_params,
-                                      request_id_item)))
-                tasks.append(task)
-
-            output = await asyncio.gather(*tasks)
-
-            output = [x[0] for x in output]
-
-            logger.info(output)
-
-            new_beams = []
-            for i, current_beam in enumerate(all_beams):
-                result = output[i]
-
-                if result.outputs[0].logprobs is not None:
-                    logprobs = result.outputs[0].logprobs[0]
-                    for token_id, logprob_obj in logprobs.items():
-                        new_beam = BeamSearchSequence(
-                            tokens=current_beam.tokens + [token_id],
-                            cum_logprob=current_beam.cum_logprob +
-                            logprob_obj.logprob)
-
-                        if token_id == tokenizer.eos_token_id and \
-                            not ignore_eos:
-                            completed.append(new_beam)
-                        else:
-                            new_beams.append(new_beam)
-
-            sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
-            all_beams = sorted_beams[:beam_width]
-
-        completed.extend(all_beams)
-        sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
-        best_beams = sorted_completed[:beam_width]
-
-        for beam in best_beams:
-            beam.text = tokenizer.decode(beam.tokens[tokenizedLength:])
-
-        beam_search_output = RequestOutput(
-            request_id=request_id,
-            prompt=prompt,
-            outputs=[
-                CompletionOutput(
-                    text=beam.text,
-                    cumulative_logprob=beam.cum_logprob,
-                    token_ids=beam.tokens,
-                    index=i,
-                    logprobs=beam.cum_logprob,
-                ) for (i, beam) in enumerate(best_beams)
-            ],
-            finished=True,
-            prompt_token_ids=tokenizedPrompt,
-            prompt_logprobs=None)
-
-        logger.info(beam_search_output)
-
-        yield beam_search_output
-
     @overload  # DEPRECATED
     def encode(
         self,
@@ -605,9 +525,14 @@ class MQLLMEngineClient:
         assert (prompt is not None and pooling_params is not None
                 and request_id is not None)
 
-        return self._process_request(prompt, pooling_params, request_id,
-                                     lora_request, trace_headers, None,
-                                     priority)
+        return cast(
+            AsyncGenerator[EmbeddingRequestOutput, None],
+            self._process_request(prompt,
+                                  pooling_params,
+                                  request_id,
+                                  lora_request,
+                                  trace_headers,
+                                  priority=priority))
 
     async def _process_request(
         self,
@@ -635,7 +560,9 @@ class MQLLMEngineClient:
                 build_guided_decoding_logits_processor_async(
                     sampling_params=params,
                     tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=self.decoding_config.guided_decoding_backend
+                    default_guided_backend=(self.decoding_config.guided_decoding_backend
+                        if self.decoding_config
+                        else DecodingConfig.guided_decoding_backend),
                 )
 
         # 1) Create output queue for this requests.

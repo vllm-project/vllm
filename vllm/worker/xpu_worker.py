@@ -17,7 +17,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.utils import is_xpu
+from vllm.platforms import current_platform
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
@@ -53,7 +53,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         assert device_config.device_type == "xpu"
-        assert is_xpu()
+        assert current_platform.is_xpu()
 
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -91,7 +91,8 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.gpu_cache: Optional[List[List[torch.Tensor]]]
 
     def init_device(self) -> None:
-        if self.device_config.device.type == "xpu" and is_xpu():
+        if self.device_config.device.type == "xpu" and current_platform.is_xpu(
+        ):
             self.device = torch.device(f"xpu:{self.local_rank}")
             torch.xpu.set_device(self.device)
             torch.xpu.empty_cache()
