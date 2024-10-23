@@ -1051,7 +1051,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.image_size = config.vision_config.image_size
 
         self.vision_model = MllamaVisionModel(config.vision_config,
-                                              quant_config)
+                                              quant_config,
+                                              prefix="vision_model")
         self.language_model = MllamaForCausalLM(
             config.text_config,
             cache_config=cache_config,
