@@ -140,7 +140,13 @@ class EngineClient(ABC):
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            beam.text = tokenizer.decode(beam.tokens[tokenized_length:])
+            if (beam.tokens[-1] == tokenizer.eos_token_id and
+                not ignore_eos):
+                # Remove the eos token from the text.
+                tokens = beam.tokens[tokenized_length:-1]
+            else:
+                tokens = beam.tokens[tokenized_length:]
+            beam.text = tokenizer.decode(tokens)
 
         beam_search_output = RequestOutput(
             request_id=request_id,
