@@ -25,7 +25,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.tokenizer.detokenizer import Detokenizer, DetokenizerInputs
+from vllm.v1.processor.detokenizer import Detokenizer, DetokenizerInputs
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
