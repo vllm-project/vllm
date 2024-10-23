@@ -52,7 +52,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer, is_pp_missing_parameter,
+from .utils import (PPMissingLayer, get_inputs_embeds, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -319,12 +319,14 @@ class SolarModel(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = get_inputs_embeds(input_ids,
+                                              self.get_input_embeddings,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
+
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -462,9 +464,12 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, kv_caches,
-                                  attn_metadata, intermediate_tensors)
+                                  attn_metadata, intermediate_tensors,
+                                  inputs_embeds, inputs_embeds_masks)
         return model_output
 
     def compute_logits(self, hidden_states: torch.Tensor,
