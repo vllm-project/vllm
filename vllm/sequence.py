@@ -482,6 +482,10 @@ class Sequence:
             inputs).get("encoder_multi_modal_data")) or {}
 
     @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        return self.inputs.get("mm_processor_kwargs") or {}
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -576,25 +580,6 @@ class Sequence:
 
     def get_cumulative_logprob(self) -> float:
         return self.data.cumulative_logprob
-
-    def get_beam_search_score(self,
-                              length_penalty: float = 1.0,
-                              seq_len: Optional[int] = None,
-                              eos_token_id: Optional[int] = None) -> float:
-        """Calculate the beam search score with length penalty.
-
-        Adapted from
-
-        https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
-        """
-        if seq_len is None:
-            seq_len = self.get_len()
-            # NOTE: HF implementation does not count the EOS token
-            # towards the length, we align with that here for testing.
-            if (eos_token_id is not None
-                    and self.get_last_token_id() == eos_token_id):
-                seq_len -= 1
-        return self.get_cumulative_logprob() / (seq_len**length_penalty)
 
     def is_finished(self) -> bool:
         return SequenceStatus.is_finished(self.status)
@@ -730,6 +715,14 @@ class SequenceGroup:
         return self.seqs[0].multi_modal_data
 
     @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        # As with multi-modal data, all sequences in the group should have the
+        # same processor kwargs (i.e., mm_processor_kwargs are optionally
+        # provided per request; note that are independent of whether the model
+        # decoder-only or an encoder-decoder).
+        return self.seqs[0].mm_processor_kwargs
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -743,9 +736,34 @@ class SequenceGroup:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
                          if self.prompt_adapter_request else 0
 
-    def init_multi_step(self, num_scheduler_steps: int) -> None:
-        self.state.num_steps = num_scheduler_steps
+    def init_multi_step(self, num_steps: int) -> None:
+        self.state.num_steps = num_steps
         self.state.current_step = 0
+
+    def init_multi_step_from_lookahead_slots(self, num_lookahead_slots: int,
+                                             num_scheduler_steps: int,
+                                             is_multi_step: bool,
+                                             enable_chunking: bool) -> None:
+
+        if not is_multi_step:
+            self.init_multi_step(num_steps=num_scheduler_steps)
+            return
+
+        # Multi-Step case
+        is_prefill = self.is_prefill()
+
+        # The asserts below reflect the expectations of the current system.
+        if is_prefill and enable_chunking:
+            assert num_lookahead_slots == num_scheduler_steps
+            self.init_multi_step(num_steps=num_lookahead_slots)
+        else:
+            is_decode: bool = not is_prefill
+            # If it is a prefill, num_lookahead_slots must be 0
+            assert num_lookahead_slots == 0 or is_decode
+            # If it is a decode, num_lookahead_slots + 1 must match
+            # the scheduler steps.
+            assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
+            self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
@@ -784,25 +802,18 @@ class SequenceGroup:
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
-        if self.sampling_params and self.sampling_params.use_beam_search:
-            # For beam search, maximally there will always be `best_of` beam
-            # candidates running in the future.
-            best_of = self.sampling_params.best_of
-            assert isinstance(best_of, int)
-            return best_of
-        else:
-            if self.sampling_params:
-                best_of = self.sampling_params.best_of
-                assert isinstance(best_of, int)
-                if best_of > self.num_seqs():
-                    # At prompt stage, the sequence group is not yet filled up
-                    # and only have one sequence running. However, in the
-                    # generation stage, we will have `best_of` sequences
-                    # running.
-                    return best_of
-            # At sampling stages, return the number of actual sequences
-            # that are not finished yet.
-            return self.num_unfinished_seqs()
+        if self.sampling_params:
+            n = self.sampling_params.n
+            assert isinstance(n, int)
+            if n > self.num_seqs():
+                # At prompt stage, the sequence group is not yet filled up
+                # and only have one sequence running. However, in the
+                # generation stage, we will have `n` sequences
+                # running.
+                return n
+        # At sampling stages, return the number of actual sequences
+        # that are not finished yet.
+        return self.num_unfinished_seqs()
 
     def get_seqs(
         self,
@@ -950,6 +961,7 @@ class SequenceGroupMetadata(
             used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
+        mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None 
                           unless you are working with an encoder/decoder
@@ -976,6 +988,7 @@ class SequenceGroupMetadata(
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
@@ -1010,6 +1023,20 @@ class SequenceGroupMetadata(
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
 
+    # Multi-Step Chunked-Prefill property
+    @property
+    def is_single_step_prompt(self) -> bool:
+        # do_sample is true, only when the token_chunk_size matches the
+        # num_uncomputed_tokens of the sequence. This indicates that
+        # the prompt will finish processing in a single `execute_model`
+        # step.
+        return self.is_prompt and self.do_sample
+
+    def get_first_seq_id(self) -> int:
+        # This is an efficient way of fetching the seq_id when
+        # we know this SequenceGroup has only one sequence.
+        return next(iter(self.seq_data))
+
     def apply_delta(self,
                     sequence_group_metadata_delta: SequenceGroupMetadataDelta):
         for id, delta in sequence_group_metadata_delta.seq_data_delta.items():
@@ -1022,7 +1049,8 @@ class SequenceGroupMetadata(
 
     def finish_step(self) -> None:
         assert self.state is not None
-        assert self.state.current_step < self.state.num_steps
+        assert self.state.current_step < self.state.num_steps, \
+            f"current step {self.state.current_step}, num_steps {self.state.num_steps}" # noqa
         self.state.current_step += 1
 
 
@@ -1109,10 +1137,9 @@ class EmbeddingSequenceGroupOutput(
         return self.embeddings == other.embeddings
 
 
-class IntermediateTensors(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
+# cannot use msgspec.Struct here because Dynamo does not support it
+@dataclass
+class IntermediateTensors:
     """For all pipeline stages except the last, we need to return the hidden
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.

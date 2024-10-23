@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import DEVICE_OPTIONS, EngineArgs
-from vllm.inputs import PromptInputs
+from vllm.inputs import PromptType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
@@ -51,9 +51,8 @@ def main(args: argparse.Namespace):
 
     sampling_params = SamplingParams(
         n=args.n,
-        temperature=0.0 if args.use_beam_search else 1.0,
+        temperature=1.0,
         top_p=1.0,
-        use_beam_search=args.use_beam_search,
         ignore_eos=True,
         max_tokens=args.output_len,
     )
@@ -61,7 +60,7 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
-    dummy_inputs: List[PromptInputs] = [{
+    dummy_prompts: List[PromptType] = [{
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
@@ -74,13 +73,13 @@ def main(args: argparse.Namespace):
                     ],
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
                         str(profile_dir))) as p:
-                llm.generate(dummy_inputs,
+                llm.generate(dummy_prompts,
                              sampling_params=sampling_params,
                              use_tqdm=False)
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
-            llm.generate(dummy_inputs,
+            llm.generate(dummy_prompts,
                          sampling_params=sampling_params,
                          use_tqdm=False)
             end_time = time.perf_counter()
@@ -222,7 +221,9 @@ if __name__ == '__main__':
     parser.add_argument("--enable-prefix-caching",
                         action='store_true',
                         help="Enable automatic prefix caching")
-    parser.add_argument('--use-v2-block-manager', action='store_true')
+    parser.add_argument('--use-v2-block-manager',
+                        action='store_true',
+                        default=EngineArgs.use_v2_block_manager)
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

@@ -203,7 +203,8 @@ FROM vllm-openai as vllm-grpc-adapter
 USER root
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install vllm-tgis-adapter==0.5.1
+    --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
+    uv pip install $(echo dist/*.whl)'[tensorizer]' vllm-tgis-adapter==0.5.3
 
 ENV GRPC_PORT=8033 \
     PORT=8000 \

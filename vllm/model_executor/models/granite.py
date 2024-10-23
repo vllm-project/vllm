@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+from transformers import GraniteConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
@@ -48,10 +49,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.granite import GraniteConfig
 from vllm.utils import is_hip
 
-from .interfaces import SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
 
@@ -311,12 +311,12 @@ class GraniteModel(nn.Module):
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
             residual = None
+
+            hidden_states *= self.config.embedding_multiplier
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
-        hidden_states *= self.config.embedding_multiplier
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
@@ -337,7 +337,7 @@ class GraniteModel(nn.Module):
         return hidden_states
 
 
-class GraniteForCausalLM(nn.Module, SupportsLoRA):
+class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -404,9 +404,12 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA):
                 self.lm_head.weight = self.model.embed_tokens.weight
 
             logit_scale = getattr(config, "logit_scale", 1.0)
+
+            if hasattr(config, "logits_scaling"):
+                logit_scale /= config.logits_scaling
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
-                                                    logit_scale)
+                                                    scale=logit_scale)
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
@@ -428,8 +431,6 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA):
             sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
-        if logits is not None:
-            logits /= self.config.logits_scaling
         return logits
 
     def sample(
