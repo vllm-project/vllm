@@ -11,7 +11,7 @@ from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_warning_once
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
-                   PromptType, SingletonPrompt, TokenInputs, token_inputs)
+                   PromptType, SingletonInputs, SingletonPrompt, token_inputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
@@ -204,7 +204,7 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-    ) -> DecoderOnlyInputs:
+    ) -> SingletonInputs:
         '''
         Extract the components of any single encoder or decoder input prompt.
 
@@ -272,7 +272,7 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
-    ) -> DecoderOnlyInputs:
+    ) -> SingletonInputs:
         """Async version of :meth:`_extract_prompt_components`."""
         parsed = parse_singleton_prompt(prompt)
 
@@ -321,8 +321,8 @@ class InputPreprocessor:
 
     def _build_enc_dec_llm_inputs(
         self,
-        encoder_inputs: TokenInputs,
-        decoder_inputs: Optional[TokenInputs],
+        encoder_inputs: SingletonInputs,
+        decoder_inputs: Optional[SingletonInputs],
     ) -> EncoderDecoderInputs:
         if encoder_inputs["type"] == "token":
             pass
@@ -391,8 +391,8 @@ class InputPreprocessor:
         * :class:`EncoderDecoderInputs` instance
         '''
 
-        encoder_inputs: TokenInputs
-        decoder_inputs: Optional[TokenInputs]
+        encoder_inputs: SingletonInputs
+        decoder_inputs: Optional[SingletonInputs]
 
         if is_explicit_encoder_decoder_prompt(prompt):
             encoder_inputs = self._prompt_to_llm_inputs(
@@ -423,8 +423,8 @@ class InputPreprocessor:
         request_id: str,
     ) -> EncoderDecoderInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
-        encoder_inputs: TokenInputs
-        decoder_inputs: Optional[TokenInputs]
+        encoder_inputs: SingletonInputs
+        decoder_inputs: Optional[SingletonInputs]
 
         if is_explicit_encoder_decoder_prompt(prompt):
             encoder_task = self._prompt_to_llm_inputs_async(
