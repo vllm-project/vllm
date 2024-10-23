@@ -261,7 +261,7 @@ class OlmoModel(nn.Module):
         if get_pp_group().is_first_rank:
             # Get embeddings of input.
             # shape: (batch_size, seq_len, d_model)
-            hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+            inputs_embeds = get_inputs_embeds(input_ids, self.embed_tokens,
                                               inputs_embeds,
                                               inputs_embeds_masks)
 
