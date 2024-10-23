@@ -49,7 +49,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
     t: torch.Tensor
     p: torch.Tensor
     num_samples: int
-    best_of: List[int]
+    n: List[int]
     seq_groups: List[List[int]]
     is_first_multi_step: bool = True
     is_last_step: bool = True
@@ -65,7 +65,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
             "t": self.t,
             "p": self.p,
             "num_samples": self.num_samples,
-            "best_of": self.best_of,
+            "n": self.n,
             "seq_groups": self.seq_groups,
             "is_first_multi_step": self.is_first_multi_step,
             "is_last_step": self.is_last_step,
@@ -113,16 +113,23 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             (self.scheduler_config.max_num_seqs, self.max_num_blocks_per_seq),
             dtype=np.int32)
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
-            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.cache_config.cache_dtype,
             self.block_size,
+            self.model_config.is_attention_free,
             False,
         )
         self.cached_step_outputs: List[torch.Tensor] = []
+
+        smem_size = 512 * 1024
+        block_table_size = 4 * self.block_tables.size
+        if block_table_size >= smem_size:
+            logger.warning(
+                "The max_model_len (%d) is too large. This may degrade the "
+                "performance due to the insufficient smem size. Consider "
+                "setting --max-model-len to a smaller value.",
+                self.model_config.max_model_len)
 
     def load_model(self) -> None:
         self.device = self.device_config.device
@@ -435,7 +442,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         assert len(seq_group_metadata_list) > 0
         t = []
         p = []
-        best_of = []
+        n = []
         for seq_group_metadata in seq_group_metadata_list:
             sampling_params = seq_group_metadata.sampling_params
             t.append(sampling_params.temperature)
@@ -448,14 +455,11 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 raise NotImplementedError(
                     "Top-k sampling is currently disabled for the TPU backend "
                     "due to performance issues.")
-            if sampling_params.best_of > _MAX_NUM_SAMPLES:
+            if sampling_params.n > _MAX_NUM_SAMPLES:
                 raise NotImplementedError(
                     f"Best of > {_MAX_NUM_SAMPLES} is not supported by the TPU "
                     "backend.")
-            best_of.append(sampling_params.best_of)
-            if sampling_params.use_beam_search:
-                raise NotImplementedError(
-                    "Beam search is not supported by the TPU backend.")
+            n.append(sampling_params.n)
             if sampling_params.logprobs is not None:
                 raise NotImplementedError(
                     "logprobs is not currently supported by the TPU backend.")
@@ -468,7 +472,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_seqs = len(seq_group_metadata.seq_data)
             t += [t[-1]] * (num_seqs - 1)
             p += [p[-1]] * (num_seqs - 1)
-            best_of += [best_of[-1]] * (num_seqs - 1)
+            n += [n[-1]] * (num_seqs - 1)
 
         num_paddings = padded_batch_size - len(t)
         t += [1.0] * num_paddings
@@ -476,7 +480,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
         t = torch.tensor(t, dtype=torch.float32, device="cpu")
         p = torch.tensor(p, dtype=torch.float32, device="cpu")
-        return t, p, best_of
+        return t, p, n
 
     def prepare_model_input(
         self,
@@ -496,8 +500,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             inputs = self._prepare_decode(seq_group_metadata_list)
         input_tokens, input_positions, attn_metadata, input_lens = inputs
         padded_batch_size = input_tokens.shape[0]
-        t, p, best_of = self._prepare_sample(seq_group_metadata_list,
-                                             padded_batch_size)
+        t, p, n = self._prepare_sample(seq_group_metadata_list,
+                                       padded_batch_size)
         num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
 
         seq_groups = [
@@ -505,8 +509,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             for metadata in seq_group_metadata_list
         ]
         return ModelInputForTPU(input_tokens, input_positions, attn_metadata,
-                                input_lens, t, p, num_samples, best_of,
-                                seq_groups)
+                                input_lens, t, p, num_samples, n, seq_groups)
 
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> ModelInputForTPU:
@@ -546,7 +549,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                         seq_group_metadata_list=ctx.seq_group_metadata_list,
                         scheduler_outputs=ctx.scheduler_outputs,
                         is_async=False,
-                        is_last_step=False)
+                        is_last_step=False,
+                        is_first_step_output=i == 0)
                     model_input.async_callback()
             if use_async_out_proc:
                 return [sampler_outputs[-1]]
@@ -612,7 +616,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 assert len(seq_ids) == 1
                 seq_id = seq_ids[0]
                 seq_outputs = []
-                for j in range(model_input.best_of[i]):
+                for j in range(model_input.n[i]):
                     next_token_id = next_token_ids[i][j]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,

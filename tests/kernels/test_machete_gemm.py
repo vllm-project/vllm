@@ -32,13 +32,14 @@ MNK_SHAPES = [
     (1, 128, 128),
     (1, 512, 1024),
     (1, 4096, 4096),
+    (1, 8192, 28672),
     (13, 8192, 4096),
     (26, 4096, 8192),
-    (1, 4096, 4096),
+    (64, 4096, 4096),
+    (64, 8192, 28672),
     (257, 128, 4096),
     (257, 4224, 4160),
     (257, 4096, 4096),
-    (64, 4096, 4096),
     (1024, 4096, 8192),
     (1024, 8192, 4096),
 ]
@@ -157,8 +158,9 @@ def machete_quantize_and_pack(atype: torch.dtype,
 
     w_q = pack_rows(w_q, wtype.size_bits, *w_q.shape)
     w_q = w_q.t().contiguous().t()  # convert to col major
+
     w_q_machete = ops.machete_prepack_B(w_q, atype, wtype, stype)
-    opcheck(torch.ops._C.machete_prepack_B, (w_q, atype, wtype, stype))
+    opcheck(torch.ops._C.machete_prepack_B, (w_q, atype, wtype.id, stype))
 
     return w_ref, w_q_machete, w_s, w_zp
 
@@ -266,7 +268,6 @@ def test_machete_all_schedules(shape, types: TypeConfig):
             continue
 
         tensors = create_test_tensors(shape, types, group_size)
-
         print(f"MNK = {shape}")
         for schedule in ops.machete_supported_schedules(
                 types.act_type,

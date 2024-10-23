@@ -7,7 +7,7 @@ It takes over the control of the distributed environment from PyTorch.
 The typical workflow is:
 
 - call `init_distributed_environment` to initialize the distributed environment.
-- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
+- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to
  initialize the model parallel groups.
 
 - any code dealing with the distributed stuff
@@ -20,6 +20,7 @@ If you only need to use the distributed environment without model/pipeline
  steps.
 """
 import contextlib
+import gc
 import pickle
 import weakref
 from collections import namedtuple
@@ -1127,6 +1128,19 @@ def destroy_distributed_environment():
     _WORLD = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+
+
+def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    if shutdown_ray:
+        import ray  # Lazy import Ray
+        ray.shutdown()
+    gc.collect()
+    if not current_platform.is_cpu():
+        torch.cuda.empty_cache()
 
 
 def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:

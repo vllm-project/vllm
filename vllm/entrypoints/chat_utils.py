@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import (Any, Awaitable, Dict, Generic, Iterable, List, Literal,
-                    Mapping, Optional, Tuple, TypeVar, Union, cast)
+from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
+                    Literal, Mapping, Optional, Tuple, TypeVar, Union, cast)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -33,6 +33,7 @@ from vllm.multimodal.utils import (async_get_and_parse_audio,
                                    async_get_and_parse_image,
                                    get_and_parse_audio, get_and_parse_image)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -58,10 +59,35 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
     """The type of the content part."""
 
 
+class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
+    """A simpler version of the param that only accepts a plain image_url.
+    This is supported by OpenAI API, although it is not documented.
+    
+    Example:
+    {
+        "image_url": "https://example.com/image.jpg"
+    }
+    """
+    image_url: Required[str]
+
+
+class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
+    """A simpler version of the param that only accepts a plain audio_url.
+    
+    Example:
+    {
+        "audio_url": "https://example.com/audio.mp3"
+    }
+    """
+    audio_url: Required[str]
+
+
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartRefusalParam,
-    CustomChatCompletionContentPartParam]
+    CustomChatCompletionContentPartParam,
+    CustomChatCompletionContentSimpleImageParam,
+    CustomChatCompletionContentSimpleAudioParam, str]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -157,22 +183,24 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat"):
+            if model_type in ("chameleon", "internvl_chat", "NVLM_D"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|image_pad|><|vision_end|>"
+            if model_type == "molmo":
+                return ""
 
-            raise TypeError(f"Unknown model type: {model_type}")
+            raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
             if model_type == "ultravox":
                 return "<|reserved_special_token_0|>"
-            raise TypeError(f"Unknown model type: {model_type}")
+            raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "video":
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|video_pad|><|vision_end|>"
-            raise TypeError(f"Unknown model type: {model_type}")
+            raise TypeError(f"Unknown {modality} model type: {model_type}")
         else:
             raise TypeError(f"Unknown modality: {modality}")
 
@@ -303,6 +331,28 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder(placeholder)
 
 
+def validate_chat_template(chat_template: Optional[Union[Path, str]]):
+    """Raises if the provided chat template appears invalid."""
+    if chat_template is None:
+        return
+
+    elif isinstance(chat_template, Path) and not chat_template.exists():
+        raise FileNotFoundError(
+            "the supplied chat template path doesn't exist")
+
+    elif isinstance(chat_template, str):
+        JINJA_CHARS = "{}\n"
+        if not any(c in chat_template
+                   for c in JINJA_CHARS) and not Path(chat_template).exists():
+            raise ValueError(
+                f"The supplied chat template string ({chat_template}) "
+                f"appears path-like, but doesn't exist!")
+
+    else:
+        raise TypeError(
+            f"{type(chat_template)} is not a valid chat template type")
+
+
 def load_chat_template(
         chat_template: Optional[Union[Path, str]]) -> Optional[str]:
     if chat_template is None:
@@ -362,6 +412,71 @@ _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
+# Define a mapping from part types to their corresponding parsing functions.
+MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
+    "text":
+    lambda part: _TextParser(part).get("text", ""),
+    "image_url":
+    lambda part: _ImageParser(part).get("image_url", {}).get("url", ""),
+    "audio_url":
+    lambda part: _AudioParser(part).get("audio_url", {}).get("url", ""),
+    "refusal":
+    lambda part: _RefusalParser(part).get("refusal", ""),
+}
+
+
+def _parse_chat_message_content_mm_part(
+        part: ChatCompletionContentPartParam) -> Tuple[str, str]:
+    """
+    Parses a given multi modal content part based on its type.
+
+    Args:
+        part: A dict containing the content part, with a potential 'type' field.
+
+    Returns:
+        A tuple (part_type, content) where:
+        - part_type: Type of the part (e.g., 'text', 'image_url').
+        - content: Parsed content (e.g., text, image URL).
+
+    Raises:
+        ValueError: If the 'type' field is missing and no direct URL is found.
+    """
+    assert isinstance(
+        part, dict)  # This is needed to avoid mypy errors: part.get() from str
+    part_type = part.get("type", None)
+
+    if isinstance(part_type, str) and part_type in MM_PARSER_MAP:
+        content = MM_PARSER_MAP[part_type](part)
+
+        # Special case for 'image_url.detail'
+        if part_type == "image_url" and part.get("detail") != "auto":
+            logger.warning("'image_url.detail' is currently not supported "
+                           "and will be ignored.")
+
+        return part_type, content
+
+    # Handle missing 'type' but provided direct URL fields.
+    if part_type is None:
+        if part.get("image_url") is not None:
+            image_params = cast(CustomChatCompletionContentSimpleImageParam,
+                                part)
+            return "image_url", image_params.get("image_url", "")
+        if part.get("audio_url") is not None:
+            audio_params = cast(CustomChatCompletionContentSimpleAudioParam,
+                                part)
+            return "audio_url", audio_params.get("audio_url", "")
+
+        # Raise an error if no 'type' or direct URL is found.
+        raise ValueError("Missing 'type' field in multimodal part.")
+
+    if not isinstance(part_type, str):
+        raise ValueError("Invalid 'type' field in multimodal part.")
+    return part_type, "unknown part_type content"
+
+
+VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
+                                       "audio_url")
+
 
 def _parse_chat_message_content_parts(
     role: str,
@@ -377,29 +492,28 @@ def _parse_chat_message_content_parts(
 
     has_image = False
     for part in parts:
-        part_type = part["type"]
-        if part_type == "text":
-            text = _TextParser(part)["text"]
+        if isinstance(part, str):  # Handle plain text parts
+            text = _TextParser(part)
             texts.append(text)
-        elif part_type == "image_url":
-            image_url = _ImageParser(part)["image_url"]
+        else:  # Handle structured dictionary parts
+            part_type, content = _parse_chat_message_content_mm_part(part)
 
-            if image_url.get("detail", "auto") != "auto":
-                logger.warning(
-                    "'image_url.detail' is currently not supported and "
-                    "will be ignored.")
+            # if part_type is text/refusal/image_url/audio_url but
+            # content is empty, logg a warning and skip
+            if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
+                logger.warning("Skipping multimodal part "
+                               "with empty / unparsable content.")
+                continue
 
-            mm_parser.parse_image(image_url["url"])
-            has_image = True
-        elif part_type == "audio_url":
-            audio_url = _AudioParser(part)["audio_url"]
-
-            mm_parser.parse_audio(audio_url["url"])
-        elif part_type == "refusal":
-            text = _RefusalParser(part)["refusal"]
-            texts.append(text)
-        else:
-            raise NotImplementedError(f"Unknown part type: {part_type}")
+            if part_type in ("text", "refusal"):
+                texts.append(content)
+            elif part_type == "image_url":
+                mm_parser.parse_image(content)
+                has_image = True
+            elif part_type == "audio_url":
+                mm_parser.parse_audio(content)
+            else:
+                raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
     if keep_multimodal_content:
@@ -540,14 +654,14 @@ def apply_mistral_chat_template(
     **kwargs: Any,
 ) -> List[int]:
     if chat_template is not None:
-        logger.warning(
+        print_warning_once(
             "'chat_template' cannot be overridden for mistral tokenizer.")
     if "add_generation_prompt" in kwargs:
-        logger.warning(
+        print_warning_once(
             "'add_generation_prompt' is not supported for mistral tokenizer, "
             "so it will be ignored.")
     if "continue_final_message" in kwargs:
-        logger.warning(
+        print_warning_once(
             "'continue_final_message' is not supported for mistral tokenizer, "
             "so it will be ignored.")
 

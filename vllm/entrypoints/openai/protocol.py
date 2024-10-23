@@ -184,7 +184,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -285,6 +284,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."))
 
     # doc: end-chat-completion-extra-params
 
@@ -302,6 +307,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            length_penalty=self.length_penalty,
         )
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
@@ -314,9 +320,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             prompt_logprobs = self.top_logprobs
 
         guided_json_object = None
-        if (self.response_format is not None
-                and self.response_format.type == "json_object"):
-            guided_json_object = True
+        if self.response_format is not None:
+            if self.response_format.type == "json_object":
+                guided_json_object = True
+            elif self.response_format.type == "json_schema":
+                json_schema = self.response_format.json_schema
+                assert json_schema is not None
+                self.guided_json = json_schema.json_schema
+                if self.guided_decoding_backend is None:
+                    self.guided_decoding_backend = "lm-format-enforcer"
 
         guided_decoding = GuidedDecodingParams.from_optional(
             json=self._get_guided_json_from_tool() or self.guided_json,
@@ -345,12 +357,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
@@ -518,7 +527,6 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -541,8 +549,8 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description=
         ("Similar to chat completion, this parameter specifies the format of "
-         "output. Only {'type': 'json_object'} or {'type': 'text' } is "
-         "supported."),
+         "output. Only {'type': 'json_object'}, {'type': 'json_schema'} or "
+         "{'type': 'text' } is supported."),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -597,6 +605,7 @@ class CompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            length_penalty=self.length_penalty,
         )
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
@@ -641,13 +650,10 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
             prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
