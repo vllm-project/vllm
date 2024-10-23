@@ -36,7 +36,8 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import INPUT_REGISTRY, EncoderDecoderInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderInputs, InputContext,
+                         TokenInputs, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -88,21 +89,32 @@ def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
 
 def input_processor_for_mllama(ctx: InputContext,
                                inputs: EncoderDecoderInputs):
-    enc_inputs = inputs["encoder"]
-    dec_inputs = inputs["decoder"]
+    # Example inputs when initially passed to processor:
+    # {
+    #     'encoder': {
+    #         'type': 'token',
+    #         'prompt_token_ids': [128000, 128256, 128000, 3923, 374, 279, 2262, 315, 420, 2217, 30],  # noqa: E501
+    #         'prompt': '<|image|><|begin_of_text|>What is the content of this image?',  # noqa: E501
+    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
+    #     },
+    #     'decoder': {
+    #         'type': 'token',
+    #         'prompt_token_ids': [128000],
+    #     },
+    # }
 
     # move encoder prompt to decoder
-    if dec_inputs.get("prompt") is None:
-        dec_inputs["prompt"] = enc_inputs["prompt"]
-        dec_inputs["prompt_token_ids"] = enc_inputs["prompt_token_ids"]
+    inputs["decoder"] = TokenInputs(**inputs["encoder"])
 
-    multi_modal_data = enc_inputs.get("multi_modal_data")
+    dec_inputs = inputs["decoder"]
+
+    multi_modal_data = dec_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         # text-only
-        enc_inputs["prompt"] = ""
-        enc_inputs["prompt_token_ids"] = []
-        enc_inputs["multi_modal_data"] = {}
-        return inputs
+        return EncoderDecoderInputs(
+            encoder=token_inputs([]),
+            decoder=dec_inputs,
+        )
 
     image_data = multi_modal_data["image"]
     if isinstance(image_data, Image.Image):
@@ -115,15 +127,18 @@ def input_processor_for_mllama(ctx: InputContext,
     # get the number of tiles for those images.
     num_decode_images = _get_num_image_in_last_group(
         dec_inputs["prompt_token_ids"])
+
     hf_config = ctx.model_config.hf_config
+    vision_config = hf_config.vision_config
+
     num_tiles = 0
     for image in image_data[::-1]:
         width, height = image.size
-        tile_size = hf_config.vision_config.image_size
+        tile_size = vision_config.image_size
         canvas_height, canvas_width = get_optimal_tiled_canvas(
             image_height=height,
             image_width=width,
-            max_image_tiles=hf_config.vision_config.max_num_tiles,
+            max_image_tiles=vision_config.max_num_tiles,
             tile_size=tile_size,
         )
         num_tiles_height = canvas_height // tile_size
@@ -132,18 +147,23 @@ def input_processor_for_mllama(ctx: InputContext,
         num_decode_images -= 1
         if num_decode_images == 0:
             break
+
     # Set encoder prompt length based on the number of tiles.
     # This tells the block manager to allocate correct number
     # of slots for encoder tokens.
-    assert hf_config.vision_config.image_size % 14 == 0, \
+    assert vision_config.image_size % 14 == 0, \
         "chunk size should be multiple of 14"
-    token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
+    token_per_chunk = (vision_config.image_size // 14)**2 + 1
     num_tokens = num_tiles * token_per_chunk
 
-    enc_inputs["prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
-    enc_inputs["prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID] * num_tokens
-
-    return inputs
+    return EncoderDecoderInputs(
+        encoder=token_inputs(
+            prompt_token_ids=[MLLAMA_IMAGE_TOKEN_ID] * num_tokens,
+            prompt=MLLAMA_IMAGE_TOKEN * num_tokens,
+            multi_modal_data=multi_modal_data,
+        ),
+        decoder=dec_inputs,
+    )
 
 
 def get_max_mllama_image_tokens(ctx: InputContext) -> int:
