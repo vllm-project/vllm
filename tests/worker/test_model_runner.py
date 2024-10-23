@@ -52,7 +52,7 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
                 range(seq_len),
-                prompt_embeds=torch.rand(seq_len, 10).tolist(),
+                prompt_embeds=torch.rand(seq_len, 10),
             )
             input_embeds_len += seq_len
         else:
@@ -185,7 +185,7 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
                 [],
-                prompt_embeds=torch.rand(context_len, 10).tolist(),
+                prompt_embeds=torch.rand(context_len, 10),
             )
             input_embeds_len += context_len
         else:
@@ -365,7 +365,7 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
                 [],
-                prompt_embeds=torch.rand(seq_len, 10).tolist(),
+                prompt_embeds=torch.rand(seq_len, 10),
             )
             input_embeds_len += seq_len
         else:
@@ -388,7 +388,7 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData.from_seqs(
                 [],
-                prompt_embeds=torch.rand(context_len, 10).tolist(),
+                prompt_embeds=torch.rand(context_len, 10),
             ),
         else:
             seq_data = SequenceData.from_seqs(range(context_len))

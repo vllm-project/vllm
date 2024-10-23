@@ -831,11 +831,20 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         seq_lens = []
         query_lens = []
+        input_embeds_lst = []
+        input_embeds_masks_lst = []
         max_decode_seq_len = 0
         max_encoder_seq_len = 0
+
         for inter_data in self.inter_data_list:
             seq_lens.extend(inter_data.seq_lens)
             query_lens.extend(inter_data.query_lens)
+            
+            if inter_data.input_embeds is not None:
+                input_embeds_lst.append(inter_data.input_embeds)
+            if inter_data.input_embeds_mask is not None:
+                input_embeds_masks_lst.append(inter_data.input_embeds_mask)
+
             if not inter_data.is_prompt:
                 max_decode_seq_len = max(max_decode_seq_len,
                                          max(inter_data.seq_lens))
@@ -843,10 +852,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     max_encoder_seq_len = max(max_encoder_seq_len,
                                               inter_data.encoder_seq_len)
 
-        input_embeds_lst = [
-            inter_data.input_embeds for inter_data in self.inter_data_list
-            if inter_data.input_embeds is not None
-        ]
         if input_embeds_lst:
             input_embeds = torch.cat(input_embeds_lst).to(
                 device=self.runner.device,
@@ -854,10 +859,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         else:
             input_embeds = None
 
-        input_embeds_masks_lst = [
-            inter_data.input_embeds_mask for inter_data in self.inter_data_list
-            if inter_data.input_embeds_mask is not None
-        ]
         if input_embeds_masks_lst:
             input_embeds_masks = torch.cat(input_embeds_masks_lst).to(
                 self.runner.device)

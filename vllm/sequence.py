@@ -426,7 +426,7 @@ class Sequence:
         if self.prompt_token_ids:
             data = SequenceData.from_seqs(self.prompt_token_ids)
         else:
-            assert self.prompt_embeds is not None
+            assert isinstance(self.prompt_embeds, torch.Tensor)
             data = SequenceData.from_seqs([], prompt_embeds=self.prompt_embeds)
 
         self.data = data
