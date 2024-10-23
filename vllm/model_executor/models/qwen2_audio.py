@@ -170,8 +170,12 @@ def input_processor_for_qwen2_audio(
     assert (isinstance(multi_modal_data['audio'], list)
             and isinstance(multi_modal_data['audio'][0], tuple))
     processor = cached_get_processor(ctx.model_config.model)
-    resampled_audios = [librosa.resample(_[0], orig_sr=_[1], target_sr=processor.feature_extractor.sampling_rate) for _ in multi_modal_data['audio']]
-
+    resampled_audios = [
+        librosa.resample(
+            _[0], orig_sr=_[1],
+            target_sr=processor.feature_extractor.sampling_rate) 
+        for _ in multi_modal_data['audio']
+    ]
     audio_input_lengths = np.array(
         [min(3000, _.shape[0] // 160 + 1) for _ in resampled_audios])
 
@@ -223,7 +227,12 @@ def input_mapper_for_qwen2_audio(
         }
         return batch_data
     try:
-        resampled_audios = [librosa.resample(_[0], orig_sr=_[1], target_sr=processor.feature_extractor.sampling_rate) for _ in multi_modal_data]
+        resampled_audios = [
+            librosa.resample(
+                _[0], orig_sr=_[1],
+                target_sr=processor.feature_extractor.sampling_rate)
+            for _ in multi_modal_data
+        ]
         batch_data = audio_feature_extractor(resampled_audios,
                                              sampling_rate=16000,
                                              return_attention_mask=True,
@@ -231,7 +240,7 @@ def input_mapper_for_qwen2_audio(
                                              return_tensors="pt").data
         batch_data["feature_attention_mask"] = batch_data.pop("attention_mask")
     except Exception:
-        logger.error("Failed to process audio (%s)", audios)
+        logger.error("Failed to process audio (%s)", multi_modal_data)
         raise
 
     return MultiModalInputs(batch_data)
