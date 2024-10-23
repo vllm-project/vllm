@@ -141,7 +141,7 @@ class EngineClient(ABC):
 
         for beam in best_beams:
             if (beam.tokens[-1] == tokenizer.eos_token_id and not ignore_eos):
-                # Remove the eos token from the text.
+                # Skip the eos token in the text.
                 tokens = beam.tokens[tokenized_length:-1]
             else:
                 tokens = beam.tokens[tokenized_length:]
