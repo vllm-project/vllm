@@ -21,7 +21,7 @@ You can install vLLM using pip:
 .. code-block:: console
 
     $ # (Recommended) Create a new conda environment.
-    $ conda create -n myenv python=3.10 -y
+    $ conda create -n myenv python=3.12 -y
     $ conda activate myenv
 
     $ # Install vLLM with CUDA 12.1.
