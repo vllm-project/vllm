@@ -275,8 +275,8 @@ class LLMEngine:
             scheduler_config.multi_step_stream_outputs,
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc, use_cached_outputs,
-            model_config.mm_processor_kwargs, 
-            model_config.pooling_config.pooling_type, 
+            model_config.mm_processor_kwargs,
+            model_config.pooling_config.pooling_type,
             model_config.pooling_config.normalize)
         # TODO(woosuk): Print more configs in debug mode.
         self.model_config = model_config
