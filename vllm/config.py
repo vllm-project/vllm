@@ -17,7 +17,7 @@ from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        is_hip, is_openvino, is_xpu, print_warning_once)
+                        is_hip, is_openvino, print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -1121,7 +1121,7 @@ class DeviceConfig:
                 self.device_type = "tpu"
             elif current_platform.is_cpu():
                 self.device_type = "cpu"
-            elif is_xpu():
+            elif current_platform.is_xpu():
                 self.device_type = "xpu"
             else:
                 raise RuntimeError("Failed to infer device type")
