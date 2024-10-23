@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16, CompressedTensors24)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
@@ -93,6 +93,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         # details follow the structure defined by the QuantizationArgs
         # pydantic model, which is used to verify the structure of the
         # quant_config and also store the details for later use.
+        """
         for _, quant_config in config["config_groups"].items():
             targets = quant_config.get("targets")
             for target in targets:
@@ -115,11 +116,26 @@ class CompressedTensorsConfig(QuantizationConfig):
                         target_scheme_map[target][
                             "input_activations"] = QuantizationArgs.parse_obj(
                                 quant_config.get("input_activations"))
+        """
+        sparsity_config = config.get("sparsity_config")
+        targets = sparsity_config.get("targets")
+        sparsity_format = sparsity_config.get("format")
+        ignore = sparsity_config.get("ignore")
+        
+        for t in targets:
+            target_scheme_map[t] = sparsity_format
 
+        """
         return cls(target_scheme_map=target_scheme_map,
                    ignore=ignore,
                    quant_format=quant_format,
                    kv_cache_scheme=config.get("kv_cache_scheme"))
+        """
+        return cls(
+            target_scheme_map=target_scheme_map,
+            ignore=ignore,
+            quant_format=sparsity_format,
+        )
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -318,6 +334,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         # TODO (@robertgshaw): add compressed-tensors as dep
         # so we do not have to re-write these functions
         # need to make accelerate optional in ct to do this
+        """
         matched_target = find_matched_target(
             layer_name=layer_name,
             module=layer,
@@ -332,6 +349,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())
+        """
+        scheme = CompressedTensors24()
 
         return scheme
 
