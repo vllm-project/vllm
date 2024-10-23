@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from unittest.mock import patch
 
 import numpy as np
@@ -14,8 +14,7 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalInputs, MultiModalRegistry)
+from vllm.multimodal import MultiModalInputs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available)
@@ -45,7 +44,6 @@ class GPUModelRunner:
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         observability_config: Optional[ObservabilityConfig] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -80,10 +78,6 @@ class GPUModelRunner:
 
         # Multi-modal data support
         self.input_registry = input_registry
-        self.mm_registry = mm_registry
-        self.multi_modal_input_mapper = mm_registry.create_input_mapper(
-            model_config)
-        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -146,15 +140,13 @@ class GPUModelRunner:
                 req_id=req_id,
                 prompt_token_ids=req_data.prompt_token_ids,
                 prompt=req_data.prompt,
-                multi_modal_data=req_data.multi_modal_data,
-                mm_processor_kwargs=req_data.mm_processor_kwargs,
+                mm_inputs=req_data.mm_inputs,
                 sampling_params=req_data.sampling_params,
                 generator=None,  # TODO
                 block_ids=req_data.block_ids,
                 num_computed_tokens=req_data.num_computed_tokens,
                 output_token_ids=[],
-                requires_encoder_processing=(req_data.multi_modal_data
-                                             is not None),
+                requires_encoder_processing=req_data.mm_inputs is not None,
             )
             req_ids_to_add.append(req_id)
 
@@ -213,13 +205,7 @@ class GPUModelRunner:
             req_state = self.requests[req_id]
             if not req_state.requires_encoder_processing:
                 continue
-
-            # print("DATA", req_state.multi_modal_data)
-            # print("KWARGS", req_state.mm_processor_kwargs)
-            mm_kwargs = self._prepare_multi_modal_inputs(req_state)
-            if mm_kwargs is not None:
-                mm_inputs.append(mm_kwargs)
-                # print("MM_KWARGS", mm_kwargs["pixel_values"].shape)
+            mm_inputs.append(req_state.mm_inputs)
             req_state.requires_encoder_processing = False
         batched_mm_inputs = MultiModalInputs.batch(mm_inputs)
         batched_mm_inputs = MultiModalInputs.as_kwargs(batched_mm_inputs,
@@ -316,19 +302,6 @@ class GPUModelRunner:
         logits_indices = query_start_loc[1:] - 1
         return (input_ids, positions, attn_metadata, batched_mm_inputs,
                 logits_indices)
-
-    def _prepare_multi_modal_inputs(
-        self,
-        request_state: "CachedRequestState",
-    ) -> Optional[MultiModalInputs]:
-        mm_data = request_state.multi_modal_data
-        if mm_data is None:
-            return None
-        mm_kwargs = self.multi_modal_input_mapper(
-            mm_data,
-            mm_processor_kwargs=request_state.mm_processor_kwargs,
-        )
-        return mm_kwargs
 
     def _prepare_sampling(
         self,
@@ -470,8 +443,7 @@ class CachedRequestState:
     req_id: str
     prompt_token_ids: List[int]
     prompt: Optional[str]
-    multi_modal_data: Optional["MultiModalDataDict"]
-    mm_processor_kwargs: Optional[Dict[str, Any]]
+    mm_inputs: Optional[MultiModalInputs]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 

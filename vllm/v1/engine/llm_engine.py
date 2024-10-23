@@ -25,6 +25,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.processor.detokenizer import Detokenizer, DetokenizerInputs
+from vllm.v1.processor.mm_input_mapper import (MMInputMapper,
+                                               MMInputMapperInputs)
 from vllm.v1.request import Request, RequestStatus
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -141,6 +143,10 @@ class LLMEngine:
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
+        if self.model_config.is_multimodal_model:
+            self.mm_input_mapper = MMInputMapper(model_config)
+        else:
+            self.mm_input_mapper = None
 
         # Request id -> Request
         self.requests: Dict[str, Request] = {}
@@ -256,7 +262,21 @@ class LLMEngine:
                       arrival_time)
         self.requests[request_id] = req
         self.num_lagged_steps[request_id] = 0
-        self.scheduler.add_request(req)
+
+        # NOTE(woosuk): Here, we do not strictly follow the FCFS policy,
+        # as the text-only requests that arrive later can be scheduled
+        # before the multimodal requests that arrived earlier.
+        if req.mm_data is None:
+            # No multi-modal data for this request.
+            self.scheduler.add_request(req)
+        elif req.mm_inputs is not None:
+            # The multi-modal inputs have already been processed.
+            self.scheduler.add_request(req)
+        else:
+            # The request needs to be processed by the mm input mapper before
+            # being scheduled.
+            assert self.mm_input_mapper is not None
+            self.send_to_mm_input_mapper([req])
 
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
@@ -300,6 +320,7 @@ class LLMEngine:
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         self.scheduler.finish_requests(request_id,
                                        RequestStatus.FINISHED_ABORTED)
+        self._free_request(request_id)
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
@@ -316,6 +337,8 @@ class LLMEngine:
         # FIXME(woosuk): Currently, the step method is inefficient because it
         # creates RequestOutput objects for all running requests, while they
         # may not be needed unless the output is streamed to the client.
+
+        self.recv_from_mm_input_mapper()
         if self.scheduler.has_unfinished_requests():
             scheduler_output = self.scheduler.schedule()
             output = self.model_executor.execute_model(scheduler_output)
@@ -361,6 +384,11 @@ class LLMEngine:
         num_reqs = len(detokenizer_output.req_ids)
         for i in range(num_reqs):
             req_id = detokenizer_output.req_ids[i]
+            if req_id not in self.requests:
+                # The request has been aborted while the detokenizer was
+                # processing the outputs.
+                continue
+
             req = self.requests[req_id]
             req.output_text += detokenizer_output.detokenized_texts[i]
 
@@ -373,9 +401,7 @@ class LLMEngine:
             req_outputs.append(req_output)
 
             if finished:
-                del self.requests[req_id]
-                del self.num_lagged_steps[req_id]
-                del self.request_outputs[req_id]
+                self._free_request(req_id)
         return req_outputs
 
     def terminate_detokenizer(self) -> None:
@@ -439,6 +465,38 @@ class LLMEngine:
             completion_output.stop_reason = request.stop_reason
             req_output.finished = finished
         return req_output
+
+    def send_to_mm_input_mapper(self, requests: List[Request]) -> None:
+        if self.mm_input_mapper is None:
+            return
+        mm_mapper_input = MMInputMapperInputs.from_requests(requests)
+        self.mm_input_mapper.send(mm_mapper_input)
+
+    def recv_from_mm_input_mapper(self) -> None:
+        if self.mm_input_mapper is None:
+            return
+
+        while True:
+            output = self.mm_input_mapper.recv()
+            if output is None:
+                break
+
+            num_reqs = len(output.req_ids)
+            for i in range(num_reqs):
+                req_id = output.req_ids[i]
+                if req_id not in self.requests:
+                    # The request has been aborted while the MM input mapper was
+                    # processing the inputs.
+                    continue
+
+                req = self.requests[req_id]
+                req.mm_inputs = output.mm_inputs[i]
+                self.scheduler.add_request(req)
+
+    def _free_request(self, request_id: str) -> None:
+        self.requests.pop(request_id, None)
+        self.num_lagged_steps.pop(request_id, None)
+        self.request_outputs.pop(request_id, None)
 
     def check_health(self) -> None:
         if self.tokenizer:

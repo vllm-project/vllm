@@ -1,11 +1,10 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import (Any, Deque, Dict, Iterable, List, Optional, Set, Tuple,
-                    Union)
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal import MultiModalInputs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.outputs import ModelRunnerOutput
@@ -334,8 +333,7 @@ class NewRequestData:
     req_id: str
     prompt_token_ids: List[int]
     prompt: Optional[str]
-    multi_modal_data: Optional[MultiModalDataDict]
-    mm_processor_kwargs: Optional[Dict[str, Any]]
+    mm_inputs: Optional[MultiModalInputs]
     sampling_params: SamplingParams
     block_ids: List[int]
     num_computed_tokens: int
@@ -351,8 +349,7 @@ class NewRequestData:
             req_id=request.request_id,
             prompt_token_ids=request.inputs["prompt_token_ids"],
             prompt=request.inputs.get("prompt"),
-            multi_modal_data=request.inputs.get("multi_modal_data"),
-            mm_processor_kwargs=request.inputs.get("mm_processor_kwargs"),
+            mm_inputs=request.mm_inputs,
             sampling_params=request.sampling_params,
             block_ids=block_ids,
             num_computed_tokens=num_computed_tokens,
