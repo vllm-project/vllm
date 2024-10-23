@@ -114,6 +114,9 @@ def print_timers(timers: Iterable[TMeasurement]):
 def run(MKNs: Iterable[Tuple[int, int, int]],
         use_fp8: bool) -> Iterable[TMeasurement]:
     results = []
+    # MKNs = [(2048, 8192, 14336)]
+    # MKNs = [(32, 11008, 4096)]
+    MKNs = [(2048, 11008, 14336)]
     for m, k, n in MKNs:
         timers = bench(m, k, n, "gemm", f"MKN=({m}x{k}x{n})", use_fp8)
         print_timers(timers)
@@ -130,9 +133,9 @@ def make_output(data: Iterable[TMeasurement],
     print_timers(data)
 
     # pickle all the results
-    timestamp = int(time.time()) if timestamp is None else timestamp
-    with open(f"{base_description}-{timestamp}.pkl", "wb") as f:
-        pkl.dump(data, f)
+    # timestamp = int(time.time()) if timestamp is None else timestamp
+    # with open(f"{base_description}-{timestamp}.pkl", "wb") as f:
+    #     pkl.dump(data, f)
 
 
 def run_model_bench(args):

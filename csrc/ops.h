@@ -225,4 +225,11 @@ torch::Tensor cslt_mm_fp8_semi_structured(
     const c10::optional<torch::Tensor>& alpha_opt,
     const c10::optional<torch::Tensor>& bias_opt, bool transpose_result);
 
+int64_t cslt_prepare_mm_fp8_semi_structured(const torch::Tensor& compressed_A,
+                                            const torch::Tensor& dense_B);
+
+torch::Tensor cslt_mm_fp8_semi_structured_prepared(int64_t id);
+
+void cslt_fp8_semi_structured_destroy(int64_t id);
+
 #endif
