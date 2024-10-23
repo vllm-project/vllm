@@ -127,8 +127,12 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
 .. tip::
 
     Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
+
     For example, you can install `ccache <https://github.com/ccache/ccache>`_ using ``conda install ccache`` or ``apt install ccache`` .
     As long as ``which ccache`` command can find the ``ccache`` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
+
+    `sccache <https://github.com/mozilla/sccache>` works similarly to ``ccache``, but has the capability to utilize caching in remote storage environments.
+    The following env vars can be set for to configure the vLLM ``sccache`` remote: ``SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1``. We also recommend setting ``SCCACHE_IDLE_TIMEOUT=0``
 
 
 Use an existing PyTorch installation
