@@ -2,11 +2,12 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
+import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 # yapf: disable
-from mistral_common.tokens.tokenizers.mistral import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as PublicMistralTokenizer)
 # yapf: enable
@@ -24,18 +25,38 @@ class Encoding:
     input_ids: List[int]
 
 
+def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
+    repo_cache = os.path.join(
+        huggingface_hub.constants.HF_HUB_CACHE,
+        huggingface_hub.constants.REPO_ID_SEPARATOR.join(
+            ["models", *repo_id.split("/")]))
+
+    if revision is None:
+        revision_file = os.path.join(repo_cache, "refs", "main")
+        if os.path.isfile(revision_file):
+            with open(revision_file) as file:
+                revision = file.read()
+
+    if revision:
+        revision_dir = os.path.join(repo_cache, "snapshots", revision)
+        if os.path.isdir(revision_dir):
+            return os.listdir(revision_dir)
+
+    return []
+
+
 def find_tokenizer_file(files: List[str]):
     file_pattern = re.compile(r"^tokenizer\.model\.v.*$|^tekken\.json$")
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
         raise OSError(f"Found {len(matched_files)} files matching the "
-                      "pattern: {matched_files}. Make sure only one Mistral "
-                      "tokenizer is present in {tokenizer_name}.")
+                      f"pattern: {file_pattern}. Make sure only one Mistral "
+                      f"tokenizer is present in {files}.")
     elif len(matched_files) == 0:
         raise OSError(f"Found {len(matched_files)} files matching the "
-                      "pattern: {matched_files}. Make sure that a Mistral "
-                      "tokenizer is present in {tokenizer_name}.")
+                      f"pattern: {file_pattern}. Make sure that a Mistral "
+                      f"tokenizer is present in {files}.")
 
     return matched_files[0]
 
@@ -90,9 +111,16 @@ class MistralTokenizer:
     @staticmethod
     def _download_mistral_tokenizer_from_hf(tokenizer_name: str,
                                             revision: Optional[str]) -> str:
-        api = HfApi()
-        repo_info = api.model_info(tokenizer_name)
-        files = [s.rfilename for s in repo_info.siblings]
+        try:
+            hf_api = HfApi()
+            files = hf_api.list_repo_files(repo_id=tokenizer_name,
+                                           revision=revision)
+        except ConnectionError as exc:
+            files = list_local_repo_files(repo_id=tokenizer_name,
+                                          revision=revision)
+
+            if len(files) == 0:
+                raise exc
 
         filename = find_tokenizer_file(files)
 
@@ -165,6 +193,10 @@ class MistralTokenizer:
                             messages: List["ChatCompletionMessageParam"],
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
+
+        last_message = cast(Dict[str, Any], messages[-1])
+        if last_message["role"] == "assistant":
+            last_message["prefix"] = True
 
         request = ChatCompletionRequest(messages=messages,
                                         tools=tools)  # type: ignore[type-var]

@@ -22,7 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
-from functools import lru_cache, partial
+from functools import partial
 from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
                     Tuple, Type, TypedDict, Union)
 
@@ -34,17 +34,18 @@ from PIL import Image
 from transformers.image_utils import (get_image_size,
                                       infer_channel_dimension_format,
                                       to_numpy_array)
+from transformers.models.qwen2_vl.configuration_qwen2_vl import (
+    Qwen2VLConfig, Qwen2VLVisionConfig)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     make_batched_images, make_batched_videos, smart_resize)
 
-import vllm.envs as envs
 from vllm.attention import AttentionMetadata
-from vllm.attention.selector import (_Backend, backend_name_to_enum,
-                                     get_global_forced_attn_backend)
+from vllm.attention.selector import _Backend
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
@@ -60,15 +61,13 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalInputs)
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceData
-from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
-                                                     Qwen2VLVisionConfig)
-from vllm.transformers_utils.processor import get_processor
-from vllm.utils import is_cpu
+from vllm.transformers_utils.config import uses_mrope
+from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (PPMissingLayer, is_pp_missing_parameter,
+from .utils import (PPMissingLayer, get_vit_attn_backend,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
 
 logger = init_logger(__name__)
@@ -79,7 +78,7 @@ logger = init_logger(__name__)
 class Qwen2VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: 
+    """Shape:
     `(num_patches, num_channels * patch_size * patch_size)`
     """
 
@@ -103,14 +102,14 @@ Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
 
 class Qwen2VLVideoInputs(TypedDict):
     pixel_values_videos: torch.Tensor
-    """Shape: 
-    `(num_patches, 
+    """Shape:
+    `(num_patches,
       num_channels * temporal_patch_size * patch_size * patch_size)`
     """
 
     video_grid_thw: torch.Tensor
     """Shape: `(num_videos, 3)`
-    
+
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
@@ -213,37 +212,12 @@ class Qwen2VisionAttention(nn.Module):
                                       quant_config=quant_config)
 
         # Detect attention implementation.
-        selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
-        if selected_backend is None:
-            backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
-            if backend_by_env_var is not None:
-                selected_backend = backend_name_to_enum(backend_by_env_var)
-        if selected_backend is None:
-            # For Volta and Turing GPUs, use xformers instead.
-            device_available = current_platform.has_device_capability(80)
-            if device_available:
-                from transformers.utils import is_flash_attn_2_available
-
-                if is_flash_attn_2_available():
-                    self._use_flash_attn = True
-                else:
-                    logger.warning(
-                        "Current Qwen2-VL implementation has a bug with "
-                        "`vllm-flash-attn` inside vision module, so we use "
-                        "xformers backend instead. You can run `pip install "
-                        "flash-attn to use flash-attention backend.")
-                    self._use_flash_attn = False
-            else:
-                self._use_flash_attn = False
-        else:
-            if selected_backend == _Backend.FLASH_ATTN:
-                self._use_flash_attn = True
-            elif selected_backend == _Backend.XFORMERS:
-                self._use_flash_attn = False
-            else:
-                raise RuntimeError(
-                    f"Qwen2-VL does not support {selected_backend} backend now."
-                )
+        self.attn_backend: _Backend = get_vit_attn_backend()
+        if self.attn_backend not in {
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+        }:
+            raise RuntimeError(
+                f"Qwen2-VL does not support {self.attn_backend} backend now.")
 
     def forward(
         self,
@@ -272,7 +246,7 @@ class Qwen2VisionAttention(nn.Module):
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
-        if self._use_flash_attn:
+        if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
             from flash_attn import flash_attn_varlen_func
@@ -293,7 +267,7 @@ class Qwen2VisionAttention(nn.Module):
             context_layer = rearrange(output,
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
-        elif is_cpu():
+        elif self.attn_backend == _Backend.TORCH_SDPA:
             seq_length = q.size(1)
             q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
             attention_mask = torch.zeros([1, seq_length, seq_length],
@@ -308,7 +282,7 @@ class Qwen2VisionAttention(nn.Module):
                                                     attention_mask,
                                                     dropout_p=0.0)
             context_layer = rearrange(output, "b h s d -> b s h d ")
-        else:
+        elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
@@ -570,8 +544,6 @@ class Qwen2VisionTransformer(nn.Module):
 
 # === Vision input helpers === #
 
-cached_get_processor = lru_cache(get_processor)
-
 
 def mm_input_mapper_for_qwen2_vl(
     ctx: InputContext,
@@ -715,7 +687,7 @@ def dummy_data_for_qwen2_vl(
 
     hf_config = ctx.get_hf_config(Qwen2VLConfig)
 
-    dummy_seqdata = SequenceData.from_token_counts(
+    dummy_seqdata = SequenceData.from_prompt_token_counts(
         (hf_config.vision_start_token_id, 1),
         (hf_config.image_token_id, max_llm_image_tokens),
         (hf_config.vision_end_token_id, 1),
@@ -798,11 +770,13 @@ def _expand_pad_tokens(inputs: list, token_id: int, make_batched_fn: Callable,
     return prompt_token_ids_with_data
 
 
-def input_processor_for_qwen2_vl(ctx: InputContext,
-                                 llm_inputs: LLMInputs) -> LLMInputs:
-    multi_modal_data = llm_inputs.get("multi_modal_data", None)
+def input_processor_for_qwen2_vl(
+    ctx: InputContext,
+    inputs: DecoderOnlyInputs,
+) -> DecoderOnlyInputs:
+    multi_modal_data = inputs.get("multi_modal_data", None)
     if multi_modal_data is None:
-        return llm_inputs
+        return inputs
 
     image_inputs = multi_modal_data.get("image", None)
     video_inputs = multi_modal_data.get("video", None)
@@ -816,7 +790,7 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     # `transformers.models.qwen2_vl.processing_qwen2_vl.Qwen2VLProcessor`.
     #
     # The following code is equivalent to:
-    #    prompt = llm_inputs["prompt"]
+    #    prompt = inputs["prompt"]
     #    inputs = processor(text=[prompt],
     #                       images=image_inputs,
     #                       videos=video_inputs,
@@ -824,9 +798,9 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     #                       return_tensors="pt")
     #    prompt_token_ids = inputs["input_ids"][0].tolist()
 
-    prompt_token_ids = llm_inputs.get("prompt_token_ids", None)
+    prompt_token_ids = inputs.get("prompt_token_ids", None)
     if prompt_token_ids is None:
-        prompt = llm_inputs["prompt"]
+        prompt = inputs["prompt"]
         prompt_token_ids = processor.tokenizer(
             prompt,
             padding=True,
@@ -867,9 +841,9 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
                                               image_processor,
                                               prompt_token_ids)
 
-    return LLMInputs(
+    return token_inputs(
         prompt_token_ids=prompt_token_ids,
-        prompt=llm_inputs["prompt"],
+        prompt=inputs["prompt"],
         multi_modal_data=multi_modal_data,
     )
 
@@ -1061,8 +1035,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             if image_input is None and video_input is None:
                 inputs_embeds = None
             else:
-                rope_scaling = getattr(self.config, "rope_scaling", {})
-                if rope_scaling.get("type", None) == "mrope":
+                if uses_mrope(self.config):
                     assert positions.ndim == 2 and positions.size(0) == 3, (
                         "multimodal section rotary embedding requires "
                         f"(3, seq_len) positions, but got {positions.size()}")
@@ -1167,8 +1140,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                         continue
                     param = params_dict[name]
                 except KeyError:
-                    print(params_dict.keys())
-                    raise
+                    raise ValueError(f"Unexpected weight: {name}") from None
 
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

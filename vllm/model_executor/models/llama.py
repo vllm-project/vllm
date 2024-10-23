@@ -28,6 +28,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
@@ -47,13 +49,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer, group_weights_with_prefix,
-                    is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -267,6 +269,13 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "inputs_embeds": 0,
+        "intermediate_tensors": 0,
+    })
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -362,8 +371,6 @@ class LlamaModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
 
-        params_dict = dict(self.named_parameters())
-
         hqq_map = [
             (".qweight", "W_q", False),
             (".zeros", "zero", True),
@@ -378,12 +385,11 @@ class LlamaModel(nn.Module):
             tmp = torch.empty([2 * step, W_q.shape[1]],
                               dtype=dtype,
                               device=W_q.device)
-
             tmp[:step] = (W_q & 0b11110000) >> 4
             tmp[step:] = W_q & 0b00001111
-
             return tmp
 
+        params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
 
             if self.is_hqq:
@@ -469,6 +475,9 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                if name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
@@ -516,6 +525,19 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "lm_head": "output_embeddings"
     }
     embedding_padding_modules = ["lm_head"]
+
+    # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".gate_proj.",
+        ".down_proj.",
+        ".up_proj.",
+        ".q_proj.",
+        ".k_proj.",
+        ".v_proj.",
+        ".o_proj.",
+    ]
+    # in TP, these weights are partitioned along the column dimension (dim=-1)
+    column_parallel_weights_modules = [".down_proj.", ".o_proj."]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -579,7 +601,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
+                self.lm_head = self.lm_head.tie_weights(
+                    self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
@@ -618,38 +641,14 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights = [
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
-            for name, loaded_weight in weights
-        ]
-
-        weights_group = group_weights_with_prefix(weights)
-
-        self.model.load_weights(weights_group["model"])
-
-        if not self.config.tie_word_embeddings:
-            lm_head_dict = dict(self.lm_head.named_parameters())
-            for name, loaded_weight in weights_group["lm_head"]:
-
-                if name == '':
-                    lw = loaded_weight
-                    for name, loaded_weight in lw.items():
-                        if is_pp_missing_parameter(name, self.lm_head):
-                            continue
-
-                        param = lm_head_dict[name]
-                        weight_loader = getattr(param, "weight_loader",
-                                                default_weight_loader)
-                        weight_loader(param, loaded_weight)
-
-                else:
-                    if is_pp_missing_parameter(name, self.lm_head):
-                        continue
-
-                    param = lm_head_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
+            for name, loaded_weight in weights)
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         self.model.load_kv_cache_scales(quantization_param_path)
@@ -685,3 +684,52 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+class LlamaEmbeddingModel(nn.Module, SupportsPP):
+    """
+    A model that uses Llama with additional embedding functionalities.
+
+    This class encapsulates the LlamaModel and provides an interface for
+    embedding operations and customized pooling functions.
+
+    Attributes:
+        model: An instance of LlamaModel used for forward operations.
+        _pooler: An instance of Pooler used for pooling operations.
+    """
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+
+        self.model = LlamaModel(**kwargs)
+        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        return self.model(input_ids, positions, kv_caches, attn_metadata,
+                          intermediate_tensors, inputs_embeds)
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        self.model.load_weights(weights)
+
+    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
+        self.model.load_kv_cache_scales(quantization_param_path)

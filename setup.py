@@ -290,10 +290,6 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def _build_core_ext() -> bool:
-    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu())
-
-
 def get_hipcc_rocm_version():
     # Run the hipcc --version command
     result = subprocess.run(['hipcc', '--version'],
@@ -332,7 +328,7 @@ def get_neuronxcc_version():
         # Return the version string
         return match.group(1)
     else:
-        raise RuntimeError("Could not find HIP version in the output")
+        raise RuntimeError("Could not find Neuron version in the output")
 
 
 def get_nvcc_cuda_version() -> Version:
@@ -456,9 +452,6 @@ def get_requirements() -> List[str]:
 
 ext_modules = []
 
-if _build_core_ext():
-    ext_modules.append(CMakeExtension(name="vllm._core_C"))
-
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
@@ -503,7 +496,11 @@ setup(
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Information Technology",
+        "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
                                     "tests*")),

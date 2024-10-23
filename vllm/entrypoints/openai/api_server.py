@@ -31,7 +31,8 @@ from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.cli_args import (make_arg_parser,
+                                              validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -536,8 +537,11 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
                        f"(chose from {{ {','.join(valide_tool_parses)} }})")
 
-    temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    temp_socket.bind(("", args.port))
+    # workaround to make sure that we bind the port before the engine is set up.
+    # This avoids race conditions with ray.
+    # see https://github.com/vllm-project/vllm/issues/8204
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("", args.port))
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
@@ -551,8 +555,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         model_config = await engine_client.get_model_config()
         init_app_state(engine_client, model_config, app.state, args)
 
-        temp_socket.close()
-
         shutdown_task = await serve_http(
             app,
             host=args.host,
@@ -563,6 +565,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            fd=sock.fileno(),
             **uvicorn_kwargs,
         )
 
@@ -577,5 +580,6 @@ if __name__ == "__main__":
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+    validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))
