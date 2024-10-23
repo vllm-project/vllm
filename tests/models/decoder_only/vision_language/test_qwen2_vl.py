@@ -62,6 +62,7 @@ def test_qwen2_vl_max_image_tokens(get_max_qwen2_vl_image_tokens,
                                    qwen2_vl_context: InputContext,
                                    mm_processor_kwargs: Dict[str, Any],
                                    expected_max_tokens: int):
+    """Ensure that the max token calc handles min/max pixels properly."""
     actual_max_tokens = get_max_qwen2_vl_image_tokens(qwen2_vl_context,
                                                       **mm_processor_kwargs)
     assert actual_max_tokens == expected_max_tokens
@@ -78,6 +79,7 @@ def test_qwen2_vl_dummy_data(dummy_data_for_qwen2_vl,
                              qwen2_vl_context: InputContext,
                              mm_processor_kwargs: Dict[str, Any],
                              token_count: int, img_size: Tuple[int, int]):
+    """Ensure that the dummy data handles min/max pixels properly."""
     seq_len = 3000
     hf_config = qwen2_vl_context.get_hf_config()
     image_token_id = hf_config.image_token_id
@@ -109,6 +111,7 @@ def test_input_processor(input_processor_for_qwen2_vl,
                          qwen2_vl_context: InputContext,
                          image_assets: _ImageAssets, num_placeholders: int,
                          mm_processor_kwargs: Dict[str, Any]):
+    """Ensure that the image processor handles min/max pixels properly."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     prompt = "<|vision_start|><|image_pad|><|vision_end|>"
 
