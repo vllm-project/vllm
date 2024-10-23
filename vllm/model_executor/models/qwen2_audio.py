@@ -229,9 +229,9 @@ def input_mapper_for_qwen2_audio(
     try:
         resampled_audios = [
             librosa.resample(
-                _[0], orig_sr=_[1],
+                audio, orig_sr=sampling_rate,
                 target_sr=processor.feature_extractor.sampling_rate)
-            for _ in multi_modal_data
+            for audio, sampling_rate in multi_modal_data
         ]
         batch_data = audio_feature_extractor(resampled_audios,
                                              sampling_rate=16000,
