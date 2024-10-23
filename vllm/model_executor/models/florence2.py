@@ -237,8 +237,7 @@ class Florence2ForConditionalGeneration(nn.Module):
         logits: Optional[torch.Tensor],
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.language_model.sampler(logits, sampling_metadata)
-        return next_tokens
+        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         skip_prefixes = [
