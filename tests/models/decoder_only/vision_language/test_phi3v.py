@@ -1,17 +1,18 @@
 import os
 import re
-from typing import Callable, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import pytest
 import torch
 from transformers import AutoImageProcessor, AutoTokenizer
 
-from vllm.inputs import InputContext, LLMInputs
+from vllm.inputs import InputContext, token_inputs
 from vllm.model_executor.models.phi3v import _IMAGE_TOKEN_ID
 from vllm.multimodal import MultiModalRegistry
 from vllm.multimodal.utils import rescale_image_size
+from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu, is_hip
+from vllm.utils import is_hip
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
@@ -49,7 +50,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 target_dtype = "half"
-if is_cpu():
+if current_platform.is_cpu():
     target_dtype = "bfloat16"
 
 # ROCm Triton FA can run into shared memory issues with these models,
@@ -89,6 +90,7 @@ def run_test(
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
+                     task="generate",
                      max_model_len=4096,
                      max_num_seqs=2,
                      dtype=dtype,
@@ -311,7 +313,7 @@ def test_input_mapper_override(model: str, image_assets: _ImageAssets,
     (4, 781),
     (16, 2653),
 ])
-def test_max_tokens_override(get_max_phi3v_image_tokens: Callable, model: str,
+def test_max_tokens_override(get_max_phi3v_image_tokens, model: str,
                              num_crops: int, expected_max_tokens: int):
     """Ensure get_max_phi3v_image_tokens handles num_crops properly."""
     # NOTE: mm_processor_kwargs on the context in this test is unused, since
@@ -343,8 +345,8 @@ def test_max_tokens_override(get_max_phi3v_image_tokens: Callable, model: str,
     (16, 2653, 1),
     (16, 2653, 2),
 ])
-def test_dummy_data_override(dummy_data_for_phi3v: Callable, model: str,
-                             num_crops: int, toks_per_img: int, num_imgs: int):
+def test_dummy_data_override(dummy_data_for_phi3v, model: str, num_crops: int,
+                             toks_per_img: int, num_imgs: int):
     """Ensure dummy_data_for_phi3v handles num_crops properly."""
     # Same as the previous test - don't initialize mm_processor_kwargs
     # in this test and assume that the kwargs will be correctly expanded by
@@ -374,7 +376,7 @@ def test_dummy_data_override(dummy_data_for_phi3v: Callable, model: str,
     (16, 1921, 1),
     (16, 1921, 2),
 ])
-def test_input_processor_override(input_processor_for_phi3v: Callable,
+def test_input_processor_override(input_processor_for_phi3v,
                                   image_assets: _ImageAssets, model: str,
                                   num_crops: int, expected_toks_per_img: int,
                                   num_imgs: int):
@@ -393,16 +395,14 @@ def test_input_processor_override(input_processor_for_phi3v: Callable,
     prompt = f"<|user|>\n{img_str}<|end|>\n<|assistant|>\n"
     images = [image_assets[0].pil_image] * num_imgs
 
-    llm_inputs = LLMInputs(prompt_token_ids=tokenizer.encode(prompt),
-                           prompt=prompt,
-                           multi_modal_data={"image": images})
+    inputs = token_inputs(prompt_token_ids=tokenizer.encode(prompt),
+                          prompt=prompt,
+                          multi_modal_data={"image": images})
 
-    proc_llm_inputs = input_processor_for_phi3v(
-        ctx=ctx,
-        llm_inputs=llm_inputs,
-        num_crops=num_crops,
-    )
+    processed_inputs = input_processor_for_phi3v(ctx,
+                                                 inputs,
+                                                 num_crops=num_crops)
 
     # Ensure we have the right number of placeholders per num_crops size
-    img_tok_count = proc_llm_inputs["prompt_token_ids"].count(_IMAGE_TOKEN_ID)
+    img_tok_count = processed_inputs["prompt_token_ids"].count(_IMAGE_TOKEN_ID)
     assert img_tok_count == expected_toks_per_img * num_imgs

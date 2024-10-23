@@ -23,9 +23,18 @@ TEST_IMAGE_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--dtype", "bfloat16", "--max-model-len", "4096", "--max-num-seqs",
-        "5", "--enforce-eager", "--trust-remote-code", "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}"
+        "--task",
+        "generate",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "5",
+        "--enforce-eager",
+        "--trust-remote-code",
+        "--limit-mm-per-prompt",
+        f"image={MAXIMUM_IMAGES}",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

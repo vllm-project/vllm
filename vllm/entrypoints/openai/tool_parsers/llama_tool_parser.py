@@ -7,12 +7,13 @@ import partial_json_parser
 from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import find_common_prefix
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
@@ -41,6 +42,7 @@ def is_complete_json(input_str):
         return False
 
 
+@ToolParserManager.register_module("llama3_json")
 class Llama3JsonToolParser(ToolParser):
     """
     Tool call parser for Llama 3.1 models intended for use with the
@@ -64,8 +66,9 @@ class Llama3JsonToolParser(ToolParser):
                                              add_special_tokens=False)[0]
         self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
 
-    def extract_tool_calls(self,
-                           model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         """
@@ -109,9 +112,8 @@ class Llama3JsonToolParser(ToolParser):
                                                content=None)
             return ret
 
-        except Exception as e:
-            logger.error("Error in extracting tool call from response: %s", e)
-            print("ERROR", e)
+        except Exception:
+            logger.exception("Error in extracting tool call from response.")
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -125,6 +127,7 @@ class Llama3JsonToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         if not (current_text.startswith(self.bot_token)
@@ -265,8 +268,8 @@ class Llama3JsonToolParser(ToolParser):
             self.prev_tool_call_arr = tool_call_arr
             return delta
 
-        except Exception as e:
-            logger.error("Error trying to handle streaming tool call: %s", e)
+        except Exception:
+            logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")

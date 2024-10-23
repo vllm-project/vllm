@@ -7,7 +7,6 @@ from PIL.Image import Image
 from transformers import AutoConfig
 
 from vllm.multimodal.utils import rescale_image_size
-from vllm.utils import is_cpu
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
@@ -19,15 +18,20 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "cherry_blossom":
     "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
 })
-HF_MULTIIMAGE_IMAGE_PROMPT = "<|im_start|>User\nImage-1: <image>\nImage-2: <image>\nDescribe the two images in detail.<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
+HF_MULTIIMAGE_IMAGE_PROMPT = "<|im_start|>User\nImage-1: <image>\nImage-2: <image>\nDescribe the two images in short.<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
 
 models = [
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL2-2B",
+    # NOTE: Mono-InternVL-2B doesn't work with fp16,
+    # it will result NaN during inference.
+    # See: https://huggingface.co/OpenGVLab/Mono-InternVL-2B/discussions/9
+    "OpenGVLab/Mono-InternVL-2B",
     # Broken due to outdated implementation of Phi-3
     # See: https://huggingface.co/OpenGVLab/InternVL2-4B/discussions/3
     # "OpenGVLab/InternVL2-4B",
 ]
+target_dtype = "bfloat16"
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py
@@ -52,9 +56,15 @@ def generate(
 
     input_embeds = input_embeds.reshape(B, N, C)
 
-    outputs = self.language_model.generate(
+    forward_kwargs = dict(
         inputs_embeds=input_embeds,
         attention_mask=attention_mask,
+    )
+    if getattr(self, "use_visual_token_mask", False):
+        visual_token_mask = selected.reshape(B, N, 1).to(input_embeds.dtype)
+        forward_kwargs["visual_token_mask"] = visual_token_mask
+    outputs = self.language_model.generate(
+        **forward_kwargs,
         **generate_kwargs,
     )
 
@@ -78,7 +88,7 @@ def run_test(
 
     All the image fixtures for the test are from IMAGE_ASSETS.
     For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalDataDict objects 
+    For vllm runner, we provide MultiModalDataDict objects
     and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
@@ -97,7 +107,8 @@ def run_test(
             self.tokenizer = hf_runner.tokenizer
             self.dtype = hf_runner.model.dtype
 
-            self.config = AutoConfig.from_pretrained(hf_runner.model_name)
+            self.config = AutoConfig.from_pretrained(hf_runner.model_name,
+                                                     trust_remote_code=True)
             self.vision_config = self.config.vision_config
             self.use_thumbnail = self.config.use_thumbnail
             self.min_num = self.config.min_dynamic_patch
@@ -240,11 +251,6 @@ def run_awq_test(
             name_0="source",
             name_1="awq",
         )
-
-
-target_dtype = "half"
-if is_cpu():
-    target_dtype = "bfloat16"
 
 
 @pytest.mark.parametrize("model", models)

@@ -16,9 +16,6 @@ from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-# technically this needs Mistral-7B-v0.1 as base, but we're not testing
-# generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 
 @pytest.fixture(scope="module")
@@ -433,18 +430,28 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
         model=model_name,
         messages=messages,
         max_tokens=10,
+        extra_body=dict(min_tokens=10),
         temperature=0.0,
         stream=True,
         stream_options={
             "include_usage": True,
-            "continuous_usage_stats": True
+            "continuous_usage_stats": True,
         },
     )
+    last_completion_tokens = 0
     async for chunk in stream:
         assert chunk.usage.prompt_tokens >= 0
-        assert chunk.usage.completion_tokens >= 0
+        assert last_completion_tokens == 0 or \
+               chunk.usage.completion_tokens > last_completion_tokens or \
+               (
+                   not chunk.choices and
+                   chunk.usage.completion_tokens == last_completion_tokens
+               )
         assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
                                             chunk.usage.completion_tokens)
+        last_completion_tokens = chunk.usage.completion_tokens
+
+    assert last_completion_tokens == 10
 
 
 # NOTE: Not sure why, but when I place this after `test_guided_regex_chat`
@@ -841,14 +848,28 @@ async def test_response_format_json_object(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_response_format_json_schema(client: openai.AsyncOpenAI):
+    prompt = 'what is 1+1? The format is "result": 2'
+    # Check that this prompt cannot lead to a valid JSON without json_schema
     for _ in range(2):
         resp = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{
-                "role":
-                "user",
-                "content": ('what is 1+1? please respond with a JSON object, '
-                            'the format is {"result": 2}')
+                "role": "user",
+                "content": prompt
+            }],
+        )
+        content = resp.choices[0].message.content
+        assert content is not None
+        with pytest.raises((json.JSONDecodeError, AssertionError)):
+            loaded = json.loads(content)
+            assert loaded == {"result": 2}, loaded
+
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{
+                "role": "user",
+                "content": prompt
             }],
             response_format={
                 "type": "json_schema",

@@ -79,12 +79,15 @@ Documentation
 
    serving/openai_compatible_server
    serving/deploying_with_docker
+   serving/deploying_with_k8s
+   serving/deploying_with_nginx
    serving/distributed_serving
    serving/metrics
    serving/env_vars
    serving/usage_stats
    serving/integrations
    serving/tensorizer
+   serving/compatibility_matrix
    serving/faq
 
 .. toctree::

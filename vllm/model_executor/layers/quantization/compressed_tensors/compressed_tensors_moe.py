@@ -3,14 +3,14 @@ from enum import Enum
 from typing import Callable, List, Optional
 
 import torch
+from compressed_tensors import CompressionFormat
+from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    CompressionFormat, QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
@@ -498,14 +498,14 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
             router_logits,
-            layer.w13_g_idx,
-            layer.w2_g_idx,
-            layer.w13_g_idx_sort_indices,
-            layer.w2_g_idx_sort_indices,
             topk_weights,
             topk_ids,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            g_idx1=layer.w13_g_idx,
+            g_idx2=layer.w2_g_idx,
+            sort_indices1=layer.w13_g_idx_sort_indices,
+            sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.num_bits,
         )

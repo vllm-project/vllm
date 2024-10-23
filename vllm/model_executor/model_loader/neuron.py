@@ -1,11 +1,11 @@
 """Utilities for selecting and loading neuron models."""
+import copy
 import importlib
 import os
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import transformers
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
@@ -13,6 +13,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
+                           SequenceOutput)
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",
@@ -37,15 +39,18 @@ _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str, str]] = {
 
 class NeuronCasualLM(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-    ) -> None:
+    def __init__(self,
+                 config: PretrainedConfig,
+                 on_device_sampling_disabled: bool = False) -> None:
         super().__init__()
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
                                                 logits_as_input=True)
-        self.sampler = Sampler()
+
+        self.on_device_sampling_disabled = on_device_sampling_disabled
+        if self.on_device_sampling_disabled:
+            # Use default sampler
+            self.sampler = Sampler()
 
         # Lazy initialized
         self.model: nn.Module
@@ -71,8 +76,29 @@ class NeuronCasualLM(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+
+        if self.on_device_sampling_disabled:
+            next_tokens = self.sampler(logits, sampling_metadata)
+            return next_tokens
+
+        # On-device sampling outputs the token ids directly.
+        sampled_token_ids = logits.flatten()
+        next_tokens = []
+        sample_idx = 0
+        for seq_group in sampling_metadata.seq_groups:
+            samples = []
+            for seq_id in seq_group.seq_ids:
+                token_id = sampled_token_ids[sample_idx].item()
+                samples.append(
+                    SequenceOutput(parent_seq_id=seq_id,
+                                   output_token=token_id,
+                                   logprobs={token_id: Logprob(token_id)}))
+                sample_idx += 1
+            next_tokens.append(
+                CompletionSequenceGroupOutput(samples=samples,
+                                              prompt_logprobs=None))
+
+        return SamplerOutput(outputs=next_tokens)
 
     def load_weights(self, model_name_or_path: str, **kwargs):
         arch = _get_model_architecture(self.config)
@@ -81,37 +107,9 @@ class NeuronCasualLM(nn.Module):
         neuronx_module = importlib.import_module(neuronx_module_path)
         neuronx_model_cls = getattr(neuronx_module, neuronx_model_cls_name)
 
-        split_model_dir = f"{model_name_or_path}-split"
-        if _is_pretrained_neuron_checkpoint(model_name_or_path):
-            split_model_dir = model_name_or_path
-        elif not os.path.exists(f"{model_name_or_path}-split"):
-            hf_model_cls = getattr(transformers, hf_model_cls_name)
-            from transformers_neuronx.module import save_pretrained_split
-
-            hf_model = hf_model_cls.from_pretrained(model_name_or_path,
-                                                    low_cpu_mem_usage=True)
-            save_pretrained_split(hf_model, f"{model_name_or_path}-split")
-
-        self.model = neuronx_model_cls.from_pretrained(split_model_dir,
+        self.model = neuronx_model_cls.from_pretrained(model_name_or_path,
                                                        **kwargs)
         self.model.to_neuron()
-
-
-def _is_pretrained_neuron_checkpoint(model_name_or_path: str) -> bool:
-    # Checking if the neuron checkpoint is saved in the old format.
-    if os.path.isdir(os.path.join(model_name_or_path, "pytorch_model.bin")):
-        return True
-    # Checking if the neuron checkpoint is saved in the new format.
-    pretrained_split_files = ["config.json", "generation_config.json"]
-    pretrained_split_format = ".safetensors"
-    for file in pretrained_split_files:
-        file_path = os.path.join(model_name_or_path, file)
-        if not os.path.isfile(file_path):
-            return False
-    for file in os.listdir(model_name_or_path):
-        if file.endswith(pretrained_split_format):
-            return True
-    return False
 
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
@@ -157,8 +155,20 @@ def _get_default_neuron_config(model_config: ModelConfig,
         quant=neuron_quantization_config_builder(model_config.quantization)
         if model_config.quantization else None,
         continuous_batching=continuous_batching_config,
-        weight_tiling=bool(model_config.quantization))
+        weight_tiling=bool(model_config.quantization),
+        on_device_generation=_get_neuron_on_device_generation_config(
+            model_config))
     return default_neuron_args
+
+
+def _get_neuron_on_device_generation_config(model_config: ModelConfig):
+    if not _is_neuron_on_device_sampling_disabled(model_config):
+        return copy.deepcopy(model_config.neuron_sampling_params)
+    return None
+
+
+def _is_neuron_on_device_sampling_disabled(model_config: ModelConfig) -> bool:
+    return not getattr(model_config, "neuron_sampling_params", None)
 
 
 def _get_neuron_config_after_override(default_neuron_config,
@@ -174,7 +184,9 @@ def get_neuron_model(model_config: ModelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
 
     # Create a model instance.
-    model = NeuronCasualLM(model_config.hf_config)
+    model = NeuronCasualLM(
+        model_config.hf_config,
+        _is_neuron_on_device_sampling_disabled(model_config))
 
     default_neuron_config_args = _get_default_neuron_config(
         model_config, parallel_config, scheduler_config)

@@ -70,13 +70,11 @@ class OpenVINOCacheEngine:
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
             self.head_size,
-            self.model_config.get_num_kv_heads(self.parallel_config),
-            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.cache_config.cache_dtype,
             self.block_size,
+            self.model_config.is_attention_free,
         )
 
         # Initialize the cache.

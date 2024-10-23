@@ -98,7 +98,6 @@ steps:
   - vllm/
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
-  - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
@@ -118,7 +117,9 @@ steps:
   - vllm/core/
   - tests/distributed
   - tests/spec_decode/e2e/test_integration_dist_tp4
+  - tests/compile
   commands:
+  - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
@@ -146,7 +147,9 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/test_regression
-  command: pytest -v -s test_regression.py
+  commands:
+  - pip install modelscope
+  - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Engine Test # 10min
@@ -177,6 +180,7 @@ steps:
     - python3 offline_inference_vision_language_multi_image.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
+    - python3 offline_profile.py --model facebook/opt-125m
 
 - label: Prefix Caching Test # 9min
   #mirror_hardwares: [amd]
@@ -224,7 +228,7 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_full_graph_smoke.py
+  - pytest -v -s compile/test_basic_correctness.py
 
 - label: "PyTorch Fullgraph Test" # 18min
   source_file_dependencies:
@@ -268,7 +272,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   - tests/quantization
-  command: pytest -v -s quantization
+  command: VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -276,7 +280,6 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
@@ -307,13 +310,22 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
-- label: Decoder-only Language Models Test # 1h36min
+- label: Decoder-only Language Models Test (Standard) # 35min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
   commands:
-    - pytest -v -s models/decoder_only/language
+    - pytest -v -s models/decoder_only/language/test_models.py
+    - pytest -v -s models/decoder_only/language/test_big_models.py
+
+- label: Decoder-only Language Models Test (Extended) # 1h20min
+  nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/language
+  commands:
+    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py --ignore=models/decoder_only/language/test_big_models.py
 
 - label: Decoder-only Multi-Modal Models Test # 1h31min
   #mirror_hardwares: [amd]
@@ -330,17 +342,20 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/embedding/language
+  - tests/models/embedding/vision_language
   - tests/models/encoder_decoder/language
   - tests/models/encoder_decoder/vision_language
   commands:
     - pytest -v -s models/embedding/language
+    - pytest -v -s models/embedding/vision_language
     - pytest -v -s models/encoder_decoder/language
     - pytest -v -s models/encoder_decoder/vision_language
 
+# This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
-  #mirror_hardwares: [amd]
   optional: true
   commands:
+    - echo 'Testing custom models...'
     # PR authors can temporarily add commands below to test individual models
     # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
     # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
@@ -388,7 +403,7 @@ steps:
   - tests/distributed/
   - vllm/compilation
   commands:
-  - pytest -v -s ./compile/test_full_graph_multi_gpu.py
+  - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
@@ -490,6 +505,5 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-large.txt -t 4
