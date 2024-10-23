@@ -538,7 +538,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
 def _make_metadata_tensors(
     seq_lens: Optional[List[int]], context_lens: Optional[List[int]],
     encoder_seq_lens: Optional[List[int]], device: Union[torch.device, str]
-) -> Tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[List[int]],
+) -> Tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[torch.Tensor],
            torch.Tensor, torch.Tensor, Optional[int]]:
     '''
     Build scalar & tensor values required to build attention metadata structure.
@@ -567,8 +567,19 @@ def _make_metadata_tensors(
     encoder_seq_lens_tensor = maybe_make_int_tensor(encoder_seq_lens, device)
     max_encoder_seq_len = (None if encoder_seq_lens is None else
                            max(encoder_seq_lens))
-
+    
     seq_start_loc = None
+
+    if seq_lens_tensor is not None:
+        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] +
+                                    1,
+                                    dtype=torch.int32,
+                                    device=seq_lens_tensor.device)
+        torch.cumsum(
+            seq_lens_tensor, dim=0,
+            dtype=seq_start_loc.dtype,
+            out=seq_start_loc[1:])
+
     encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
                                         1,
                                         dtype=torch.int32,
@@ -874,7 +885,7 @@ def make_test_metadata(
             context_lens_tensor,
             _,
             _,
-            _,
+            seq_start_loc,
             encoder_seq_lens_tensor,
             encoder_seq_start_loc,
             max_encoder_seq_len,
@@ -890,6 +901,7 @@ def make_test_metadata(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            seq_start_loc=seq_start_loc,
             max_prefill_seq_len=None if seq_lens is None else max(seq_lens),
             max_decode_seq_len=0,
             context_lens_tensor=context_lens_tensor,
@@ -921,7 +933,7 @@ def make_test_metadata(
             context_lens_tensor,
             _,
             _,
-            _,
+            seq_start_loc,
             encoder_seq_lens_tensor,
             encoder_seq_start_loc,
             max_encoder_seq_len,
@@ -937,6 +949,7 @@ def make_test_metadata(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            seq_start_loc=seq_start_loc,
             max_prefill_seq_len=0,
             max_decode_seq_len=max(seq_lens),
             context_lens_tensor=context_lens_tensor,

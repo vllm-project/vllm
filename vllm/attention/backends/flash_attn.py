@@ -12,7 +12,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
-                                           is_block_tables_empty, get_seq_len_block_table_args)
+                                           is_block_tables_empty, get_query_key_seq_metadata)
 from vllm.forward_context import get_forward_context
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
@@ -797,11 +797,11 @@ def unified_flash_attention(
     
     print('Hell223!!')
     print('key.shape[0] ' + str(key.shape[0]))
-    assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
-                f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
+    #assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
+    #            f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
     print('Hell224!!')
-    assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
-                f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
+    #assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
+    #            f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
     print('Hell225!!')
     # Query for decode. KV is not needed because it is already cached.
     decode_query = query[num_prefill_tokens:]
@@ -816,24 +816,29 @@ def unified_flash_attention(
     prefill_output: Optional[torch.Tensor] = None
     decode_output: Optional[torch.Tensor] = None
     print('Hell222!!')
-
     if prefill_meta := attn_metadata.prefill_metadata:
         # Prompt run.
+        print('Running in prefill!!!')
         if (kv_cache.numel() == 0 or prefill_meta.block_tables is None
                 or prefill_meta.block_tables.numel() == 0):
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
-            print('prefill_meta ' + str(prefill_meta))
-            _, seq_start_loc, max_prefill_seq_len, _ = get_seq_len_block_table_args(
+            #print('prefill_meta ' + str(prefill_meta))
+            print('Hello123')
+            q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = get_query_key_seq_metadata(
                 prefill_meta, True, attn_type)
+            #print('seq_start_loc ' + str(seq_start_loc))
+            #print('max_prefill_seq_len ' + str(max_prefill_seq_len))
             causal = True
             if (attn_type == AttentionType.ENCODER.value or \
                 attn_type == AttentionType.ENCODER_ONLY.value) :
                 causal = False
+            print('k_seq_len ' + str(k_seq_len))
+            #print('q_seq_start_loc ' + str(q_seq_start_loc))
+            #print('k_seq_start_loc ' + str(k_seq_start_loc))
+            print('q_seq_len ' + str(q_seq_len))
             
-            print('seq_start_loc ' + str(seq_start_loc))
-            print('max_prefill_seq_len ' + str(max_prefill_seq_len))
             prefill_output = flash_attn_varlen_func(
                 q=query,
                 k=key,
@@ -842,10 +847,10 @@ def unified_flash_attention(
                 #cu_seqlens_k=prefill_meta.seq_start_loc,
                 #max_seqlen_q=prefill_meta.max_prefill_seq_len,
                 #max_seqlen_k=prefill_meta.max_prefill_seq_len,
-                cu_seqlens_q=seq_start_loc,
-                cu_seqlens_k=seq_start_loc,
-                max_seqlen_q=max_prefill_seq_len,
-                max_seqlen_k=max_prefill_seq_len,
+                cu_seqlens_q=q_seq_start_loc,
+                cu_seqlens_k=k_seq_start_loc,
+                max_seqlen_q=q_seq_len,
+                max_seqlen_k=k_seq_len,
                 softmax_scale=softmax_scale,
                 #causal=True,
                 #causal=False,
@@ -855,6 +860,7 @@ def unified_flash_attention(
                 softcap=logits_soft_cap,
             )
         else:
+            print('Going into prefix')
             # prefix-enabled attention
             assert attn_type == AttentionType.DECODER, (
                 "Decoder only models currently support prefix caching")
@@ -876,6 +882,7 @@ def unified_flash_attention(
             )
 
     if decode_meta := attn_metadata.decode_metadata:
+        print('Running in decode!!!')
         # Decoding run.
         # Use flash_attn_varlen_func kernel for speculative decoding
         # because different queries might have different lengths.
@@ -897,6 +904,7 @@ def unified_flash_attention(
             )
         else:
             # Use flash_attn_with_kvcache for normal decoding.
+            print('Running here!!!')
             decode_output = flash_attn_with_kvcache(
                 q=decode_query.unsqueeze(1),
                 k_cache=key_cache,
