@@ -729,8 +729,8 @@ class OpenAIServingChat(OpenAIServing):
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
             if isinstance(last_msg_content, list):
-                last_msg_content = "\n".join(
-                    [msg['text'] for msg in last_msg_content])
+                last_msg_content = "\n".join(msg['text']
+                                             for msg in last_msg_content)
 
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content
