@@ -22,7 +22,6 @@ from .utils import AutoWeightsLoader
 
 
 class Florence2LanguageModel(nn.Module):
-    base_model_prefix = "language_model"
 
     def __init__(self,
                  config: PretrainedConfig,
