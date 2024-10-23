@@ -553,7 +553,6 @@ def _parse_chat_message_content_part(
     raise NotImplementedError(f"Unknown part type: {part_type}")
 
 
-
 # No need to validate using Pydantic again
 _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
