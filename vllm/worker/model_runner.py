@@ -851,7 +851,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         cuda_graph_pad_size = self._get_cuda_graph_pad_size(
             num_seqs=len(seq_lens),
-            max_decode_seq_len=max_encoder_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
             max_encoder_seq_len=max_encoder_seq_len)
 
         batch_size = len(input_tokens)
@@ -1038,7 +1038,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
-            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
@@ -1883,7 +1882,7 @@ class CUDAGraphRunner(nn.Module):
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
 
-        if self.backend_name != "placeholder-attn":
+        if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
                 attn_metadata.slot_mapping, non_blocking=True)
 
