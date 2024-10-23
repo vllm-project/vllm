@@ -40,10 +40,13 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def _get_worker_kwargs(
-            self,
-            local_rank: int = 0,
-            rank: int = 0,
-            distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
+        self,
+        local_rank: int = 0,
+        rank: int = 0,
+        distributed_init_method: Optional[str] = None,
+        workers=None,
+        nccl_group_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Return worker init args for a given rank."""
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
@@ -64,6 +67,8 @@ class GPUExecutor(ExecutorBase):
             is_driver_worker=(not self.parallel_config)
             or (rank % self.parallel_config.tensor_parallel_size == 0),
             observability_config=self.observability_config,
+            workers=workers,
+            nccl_group_id=nccl_group_id,
         )
 
     def _get_worker_module_and_class(
