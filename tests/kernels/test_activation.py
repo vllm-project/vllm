@@ -55,8 +55,8 @@ def test_act_and_mul(
         fn = torch.ops._C.fatrelu_and_mul
     out = layer(x)
     ref_out = layer.forward_native(x)
-    # The SiLU and GELU implementations are equivalent to the native PyTorch
-    # implementations, so we can do exact comparison.
+    # The SiLU, GELU and FatReLU implementations are equivalent to the native
+    # PyTorch implementations, so we can do exact comparison.
     torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
 
     d = x.shape[-1] // 2
