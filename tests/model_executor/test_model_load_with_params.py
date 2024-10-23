@@ -16,5 +16,9 @@ def test_model_loading_with_params(vllm_runner):
                      max_model_len=MAX_MODEL_LEN) as model:
         output = model.encode("Write a short story about a robot that"
                               " dreams for the first time.\n")
-        print(output)
+        
+        model_config = model.model.llm_engine.model_config
+
+        assert model_config.pooling_config.pooling_type == 2
+        assert model_config.pooling_config.normalize
         assert output

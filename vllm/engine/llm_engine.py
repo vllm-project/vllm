@@ -254,7 +254,8 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "mm_processor_kwargs=%s, pooling_config=%s)", VLLM_VERSION,
+            "mm_processor_kwargs=%s, "
+            "pooling_config_type=%s, normalize=%s)", VLLM_VERSION,
             model_config.model, speculative_config, model_config.tokenizer,
             model_config.skip_tokenizer_init, model_config.tokenizer_mode,
             model_config.revision, model_config.override_neuron_config,
@@ -274,7 +275,9 @@ class LLMEngine:
             scheduler_config.multi_step_stream_outputs,
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc, use_cached_outputs,
-            model_config.mm_processor_kwargs, model_config.pooling_config)
+            model_config.mm_processor_kwargs, 
+            model_config.pooling_config.pooling_type, 
+            model_config.pooling_config.normalize)
         # TODO(woosuk): Print more configs in debug mode.
         self.model_config = model_config
         self.cache_config = cache_config
