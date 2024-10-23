@@ -839,7 +839,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         for inter_data in self.inter_data_list:
             seq_lens.extend(inter_data.seq_lens)
             query_lens.extend(inter_data.query_lens)
-            
+
             if inter_data.input_embeds is not None:
                 input_embeds_lst.append(inter_data.input_embeds)
             if inter_data.input_embeds_mask is not None:
