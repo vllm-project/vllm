@@ -1,18 +1,14 @@
-import multiprocessing
 from dataclasses import dataclass
-from typing import Dict, List, Optional
-
-import msgspec
-import zmq
-from msgspec import msgpack
+from typing import Dict, List
 
 from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import get_open_port
+from vllm.v1.processor.dist_processor import (Processor, ProcessorInputs,
+                                              ProcessorOutputs, ProcessorProc)
 
 
-class DetokenizerInputs(msgspec.Struct):
+class DetokenizerInputs(ProcessorInputs):
 
     # [num_reqs]
     req_ids: List[str]
@@ -27,7 +23,7 @@ class DetokenizerInputs(msgspec.Struct):
     free_req_ids: List[str]
 
 
-class DetokenizerOutputs(msgspec.Struct):
+class DetokenizerOutputs(ProcessorOutputs):
 
     # [num_reqs]
     req_ids: List[str]
@@ -40,109 +36,49 @@ class DetokenizerOutputs(msgspec.Struct):
     num_output_token_ids: List[int]
 
 
-class Detokenizer:
+class Detokenizer(Processor):
 
     def __init__(self, tokenizer_name: str):
-        # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
-        # For example, it does not terminate properly. We need to improve this.
-        self.push_port = get_open_port()
-        self.pull_port = get_open_port()
-        self.detokenizer = DetokenizerProc(tokenizer_name, self.push_port,
-                                           self.pull_port)
-        self.detokenizer.start()
-
-        self.zmq_context = zmq.Context()
-        self.push_socket = self.zmq_context.socket(zmq.PUSH)
-        self.push_socket.connect(f"tcp://localhost:{self.push_port}")
-        self.pull_socket = self.zmq_context.socket(zmq.PULL)
-        self.pull_socket.connect(f"tcp://localhost:{self.pull_port}")
-        self.poller = zmq.Poller()
-        self.poller.register(self.pull_socket, zmq.POLLIN)
-        self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_decoder = msgpack.Decoder(DetokenizerOutputs)
-
-    def send(self, inputs: DetokenizerInputs) -> None:
-        self.push_socket.send(self.msgpack_encoder.encode(inputs),
-                              flags=zmq.NOBLOCK)
-
-    def recv(self) -> Optional[DetokenizerOutputs]:
-        socks = dict(self.poller.poll(timeout=0))
-        if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
-            msg = self.pull_socket.recv()
-            return self.msgpack_decoder.decode(msg)
-        return None
-
-    def terminate(self) -> None:
-        self.push_socket.send(b"", flags=zmq.NOBLOCK)
-        self.detokenizer.join()
+        super().__init__(DetokenizerProc, DetokenizerInputs,
+                         DetokenizerOutputs, tokenizer_name)
 
 
-class DetokenizerProc(multiprocessing.Process):
+class DetokenizerProc(ProcessorProc):
 
-    def __init__(
-        self,
-        tokenizer_name: str,
-        pull_port: int,
-        push_port: int,
-    ):
-        super().__init__()
-        self.tokenizer_name = tokenizer_name
-        # NOTE: The pull_port of the detokenizer should be the same as the
-        # push_port of the engine. Vice versa.
-        self.pull_port = pull_port
-        self.push_port = push_port
-
-    def run(self):
-        # Initialize these objects after the process is forked since they are
-        # not picklable.
-        self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_decoder = msgpack.Decoder(DetokenizerInputs)
-        self.tokenizer = get_tokenizer(self.tokenizer_name)
+    def init_states(self, tokenizer_name: str) -> None:
+        self.tokenizer = get_tokenizer(tokenizer_name)
         # req_id -> RequestState
         self.request_states: Dict[str, RequestState] = {}
 
-        self.zmq_context = zmq.Context()
-        self.pull_socket = self.zmq_context.socket(zmq.PULL)
-        self.pull_socket.bind(f"tcp://*:{self.pull_port}")
-        self.push_socket = self.zmq_context.socket(zmq.PUSH)
-        self.push_socket.bind(f"tcp://*:{self.push_port}")
+    def process_inputs(self, inputs: DetokenizerInputs) -> DetokenizerOutputs:
+        for req_id in inputs.free_req_ids:
+            self.free(req_id)
 
-        while True:
-            message = self.pull_socket.recv()
-            if message == b"":
-                # Terminate signal.
-                break
-            inputs = self.msgpack_decoder.decode(message)
+        detokenized_texts: List[str] = []
+        num_output_token_ids: List[int] = []
+        num_reqs = len(inputs.req_ids)
+        for i in range(num_reqs):
+            req_id = inputs.req_ids[i]
+            if req_id not in self.request_states:
+                self.add_request(
+                    request_id=req_id,
+                    prompt_token_ids=inputs.prompt_token_ids[i],
+                    skip_special_tokens=inputs.skip_special_tokens[i],
+                    spaces_between_special_tokens=inputs.
+                    spaces_between_special_tokens[i],
+                )
+            new_str = self.detokenize(req_id, inputs.new_token_ids[i])
+            detokenized_texts.append(new_str)
+            req_state = self.request_states[req_id]
+            num_output_token_ids.append(
+                len(req_state.token_ids) - req_state.num_prompt_tokens)
 
-            for req_id in inputs.free_req_ids:
-                self.free(req_id)
-
-            detokenized_texts: List[str] = []
-            num_output_token_ids: List[int] = []
-            num_reqs = len(inputs.req_ids)
-            for i in range(num_reqs):
-                req_id = inputs.req_ids[i]
-                if req_id not in self.request_states:
-                    self.add_request(
-                        request_id=req_id,
-                        prompt_token_ids=inputs.prompt_token_ids[i],
-                        skip_special_tokens=inputs.skip_special_tokens[i],
-                        spaces_between_special_tokens=inputs.
-                        spaces_between_special_tokens[i],
-                    )
-                new_str = self.detokenize(req_id, inputs.new_token_ids[i])
-                detokenized_texts.append(new_str)
-                req_state = self.request_states[req_id]
-                num_output_token_ids.append(
-                    len(req_state.token_ids) - req_state.num_prompt_tokens)
-
-            detokenized = DetokenizerOutputs(
-                req_ids=inputs.req_ids,
-                detokenized_texts=detokenized_texts,
-                num_output_token_ids=num_output_token_ids,
-            )
-            self.push_socket.send(self.msgpack_encoder.encode(detokenized),
-                                  flags=zmq.NOBLOCK)
+        detokenized = DetokenizerOutputs(
+            req_ids=inputs.req_ids,
+            detokenized_texts=detokenized_texts,
+            num_output_token_ids=num_output_token_ids,
+        )
+        return detokenized
 
     def add_request(
         self,
