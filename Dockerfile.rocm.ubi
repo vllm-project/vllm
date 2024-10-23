@@ -178,8 +178,7 @@ ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH=$VIRTUAL_ENV/bin:$PATH
 
 # Required for triton
-RUN microdnf install -y --setopt=install_weak_deps=0 --nodocs gcc && \
-    rsync \
+RUN microdnf install -y --setopt=install_weak_deps=0 --nodocs gcc rsync && \
     microdnf clean all
 
 # Install libsodium for Tensorizer encryption
