@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Dict, List
 
+import msgspec
+
 from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -9,7 +11,7 @@ from vllm.v1.processor.dist_processor import (Processor, ProcessorImpl,
                                               ProcessorOutputs)
 
 
-class DetokenizerInputs(ProcessorInputs):
+class DetokenizerInputs(ProcessorInputs, msgspec.Struct):
 
     # [num_reqs]
     req_ids: List[str]
@@ -24,7 +26,7 @@ class DetokenizerInputs(ProcessorInputs):
     free_req_ids: List[str]
 
 
-class DetokenizerOutputs(ProcessorOutputs):
+class DetokenizerOutputs(ProcessorOutputs, msgspec.Struct):
 
     # [num_reqs]
     req_ids: List[str]

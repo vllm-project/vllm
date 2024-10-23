@@ -1,4 +1,5 @@
 import multiprocessing
+import pickle
 from abc import ABC, abstractmethod
 from typing import Optional, Type
 
@@ -9,11 +10,11 @@ from msgspec import msgpack
 from vllm.utils import get_open_port
 
 
-class ProcessorInputs(msgspec.Struct):
+class ProcessorInputs:
     pass
 
 
-class ProcessorOutputs(msgspec.Struct):
+class ProcessorOutputs:
     pass
 
 
@@ -47,18 +48,25 @@ class Processor:
         self.pull_socket.connect(f"tcp://localhost:{self.pull_port}")
         self.poller = zmq.Poller()
         self.poller.register(self.pull_socket, zmq.POLLIN)
-        self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_decoder = msgpack.Decoder(output_cls)
+
+        if issubclass(input_cls, msgspec.Struct):
+            self.input_encoder = msgpack.Encoder()
+        else:
+            self.input_encoder = PickleEncoder()
+        if issubclass(output_cls, msgspec.Struct):
+            self.output_decoder = msgpack.Decoder(output_cls)
+        else:
+            self.output_decoder = PickleDecoder()
 
     def send(self, inputs: ProcessorInputs) -> None:
-        self.push_socket.send(self.msgpack_encoder.encode(inputs),
+        self.push_socket.send(self.input_encoder.encode(inputs),
                               flags=zmq.NOBLOCK)
 
     def recv(self) -> Optional[ProcessorOutputs]:
         socks = dict(self.poller.poll(timeout=0))
         if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
             msg = self.pull_socket.recv()
-            return self.msgpack_decoder.decode(msg)
+            return self.output_decoder.decode(msg)
         return None
 
     def terminate(self) -> None:
@@ -92,13 +100,21 @@ class ProcessorWorker(multiprocessing.Process):
     def run(self):
         # Initialize these objects after the process is forked since they may
         # not be picklable.
-        self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_decoder = msgpack.Decoder(self.input_cls)
         self.zmq_context = zmq.Context()
         self.pull_socket = self.zmq_context.socket(zmq.PULL)
         self.pull_socket.bind(f"tcp://*:{self.pull_port}")
         self.push_socket = self.zmq_context.socket(zmq.PUSH)
         self.push_socket.bind(f"tcp://*:{self.push_port}")
+
+        if issubclass(self.input_cls, msgspec.Struct):
+            self.input_decoder = msgpack.Decoder(self.input_cls)
+        else:
+            self.input_decoder = PickleDecoder()
+        if issubclass(self.output_cls, msgspec.Struct):
+            self.output_encoder = msgpack.Encoder()
+        else:
+            self.output_encoder = PickleEncoder()
+
         # Initialize the processor.
         self.processor = self.proc_cls(*self.args, **self.kwargs)
 
@@ -107,7 +123,19 @@ class ProcessorWorker(multiprocessing.Process):
             if message == self.TERMINATE_SIGNAL:
                 # Terminate signal.
                 break
-            inputs = self.msgpack_decoder.decode(message)
+            inputs = self.input_decoder.decode(message)
             outputs = self.processor.process_inputs(inputs)
-            self.push_socket.send(self.msgpack_encoder.encode(outputs),
+            self.push_socket.send(self.output_encoder.encode(outputs),
                                   flags=zmq.NOBLOCK)
+
+
+class PickleEncoder:
+
+    def encode(self, obj) -> bytes:
+        return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+class PickleDecoder:
+
+    def decode(self, data: bytes):
+        return pickle.loads(data)
