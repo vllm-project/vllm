@@ -19,7 +19,8 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization import (AWQConfig,
+                                                     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
@@ -418,6 +419,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self._patch_quant_config(config, quant_config)
 
         image_size = config.force_image_size or config.vision_config.image_size
         patch_size = config.vision_config.patch_size
@@ -443,6 +445,18 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.img_context_token_id = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+    def _patch_quant_config(self, config: PretrainedConfig,
+                            quant_config: QuantizationConfig):
+        # the awq models from OpenGVLab missing `modules_to_not_convert`
+        # patch the quant_config to add `modules_to_not_convert` back
+        if isinstance(quant_config, AWQConfig):
+            text_config = config.text_config
+            llm_quant_config = getattr(text_config, "quantization_config",
+                                       None)
+            if (not quant_config.modules_to_not_convert) and \
+                (llm_quant_config is not None):
+                quant_config.modules_to_not_convert.append("vision_model")
 
     @cached_property
     def sampler(self):
@@ -470,6 +484,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 config.vision_config,
                 quant_config=quant_config,
                 num_hidden_layers_override=num_hidden_layers,
+                prefix="vision_model",
             )
         else:
             return InternVisionPatchModel(config.vision_config)
