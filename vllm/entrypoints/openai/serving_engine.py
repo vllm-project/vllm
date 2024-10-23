@@ -238,7 +238,7 @@ class OpenAIServing:
         # for token ids that are out of vocab. However, oov token ids will
         # later crash a cuda kernel at runtime, which will crash the entire
         # server.
-        if max(input_ids) >= tokenizer.vocab_size:
+        if max(input_ids) > tokenizer.max_token_id:
             raise ValueError("Token id {} is out of vocabulary".format(
                 max(input_ids)))
 

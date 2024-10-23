@@ -862,7 +862,7 @@ class LLM:
                     lora_request, Sequence) else lora_request
                 tokenizer = self.get_tokenizer(lora_request)
 
-                if max_token_id >= tokenizer.vocab_size:
+                if max_token_id > tokenizer.max_token_id:
                     raise ValueError(
                         f"Token id {max_token_id} is out of vocabulary.")
 
