@@ -19,7 +19,8 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization import (AWQConfig,
+                                                     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
@@ -418,11 +419,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self._patch_quant_config(config, quant_config)
 
         image_size = config.force_image_size or config.vision_config.image_size
         patch_size = config.vision_config.patch_size
         self.patch_size = patch_size
-        self.select_layer = config.select_layer
         self.num_image_token = int(
             (image_size // patch_size)**2 * (config.downsample_ratio**2))
         self.downsample_ratio = config.downsample_ratio
@@ -430,7 +431,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.llm_arch_name = config.text_config.architectures[0]
         self.is_mono = self.llm_arch_name == 'InternLM2VEForCausalLM'
-        self.vision_model = self._init_vision_model(config, self.is_mono)
+        self.vision_model = self._init_vision_model(
+            config,
+            quant_config=quant_config,
+            is_mono=self.is_mono,
+            prefix="vision_model",
+        )
 
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
@@ -441,6 +447,18 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
+    def _patch_quant_config(self, config: PretrainedConfig,
+                            quant_config: QuantizationConfig):
+        # the awq models from OpenGVLab missing `modules_to_not_convert`
+        # patch the quant_config to add `modules_to_not_convert` back
+        if isinstance(quant_config, AWQConfig):
+            text_config = config.text_config
+            llm_quant_config = getattr(text_config, "quantization_config",
+                                       None)
+            if (not quant_config.modules_to_not_convert) and \
+                (llm_quant_config is not None):
+                quant_config.modules_to_not_convert.append("vision_model")
+
     @cached_property
     def sampler(self):
         if hasattr(self.language_model, "sampler"):
@@ -448,17 +466,28 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return Sampler()
 
-    def _init_vision_model(self, config: PretrainedConfig, is_mono: bool):
+    def _init_vision_model(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig],
+        *,
+        is_mono: bool,
+        prefix: str,
+    ):
         if not is_mono:
-            vision_feature_layer = self.select_layer
+            vision_feature_layer = config.select_layer
             if vision_feature_layer < 0:
                 num_hidden_layers = config.vision_config.num_hidden_layers \
                     + vision_feature_layer + 1
             else:
                 num_hidden_layers = vision_feature_layer + 1
+
             return InternVisionModel(
                 config.vision_config,
-                num_hidden_layers_override=num_hidden_layers)
+                quant_config=quant_config,
+                num_hidden_layers_override=num_hidden_layers,
+                prefix=prefix,
+            )
         else:
             return InternVisionPatchModel(config.vision_config)
 
