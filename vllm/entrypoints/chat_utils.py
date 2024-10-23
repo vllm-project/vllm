@@ -523,29 +523,29 @@ def _parse_chat_message_content_part(
     if isinstance(part, str):  # Handle plain text parts
         text = _TextParser(part)
         return text
-    else:  # Handle structured dictionary parts
-        part_type, content = _parse_chat_message_content_mm_part(part)
 
-        # if part_type is text/refusal/image_url/audio_url but
-        # content is empty, log a warning and skip
-        if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
-            logger.warning("Skipping multimodal part "
-                           "with empty / unparsable content.")
-            return None
+    # Handle structured dictionary parts
+    part_type, content = _parse_chat_message_content_mm_part(part)
 
-        if part_type in ("text", "refusal"):
-            if wrap_dicts:
-                return {'type': 'text', 'text': content}
-            return content
-        elif part_type == "image_url":
-            mm_parser.parse_image(content)
-            if wrap_dicts:
-                return {'type': 'image'}
-        elif part_type == "audio_url":
-            mm_parser.parse_audio(content)
-        else:
-            raise NotImplementedError(f"Unknown part type: {part_type}")
-    return None
+    # if part_type is text/refusal/image_url/audio_url but
+    # content is empty, log a warning and skip
+    if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
+        logger.warning("Skipping multimodal part "
+                       "with empty / unparsable content.")
+        return None
+
+    if part_type in ("text", "refusal"):
+        return {'type': 'text', 'text': content} if wrap_dicts else content
+
+    if part_type == "image_url":
+        mm_parser.parse_image(content)
+        return {'type': 'image'} if wrap_dicts else None
+
+    if part_type == "audio_url":
+        mm_parser.parse_audio(content)
+        return {'type': 'audio'} if wrap_dicts else None
+
+    raise NotImplementedError(f"Unknown part type: {part_type}")
 
 
 # No need to validate using Pydantic again
