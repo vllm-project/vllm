@@ -12,10 +12,16 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
-from .fused_moe import fused_experts
-from .moe_pallas import fused_moe as fused_moe_pallas
-
+if current_platform.is_cuda_alike():
+    from .fused_moe import fused_experts
+else:
+    fused_experts = None  # type: ignore
+if current_platform.is_tpu():
+    from .moe_pallas import fused_moe as fused_moe_pallas
+else:
+    fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
 
 
