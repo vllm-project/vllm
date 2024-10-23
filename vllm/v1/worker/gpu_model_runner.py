@@ -154,7 +154,7 @@ class GPUModelRunner:
                 block_ids=req_data.block_ids,
                 num_computed_tokens=req_data.num_computed_tokens,
                 output_token_ids=[],
-                needs_encoder_to_process=req_data.multi_modal_data is not None,
+                requires_encoder_processing=(req_data.multi_modal_data is not None),
             )
             req_ids_to_add.append(req_id)
 
@@ -211,7 +211,7 @@ class GPUModelRunner:
         mm_inputs: List[MultiModalInputs] = []
         for req_id in self.input_batch.req_ids[:num_reqs]:
             req_state = self.requests[req_id]
-            if not req_state.needs_encoder_to_process:
+            if not req_state.requires_encoder_processing:
                 continue
 
             # print("DATA", req_state.multi_modal_data)
@@ -220,7 +220,7 @@ class GPUModelRunner:
             if mm_kwargs is not None:
                 mm_inputs.append(mm_kwargs)
                 # print("MM_KWARGS", mm_kwargs["pixel_values"].shape)
-            req_state.needs_encoder_to_process = False
+            req_state.requires_encoder_processing = False
         batched_mm_inputs = MultiModalInputs.batch(mm_inputs)
         batched_mm_inputs = MultiModalInputs.as_kwargs(batched_mm_inputs,
                                                        device=self.device)
@@ -478,7 +478,7 @@ class CachedRequestState:
     num_computed_tokens: int
     output_token_ids: List[int]
 
-    needs_encoder_to_process: bool
+    requires_encoder_processing: bool
     # encoder_outputs: Any
 
     @property
