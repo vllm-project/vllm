@@ -516,12 +516,9 @@ def test_mllama_interleaved_images(
     }]
 
 
-def test_mllama_parse_matches_hf(
-    mllama_model_config,
-    mllama_tokenizer,
-    image_url,
-):
-    """Checks end to end correctness of hf alignment for mllama parsing."""
+@pytest.mark.parametrize("model", [MLLAMA_MODEL_ID])
+def test_multimodal_image_parsing_matches_hf(model, image_url):
+    """Checks end to end hf alignment for multimodal [image] parsing."""
 
     def get_conversation(is_hf: bool):
         img_part = {"type": "image_url", "image_url": {"url": image_url}}
@@ -548,7 +545,27 @@ def test_mllama_parse_matches_hf(
             ]
         }]
 
-    tokenizer = mllama_tokenizer.tokenizer
+    # Build a config for the model
+    model_config = ModelConfig(model,
+                               task="generate",
+                               tokenizer=MLLAMA_MODEL_ID,
+                               tokenizer_mode="auto",
+                               trust_remote_code=True,
+                               dtype="bfloat16",
+                               seed=0,
+                               limit_mm_per_prompt={
+                                   "image": 2,
+                               })
+
+    # Build the tokenizer group and grab the underlying tokenizer
+    tokenizer_group = TokenizerGroup(
+        MLLAMA_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+    tokenizer = tokenizer_group.tokenizer
+
     # Build and parse a conversation with {"type": "image"} using the tokenizer
     hf_conversation = get_conversation(is_hf=True)
     hf_result = tokenizer.apply_chat_template(
@@ -561,9 +578,10 @@ def test_mllama_parse_matches_hf(
     vllm_conversation = get_conversation(is_hf=False)
     conversation, _ = parse_chat_messages(
         vllm_conversation,
-        mllama_model_config,
-        mllama_tokenizer,
+        model_config,
+        tokenizer_group,
     )
+
     vllm_result = apply_hf_chat_template(
         tokenizer,
         conversation=conversation,
