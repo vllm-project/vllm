@@ -155,6 +155,7 @@ ENV LD_LIBRARY_PATH="${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nv
 
 # Triton needs a CC compiler
 RUN microdnf install -y gcc \
+    rsync \
     && microdnf clean all
 
 # install vllm wheel first, so that torch etc will be installed
