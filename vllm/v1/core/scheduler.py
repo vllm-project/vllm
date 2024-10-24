@@ -138,13 +138,11 @@ class Scheduler:
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if num_new_tokens == 0:
-                    # FIXME: The happens when prompt length is divisible by
-                    # the block size and all blocks are cached. We have to
-                    # support query_len=0 in model runner to handle this case.
-                    # Now we force to recompute the last block, which hurts
-                    # performance and introduces duplications.
-                    num_computed_tokens -= self.block_size
-                    num_new_tokens = self.block_size
+                    # The happens when prompt length is divisible by the block
+                    # size and all blocks are cached. Now we force to recompute
+                    # the last token.
+                    num_computed_tokens -= 1
+                    num_new_tokens = 1
                     computed_block_ids.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
