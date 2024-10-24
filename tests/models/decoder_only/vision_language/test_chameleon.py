@@ -1,6 +1,7 @@
 from typing import List, Optional, Type
 
 import pytest
+import transformers
 from transformers import AutoModelForVision2Seq, BatchEncoding
 
 from vllm.multimodal.utils import rescale_image_size
@@ -93,6 +94,10 @@ def run_test(
         )
 
 
+@pytest.mark.skipif(
+    transformers.__version__.startswith("4.46.0"),
+    reason="Model broken in HF, see huggingface/transformers#34379",
+)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
